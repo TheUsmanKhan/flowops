@@ -106,7 +106,9 @@ model Role {
   description   String?
   roleTier      String   @default("standard") // elevated | standard
   isSystemRole  Boolean  @default(false)
-  systemRoleKey String?  @unique // owner | founder | co_founder | investor | null
+  systemRoleKey String?  // owner | founder | co_founder | investor | null
+  // NOTE: systemRoleKey is unique PER COMPANY (not globally), so every
+  // company can seed its own owner/founder/co_founder/investor roles.
   isActive      Boolean  @default(true)
   createdById   String?
   createdBy     Profile? @relation("RoleCreator", fields: [createdById], references: [id])
@@ -118,6 +120,7 @@ model Role {
   invitations     Invitation[]
 
   @@unique([companyId, name])
+  @@unique([companyId, systemRoleKey])
 }
 
 /// Permission keys attached to standard roles. Elevated roles bypass this.

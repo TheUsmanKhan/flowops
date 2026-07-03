@@ -3,7 +3,15 @@
 import { useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
-import { Loader2, ArrowLeft, ArrowRight, Check, Building2, MapPin } from 'lucide-react'
+import {
+  Loader2,
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  Building2,
+  MapPin,
+  AlertCircle,
+} from 'lucide-react'
 import { toast } from 'sonner'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
@@ -35,6 +43,7 @@ export function CreateCompanyWizard({
 }) {
   const [step, setStep] = useState(0)
   const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
   const user = useAppStore((s) => s.user)
 
   const form = useForm<CreateCompanyInput>({
@@ -57,13 +66,24 @@ export function CreateCompanyWizard({
   })
   const values = form.watch()
 
+  /** Validate only the fields belonging to a given step, then advance. */
+  async function goNext() {
+    setSubmitError(null)
+    const fieldsForStep: (keyof CreateCompanyInput)[] =
+      step === 0 ? ['orgName'] : ['companyName']
+    const valid = await form.trigger(fieldsForStep)
+    if (valid) setStep((s) => Math.min(s + 1, STEPS.length - 1))
+  }
+
   async function submit() {
+    setSubmitError(null)
+    // Validate the full form one last time.
     const valid = await form.trigger()
     if (!valid) {
-      setStep(0)
-      toast.error('Please fix the highlighted fields.')
+      setSubmitError('Please complete all required fields before continuing.')
       return
     }
+
     setSubmitting(true)
     try {
       const session = await api.post<SessionResponse>(
@@ -73,9 +93,12 @@ export function CreateCompanyWizard({
       toast.success('Workspace created — welcome to FlowOps.')
       onComplete(session)
     } catch (err) {
-      toast.error(
-        err instanceof FetchError ? err.message : 'Failed to create workspace.',
-      )
+      const message =
+        err instanceof FetchError
+          ? err.message
+          : 'Network error — the server may have restarted. Please try again.'
+      setSubmitError(message)
+      toast.error(message)
     } finally {
       setSubmitting(false)
     }
@@ -86,6 +109,7 @@ export function CreateCompanyWizard({
       <button
         onClick={onBack}
         className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+        disabled={submitting}
       >
         <ArrowLeft className="h-4 w-4" /> Back
       </button>
@@ -96,7 +120,7 @@ export function CreateCompanyWizard({
           <div key={label} className="flex items-center gap-2 flex-1">
             <div
               className={cn(
-                'flex h-7 w-7 items-center justify-center rounded-full text-xs font-medium shrink-0',
+                'flex h-7 w-7 items-center justify-center rounded-full text-xs font-medium shrink-0 transition-colors',
                 i < step
                   ? 'bg-primary text-primary-foreground'
                   : i === step
@@ -117,7 +141,7 @@ export function CreateCompanyWizard({
             {i < STEPS.length - 1 && (
               <div
                 className={cn(
-                  'h-px flex-1',
+                  'h-px flex-1 transition-colors',
                   i < step ? 'bg-primary' : 'bg-border',
                 )}
               />
@@ -126,27 +150,63 @@ export function CreateCompanyWizard({
         ))}
       </div>
 
+      {/* Inline error banner */}
+      {submitError && (
+        <div className="flex items-start gap-2.5 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
+          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div className="flex-1">
+            <p className="font-medium">Couldn&apos;t create the workspace</p>
+            <p className="text-xs mt-0.5 opacity-90">{submitError}</p>
+          </div>
+          <button
+            onClick={() => setSubmitError(null)}
+            className="text-destructive/60 hover:text-destructive text-xs"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
-            {step === 0 && <><Building2 className="h-5 w-5 text-primary" /> Organization details</>}
-            {step === 1 && <><MapPin className="h-5 w-5 text-primary" /> Company details</>}
-            {step === 2 && <><Check className="h-5 w-5 text-primary" /> Review & create</>}
+            {step === 0 && (
+              <>
+                <Building2 className="h-5 w-5 text-primary" /> Organization
+                details
+              </>
+            )}
+            {step === 1 && (
+              <>
+                <MapPin className="h-5 w-5 text-primary" /> Company details
+              </>
+            )}
+            {step === 2 && (
+              <>
+                <Check className="h-5 w-5 text-primary" /> Review &amp; create
+              </>
+            )}
           </CardTitle>
           <CardDescription>
-            {step === 0 && 'The umbrella organization that holds one or more companies.'}
-            {step === 1 && 'Your first operating company — all business data lives here.'}
-            {step === 2 && 'Confirm the details below and create your workspace.'}
+            {step === 0 &&
+              'The umbrella organization that holds one or more companies.'}
+            {step === 1 &&
+              'Your first operating company — all business data lives here.'}
+            {step === 2 &&
+              'Confirm the details below and create your workspace.'}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {step === 0 && (
             <div className="space-y-4">
               <div className="space-y-1.5">
-                <Label htmlFor="orgName">Organization name</Label>
+                <Label htmlFor="orgName">
+                  Organization name <span className="text-destructive">*</span>
+                </Label>
                 <Input
                   id="orgName"
                   placeholder="Khan Holdings"
+                  autoFocus
                   {...form.register('orgName')}
                 />
                 {form.formState.errors.orgName && (
@@ -155,11 +215,15 @@ export function CreateCompanyWizard({
                   </p>
                 )}
                 <p className="text-xs text-muted-foreground">
-                  A slug will be auto-generated for URLs.
+                  A URL-safe slug will be auto-generated.
                 </p>
               </div>
               <div className="rounded-lg bg-muted/50 p-3 text-xs text-muted-foreground">
-                Owner: <span className="font-medium text-foreground">{user?.fullName}</span> ({user?.email})
+                Owner:{' '}
+                <span className="font-medium text-foreground">
+                  {user?.fullName}
+                </span>{' '}
+                ({user?.email})
               </div>
             </div>
           )}
@@ -167,10 +231,13 @@ export function CreateCompanyWizard({
           {step === 1 && (
             <div className="grid sm:grid-cols-2 gap-4">
               <div className="space-y-1.5 sm:col-span-2">
-                <Label htmlFor="companyName">Company name</Label>
+                <Label htmlFor="companyName">
+                  Company name <span className="text-destructive">*</span>
+                </Label>
                 <Input
                   id="companyName"
                   placeholder="Khan Traders Pvt Ltd"
+                  autoFocus
                   {...form.register('companyName')}
                 />
                 {form.formState.errors.companyName && (
@@ -226,10 +293,7 @@ export function CreateCompanyWizard({
             <div className="space-y-4">
               <ReviewRow label="Organization" value={values.orgName} />
               <ReviewRow label="Company" value={values.companyName} />
-              <ReviewRow
-                label="Legal name"
-                value={values.legalName || '—'}
-              />
+              <ReviewRow label="Legal name" value={values.legalName || '—'} />
               <ReviewRow label="NTN/STRN" value={values.taxId || '—'} />
               <ReviewRow
                 label="Location"
@@ -240,11 +304,19 @@ export function CreateCompanyWizard({
               <ReviewRow label="Currency" value={values.baseCurrency} />
               <ReviewRow label="Timezone" value={values.timezone} />
               <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs">
-                <p className="font-medium text-primary mb-1">What happens next</p>
+                <p className="font-medium text-primary mb-1">
+                  What happens next
+                </p>
                 <ul className="space-y-1 text-muted-foreground">
                   <li>• Organization + company are created</li>
-                  <li>• 4 system roles seeded (Owner, Founder, Co-Founder, Investor)</li>
-                  <li>• You&apos;re added as an Owner employee with elevated access</li>
+                  <li>
+                    • 4 system roles seeded (Owner, Founder, Co-Founder,
+                    Investor)
+                  </li>
+                  <li>
+                    • You&apos;re added as an Owner employee with elevated
+                    access
+                  </li>
                 </ul>
               </div>
             </div>
@@ -261,13 +333,16 @@ export function CreateCompanyWizard({
           <ArrowLeft className="h-4 w-4" /> {step === 0 ? 'Cancel' : 'Back'}
         </Button>
         {step < STEPS.length - 1 ? (
-          <Button onClick={() => setStep((s) => s + 1)} disabled={submitting}>
+          <Button onClick={goNext} disabled={submitting}>
             Continue <ArrowRight className="h-4 w-4" />
           </Button>
         ) : (
           <Button onClick={submit} disabled={submitting}>
             {submitting ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" /> Creating
+                workspace…
+              </>
             ) : (
               <>
                 Create workspace <Check className="h-4 w-4" />

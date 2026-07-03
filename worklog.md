@@ -57,3 +57,33 @@ Stage Summary:
 - Single SPA route (/) with Zustand view routing; all API routes under /api/*.
 - Database: live on user's Supabase (flafcggvqfgyafzekxzk), 10 tables, password 123@Usman123@.
 - Known sandbox limitation: dev server process is killed when a bash session ends; restart with `env -u DATABASE_URL -u DIRECT_URL bun run dev` if the preview is unreachable.
+
+---
+Task ID: FIX-1
+Agent: main
+Task: Fix "Company Creation not working" — root cause + expert rebuild
+
+Work Log:
+- Reproduced the issue: create-company API returned HTTP 500 with Prisma P2002 "Unique constraint failed on systemRoleKey".
+- Root cause: `systemRoleKey` column had a GLOBAL `@unique` constraint, but system roles (owner/founder/co_founder/investor) are PER-COMPANY. Once any company had these roles, NO other company could ever be created — breaking multi-tenancy entirely.
+- Schema fix: Changed `systemRoleKey String? @unique` → removed global unique, added `@@unique([companyId, systemRoleKey])` compound constraint. Each company now gets its own set of system roles. Pushed to Supabase (verified: `Role_companyId_systemRoleKey_key` index live).
+- API rewrite (create-company/route.ts):
+  * Replaced 4 sequential `role.create()` calls with a single `role.createMany()` batch insert (1 DB round-trip instead of 4).
+  * Added error recovery: tracks created org/company IDs and deletes them on failure (so slugs don't block retries).
+  * Added duck-type P2002 check → friendly "That name is already taken" message instead of raw Prisma stack trace.
+  * Removed `import type { Prisma }` that was hanging Turbopack compilation.
+- Frontend wizard rewrite (create-company-wizard.tsx):
+  * Per-step validation: step 0 validates orgName only, step 1 validates companyName only — no more jumping back to step 0 on final submit.
+  * Inline error banner with AlertCircle icon + dismiss button (in case toast is missed).
+  * Clear loading state: button shows "Creating workspace…" with spinner (not just a bare spinner).
+  * Network error handling: "Network error — the server may have restarted. Please try again."
+- Verified end-to-end via self-contained test script:
+  * Registered fresh user (hamza@flowops.pk) → 200 ✓
+  * Created "Hamza Mart" company → 200 ✓, returned full session with activeCompany + employee.isElevated=true ✓
+  * DB verified: both "Hamza Mart" AND "Usman Commerce" have 4 roles each (compound unique working) ✓
+- Cleaned up test data. Usman Commerce preserved for the existing test account.
+
+Stage Summary:
+- Company creation now works for ANY number of companies (multi-tenant fix).
+- 3-layer fix: schema (compound unique) + API (batch + rollback + friendly errors) + frontend (per-step validation + error display + loading state).
+- Verified: second company creation succeeds with 4 system roles seeded.
