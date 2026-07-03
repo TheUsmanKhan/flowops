@@ -35,6 +35,7 @@ export function RegisterForm() {
         fullName: values.fullName,
         email: values.email,
         password: values.password,
+        confirmPassword: values.confirmPassword,
       })
       setSession({
         user: session.user,

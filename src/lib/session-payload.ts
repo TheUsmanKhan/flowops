@@ -67,7 +67,7 @@ export async function buildSessionPayload(
       fullName: profile.fullName,
       avatarUrl: profile.avatarUrl,
       phone: profile.phone,
-      isOnboarded: profile.isOnBoarded,
+      isOnboarded: profile.isOnboarded,
       createdAt: profile.createdAt.toISOString(),
     },
     activeCompany,
