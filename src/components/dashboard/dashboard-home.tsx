@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
 import { api } from '@/lib/api-client'
 import { PageHeader } from '@/components/layout/dashboard-shell'
@@ -32,16 +32,14 @@ export function DashboardHome() {
   const activeCompany = useAppStore((s) => s.activeCompany)
   const user = useAppStore((s) => s.user)
   const navigate = useAppStore((s) => s.navigate)
-  const [data, setData] = useState<DashboardData | null>(null)
-  const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    api
-      .get<DashboardData>('/api/dashboard')
-      .then(setData)
-      .catch(() => setData(null))
-      .finally(() => setLoading(false))
-  }, [activeCompany?.id])
+  // TanStack Query: benefits from the prefetch fired during workspace switch,
+  // and gets invalidated when the active company changes (see switcher).
+  const { data, isLoading } = useQuery<DashboardData>({
+    queryKey: ['dashboard'],
+    queryFn: () => api.get('/api/dashboard'),
+    staleTime: 30_000,
+  })
 
   return (
     <div className="space-y-6">
@@ -67,7 +65,7 @@ export function DashboardHome() {
                   <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${card.color}`}>
                     <Icon className="h-5 w-5" />
                   </div>
-                  {loading ? (
+                  {isLoading ? (
                     <div className="h-7 w-12 rounded bg-muted animate-pulse" />
                   ) : (
                     <span className="text-2xl font-semibold tracking-tight">
@@ -99,7 +97,7 @@ export function DashboardHome() {
             </Button>
           </CardHeader>
           <CardContent className="pt-0">
-            {loading ? (
+            {isLoading ? (
               <div className="space-y-2">
                 {Array.from({ length: 5 }).map((_, i) => (
                   <div key={i} className="h-12 rounded bg-muted/50 animate-pulse" />

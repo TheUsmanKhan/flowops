@@ -7,34 +7,50 @@ export const dynamic = 'force-dynamic'
 
 /**
  * Fetch all workspaces for the current user, grouped by organization.
- * Returns the structure used by the WorkspaceSwitcher:
  *
- *   workspaces: [
- *     { org_id, org_name, org_logo_url, org_slug, is_owner, companies: [...] }
- *   ]
- *
- * Companies where the user is NOT an owner of the parent org (i.e. they were
- * invited as an employee) are grouped under a synthetic "OTHER COMPANIES"
- * org so the switcher can render them separately.
+ * PERFORMANCE: This uses a SINGLE database query with nested includes to
+ * fetch employees + companies + organizations + active-employee counts +
+ * role in one round-trip. The previous implementation did an N+1 (one
+ * extra query per org), which was the main cause of slow switcher load.
  */
 export async function GET() {
   try {
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
 
-    const settings = await db.userSetting.findUnique({
-      where: { userId: user.id },
-    })
+    // Single query: employees → company → organization, plus role + counts.
+    // This replaces the old N+1 loop with one round-trip to Supabase.
+    const [settings, employees] = await Promise.all([
+      db.userSetting.findUnique({ where: { userId: user.id } }),
+      db.employee.findMany({
+        where: { userId: user.id, status: 'active' },
+        include: {
+          role: { select: { id: true, name: true, roleTier: true } },
+          company: {
+            include: {
+              organization: {
+                select: {
+                  id: true,
+                  name: true,
+                  slug: true,
+                  logoUrl: true,
+                  ownerId: true,
+                  isActive: true,
+                },
+              },
+              _count: {
+                select: { employees: { where: { status: 'active' } } },
+              },
+            },
+          },
+        },
+        orderBy: { joinedAt: 'asc' },
+      }),
+    ])
 
-    const employees = await db.employee.findMany({
-      where: { userId: user.id, status: 'active' },
-      include: {
-        company: { include: { _count: { select: { employees: { where: { status: 'active' } } } } } },
-        role: { select: { id: true, name: true, roleTier: true } },
-      },
-    })
+    const activeCompanyId = settings?.activeCompanyId
 
-    // Group companies by their organization.
+    // Group companies by organization — in memory, no extra queries.
     const orgMap = new Map<
       string,
       {
@@ -57,44 +73,24 @@ export async function GET() {
       }
     >()
 
-    // Cache org lookups (including owner check).
-    const orgCache = new Map<
-      string,
-      { name: string; slug: string; logoUrl: string | null; ownerId: string }
-    >()
-
     for (const emp of employees) {
       const company = emp.company
       if (!company || !company.isActive) continue
-
-      let org = orgCache.get(company.organizationId)
-      if (!org) {
-        const orgRow = await db.organization.findUnique({
-          where: { id: company.organizationId },
-          select: { id: true, name: true, slug: true, logoUrl: true, ownerId: true, isActive: true },
-        })
-        if (!orgRow || !orgRow.isActive) continue
-        org = {
-          name: orgRow.name,
-          slug: orgRow.slug,
-          logoUrl: orgRow.logoUrl,
-          ownerId: orgRow.ownerId,
-        }
-        orgCache.set(company.organizationId, org)
-      }
+      const org = company.organization
+      if (!org || !org.isActive) continue
 
       const isOwner = org.ownerId === user.id
-      let group = orgMap.get(company.organizationId)
+      let group = orgMap.get(org.id)
       if (!group) {
         group = {
-          org_id: company.organizationId,
+          org_id: org.id,
           org_name: org.name,
           org_logo_url: org.logoUrl,
           org_slug: org.slug,
           is_owner: isOwner,
           companies: [],
         }
-        orgMap.set(company.organizationId, group)
+        orgMap.set(org.id, group)
       }
 
       group.companies.push({
@@ -106,11 +102,11 @@ export async function GET() {
         role_name: emp.role.name,
         role_tier: emp.role.roleTier,
         employee_count: company._count.employees,
-        is_active_workspace: settings?.activeCompanyId === company.id,
+        is_active_workspace: activeCompanyId === company.id,
       })
     }
 
-    // Sort: owned orgs first (alphabetical), then invited companies.
+    // Sort: owned orgs first (alphabetical), then invited.
     const owned = Array.from(orgMap.values())
       .filter((g) => g.is_owner)
       .sort((a, b) => a.org_name.localeCompare(b.org_name))

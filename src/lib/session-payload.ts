@@ -2,36 +2,40 @@ import { db } from './db'
 import type { SessionResponse } from './types'
 
 /**
- * Build the full session payload returned by /auth/login and /auth/me:
- * the authenticated user, their list of companies, the active company,
- * and the caller's employee record + resolved permissions in that company.
+ * Build the full session payload returned by /auth/login and /auth/me.
+ *
+ * PERFORMANCE: profile + settings + employees are fetched in PARALLEL
+ * (Promise.all) instead of sequentially. The employees query uses nested
+ * includes to get company + role + rolePermissions in a single round-trip.
  */
 export async function buildSessionPayload(
   userId: string,
 ): Promise<SessionResponse> {
-  const profile = await db.profile.findUnique({ where: { id: userId } })
+  // Parallel: 3 queries at once instead of 3 sequential round-trips.
+  const [profile, settings, employees] = await Promise.all([
+    db.profile.findUnique({ where: { id: userId } }),
+    db.userSetting.findUnique({ where: { userId } }),
+    db.employee.findMany({
+      where: { userId, status: 'active' },
+      include: {
+        company: true,
+        role: { include: { rolePermissions: { select: { permissionKey: true } } } },
+      },
+      orderBy: { joinedAt: 'asc' },
+    }),
+  ])
+
   if (!profile) {
     return { user: null, activeCompany: null, companies: [], employee: null }
   }
 
-  const settings = await db.userSetting.findUnique({
-    where: { userId: profile.id },
-  })
-
-  const employees = await db.employee.findMany({
-    where: { userId: profile.id, status: 'active' },
-    include: { company: true, role: { include: { rolePermissions: true } } },
-  })
-
   const companies = employees
     .map((e) => e.company)
-    .filter((c) => c !== null && c.isActive)
+    .filter((c): c is NonNullable<typeof c> => c !== null && c.isActive)
     .map((c) => mapCompany(c))
 
   const activeCompanyId = settings?.activeCompanyId
-  let activeEmployee = employees.find(
-    (e) => e.companyId === activeCompanyId,
-  )
+  let activeEmployee = employees.find((e) => e.companyId === activeCompanyId)
 
   // If no active company set, fall back to the first available.
   if (!activeEmployee && employees.length > 0) {
@@ -53,9 +57,7 @@ export async function buildSessionPayload(
         roleTier: activeEmployee.role.roleTier,
         roleName: activeEmployee.role.name,
         systemRoleKey: activeEmployee.role.systemRoleKey,
-        permissions: activeEmployee.role.rolePermissions.map(
-          (p) => p.permissionKey,
-        ),
+        permissions: activeEmployee.role.rolePermissions.map((p) => p.permissionKey),
         isElevated: activeEmployee.role.roleTier === 'elevated',
       }
     : null

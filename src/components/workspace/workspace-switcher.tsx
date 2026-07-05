@@ -56,32 +56,74 @@ export function WorkspaceSwitcher() {
   const [switching, setSwitching] = useState<string | null>(null)
   const queryClient = useQueryClient()
 
+  // staleTime: 60s — the query is invalidated explicitly after create/switch,
+  // so a long staleTime just prevents redundant refetches on re-renders.
   const { data, isLoading, isError, refetch } = useQuery<{
     workspaces: WorkspaceGroup[]
   }>({
     queryKey: ['workspaces'],
     queryFn: () => api.get('/api/workspaces'),
-    staleTime: 30_000,
+    staleTime: 60_000,
+    refetchOnMount: false,
   })
 
   async function switchTo(companyId: string) {
     if (companyId === activeCompany?.id) return
     setSwitching(companyId)
+
+    // OPTIMISTIC UPDATE: immediately mark the target company as active in
+    // the cache so the UI shows the checkmark instantly, before the server
+    // responds. This makes the switcher feel instantaneous.
+    const prevData = queryClient.getQueryData<{ workspaces: WorkspaceGroup[] }>(['workspaces'])
+    if (prevData) {
+      queryClient.setQueryData<{ workspaces: WorkspaceGroup[] }>(['workspaces'], {
+        workspaces: prevData.workspaces.map((g) => ({
+          ...g,
+          companies: g.companies.map((c) => ({
+            ...c,
+            is_active_workspace: c.company_id === companyId,
+          })),
+        })),
+      })
+    }
+
     try {
       const res = await api.post<{
         activeCompany: typeof activeCompany
         employee: typeof employee
       }>('/api/workspace/switch', { companyId })
+
       setSession({
         user,
         activeCompany: res.activeCompany,
         companies,
         employee: res.employee ?? undefined,
       })
-      queryClient.clear()
+
+      // TARGETED invalidation: only invalidate company-scoped queries, NOT
+      // the entire cache. This preserves user/org-scoped data (workspaces
+      // list, profile) and only forces company-scoped data (dashboard,
+      // employees, roles) to refetch with the new RLS context.
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['employees'] })
+      queryClient.invalidateQueries({ queryKey: ['roles'] })
+      queryClient.invalidateQueries({ queryKey: ['audit-logs'] })
+      queryClient.invalidateQueries({ queryKey: ['company'] })
+
+      // PREFETCH the dashboard data so it's ready before the user lands
+      // on the dashboard page — eliminates the post-switch loading gap.
+      queryClient.prefetchQuery({
+        queryKey: ['dashboard'],
+        queryFn: () => api.get('/api/dashboard'),
+      })
+
       toast.success(`Switched to ${res.activeCompany?.name}`)
       navigate({ name: 'dashboard' })
     } catch {
+      // Revert the optimistic update on failure.
+      if (prevData) {
+        queryClient.setQueryData(['workspaces'], prevData)
+      }
       toast.error('Failed to switch workspace')
     } finally {
       setSwitching(null)
@@ -209,4 +251,16 @@ export function WorkspaceSwitcher() {
       </DropdownMenuContent>
     </DropdownMenu>
   )
+}
+
+/**
+ * Helper exported for other components (create-org/create-company wizards)
+ * to invalidate the workspaces query so newly created companies appear
+ * instantly in the switcher without waiting for staleTime to expire.
+ */
+export function useInvalidateWorkspaces() {
+  const queryClient = useQueryClient()
+  return () => {
+    queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+  }
 }

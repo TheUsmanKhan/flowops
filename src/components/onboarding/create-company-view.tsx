@@ -6,6 +6,7 @@ import { toast } from 'sonner'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
 import type { SessionResponse } from '@/lib/types'
+import { useInvalidateWorkspaces } from '@/components/workspace/workspace-switcher'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -49,6 +50,7 @@ export function CreateCompanyView({ orgId, onBack }: { orgId?: string; onBack: (
   const navigate = useAppStore((s) => s.navigate)
   const user = useAppStore((s) => s.user)
   const setSession = useAppStore((s) => s.setSession)
+  const invalidateWorkspaces = useInvalidateWorkspaces()
   const [step, setStep] = useState(orgId ? 1 : 0)
   const [orgs, setOrgs] = useState<OrgOption[]>([])
   const [loadingOrgs, setLoadingOrgs] = useState(true)
@@ -118,6 +120,7 @@ export function CreateCompanyView({ orgId, onBack }: { orgId?: string; onBack: (
         companies: session.companies,
         employee: session.employee ?? undefined,
       })
+      invalidateWorkspaces()
       toast.success(`${form.company_name} created!`)
       navigate({ name: 'dashboard' })
     } catch (err) {

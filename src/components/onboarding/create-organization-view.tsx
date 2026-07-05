@@ -6,6 +6,7 @@ import { toast } from 'sonner'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
 import type { SessionResponse } from '@/lib/types'
+import { useInvalidateWorkspaces } from '@/components/workspace/workspace-switcher'
 import { slugify } from '@/lib/slugify'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -46,6 +47,7 @@ export function CreateOrganizationView({ onBack }: { onBack: () => void }) {
   const navigate = useAppStore((s) => s.navigate)
   const user = useAppStore((s) => s.user)
   const setSession = useAppStore((s) => s.setSession)
+  const invalidateWorkspaces = useInvalidateWorkspaces()
   const [step, setStep] = useState(0)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -117,6 +119,9 @@ export function CreateOrganizationView({ onBack }: { onBack: () => void }) {
         companies: session.companies,
         employee: session.employee ?? undefined,
       })
+      // Invalidate the workspaces query so the new org+company appear
+      // instantly in the switcher (no waiting for staleTime to expire).
+      invalidateWorkspaces()
       toast.success(`${form.org_name} created! Welcome to your new workspace.`)
       navigate({ name: 'dashboard' })
     } catch (err) {

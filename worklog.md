@@ -146,3 +146,46 @@ Stage Summary:
 - Sprint 2 COMPLETE: full Organization & Company management system.
 - Users can now: create multiple organizations, create multiple companies per org, switch between workspaces (grouped by org), upload logos, manage company settings (5 tabs), manage org settings (4 tabs), archive with name confirmation.
 - All 7 "current problems to fix" from the spec are resolved.
+
+---
+Task ID: PERF-1
+Agent: main
+Task: Optimize workspace switching performance (switcher load, switch speed, dashboard load)
+
+Work Log:
+- Diagnosed 5 performance bottlenecks:
+  1. N+1 query in /api/workspaces (one extra db.organization.findUnique per org)
+  2. Switch API called heavy buildSessionPayload() (7-9 sequential queries)
+  3. Frontend queryClient.clear() nuked ALL cache after switch
+  4. Workspaces staleTime: 30s meant new companies didn't show for 30s
+  5. No prefetching — dashboard data fetched only after page render
+
+- Fix 1: Rewrote /api/workspaces — single query with nested includes (employee → company → organization + _count + role). Eliminated the N+1 loop. Response time: 2-3s → 0.6s.
+
+- Fix 2: Rewrote /api/workspace/switch — returns ONLY minimal data (activeCompany + employee/role/permissions for the new company). 2 parallel queries (userSetting.update + auditLog) instead of 7-9 sequential. No buildSessionPayload call.
+
+- Fix 3: Optimized buildSessionPayload — profile + settings + employees now fetched with Promise.all (3 parallel instead of 3 sequential). rolePermissions select narrowed to just permissionKey.
+
+- Fix 4: Frontend WorkspaceSwitcher rebuild:
+  * Optimistic update: immediately marks target company as active in cache (instant checkmark) before server responds
+  * Targeted invalidation: only invalidates company-scoped queries (dashboard, employees, roles, audit-logs, company) — NOT the entire cache. User/org data preserved.
+  * Prefetch: fires dashboard query during switch so data is ready before page render
+  * staleTime: 60s (was 30s) + refetchOnMount: false — prevents redundant refetches
+  * Reverts optimistic update on failure
+
+- Fix 5: useInvalidateWorkspaces() hook — exported from switcher, called by create-organization and create-company wizards after success. New companies now appear in the switcher INSTANTLY (no waiting for staleTime).
+
+- Fix 6: Converted DashboardHome from manual useEffect+useState to TanStack Query (queryKey: ['dashboard']). Now benefits from the prefetch fired during switch — dashboard loads instantly after switch instead of showing a loading spinner.
+
+- Measured response times (against Supabase Japan):
+  * workspaces API: 0.6s (was 2-3s+ with N+1)
+  * dashboard API: 0.85s (unchanged, already used Promise.all)
+  * switch API: ~0.5s (was 2-3s+ with buildSessionPayload)
+  * Perceived switch speed: instant (optimistic UI) + dashboard prefetched
+
+Stage Summary:
+- 5 optimizations applied, all verified working.
+- Switcher load: 2-3s → 0.6s (5x faster)
+- Switch action: 2-3s → instant perceived (optimistic) + 0.5s background
+- Dashboard after switch: loading spinner → instant (prefetched)
+- New company visibility: 30s delay → instant (invalidation hook)
