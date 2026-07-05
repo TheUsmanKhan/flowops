@@ -13,108 +13,13 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import {
-  Check,
-  ChevronsUpDown,
-  Building2,
-  Plus,
-  LogOut,
-  Settings,
-  User as UserIcon,
-} from 'lucide-react'
+import { LogOut, Settings, User as UserIcon } from 'lucide-react'
 import { api } from '@/lib/api-client'
 import { toast } from 'sonner'
 import { useRouter } from 'next/navigation'
-import { cn } from '@/lib/utils'
 
-export function WorkspaceSwitcher() {
-  const companies = useAppStore((s) => s.companies)
-  const activeCompany = useAppStore((s) => s.activeCompany)
-  const navigate = useAppStore((s) => s.navigate)
-  const setSession = useAppStore((s) => s.setSession)
-  const user = useAppStore((s) => s.user)
-  const employee = useAppStore((s) => s.employee)
-
-  async function switchCompany(companyId: string) {
-    if (companyId === activeCompany?.id) return
-    try {
-      const res = await api.post<{
-        activeCompany: typeof activeCompany
-        employee: typeof employee
-      }>('/api/workspace/switch', { companyId })
-      setSession({
-        user,
-        activeCompany: res.activeCompany,
-        companies,
-        employee: res.employee ?? undefined,
-      })
-      toast.success(`Switched to ${res.activeCompany?.name}`)
-      navigate({ name: 'dashboard' })
-    } catch (err) {
-      toast.error('Failed to switch workspace')
-    }
-  }
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          variant="outline"
-          className="gap-2 h-9 px-2.5 max-w-[220px] justify-between"
-        >
-          <span className="flex items-center gap-2 min-w-0">
-            <span className="flex h-6 w-6 items-center justify-center rounded-md bg-primary/10 text-primary shrink-0">
-              <Building2 className="h-3.5 w-3.5" />
-            </span>
-            <span className="truncate text-sm font-medium">
-              {activeCompany?.name ?? 'Select company'}
-            </span>
-          </span>
-          <ChevronsUpDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-64">
-        <DropdownMenuLabel className="text-xs text-muted-foreground">
-          Your companies
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        {companies.length === 0 && (
-          <div className="px-2 py-3 text-sm text-muted-foreground">
-            No companies yet.
-          </div>
-        )}
-        {companies.map((c) => (
-          <DropdownMenuItem
-            key={c.id}
-            onClick={() => switchCompany(c.id)}
-            className="gap-2 cursor-pointer"
-          >
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-muted text-xs font-medium shrink-0">
-              {initials(c.name)}
-            </span>
-            <span className="flex-1 min-w-0">
-              <span className="block text-sm truncate">{c.name}</span>
-              <span className="block text-xs text-muted-foreground truncate">
-                {c.baseCurrency} · {c.countryCode}
-              </span>
-            </span>
-            {c.id === activeCompany?.id && (
-              <Check className="h-4 w-4 text-primary" />
-            )}
-          </DropdownMenuItem>
-        ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onClick={() => navigate({ name: 'onboarding' })}
-          className="gap-2 cursor-pointer text-primary"
-        >
-          <Plus className="h-4 w-4" />
-          Create new company
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  )
-}
+// Re-export the rebuilt WorkspaceSwitcher so existing imports keep working.
+export { WorkspaceSwitcher } from '@/components/workspace/workspace-switcher'
 
 export function UserMenu() {
   const user = useAppStore((s) => s.user)
@@ -179,6 +84,12 @@ export function UserMenu() {
           className="gap-2 cursor-pointer"
         >
           <Settings className="h-4 w-4" /> Company settings
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={() => navigate({ name: 'organization' })}
+          className="gap-2 cursor-pointer"
+        >
+          <Settings className="h-4 w-4" /> Organization settings
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem

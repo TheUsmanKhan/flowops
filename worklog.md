@@ -87,3 +87,62 @@ Stage Summary:
 - Company creation now works for ANY number of companies (multi-tenant fix).
 - 3-layer fix: schema (compound unique) + API (batch + rollback + friendly errors) + frontend (per-step validation + error display + loading state).
 - Verified: second company creation succeeds with 4 system roles seeded.
+
+---
+Task ID: SPRINT-2
+Agent: main
+Task: Build complete Organization & Company management system (Sprint 2)
+
+Work Log:
+- Built Part 1: /lib/data/currencies.ts — complete world currency list (160 currencies) with POPULAR_CURRENCIES, getCurrencyByCode, formatCurrencyLabel helpers.
+- Built /lib/data/countries.ts — country list (90+ countries), PAKISTAN_PROVINCES, POPULAR_TIMEZONES, ALL_TIMEZONES, MONTHS, PAYMENT_TERMS.
+- Built Part 2: /components/ui/currency-selector.tsx — searchable command palette with Popular + All sections, matches code/name/symbol.
+- Built /components/ui/country-selector.tsx — CountrySelector + TimezoneSelector (same searchable pattern).
+- Built Part 12: /components/ui/initials-avatar.tsx — deterministic color from id hash (8 color palette), sm/md/lg sizes, rounded option for orgs.
+- Built Part 4: /lib/validations/organization.ts — createOrganizationSchema, createCompanySchema, updateCompanySchema, updateOrganizationSchema, archiveSchema.
+- Built /api/upload route — local storage with Supabase-compatible contract (type+id path, 2MB limit, JPG/PNG/WebP).
+- Built /components/ui/logo-upload.tsx — reusable logo upload field with preview, removal, drag/click.
+- Built Part 3 API routes:
+  * /api/workspaces — getUserWorkspaces grouped by org (owned orgs first, then invited)
+  * /api/organizations/create — createOrganization (org + first company + 4 system roles + owner employee + activate workspace)
+  * /api/companies/create — createCompany under existing org (owner-verified)
+  * /api/organizations/[id] PATCH — updateOrganization (owner only)
+  * /api/organizations/[id] POST — archiveOrganization (name confirmation, cascades to all companies)
+  * /api/companies/[id]/archive — archiveCompany (org owner only, name confirmation, terminates employees)
+  * Extended /api/company PATCH — now handles logoUrl, fiscalYearStart, timezone, countryCode
+- Built Part 5: /components/workspace/workspace-switcher.tsx — complete rebuild with:
+  * TanStack Query (staleTime 30s) for workspaces list
+  * Grouped by org (owned orgs first, invited companies separate)
+  * Per-company: initials avatar/logo, role name, employee count, active checkmark
+  * "Add company to [Org]" shortcuts for owned orgs
+  * "Create New Organization" at bottom
+  * Loading skeletons + error retry
+  * Optimistic switching with queryClient.clear()
+- Built Part 6: /components/onboarding/create-organization-view.tsx — 3-step wizard (Org Info → First Company → Review) with logo upload, currency/country selectors, Pakistan provinces, fiscal year, per-step validation, error banner.
+- Built Part 7: /components/onboarding/create-company-view.tsx — 3-step wizard (Choose Org → Company Details → Review) with org pre-selection via orgId prop.
+- Built Part 8: /components/settings/company-settings-view.tsx — 5-tab settings (Profile, Tax & Legal, Address & Contact, Financial, Danger Zone) with:
+  * Logo upload + removal
+  * Currency change warning banner
+  * Fiscal year live preview
+  * Archive with typed-name confirmation dialog
+- Built Part 9: /components/settings/organization-view.tsx — 4-tab settings (Profile, Companies, Subscription, Danger Zone) with:
+  * Logo upload
+  * Companies table with "Add Company" + "Manage" actions
+  * Subscription plan display
+  * Archive with typed-name confirmation
+- Updated Part 10+11: SPA router + sidebar — added 'create-organization' and 'create-company' routes, updated sidebar/mobile-nav with Company Settings + Organization nav items.
+- Updated navbar.tsx — re-exports new WorkspaceSwitcher, cleaned up old inline version.
+- Updated /app/page.tsx — renders new views, handles create-organization even before onboarding completes.
+
+Verification (self-contained test script):
+- Register fresh user (sana@flowops.pk) → 200 ✓
+- Create Organization (Sana Group + Sana Boutique) → 200 ✓, returned activeCompany + elevated Owner employee ✓
+- Create second company (Sana Online Store) under same org → 200 ✓
+- Workspaces API → returned 1 org group with 2 companies, owner=true, active workspace tracking correct ✓
+- DB verified: both companies have 4 system roles each ✓
+- Lint: 0 errors, 6 warnings (unused eslint-disable directives)
+
+Stage Summary:
+- Sprint 2 COMPLETE: full Organization & Company management system.
+- Users can now: create multiple organizations, create multiple companies per org, switch between workspaces (grouped by org), upload logos, manage company settings (5 tabs), manage org settings (4 tabs), archive with name confirmation.
+- All 7 "current problems to fix" from the spec are resolved.

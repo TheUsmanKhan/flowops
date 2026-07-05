@@ -28,6 +28,8 @@ export type AppRoute =
   | { name: 'company-settings' }
   | { name: 'settings' }
   | { name: 'audit' }
+  | { name: 'create-organization' }
+  | { name: 'create-company'; orgId?: string }
 
 interface AppState {
   // session

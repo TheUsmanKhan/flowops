@@ -12,6 +12,8 @@ import { RegisterForm } from '@/components/auth/register-form'
 import { ForgotPasswordForm } from '@/components/auth/forgot-password-form'
 import { ResetPasswordForm } from '@/components/auth/reset-password-form'
 import { OnboardingView } from '@/components/onboarding/onboarding-view'
+import { CreateOrganizationView } from '@/components/onboarding/create-organization-view'
+import { CreateCompanyView } from '@/components/onboarding/create-company-view'
 import { DashboardShell, PageHeader } from '@/components/layout/dashboard-shell'
 import { DashboardHome } from '@/components/dashboard/dashboard-home'
 import { EmployeesView } from '@/components/employees/employees-view'
@@ -113,7 +115,22 @@ export default function Page() {
   }
 
   // ---- Authenticated but not onboarded ----
+  // Allow create-organization even before onboarding completes.
+  if (user && route.name === 'create-organization') {
+    return (
+      <DashboardShell>
+        <CreateOrganizationView onBack={() => navigate({ name: user.isOnboarded && activeCompany ? 'dashboard' : 'onboarding' })} />
+      </DashboardShell>
+    )
+  }
   if (!user.isOnboarded || !activeCompany) {
+    if (route.name === 'create-company') {
+      return (
+        <DashboardShell>
+          <CreateCompanyView onBack={() => navigate({ name: 'onboarding' })} />
+        </DashboardShell>
+      )
+    }
     return <OnboardingView />
   }
 
@@ -146,7 +163,21 @@ function renderRoute(
       return <SettingsView />
     case 'audit':
       return <AuditLogView />
+    case 'create-organization':
+      return <CreateOrganizationViewWithBack />
+    case 'create-company':
+      return <CreateCompanyViewWithBack orgId={route.orgId} />
     default:
       return <DashboardHome />
   }
+}
+
+function CreateOrganizationViewWithBack() {
+  const navigate = useAppStore((s) => s.navigate)
+  return <CreateOrganizationView onBack={() => navigate({ name: 'dashboard' })} />
+}
+
+function CreateCompanyViewWithBack({ orgId }: { orgId?: string }) {
+  const navigate = useAppStore((s) => s.navigate)
+  return <CreateCompanyView orgId={orgId} onBack={() => navigate({ name: 'organization' })} />
 }

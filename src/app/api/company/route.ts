@@ -4,6 +4,7 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { updateCompanySchema } from '@/lib/validations/company'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
+import { buildSessionPayload } from '@/lib/session-payload'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -115,6 +116,7 @@ export async function PATCH(req: Request) {
         ...(d.taxId !== undefined ? { taxId: d.taxId || null } : {}),
         ...(d.taxIdType ? { taxIdType: d.taxIdType } : {}),
         ...(d.baseCurrency ? { baseCurrency: d.baseCurrency } : {}),
+        ...(d.countryCode ? { countryCode: d.countryCode } : {}),
         ...(d.email !== undefined ? { email: d.email || null } : {}),
         ...(d.phone !== undefined ? { phone: d.phone || null } : {}),
         ...(d.website !== undefined ? { website: d.website || null } : {}),
@@ -123,6 +125,9 @@ export async function PATCH(req: Request) {
         ...(d.addressProvince !== undefined ? { addressProvince: d.addressProvince || null } : {}),
         ...(d.addressPostalCode !== undefined ? { addressPostalCode: d.addressPostalCode || null } : {}),
         ...(d.addressCountry !== undefined ? { addressCountry: d.addressCountry || null } : {}),
+        ...(d.timezone ? { timezone: d.timezone } : {}),
+        ...(d.fiscalYearStart ? { fiscalYearStart: d.fiscalYearStart } : {}),
+        ...(d.logoUrl !== undefined ? { logoUrl: d.logoUrl || null } : {}),
       },
     })
 
@@ -138,7 +143,7 @@ export async function PATCH(req: Request) {
       newValues: d,
     })
 
-    return Response.json({ id: updated.id })
+    return Response.json(await buildSessionPayload(user.id))
   } catch (err) {
     return handleError(err)
   }

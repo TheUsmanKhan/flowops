@@ -28,9 +28,10 @@ const NAV: NavItem[] = [
   { route: { name: 'dashboard' }, label: 'Dashboard', icon: LayoutDashboard, matchPrefixes: ['dashboard'] },
   { route: { name: 'employees' }, label: 'Employees', icon: Users, permission: PERMISSIONS.EMPLOYEES_VIEW, matchPrefixes: ['employees'] },
   { route: { name: 'roles' }, label: 'Roles & Permissions', icon: ShieldCheck, permission: PERMISSIONS.SETTINGS_ROLES_MANAGE, matchPrefixes: ['roles'] },
-  { route: { name: 'organization' }, label: 'Organization', icon: Building2 },
+  { route: { name: 'organization' }, label: 'Organization', icon: Building2, matchPrefixes: ['organization', 'create-company'] },
+  { route: { name: 'company-settings' }, label: 'Company Settings', icon: Settings, matchPrefixes: ['company-settings'] },
   { route: { name: 'audit' }, label: 'Audit Log', icon: ScrollText, permission: PERMISSIONS.AUDIT_VIEW, matchPrefixes: ['audit'] },
-  { route: { name: 'settings' }, label: 'Settings', icon: Settings, matchPrefixes: ['settings', 'company-settings'] },
+  { route: { name: 'settings' }, label: 'Personal Settings', icon: Settings, matchPrefixes: ['settings'] },
 ]
 
 export function Sidebar() {
