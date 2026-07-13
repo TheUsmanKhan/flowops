@@ -28,6 +28,9 @@ import { AuditLogView } from '@/components/settings/audit-log-view'
 import { ProductsView } from '@/components/products/products-view'
 import { ProductCreateView } from '@/components/products/product-create-view'
 import { ProductDetailView } from '@/components/products/product-detail-view'
+import { CatalogSettingsView } from '@/components/products/catalog-settings-view'
+import { ReturnedStitchedView } from '@/components/products/returned-stitched-view'
+import { OrgCatalogView } from '@/components/products/org-catalog-view'
 import { Card, CardContent } from '@/components/ui/card'
 
 export default function Page() {
@@ -176,6 +179,12 @@ function renderRoute(
       return <ProductCreateViewWithBack />
     case 'product-detail':
       return <ProductDetailView productId={route.id} />
+    case 'product-settings':
+      return <CatalogSettingsView />
+    case 'returned-stitched':
+      return <ReturnedStitchedView />
+    case 'org-catalog':
+      return <OrgCatalogView />
     default:
       return <DashboardHome />
   }

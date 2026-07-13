@@ -33,6 +33,9 @@ export type AppRoute =
   | { name: 'products' }
   | { name: 'product-create' }
   | { name: 'product-detail'; id: string }
+  | { name: 'product-settings' }
+  | { name: 'returned-stitched' }
+  | { name: 'org-catalog' }
 
 interface AppState {
   // session
