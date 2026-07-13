@@ -189,3 +189,56 @@ Stage Summary:
 - Switch action: 2-3s → instant perceived (optimistic) + 0.5s background
 - Dashboard after switch: loading spinner → instant (prefetched)
 - New company visibility: 30s delay → instant (invalidation hook)
+
+---
+Task ID: SPRINT3-UI
+Agent: main
+Task: Build Product Catalog UI — 3 React components + SPA router wiring
+
+Work Log:
+- Read previous worklog + existing files: app-store.ts, page.tsx, dashboard-shell.tsx, api-client.ts, fulfillment-types.ts, validations/product.ts, the 3 product API routes, /api/categories, /api/brands, and reference components (employees-view, employee-detail-view, create-organization-view).
+- Built `/src/components/products/products-view.tsx` (list page):
+  * TanStack Query `queryKey: ['products']`, `staleTime: 30_000`.
+  * PageHeader with "New Product" button → `product-create`.
+  * Search input + product type filter (All/Simple/Variable/Bundle/Service).
+  * Responsive grid (1/2/3/4 cols) of product cards — primary image or Package placeholder, title, slug, type/scope/variant-count badges, category/brand line, price range, featured/stitchable/owner corner badges, ChevronRight affordance, keyboard accessible (Enter/Space).
+  * Loading skeleton grid (8 cards), empty state CTA, error state with retry, refetching indicator.
+- Built `/src/components/products/product-create-view.tsx` (3-step wizard):
+  * Stepper UI matching create-organization-view design.
+  * Step 1: title, short description (500 char counter), full description, visual product-type cards, Category+Brand dropdowns with inline "Add new" dialogs (POST /api/categories + /api/brands), Featured toggle, Stitchable toggle (variable only).
+  * Step 2 — 3 modes:
+    - Mode A (simple/bundle/service): single-variant form — SKU, barcode, cost/sale/compare prices, weight, fulfillment type, conditional production days + stitching type for made_to_order.
+    - Mode B (stitchable variable): include-unstitched toggle + fabric cost, include-sizes toggle + STANDARD_SIZES grid + custom sizes, 3 stitching types each with charge + production days inputs (defaults from DEFAULT_PRODUCTION_DAYS), ⚡ Generate Variants → POST /api/products/generate-stitched, preview table with editable sale price + active toggle per row, FulfillmentBadge (green=stock, sky=made-to-order).
+    - Mode C (regular variable): manual variant rows — SKU, cost, sale price, multiline attributes (Key: Value), set-default/delete-row, min 1 enforced.
+  * Step 3: scope selector cards (Private/Organization/Selective), review summary, "What will happen" info box, Create Product button.
+  * Per-step validation, inline error banner, loading state on submit. On success → toast + invalidate `['products']` + navigate to `product-detail`.
+  * Helper useEffect clears isStitchable when product_type changes away from variable.
+- Built `/src/components/products/product-detail-view.tsx` (tabbed detail):
+  * TanStack Query `queryKey: ['product', productId]`, `staleTime: 30_000`.
+  * Back button → products. PageHeader with title + badges (type, scope, stitchable, active, featured, owner).
+  * If isOwner: Edit button (disabled, future) + "Promote to Org" button (dialog → PATCH /api/products/[id] with new scope).
+  * Tabs: Overview | Variants | Images | Shopify Sync (+ Pricing tab when not owner & has subscription).
+  * Overview: description, short description, details card, stitching info.
+  * Variants: full table (SKU, attributes, cost+stitching breakdown, sale/compare prices, FulfillmentBadge, stitching type, production days, inventory policy badge, active switch) + Shopify Sync Preview section at bottom.
+  * Images: responsive grid with Primary/Variant badges, or empty state.
+  * Shopify Sync: JSON payload preview + sync notes (stock_based → inventory_management=shopify, made_to_order → null+continue).
+  * Pricing (non-owner + subscription): editable sale_price/compare_price per variant with dirty-tracking and Save button (PATCH /api/products/[id]/variants/[variantId]/pricing).
+- Wired into `/src/app/page.tsx`:
+  * Imported ProductsView, ProductCreateView, ProductDetailView.
+  * Added ProductCreateViewWithBack wrapper that supplies onBack={() => navigate({ name: 'products' })}.
+  * Added switch cases: products → ProductsView, product-create → ProductCreateViewWithBack, product-detail → ProductDetailView with productId={route.id}.
+- Lint & type-check:
+  * bun run lint: 0 errors, 0 warnings in new files (6 remaining warnings are all pre-existing in other files).
+  * bunx tsc --noEmit: 0 errors in new files. Fixed initial TS issues:
+    - opt.type → opt.key in StitchableVariantBuilder (5 spots) — STITCHING_OPTIONS field is named `key`.
+    - PromoteDialog scope-state type narrowing: replaced .filter() on a 'private'|'organization'|'selective' array (TypeScript can't narrow through filter) with a separate PROMOTE_SCOPE_OPTIONS constant typed 'organization' | 'selective'.
+    - Removed unused variantsDefault helper and unused ScopeOption interface / SCOPE_OPTIONS constant.
+    - Removed unused @next/next/no-img-element eslint-disable comments in my 2 image usages.
+  * Pre-existing errors in other files (company/route.ts, dashboard/route.ts, validations/product.ts zod z.record, onboarding/settings session: unknown) are NOT from this task and were left untouched.
+
+Stage Summary:
+- Sprint 3 Product Catalog UI COMPLETE: 3 production-ready React components + SPA router wiring.
+- List view: search, filter, responsive card grid with skeletons and empty state.
+- Create wizard: 3 steps, supports all 4 product types including the complex stitchable variable builder that calls the generate-stitched API and shows an editable variant preview table.
+- Detail view: 4-5 tabs (Overview/Variants/Images/Shopify Sync/Pricing) with full variant table, Shopify sync preview, promote-to-org dialog, and per-company pricing editor for non-owners.
+- All components: TanStack Query for data, Zustand for routing, Sonner for toasts, emerald-primary design system, mobile-first responsive, keyboard accessible.

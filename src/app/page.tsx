@@ -25,6 +25,9 @@ import { OrganizationView } from '@/components/settings/organization-view'
 import { CompanySettingsView } from '@/components/settings/company-settings-view'
 import { SettingsView } from '@/components/settings/settings-view'
 import { AuditLogView } from '@/components/settings/audit-log-view'
+import { ProductsView } from '@/components/products/products-view'
+import { ProductCreateView } from '@/components/products/product-create-view'
+import { ProductDetailView } from '@/components/products/product-detail-view'
 import { Card, CardContent } from '@/components/ui/card'
 
 export default function Page() {
@@ -167,6 +170,12 @@ function renderRoute(
       return <CreateOrganizationViewWithBack />
     case 'create-company':
       return <CreateCompanyViewWithBack orgId={route.orgId} />
+    case 'products':
+      return <ProductsView />
+    case 'product-create':
+      return <ProductCreateViewWithBack />
+    case 'product-detail':
+      return <ProductDetailView productId={route.id} />
     default:
       return <DashboardHome />
   }
@@ -180,4 +189,9 @@ function CreateOrganizationViewWithBack() {
 function CreateCompanyViewWithBack({ orgId }: { orgId?: string }) {
   const navigate = useAppStore((s) => s.navigate)
   return <CreateCompanyView orgId={orgId} onBack={() => navigate({ name: 'organization' })} />
+}
+
+function ProductCreateViewWithBack() {
+  const navigate = useAppStore((s) => s.navigate)
+  return <ProductCreateView onBack={() => navigate({ name: 'products' })} />
 }

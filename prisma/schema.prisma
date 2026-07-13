@@ -55,6 +55,21 @@ model Organization {
   companies   Company[]
   invitations Invitation[]
   auditLogs   AuditLog[]
+
+  // Sprint 3 back-relations
+  orgCategories        OrgCategory[]
+  orgBrands            OrgBrand[]
+  orgAttributes        OrgAttribute[]
+  orgAttributeValues   OrgAttributeValue[]
+  orgProducts          OrgProduct[]
+  orgProductVariants   OrgProductVariant[]
+  orgProductImages     OrgProductImage[]
+  orgProductBundles    OrgProductBundle[]
+  selectiveAccess      SelectiveProductAccess[]
+  companyProductSettings CompanyProductSetting[]
+  companyVariantPricing  CompanyVariantPricing[]
+  returnedStitchedInventory ReturnedStitchedInventory[]
+  productFulfillmentCosts  ProductFulfillmentCost[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -94,6 +109,14 @@ model Company {
   auditLogs        AuditLog[]
   metricEvents     MetricEvent[]
   activeForSettings UserSetting[]
+
+  // Sprint 3 back-relations
+  sourceProducts          OrgProduct[]
+  selectiveProductAccess  SelectiveProductAccess[]
+  companyProductSettings  CompanyProductSetting[]
+  companyVariantPricing   CompanyVariantPricing[]
+  returnedStitchedInventory ReturnedStitchedInventory[]
+  productFulfillmentCosts  ProductFulfillmentCost[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -165,6 +188,22 @@ model Employee {
   updatedAt         DateTime  @updatedAt
 
   auditLogs AuditLog[]
+
+  // Sprint 3 back-relations (named to avoid ambiguity)
+  createdCategories      OrgCategory[]      @relation("CategoryCreator")
+  createdBrands          OrgBrand[]         @relation("BrandCreator")
+  createdAttributes      OrgAttribute[]     @relation("AttributeCreator")
+  createdProducts        OrgProduct[]      @relation("ProductCreator")
+  promotedProducts       OrgProduct[]      @relation("ProductPromoter")
+  demotedProducts        OrgProduct[]      @relation("ProductDemoter")
+  createdVariants        OrgProductVariant[] @relation("VariantCreator")
+  uploadedProductImages  OrgProductImage[] @relation("ImageUploader")
+  grantedSelectiveAccess SelectiveProductAccess[] @relation("SelectiveAccessGranter")
+  subscribedProducts     CompanyProductSetting[] @relation("SubscriptionCreator")
+  revokedSubscriptions   CompanyProductSetting[] @relation("SubscriptionRevoker")
+  receivedReturnedItems  ReturnedStitchedInventory[] @relation("ReturnedItemReceiver")
+  writtenOffReturnedItems ReturnedStitchedInventory[] @relation("ReturnedItemWriteOff")
+  loggedFulfillmentCosts ProductFulfillmentCost[] @relation("FulfillmentCostLogger")
 
   @@unique([companyId, userId])
 }
@@ -247,4 +286,377 @@ model MetricEvent {
   createdAt    DateTime @default(now())
 
   @@index([companyId, entityType, metricKey, recordedAt])
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SPRINT 3 — PRODUCT CATALOG SYSTEM
+// 12 models: categories, brands, attributes, products, variants,
+// images, bundles, selective access, company pricing, returned inventory.
+// Multi-tenant isolation: org-level catalog + company-level pricing.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Hierarchical categories at organization level (shared by all companies).
+model OrgCategory {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  parentId       String?
+  parent         OrgCategory? @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children       OrgCategory[] @relation("CategoryTree")
+  name           String
+  slug           String
+  imageUrl       String?
+  displayOrder   Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdById    String?
+  createdBy      Employee? @relation("CategoryCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  products       OrgProduct[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+}
+
+/// Brands at organization level. e.g. LAMHA, Muzammil Collection.
+model OrgBrand {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  slug           String
+  logoUrl        String?
+  isActive       Boolean  @default(true)
+  createdById    String?
+  createdBy      Employee? @relation("BrandCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  products       OrgProduct[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+}
+
+/// Attribute definitions used to build variants. e.g. Size, Color, Piece Type.
+model OrgAttribute {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String   // "Size"
+  displayName    String   // "Select Size"
+  attributeType  String   @default("select") // select | color
+  displayOrder   Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdById    String?
+  createdBy      Employee? @relation("AttributeCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+
+  values         OrgAttributeValue[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+/// Values for each attribute. e.g. S, M, L / Red, Navy / Unstitched, Stitched.
+model OrgAttributeValue {
+  id             String   @id @default(cuid())
+  attributeId    String
+  attribute      OrgAttribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  value          String   // "Medium"
+  displayValue   String   // "M"
+  colorHex       String?  // only for color type
+  displayOrder   Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  @@unique([attributeId, value])
+  @@index([organizationId])
+}
+
+/// Master product record. Lives at org level. Created by one company,
+/// can be promoted to org-wide or selective sharing.
+model OrgProduct {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceCompanyId String
+  sourceCompany   Company @relation(fields: [sourceCompanyId], references: [id])
+
+  categoryId     String?
+  category       OrgCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brandId        String?
+  brand          OrgBrand? @relation(fields: [brandId], references: [id], onDelete: SetNull)
+
+  title          String
+  slug           String
+  description    String?
+  shortDescription String? @db.VarChar(500)
+
+  productType    String   @default("variable") // simple | variable | bundle | service
+  productScope   String   @default("private") // private | organization | selective | archived
+
+  isStitchable   Boolean  @default(false)
+  hasSizeVariants Boolean @default(false)
+  stitchingBasePrice Decimal @default(0) @db.Decimal(12, 2)
+
+  isActive       Boolean  @default(true)
+  isFeatured     Boolean  @default(false)
+
+  promotedAt     DateTime?
+  promotedById   String?
+  promotedBy     Employee? @relation("ProductPromoter", fields: [promotedById], references: [id])
+  demotedAt      DateTime?
+  demotedById    String?
+  demotedBy      Employee? @relation("ProductDemoter", fields: [demotedById], references: [id])
+  demotionReason String?
+
+  createdById    String
+  createdBy      Employee @relation("ProductCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  variants       OrgProductVariant[]
+  images         OrgProductImage[]
+  bundles        OrgProductBundle[] @relation("BundleProduct")
+  selectiveAccess SelectiveProductAccess[]
+  companySettings CompanyProductSetting[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, productScope])
+  @@index([sourceCompanyId])
+}
+
+/// Every unique sellable combination of a product. Shopify-compatible fields.
+/// NOTE: attribute_values JSONB must never exceed 3 keys (Shopify limit).
+model OrgProductVariant {
+  id             String   @id @default(cuid())
+  productId      String
+  product        OrgProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  sku            String   @unique
+  barcode        String?  @unique
+  // JSONB: { "Piece Type": "Stitched", "Size": "M" } — max 3 keys
+  attributeValues String  @default("{}")
+
+  costPrice      Decimal  @default(0) @db.Decimal(12, 2)
+  weightGrams    Int      @default(0)
+
+  fulfillmentType String  @default("stock_based") // stock_based | made_to_order
+  stitchingType  String?  // unstitched | stitched_basic | stitched_heavy | custom_order
+  stitchingCharges Decimal @default(0) @db.Decimal(12, 2)
+  productionDays Int      @default(0)
+
+  isTaxable      Boolean  @default(true)
+  requiresShipping Boolean @default(true)
+  inventoryPolicy String  @default("deny") // deny | continue
+
+  isDefault      Boolean  @default(false)
+  isActive       Boolean  @default(true)
+
+  // Shopify sync fields
+  shopifyVariantId      String? @unique
+  shopifyInventoryItemId String?
+
+  // Dimensions for courier/international
+  dimensions      String  @default("{}") // { length_cm, width_cm, height_cm }
+
+  createdById     String?
+  createdBy       Employee? @relation("VariantCreator", fields: [createdById], references: [id])
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  images          OrgProductImage[]
+  bundleComponents OrgProductBundle[] @relation("BundleComponent")
+  companyPricing  CompanyVariantPricing[]
+  returnedInventory ReturnedStitchedInventory[]
+  fulfillmentCosts ProductFulfillmentCost[]
+
+  @@index([productId])
+  @@index([organizationId, fulfillmentType])
+}
+
+/// Images stored in Supabase Storage, shared across all subscribing companies.
+model OrgProductImage {
+  id             String   @id @default(cuid())
+  productId      String
+  product        OrgProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  variantId      String?
+  variant        OrgProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  storagePath    String
+  publicUrl      String
+  displayOrder   Int      @default(0)
+  isPrimary      Boolean  @default(false)
+
+  uploadedById   String?
+  uploadedBy     Employee? @relation("ImageUploader", fields: [uploadedById], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@index([productId])
+}
+
+/// For bundle-type products. Defines component variants and quantities.
+model OrgProductBundle {
+  id             String   @id @default(cuid())
+  bundleProductId String
+  bundleProduct   OrgProduct @relation("BundleProduct", fields: [bundleProductId], references: [id], onDelete: Cascade)
+  componentVariantId String
+  componentVariant  OrgProductVariant @relation("BundleComponent", fields: [componentVariantId], references: [id])
+  quantity       Int      @default(1)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@unique([bundleProductId, componentVariantId])
+}
+
+/// When product_scope = 'selective', controls which companies can access it.
+model SelectiveProductAccess {
+  id             String   @id @default(cuid())
+  orgProductId   String
+  orgProduct     OrgProduct @relation(fields: [orgProductId], references: [id], onDelete: Cascade)
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  grantedById    String?
+  grantedBy      Employee? @relation("SelectiveAccessGranter", fields: [grantedById], references: [id])
+  grantedAt      DateTime @default(now())
+
+  @@unique([orgProductId, companyId])
+}
+
+/// Per-company pricing and activation for a shared org product.
+model CompanyProductSetting {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  orgProductId   String
+  orgProduct     OrgProduct @relation(fields: [orgProductId], references: [id], onDelete: Cascade)
+
+  isActive       Boolean  @default(true)
+  subscriptionStatus String @default("active") // active | paused | revoked
+
+  subscribedAt   DateTime @default(now())
+  subscribedById String?
+  subscribedBy   Employee? @relation("SubscriptionCreator", fields: [subscribedById], references: [id])
+  revokedAt      DateTime?
+  revokedById    String?
+  revokedBy      Employee? @relation("SubscriptionRevoker", fields: [revokedById], references: [id])
+  revokeReason   String?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([companyId, orgProductId])
+  @@index([companyId])
+}
+
+/// Per-variant selling price set independently by each company.
+model CompanyVariantPricing {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  salePrice      Decimal  @db.Decimal(12, 2)
+  comparePrice   Decimal? @db.Decimal(12, 2)
+
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([companyId, orgVariantId])
+  @@index([companyId])
+}
+
+/// Special pool for made-to-order items returned in sellable condition.
+/// This is the ONLY stock a made_to_order variant ever holds.
+model ReturnedStitchedInventory {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+
+  quantity       Int      @default(1)
+  condition      String   // perfect | good | open_box | damaged
+  totalCost      Decimal  @db.Decimal(12, 2)
+  suggestedResalePrice Decimal? @db.Decimal(12, 2)
+
+  originalOrderReference String?
+  returnReason   String?
+  status         String   @default("available") // available | sold | written_off
+
+  photos         String   @default("[]") // JSON array of URLs
+  notes          String?
+
+  receivedById   String?
+  receivedBy     Employee? @relation("ReturnedItemReceiver", fields: [receivedById], references: [id])
+  receivedAt     DateTime @default(now())
+
+  soldAt         DateTime?
+  soldOrderReference String?
+
+  writtenOffAt   DateTime?
+  writtenOffById String?
+  writtenOffBy   Employee? @relation("ReturnedItemWriteOff", fields: [writtenOffById], references: [id])
+  writeOffReason String?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, orgVariantId, status])
+  @@index([companyId, status])
+}
+
+/// Tracks cost components for made_to_order variants in production.
+model ProductFulfillmentCost {
+  id             String   @id @default(cuid())
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  employeeId     String?
+  employee       Employee? @relation("FulfillmentCostLogger", fields: [employeeId], references: [id])
+
+  orderReference String?
+  fabricCost     Decimal  @default(0) @db.Decimal(12, 2)
+  stitchingCost  Decimal  @default(0) @db.Decimal(12, 2)
+  embroideryCost Decimal  @default(0) @db.Decimal(12, 2)
+  otherCost      Decimal  @default(0) @db.Decimal(12, 2)
+  totalProductionCost Decimal @default(0) @db.Decimal(12, 2)
+  salePrice      Decimal? @db.Decimal(12, 2)
+
+  status         String   @default("in_production") // in_production | dispatched | delivered | returned | written_off
+  tailorName     String?
+  notes          String?
+  metadata       String   @default("{}")
+
+  dispatchedAt   DateTime?
+  deliveredAt    DateTime?
+  returnedAt     DateTime?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([companyId, orgVariantId, status])
+  @@index([orderReference])
 }

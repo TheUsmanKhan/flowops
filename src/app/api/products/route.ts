@@ -1,0 +1,271 @@
+import { db } from '@/lib/db'
+import { getCurrentUser } from '@/lib/session'
+import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
+import { productSchema } from '@/lib/validations/product'
+import { syncInventoryPolicy } from '@/lib/constants/fulfillment-types'
+import { PERMISSIONS } from '@/lib/permissions'
+
+export const runtime = 'nodejs'
+export const dynamic = 'force-dynamic'
+
+/**
+ * List products visible to the active company.
+ * Visibility rules (mirroring the RLS spec):
+ *   - private: only source_company_id = active company
+ *   - organization: any company in the same org
+ *   - selective: only companies in selective_product_access
+ *   - archived: only source company or elevated
+ */
+export async function GET() {
+  try {
+    const user = await getCurrentUser()
+    if (!user) throw new ApiError(401, 'Not authenticated')
+    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
+    const companyId = settings?.activeCompanyId
+    const orgId = settings?.activeOrgId
+    if (!companyId || !orgId) throw new ApiError(403, 'No active company')
+
+    const products = await db.orgProduct.findMany({
+      where: {
+        organizationId: orgId,
+        isActive: true,
+        OR: [
+          { sourceCompanyId: companyId },
+          { productScope: 'organization' },
+          {
+            productScope: 'selective',
+            selectiveAccess: { some: { companyId } },
+          },
+        ],
+      },
+      include: {
+        category: { select: { id: true, name: true } },
+        brand: { select: { id: true, name: true } },
+        variants: {
+          where: { isActive: true },
+          select: {
+            id: true,
+            sku: true,
+            costPrice: true,
+            fulfillmentType: true,
+            stitchingType: true,
+            isDefault: true,
+            companyPricing: {
+              where: { companyId },
+              select: { salePrice: true, comparePrice: true },
+            },
+          },
+        },
+        images: {
+          where: { isPrimary: true },
+          take: 1,
+          select: { publicUrl: true },
+        },
+        _count: { select: { variants: { where: { isActive: true } } } },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    return Response.json({
+      products: products.map((p) => ({
+        id: p.id,
+        title: p.title,
+        slug: p.slug,
+        productType: p.productType,
+        productScope: p.productScope,
+        isStitchable: p.isStitchable,
+        isFeatured: p.isFeatured,
+        isActive: p.isActive,
+        category: p.category,
+        brand: p.brand,
+        primaryImage: p.images[0]?.publicUrl ?? null,
+        variantCount: p._count.variants,
+        variants: p.variants.map((v) => ({
+          id: v.id,
+          sku: v.sku,
+          costPrice: Number(v.costPrice),
+          fulfillmentType: v.fulfillmentType,
+          stitchingType: v.stitchingType,
+          isDefault: v.isDefault,
+          salePrice: v.companyPricing[0] ? Number(v.companyPricing[0].salePrice) : null,
+          comparePrice: v.companyPricing[0]?.comparePrice ? Number(v.companyPricing[0].comparePrice) : null,
+        })),
+        isOwner: p.sourceCompanyId === companyId,
+      })),
+    })
+  } catch (err) {
+    return handleError(err)
+  }
+}
+
+/**
+ * Create a new product with variants.
+ * Creates: org_products + org_product_variants + company_product_settings
+ *          + company_variant_pricing (+ audit + metric).
+ */
+export async function POST(req: Request) {
+  try {
+    const user = await getCurrentUser()
+    if (!user) throw new ApiError(401, 'Not authenticated')
+    const settings = await db.userSetting.findUnique({
+      where: { userId: user.id },
+    })
+    const companyId = settings?.activeCompanyId
+    const orgId = settings?.activeOrgId
+    if (!companyId || !orgId) throw new ApiError(403, 'No active company')
+
+    // Permission check
+    const caller = await db.employee.findFirst({
+      where: { companyId, userId: user.id, status: 'active' },
+      include: { role: true },
+    })
+    if (!caller) throw new ApiError(403, 'Not a member of this company.')
+    const allowed =
+      caller.role.roleTier === 'elevated' ||
+      (await db.rolePermission.count({
+        where: { roleId: caller.roleId, permissionKey: PERMISSIONS.PRODUCTS_CREATE },
+      })) > 0
+    if (!allowed) throw new ApiError(403, 'You lack permission to create products.')
+
+    const body = await readBody(req)
+    const parsed = productSchema.safeParse(body)
+    if (!parsed.success) {
+      throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
+    }
+    const d = parsed.data
+
+    // Generate unique slug
+    const baseSlug = d.title
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9\s-]/g, '')
+      .replace(/[\s_-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80)
+    let slug = baseSlug || 'product'
+    let n = 1
+    while (await db.orgProduct.findUnique({ where: { organizationId_slug: { organizationId: orgId, slug } } })) {
+      n++
+      slug = `${baseSlug}-${n}`
+    }
+
+    // Validate variant attribute_values (max 3 keys — Shopify limit)
+    for (const v of d.variants) {
+      const keys = Object.keys(v.attribute_values)
+      if (keys.length > 3) {
+        throw new ApiError(400, `Variant ${v.sku} has ${keys.length} attributes. Maximum 3 allowed (Shopify limit).`)
+      }
+    }
+
+    // Create product
+    const product = await db.orgProduct.create({
+      data: {
+        organizationId: orgId,
+        sourceCompanyId: companyId,
+        categoryId: d.category_id || null,
+        brandId: d.brand_id || null,
+        title: d.title,
+        slug,
+        description: d.description || null,
+        shortDescription: d.short_description || null,
+        productType: d.product_type,
+        productScope: d.product_scope,
+        isStitchable: d.is_stitchable,
+        hasSizeVariants: d.has_size_variants,
+        stitchingBasePrice: d.stitching_base_price,
+        isActive: d.is_active,
+        isFeatured: d.is_featured,
+        createdById: caller.id,
+      },
+    })
+
+    // Create variants + company pricing
+    const variantRecords = []
+    for (const v of d.variants) {
+      // Sync fulfillment_type ↔ inventory_policy
+      const inventoryPolicy = syncInventoryPolicy(v.fulfillment_type, v.allow_backorder)
+
+      // Validate stitching_type ↔ fulfillment_type consistency
+      let fulfillmentType = v.fulfillment_type
+      if (v.stitching_type === 'unstitched') {
+        fulfillmentType = 'stock_based'
+      } else if (['stitched_basic', 'stitched_heavy', 'custom_order'].includes(v.stitching_type ?? '')) {
+        fulfillmentType = 'made_to_order'
+      }
+
+      const variant = await db.orgProductVariant.create({
+        data: {
+          productId: product.id,
+          organizationId: orgId,
+          sku: v.sku,
+          barcode: v.barcode || null,
+          attributeValues: JSON.stringify(v.attribute_values),
+          costPrice: v.cost_price,
+          weightGrams: v.weight_grams,
+          fulfillmentType,
+          stitchingType: v.stitching_type ?? null,
+          stitchingCharges: v.stitching_charges,
+          productionDays: v.production_days,
+          isTaxable: v.is_taxable,
+          requiresShipping: v.requires_shipping,
+          inventoryPolicy: syncInventoryPolicy(fulfillmentType, v.allow_backorder),
+          isDefault: v.is_default,
+          isActive: v.is_active,
+          createdById: caller.id,
+        },
+      })
+      variantRecords.push(variant)
+
+      // Create company pricing for this variant
+      await db.companyVariantPricing.create({
+        data: {
+          companyId,
+          orgVariantId: variant.id,
+          organizationId: orgId,
+          salePrice: v.sale_price,
+          comparePrice: v.compare_price ?? null,
+        },
+      })
+    }
+
+    // Create company_product_settings (creator auto-subscribes)
+    await db.companyProductSetting.create({
+      data: {
+        companyId,
+        organizationId: orgId,
+        orgProductId: product.id,
+        subscribedById: caller.id,
+      },
+    })
+
+    // Audit + metric
+    await insertAuditLog({
+      action: 'product.created',
+      entityType: 'product',
+      entityId: product.id,
+      companyId,
+      organizationId: orgId,
+      userId: user.id,
+      employeeId: caller.id,
+      newValues: {
+        title: product.title,
+        productType: product.productType,
+        variantCount: variantRecords.length,
+        isStitchable: product.isStitchable,
+      },
+    })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: product.id,
+      metricKey: 'product.created',
+      numericValue: 1,
+    })
+
+    return Response.json({ id: product.id, slug: product.slug, title: product.title })
+  } catch (err) {
+    return handleError(err)
+  }
+}

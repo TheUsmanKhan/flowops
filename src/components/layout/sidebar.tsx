@@ -10,7 +10,7 @@ import {
   Building2,
   Settings,
   ScrollText,
-  Gauge,
+  Package,
 } from 'lucide-react'
 import { useCan } from '@/stores/app-store'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -26,6 +26,7 @@ interface NavItem {
 
 const NAV: NavItem[] = [
   { route: { name: 'dashboard' }, label: 'Dashboard', icon: LayoutDashboard, matchPrefixes: ['dashboard'] },
+  { route: { name: 'products' }, label: 'Products', icon: Package, permission: PERMISSIONS.PRODUCTS_VIEW, matchPrefixes: ['products', 'product'] },
   { route: { name: 'employees' }, label: 'Employees', icon: Users, permission: PERMISSIONS.EMPLOYEES_VIEW, matchPrefixes: ['employees'] },
   { route: { name: 'roles' }, label: 'Roles & Permissions', icon: ShieldCheck, permission: PERMISSIONS.SETTINGS_ROLES_MANAGE, matchPrefixes: ['roles'] },
   { route: { name: 'organization' }, label: 'Organization', icon: Building2, matchPrefixes: ['organization', 'create-company'] },

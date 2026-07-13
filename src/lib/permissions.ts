@@ -13,6 +13,18 @@ export const PERMISSIONS = {
   INVENTORY_CREATE: 'inventory.create',
   INVENTORY_ADJUST: 'inventory.adjust',
   INVENTORY_DELETE: 'inventory.delete',
+  INVENTORY_RECEIVE: 'inventory.receive',
+  INVENTORY_REPORT_LOSS: 'inventory.report_loss',
+  INVENTORY_MANAGE_LOSS: 'inventory.manage_loss',
+
+  // Products
+  PRODUCTS_VIEW: 'products.view',
+  PRODUCTS_CREATE: 'products.create',
+  PRODUCTS_EDIT: 'products.edit',
+  PRODUCTS_MANAGE_CATALOG: 'products.manage_catalog',
+  PRODUCTS_SUBSCRIBE: 'products.subscribe',
+  PRODUCTS_PRICING: 'products.pricing',
+  PRODUCTS_PROMOTE: 'products.promote',
 
   // Orders
   ORDERS_VIEW: 'orders.view',

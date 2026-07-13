@@ -30,6 +30,9 @@ export type AppRoute =
   | { name: 'audit' }
   | { name: 'create-organization' }
   | { name: 'create-company'; orgId?: string }
+  | { name: 'products' }
+  | { name: 'product-create' }
+  | { name: 'product-detail'; id: string }
 
 interface AppState {
   // session
