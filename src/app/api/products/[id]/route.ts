@@ -1,6 +1,9 @@
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { insertAuditLog } from '@/lib/audit'
+import { PERMISSIONS } from '@/lib/permissions'
+import { updateProductSchema } from '@/lib/validations/product'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -98,6 +101,145 @@ export async function GET(
           : null,
       },
     })
+  } catch (err) {
+    return handleError(err)
+  }
+}
+
+/** Update product fields. Source company or elevated only. */
+export async function PATCH(
+  req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const user = await getCurrentUser()
+    if (!user) throw new ApiError(401, 'Not authenticated')
+    const settings = await db.userSetting.findUnique({
+      where: { userId: user.id },
+      include: { activeCompany: true },
+    })
+    const companyId = settings?.activeCompanyId
+    const orgId = settings?.activeOrgId
+    if (!companyId || !orgId) throw new ApiError(403, 'No active company')
+
+    const { id } = await params
+    const product = await db.orgProduct.findFirst({ where: { id, organizationId: orgId } })
+    if (!product) throw new ApiError(404, 'Product not found.')
+
+    const caller = await db.employee.findFirst({
+      where: { companyId, userId: user.id, status: 'active' },
+      include: { role: true },
+    })
+    if (!caller) throw new ApiError(403, 'Not a member of this company.')
+    const isOwner = product.sourceCompanyId === companyId
+    const elevated = caller.role.roleTier === 'elevated'
+    if (!isOwner && !elevated) {
+      throw new ApiError(403, 'Only the source company or elevated employees can edit this product.')
+    }
+    const allowed =
+      elevated ||
+      (await db.rolePermission.count({
+        where: { roleId: caller.roleId, permissionKey: PERMISSIONS.PRODUCTS_EDIT },
+      })) > 0
+    if (!allowed) throw new ApiError(403, 'You lack permission to edit products.')
+
+    const body = await readBody(req)
+    const parsed = updateProductSchema.safeParse(body)
+    if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
+    const d = parsed.data
+
+    const oldValues = {
+      title: product.title,
+      description: product.description,
+      categoryId: product.categoryId,
+      brandId: product.brandId,
+      isStitchable: product.isStitchable,
+      isFeatured: product.isFeatured,
+      isActive: product.isActive,
+    }
+
+    const updated = await db.orgProduct.update({
+      where: { id },
+      data: {
+        ...(d.title ? { title: d.title } : {}),
+        ...(d.description !== undefined ? { description: d.description || null } : {}),
+        ...(d.short_description !== undefined ? { shortDescription: d.short_description || null } : {}),
+        ...(d.category_id !== undefined ? { categoryId: d.category_id || null } : {}),
+        ...(d.brand_id !== undefined ? { brandId: d.brand_id || null } : {}),
+        ...(d.is_stitchable !== undefined ? { isStitchable: d.is_stitchable } : {}),
+        ...(d.stitching_base_price !== undefined ? { stitchingBasePrice: d.stitching_base_price } : {}),
+        ...(d.has_size_variants !== undefined ? { hasSizeVariants: d.has_size_variants } : {}),
+        ...(d.is_active !== undefined ? { isActive: d.is_active } : {}),
+        ...(d.is_featured !== undefined ? { isFeatured: d.is_featured } : {}),
+      },
+    })
+
+    await insertAuditLog({
+      action: 'product.updated',
+      entityType: 'product',
+      entityId: id,
+      companyId,
+      organizationId: orgId,
+      userId: user.id,
+      employeeId: caller.id,
+      oldValues,
+      newValues: d,
+    })
+
+    return Response.json({ id: updated.id })
+  } catch (err) {
+    return handleError(err)
+  }
+}
+
+/** Archive a product (elevated only — never hard delete). */
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const user = await getCurrentUser()
+    if (!user) throw new ApiError(401, 'Not authenticated')
+    const settings = await db.userSetting.findUnique({
+      where: { userId: user.id },
+      include: { activeCompany: true },
+    })
+    const companyId = settings?.activeCompanyId
+    const orgId = settings?.activeOrgId
+    if (!companyId || !orgId) throw new ApiError(403, 'No active company')
+
+    const { id } = await params
+    const product = await db.orgProduct.findFirst({ where: { id, organizationId: orgId } })
+    if (!product) throw new ApiError(404, 'Product not found.')
+
+    const caller = await db.employee.findFirst({
+      where: { companyId, userId: user.id, status: 'active' },
+      include: { role: true },
+    })
+    if (!caller) throw new ApiError(403, 'Not a member of this company.')
+    if (caller.role.roleTier !== 'elevated') {
+      throw new ApiError(403, 'Only elevated employees can archive products.')
+    }
+
+    const oldValues = { productScope: product.productScope, isActive: product.isActive }
+    await db.orgProduct.update({
+      where: { id },
+      data: { productScope: 'archived', isActive: false },
+    })
+
+    await insertAuditLog({
+      action: 'product.archived',
+      entityType: 'product',
+      entityId: id,
+      companyId,
+      organizationId: orgId,
+      userId: user.id,
+      employeeId: caller.id,
+      oldValues,
+      newValues: { productScope: 'archived', isActive: false },
+    })
+
+    return Response.json({ success: true })
   } catch (err) {
     return handleError(err)
   }

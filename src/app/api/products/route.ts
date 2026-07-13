@@ -17,8 +17,11 @@ export const dynamic = 'force-dynamic'
  *   - organization: any company in the same org
  *   - selective: only companies in selective_product_access
  *   - archived: only source company or elevated
+ *
+ * Supports filters via query params: search, category_id, brand_id,
+ * product_type, product_scope, is_active. Paginated with page & pageSize.
  */
-export async function GET() {
+export async function GET(req: Request) {
   try {
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
@@ -27,46 +30,67 @@ export async function GET() {
     const orgId = settings?.activeOrgId
     if (!companyId || !orgId) throw new ApiError(403, 'No active company')
 
-    const products = await db.orgProduct.findMany({
-      where: {
-        organizationId: orgId,
-        isActive: true,
-        OR: [
-          { sourceCompanyId: companyId },
-          { productScope: 'organization' },
-          {
-            productScope: 'selective',
-            selectiveAccess: { some: { companyId } },
-          },
-        ],
-      },
-      include: {
-        category: { select: { id: true, name: true } },
-        brand: { select: { id: true, name: true } },
-        variants: {
-          where: { isActive: true },
-          select: {
-            id: true,
-            sku: true,
-            costPrice: true,
-            fulfillmentType: true,
-            stitchingType: true,
-            isDefault: true,
-            companyPricing: {
-              where: { companyId },
-              select: { salePrice: true, comparePrice: true },
+    // Parse query params for filtering + pagination
+    const url = new URL(req.url)
+    const search = url.searchParams.get('search') ?? ''
+    const categoryId = url.searchParams.get('category_id') ?? ''
+    const brandId = url.searchParams.get('brand_id') ?? ''
+    const productType = url.searchParams.get('product_type') ?? ''
+    const productScope = url.searchParams.get('product_scope') ?? ''
+    const isActiveParam = url.searchParams.get('is_active')
+    const page = Math.max(1, Number(url.searchParams.get('page') ?? '1'))
+    const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get('pageSize') ?? '20')))
+
+    const where = {
+      organizationId: orgId,
+      ...(categoryId ? { categoryId } : {}),
+      ...(brandId ? { brandId } : {}),
+      ...(productType ? { productType } : {}),
+      ...(productScope ? { productScope } : {}),
+      ...(isActiveParam !== null ? { isActive: isActiveParam === 'true' } : { isActive: true }),
+      ...(search ? { title: { contains: search, mode: 'insensitive' as const } } : {}),
+      OR: [
+        { sourceCompanyId: companyId },
+        { productScope: 'organization' },
+        { productScope: 'selective', selectiveAccess: { some: { companyId } } },
+      ],
+    }
+
+    const [total, products] = await Promise.all([
+      db.orgProduct.count({ where }),
+      db.orgProduct.findMany({
+        where,
+        include: {
+          category: { select: { id: true, name: true } },
+          brand: { select: { id: true, name: true } },
+          variants: {
+            where: { isActive: true },
+            select: {
+              id: true,
+              sku: true,
+              costPrice: true,
+              fulfillmentType: true,
+              stitchingType: true,
+              isDefault: true,
+              companyPricing: {
+                where: { companyId },
+                select: { salePrice: true, comparePrice: true },
+              },
             },
           },
+          images: {
+            where: { isPrimary: true },
+            take: 1,
+            select: { publicUrl: true },
+          },
+          _count: { select: { variants: { where: { isActive: true } } } },
+          companySettings: { where: { companyId }, select: { isActive: true, subscriptionStatus: true } },
         },
-        images: {
-          where: { isPrimary: true },
-          take: 1,
-          select: { publicUrl: true },
-        },
-        _count: { select: { variants: { where: { isActive: true } } } },
-      },
-      orderBy: { createdAt: 'desc' },
-    })
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+    ])
 
     return Response.json({
       products: products.map((p) => ({
@@ -93,7 +117,13 @@ export async function GET() {
           comparePrice: v.companyPricing[0]?.comparePrice ? Number(v.companyPricing[0].comparePrice) : null,
         })),
         isOwner: p.sourceCompanyId === companyId,
+        subscription: p.companySettings[0]
+          ? { isActive: p.companySettings[0].isActive, status: p.companySettings[0].subscriptionStatus }
+          : null,
       })),
+      total,
+      page,
+      pageSize,
     })
   } catch (err) {
     return handleError(err)
