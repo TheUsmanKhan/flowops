@@ -78,6 +78,7 @@ import {
   STITCHING_LABELS,
 } from '@/lib/constants/fulfillment-types'
 import { FulfillmentTypeBadge } from '@/components/products/fulfillment-type-badge'
+import { PERMISSIONS } from '@/lib/permissions'
 import { cn } from '@/lib/utils'
 
 // ----------------------------------------------------------------------------
