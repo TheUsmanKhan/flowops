@@ -31,6 +31,9 @@ export async function POST(req: Request) {
     }
     const d = parsed.data
 
+    // Use base_sku as prefix if provided, otherwise fall back to slug
+    const skuPrefix = (d.base_sku || d.product_slug).toUpperCase().replace(/[^A-Z0-9-]/g, '')
+
     const variants: Array<{
       sku: string
       attribute_values: Record<string, string>
@@ -47,7 +50,7 @@ export async function POST(req: Request) {
     // 1. Unstitched variant (optional)
     if (d.include_unstitched) {
       variants.push({
-        sku: `${d.product_slug}-UN`,
+        sku: `${skuPrefix}-UN`,
         attribute_values: { 'Piece Type': 'Unstitched', Size: 'Free Size' },
         cost_price: d.base_fabric_cost,
         stitching_charges: 0,
@@ -79,7 +82,7 @@ export async function POST(req: Request) {
       if (d.sizes.length === 0) {
         // No sizes → single stitched variant (Free Size)
         variants.push({
-          sku: `${d.product_slug}-${STITCHING_SHORT[stType]}`,
+          sku: `${skuPrefix}-${STITCHING_SHORT[stType]}`,
           attribute_values: { 'Piece Type': pieceTypeLabel, Size: 'Free Size' },
           cost_price: d.base_fabric_cost + charge,
           stitching_charges: charge,
@@ -93,7 +96,7 @@ export async function POST(req: Request) {
       } else {
         for (const size of d.sizes) {
           variants.push({
-            sku: `${d.product_slug}-${size}-${STITCHING_SHORT[stType]}`,
+            sku: `${skuPrefix}-${size}-${STITCHING_SHORT[stType]}`,
             attribute_values: { 'Piece Type': pieceTypeLabel, Size: size },
             cost_price: d.base_fabric_cost + charge,
             stitching_charges: charge,

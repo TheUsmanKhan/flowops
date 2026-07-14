@@ -53,6 +53,7 @@ export async function GET(
         id: product.id,
         title: product.title,
         slug: product.slug,
+        baseSku: product.baseSku,
         description: product.description,
         shortDescription: product.shortDescription,
         productType: product.productType,
@@ -162,6 +163,7 @@ export async function PATCH(
       where: { id },
       data: {
         ...(d.title ? { title: d.title } : {}),
+        ...(d.base_sku !== undefined ? { baseSku: d.base_sku || null } : {}),
         ...(d.description !== undefined ? { description: d.description || null } : {}),
         ...(d.short_description !== undefined ? { shortDescription: d.short_description || null } : {}),
         ...(d.category_id !== undefined ? { categoryId: d.category_id || null } : {}),

@@ -369,6 +369,7 @@ model OrgAttributeValue {
   value          String   // "Medium"
   displayValue   String   // "M"
   colorHex       String?  // only for color type
+  skuCode        String?  // e.g. "M", "XXL", "RED" — used to build variant SKUs
   displayOrder   Int      @default(0)
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
@@ -393,6 +394,7 @@ model OrgProduct {
 
   title          String
   slug           String
+  baseSku        String?  // manually entered by user, e.g. "FSES-10A". Nullable — falls back to slug.
   description    String?
   shortDescription String? @db.VarChar(500)
 

@@ -40,6 +40,7 @@ export async function GET() {
           value: v.value,
           displayValue: v.displayValue,
           colorHex: v.colorHex,
+          skuCode: v.skuCode,
           displayOrder: v.displayOrder,
         })),
       })),

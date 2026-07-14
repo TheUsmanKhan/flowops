@@ -207,6 +207,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
   const [productType, setProductType] = useState<ProductType>('variable')
   const [categoryId, setCategoryId] = useState('')
   const [brandId, setBrandId] = useState('')
+  const [baseSku, setBaseSku] = useState('')
   const [isFeatured, setIsFeatured] = useState(false)
   const [isStitchable, setIsStitchable] = useState(false)
 
@@ -355,6 +356,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
         '/api/products/generate-stitched',
         {
           product_slug: slug,
+          base_sku: baseSku.trim() || undefined,
           sizes,
           stitching_types: enabledTypes,
           base_fabric_cost: Number(baseFabricCost) || 0,
@@ -405,6 +407,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
 
     const payload = {
       title: title.trim(),
+      base_sku: baseSku.trim() || undefined,
       description: description.trim() || undefined,
       short_description: shortDescription.trim() || undefined,
       product_type: productType,
@@ -556,6 +559,19 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
                   <code className="font-mono">{slug}</code>
                 </p>
               )}
+            </div>
+
+            <div className="space-y-1.5">
+              <Label htmlFor="baseSku">Base SKU / Style Code (optional)</Label>
+              <Input
+                id="baseSku"
+                value={baseSku}
+                onChange={(e) => setBaseSku(e.target.value.toUpperCase().trim())}
+                placeholder="e.g. FSES-10A"
+              />
+              <p className="text-xs text-muted-foreground">
+                Used as the prefix for all variant SKUs. Leave blank to auto-generate from the title.
+              </p>
             </div>
 
             <div className="space-y-1.5">

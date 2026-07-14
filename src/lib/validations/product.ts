@@ -38,6 +38,7 @@ export const attributeValueSchema = z.object({
   value: z.string().min(1).max(100),
   displayValue: z.string().min(1).max(50),
   colorHex: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional().or(z.literal('')),
+  skuCode: z.string().max(50).optional().or(z.literal('')),
   displayOrder: z.number().int().default(0),
   isActive: z.boolean().default(true),
 })
@@ -108,6 +109,7 @@ export type VariantInput = z.infer<typeof variantSchema>
 
 export const productSchema = z.object({
   title: z.string().min(1, 'Title is required').max(255),
+  base_sku: z.string().max(50).optional().or(z.literal('')),
   description: z.string().optional().or(z.literal('')),
   short_description: z.string().max(500).optional().or(z.literal('')),
   product_type: z.enum(['simple', 'variable', 'bundle', 'service']).default('variable'),
@@ -126,6 +128,7 @@ export type ProductInput = z.infer<typeof productSchema>
 /** Shell-only product creation (no variants in this step). */
 export const createProductShellSchema = z.object({
   title: z.string().min(2, 'Title must be at least 2 characters').max(255),
+  base_sku: z.string().max(50).optional().or(z.literal('')),
   description: z.string().optional().or(z.literal('')),
   short_description: z.string().max(500).optional().or(z.literal('')),
   product_type: z.enum(['simple', 'variable', 'bundle', 'service']).default('variable'),
@@ -140,6 +143,7 @@ export type CreateProductShellInput = z.infer<typeof createProductShellSchema>
 
 export const updateProductSchema = z.object({
   title: z.string().min(2).max(255).optional(),
+  base_sku: z.string().max(50).optional().or(z.literal('')),
   description: z.string().optional().or(z.literal('')),
   short_description: z.string().max(500).optional().or(z.literal('')),
   category_id: z.string().optional().or(z.literal('')),
@@ -275,6 +279,7 @@ export type LogFulfillmentCostInput = z.infer<typeof logFulfillmentCostSchema>
 
 export const generateStitchedSchema = z.object({
   product_slug: z.string().min(1),
+  base_sku: z.string().optional().or(z.literal('')),
   sizes: z.array(z.string()).default([]),
   stitching_types: z
     .array(z.enum(['stitched_basic', 'stitched_heavy', 'custom_order']))

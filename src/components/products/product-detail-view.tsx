@@ -1,20 +1,22 @@
 'use client'
 
-import { useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAppStore } from '@/stores/app-store'
+import { useRef, useState } from 'react'
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
+import { useAppStore, useCan } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
 import { PageHeader } from '@/components/layout/dashboard-shell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import {
   Card,
+  CardAction,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
-  CardDescription,
 } from '@/components/ui/card'
 import {
   Tabs,
@@ -31,26 +33,45 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { toast } from 'sonner'
 import {
-  Loader2,
-  ArrowLeft,
-  Package,
-  Shirt,
-  Tag,
-  Save,
-  ImageIcon,
-  Store,
-  Pencil,
-  ArrowUpCircle,
   AlertCircle,
+  ArrowLeft,
+  ArrowUpCircle,
+  Check,
+  ImageIcon,
+  Loader2,
+  Pencil,
+  Save,
+  Shirt,
+  Star,
+  Store,
+  Tag,
+  Trash2,
+  Upload,
+  X,
 } from 'lucide-react'
 import {
-  FULFILLMENT_LABELS,
-  PRODUCT_TYPE_LABELS,
   PRODUCT_SCOPE_LABELS,
+  PRODUCT_TYPE_LABELS,
   STITCHING_LABELS,
 } from '@/lib/constants/fulfillment-types'
+import { FulfillmentTypeBadge } from '@/components/products/fulfillment-type-badge'
 import { cn } from '@/lib/utils'
 
 // ----------------------------------------------------------------------------
@@ -130,6 +151,8 @@ const PROMOTE_SCOPE_OPTIONS: Array<{
 export function ProductDetailView({ productId }: { productId: string }) {
   const navigate = useAppStore((s) => s.navigate)
   const queryClient = useQueryClient()
+  const can = useCan()
+  const canEdit = can('products.edit')
   const [scopeDialogOpen, setScopeDialogOpen] = useState(false)
   const [changingScope, setChangingScope] = useState(false)
 
@@ -206,14 +229,9 @@ export function ProductDetailView({ productId }: { productId: string }) {
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {product.isOwner && (
-              <>
-                <Button variant="outline" disabled title="Coming soon">
-                  <Pencil className="h-4 w-4" /> Edit
-                </Button>
-                <Button onClick={() => setScopeDialogOpen(true)}>
-                  <ArrowUpCircle className="h-4 w-4" /> Promote to Org
-                </Button>
-              </>
+              <Button onClick={() => setScopeDialogOpen(true)}>
+                <ArrowUpCircle className="h-4 w-4" /> Promote to Org
+              </Button>
             )}
           </div>
         }
@@ -264,297 +282,19 @@ export function ProductDetailView({ productId }: { productId: string }) {
           )}
         </TabsList>
 
-        {/* Overview */}
+        {/* Overview / Details (inline-edit) */}
         <TabsContent value="overview">
-          <div className="grid gap-6 lg:grid-cols-3">
-            <Card className="lg:col-span-2">
-              <CardHeader>
-                <CardTitle className="text-base">Description</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {product.shortDescription && (
-                  <p className="text-sm font-medium">{product.shortDescription}</p>
-                )}
-                {product.description ? (
-                  <p className="text-sm text-muted-foreground whitespace-pre-wrap">
-                    {product.description}
-                  </p>
-                ) : (
-                  <p className="text-sm text-muted-foreground italic">
-                    No description provided.
-                  </p>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Details</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3 text-sm">
-                <DetailRow label="Category" value={product.category?.name ?? '—'} />
-                <DetailRow label="Brand" value={product.brand?.name ?? '—'} />
-                <DetailRow
-                  label="Variant count"
-                  value={String(product.variants.length)}
-                />
-                <DetailRow
-                  label="Slug"
-                  value={<code className="font-mono text-xs">{product.slug}</code>}
-                />
-                {product.isStitchable && (
-                  <>
-                    <div className="border-t pt-3 mt-3 space-y-3">
-                      <div className="flex items-center gap-2">
-                        <Shirt className="h-4 w-4 text-primary" />
-                        <p className="text-xs font-medium uppercase text-muted-foreground">
-                          Stitching info
-                        </p>
-                      </div>
-                      <DetailRow
-                        label="Base price"
-                        value={formatMoney(product.stitchingBasePrice)}
-                      />
-                      <DetailRow
-                        label="Has size variants"
-                        value={product.hasSizeVariants ? 'Yes' : 'No'}
-                      />
-                    </div>
-                  </>
-                )}
-              </CardContent>
-            </Card>
-          </div>
+          <DetailsTab product={product} productId={productId} canEdit={canEdit} />
         </TabsContent>
 
-        {/* Variants */}
+        {/* Variants (interactive table + edit dialog) */}
         <TabsContent value="variants">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <Tag className="h-4 w-4 text-primary" /> Variants
-              </CardTitle>
-              <CardDescription>
-                Each row is a Shopify variant with its own SKU, price, and inventory policy.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>SKU</TableHead>
-                      <TableHead>Attributes</TableHead>
-                      <TableHead className="text-right">Cost</TableHead>
-                      <TableHead className="text-right">Sale</TableHead>
-                      <TableHead className="text-right">Compare</TableHead>
-                      <TableHead>Fulfillment</TableHead>
-                      <TableHead>Stitching</TableHead>
-                      <TableHead className="text-right">Days</TableHead>
-                      <TableHead>Policy</TableHead>
-                      <TableHead className="text-center">Active</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {product.variants.length === 0 ? (
-                      <TableRow>
-                        <TableCell colSpan={10} className="h-24 text-center text-muted-foreground text-sm">
-                          No variants on this product.
-                        </TableCell>
-                      </TableRow>
-                    ) : (
-                      product.variants.map((v) => (
-                        <TableRow key={v.id}>
-                          <TableCell className="font-mono text-xs">
-                            <div className="flex items-center gap-1.5">
-                              {v.sku}
-                              {v.isDefault && (
-                                <Badge variant="secondary" className="text-[9px] py-0 px-1">DEFAULT</Badge>
-                              )}
-                            </div>
-                            {v.barcode && (
-                              <div className="text-[10px] text-muted-foreground">{v.barcode}</div>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-xs">
-                            {Object.keys(v.attributeValues).length === 0 ? (
-                              <span className="text-muted-foreground">—</span>
-                            ) : (
-                              <div className="space-y-0.5">
-                                {Object.entries(v.attributeValues).map(([k, val]) => (
-                                  <div key={k}>
-                                    <span className="text-muted-foreground">{k}:</span>{' '}
-                                    <span className="font-medium">{val}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-right text-xs">
-                            {formatMoney(v.costPrice)}
-                            {v.stitchingCharges > 0 && (
-                              <div className="text-[10px] text-muted-foreground">
-                                +{formatMoney(v.stitchingCharges)} st.
-                              </div>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-right text-xs font-medium">
-                            {v.salePrice != null ? formatMoney(v.salePrice) : '—'}
-                          </TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">
-                            {v.comparePrice != null ? formatMoney(v.comparePrice) : '—'}
-                          </TableCell>
-                          <TableCell>
-                            <FulfillmentBadge type={v.fulfillmentType} />
-                          </TableCell>
-                          <TableCell className="text-xs">
-                            {v.stitchingType
-                              ? STITCHING_LABELS[v.stitchingType] ?? v.stitchingType
-                              : <span className="text-muted-foreground">—</span>}
-                          </TableCell>
-                          <TableCell className="text-right text-xs">
-                            {v.productionDays > 0 ? v.productionDays : '—'}
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant="outline" className="text-[10px] font-mono">
-                              {v.inventoryPolicy}
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="text-center">
-                            <Switch checked={v.isActive} disabled />
-                          </TableCell>
-                        </TableRow>
-                      ))
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Shopify Sync Preview (also on Variants tab as requested) */}
-          <Card className="mt-6">
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <Store className="h-4 w-4 text-primary" /> Shopify Sync Preview
-              </CardTitle>
-              <CardDescription>
-                What will be sent to Shopify per variant.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>SKU</TableHead>
-                      <TableHead>inventory_management</TableHead>
-                      <TableHead>inventory_policy</TableHead>
-                      <TableHead className="text-right">price</TableHead>
-                      <TableHead className="text-right">compare_at_price</TableHead>
-                      <TableHead className="text-right">grams</TableHead>
-                      <TableHead>requires_shipping</TableHead>
-                      <TableHead>taxable</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {product.variants.map((v) => (
-                      <TableRow key={v.id}>
-                        <TableCell className="font-mono text-xs">{v.sku}</TableCell>
-                        <TableCell>
-                          <code className="text-xs">
-                            {v.fulfillmentType === 'stock_based' ? 'shopify' : 'null'}
-                          </code>
-                        </TableCell>
-                        <TableCell>
-                          <Badge
-                            variant="outline"
-                            className={cn(
-                              'text-[10px] font-mono',
-                              v.inventoryPolicy === 'deny'
-                                ? 'border-amber-300 text-amber-700'
-                                : 'border-emerald-300 text-emerald-700',
-                            )}
-                          >
-                            {v.inventoryPolicy}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-right text-xs">
-                          {v.salePrice != null ? formatMoney(v.salePrice) : '—'}
-                        </TableCell>
-                        <TableCell className="text-right text-xs text-muted-foreground">
-                          {v.comparePrice != null ? formatMoney(v.comparePrice) : 'null'}
-                        </TableCell>
-                        <TableCell className="text-right text-xs">{v.weightGrams}</TableCell>
-                        <TableCell>
-                          <code className="text-xs">{v.requiresShipping ? 'true' : 'false'}</code>
-                        </TableCell>
-                        <TableCell>
-                          <code className="text-xs">{v.isTaxable ? 'true' : 'false'}</code>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            </CardContent>
-          </Card>
+          <VariantsTab product={product} productId={productId} canEdit={canEdit} />
         </TabsContent>
 
-        {/* Images */}
+        {/* Images (upload + delete) */}
         <TabsContent value="images">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <ImageIcon className="h-4 w-4 text-primary" /> Images
-              </CardTitle>
-              <CardDescription>
-                Product images used on the storefront and Shopify sync.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {product.images.length === 0 ? (
-                <div className="text-center py-12 border border-dashed rounded-lg">
-                  <div className="mx-auto h-12 w-12 rounded-full bg-muted flex items-center justify-center mb-3">
-                    <ImageIcon className="h-6 w-6 text-muted-foreground" />
-                  </div>
-                  <p className="text-sm font-medium">No images yet</p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Upload images via the edit screen (coming soon).
-                  </p>
-                </div>
-              ) : (
-                <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
-                  {product.images.map((img) => (
-                    <div
-                      key={img.id}
-                      className="relative aspect-square rounded-lg border overflow-hidden bg-muted"
-                    >
-                      <img
-                        src={img.publicUrl}
-                        alt={`${product.title} image ${img.displayOrder + 1}`}
-                        className="h-full w-full object-cover"
-                      />
-                      {img.isPrimary && (
-                        <div className="absolute top-2 left-2">
-                          <Badge className="bg-background/90 backdrop-blur text-foreground border-transparent text-[10px]">
-                            Primary
-                          </Badge>
-                        </div>
-                      )}
-                      {img.variantId && (
-                        <div className="absolute bottom-2 right-2">
-                          <Badge className="bg-background/90 backdrop-blur text-foreground border-transparent text-[10px]">
-                            Variant
-                          </Badge>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <ImagesTab product={product} productId={productId} canEdit={canEdit} />
         </TabsContent>
 
         {/* Shopify Sync */}
@@ -660,23 +400,6 @@ function DetailRow({
   )
 }
 
-function FulfillmentBadge({ type }: { type: string }) {
-  const label = FULFILLMENT_LABELS[type] ?? type
-  const isStock = type === 'stock_based'
-  return (
-    <Badge
-      className={cn(
-        'border-transparent text-[10px]',
-        isStock
-          ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100'
-          : 'bg-sky-100 text-sky-700 hover:bg-sky-100',
-      )}
-    >
-      {label}
-    </Badge>
-  )
-}
-
 function PromoteDialog({
   currentScope,
   loading,
@@ -776,11 +499,21 @@ function PricingTab({
   async function save(variantId: string) {
     const draft = drafts[variantId]
     if (!draft) return
+    if (draft.salePrice == null || draft.salePrice <= 0) {
+      toast.error('Sale price must be a positive number.')
+      return
+    }
     setSaving(variantId)
     try {
-      await api.patch(`/api/products/${productId}/variants/${variantId}/pricing`, {
-        sale_price: draft.salePrice,
-        compare_price: draft.comparePrice,
+      // POST /api/products/[id]/pricing expects { pricing: [{ org_variant_id, sale_price, compare_price? }] }
+      await api.post(`/api/products/${productId}/pricing`, {
+        pricing: [
+          {
+            org_variant_id: variantId,
+            sale_price: draft.salePrice,
+            ...(draft.comparePrice != null ? { compare_price: draft.comparePrice } : {}),
+          },
+        ],
       })
       toast.success('Pricing updated.')
       onUpdate()
@@ -819,6 +552,11 @@ function PricingTab({
                 const dirty =
                   draft.salePrice !== v.salePrice ||
                   draft.comparePrice !== v.comparePrice
+                const canSave =
+                  dirty &&
+                  draft.salePrice != null &&
+                  draft.salePrice > 0 &&
+                  (draft.comparePrice == null || draft.comparePrice > draft.salePrice)
                 return (
                   <TableRow key={v.id}>
                     <TableCell className="font-mono text-xs">{v.sku}</TableCell>
@@ -861,7 +599,7 @@ function PricingTab({
                       <Button
                         size="sm"
                         variant={dirty ? 'default' : 'outline'}
-                        disabled={!dirty || saving === v.id}
+                        disabled={!canSave || saving === v.id}
                         onClick={() => save(v.id)}
                       >
                         {saving === v.id ? (
@@ -878,6 +616,1061 @@ function PricingTab({
             </TableBody>
           </Table>
         </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// ----------------------------------------------------------------------------
+// DetailsTab — inline edit mode for the Overview tab
+// ----------------------------------------------------------------------------
+function DetailsTab({
+  product,
+  productId,
+  canEdit,
+}: {
+  product: ProductDetail
+  productId: string
+  canEdit: boolean
+}) {
+  const queryClient = useQueryClient()
+  const [editing, setEditing] = useState(false)
+  const [form, setForm] = useState(() => ({
+    title: product.title,
+    description: product.description ?? '',
+    shortDescription: product.shortDescription ?? '',
+    categoryId: product.category?.id ?? '',
+    brandId: product.brand?.id ?? '',
+    isFeatured: product.isFeatured,
+    isActive: product.isActive,
+    isStitchable: product.isStitchable,
+    stitchingBasePrice: product.stitchingBasePrice,
+    hasSizeVariants: product.hasSizeVariants,
+  }))
+
+  function resetForm() {
+    setForm({
+      title: product.title,
+      description: product.description ?? '',
+      shortDescription: product.shortDescription ?? '',
+      categoryId: product.category?.id ?? '',
+      brandId: product.brand?.id ?? '',
+      isFeatured: product.isFeatured,
+      isActive: product.isActive,
+      isStitchable: product.isStitchable,
+      stitchingBasePrice: product.stitchingBasePrice,
+      hasSizeVariants: product.hasSizeVariants,
+    })
+  }
+
+  // Lazy-load category/brand options only when entering edit mode.
+  const { data: catData } = useQuery<{ categories: Array<{ id: string; name: string }> }>({
+    queryKey: ['categories'],
+    queryFn: () => api.get<{ categories: Array<{ id: string; name: string }> }>('/api/categories'),
+    enabled: editing,
+    staleTime: 60_000,
+  })
+  const { data: brandData } = useQuery<{ brands: Array<{ id: string; name: string }> }>({
+    queryKey: ['brands'],
+    queryFn: () => api.get<{ brands: Array<{ id: string; name: string }> }>('/api/brands'),
+    enabled: editing,
+    staleTime: 60_000,
+  })
+
+  const mutation = useMutation({
+    mutationFn: (patch: Record<string, unknown>) =>
+      api.patch(`/api/products/${productId}`, patch),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+      queryClient.invalidateQueries({ queryKey: ['products'] })
+      toast.success('Product updated.')
+      setEditing(false)
+    },
+    onError: (err) => {
+      // Stay in edit mode so the user can fix and retry.
+      toast.error(err instanceof FetchError ? err.message : 'Failed to update product.')
+    },
+  })
+
+  function startEdit() {
+    resetForm()
+    setEditing(true)
+  }
+
+  function cancelEdit() {
+    setEditing(false)
+  }
+
+  function save() {
+    const patch: Record<string, unknown> = {}
+    if (form.title !== product.title) patch.title = form.title
+    if (form.description !== (product.description ?? '')) patch.description = form.description
+    if (form.shortDescription !== (product.shortDescription ?? '')) patch.short_description = form.shortDescription
+    if (form.categoryId !== (product.category?.id ?? '')) patch.category_id = form.categoryId || null
+    if (form.brandId !== (product.brand?.id ?? '')) patch.brand_id = form.brandId || null
+    if (form.isFeatured !== product.isFeatured) patch.is_featured = form.isFeatured
+    if (form.isActive !== product.isActive) patch.is_active = form.isActive
+    if (form.isStitchable !== product.isStitchable) patch.is_stitchable = form.isStitchable
+    if (form.stitchingBasePrice !== product.stitchingBasePrice) patch.stitching_base_price = form.stitchingBasePrice
+    if (form.hasSizeVariants !== product.hasSizeVariants) patch.has_size_variants = form.hasSizeVariants
+
+    if (Object.keys(patch).length === 0) {
+      toast.info('No changes to save.')
+      setEditing(false)
+      return
+    }
+    mutation.mutate(patch)
+  }
+
+  // ---- Edit mode
+  if (editing) {
+    return (
+      <div className="grid gap-6 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardHeader>
+            <CardTitle className="text-base">Edit product</CardTitle>
+            <CardDescription>
+              Update the storefront-visible details. Changes are live after save.
+            </CardDescription>
+            <CardAction>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={cancelEdit}
+                  disabled={mutation.isPending}
+                >
+                  <X className="h-4 w-4" /> Cancel
+                </Button>
+                <Button size="sm" onClick={save} disabled={mutation.isPending}>
+                  {mutation.isPending ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Check className="h-4 w-4" />
+                  )}
+                  Save Changes
+                </Button>
+              </div>
+            </CardAction>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="p-title">Title</Label>
+              <Input
+                id="p-title"
+                value={form.title}
+                onChange={(e) => setForm({ ...form, title: e.target.value })}
+                placeholder="Product title"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="p-short">Short description</Label>
+              <Input
+                id="p-short"
+                value={form.shortDescription}
+                onChange={(e) => setForm({ ...form, shortDescription: e.target.value })}
+                placeholder="One-line summary (optional)"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="p-desc">Description</Label>
+              <Textarea
+                id="p-desc"
+                value={form.description}
+                onChange={(e) => setForm({ ...form, description: e.target.value })}
+                placeholder="Full description"
+                rows={6}
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Attributes</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-1.5">
+              <Label>Category</Label>
+              <Select
+                value={form.categoryId || '__none__'}
+                onValueChange={(v) => setForm({ ...form, categoryId: v === '__none__' ? '' : v })}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Select category…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">No category</SelectItem>
+                  {(catData?.categories ?? []).map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Brand</Label>
+              <Select
+                value={form.brandId || '__none__'}
+                onValueChange={(v) => setForm({ ...form, brandId: v === '__none__' ? '' : v })}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue placeholder="Select brand…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">No brand</SelectItem>
+                  {(brandData?.brands ?? []).map((b) => (
+                    <SelectItem key={b.id} value={b.id}>
+                      {b.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div>
+                <p className="text-sm font-medium">Active</p>
+                <p className="text-xs text-muted-foreground">Inactive products are hidden from storefronts.</p>
+              </div>
+              <Switch
+                checked={form.isActive}
+                onCheckedChange={(v) => setForm({ ...form, isActive: v })}
+              />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div>
+                <p className="text-sm font-medium">Featured</p>
+                <p className="text-xs text-muted-foreground">Shown in the featured section.</p>
+              </div>
+              <Switch
+                checked={form.isFeatured}
+                onCheckedChange={(v) => setForm({ ...form, isFeatured: v })}
+              />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div>
+                <p className="text-sm font-medium">Stitchable</p>
+                <p className="text-xs text-muted-foreground">Can be sent for stitching.</p>
+              </div>
+              <Switch
+                checked={form.isStitchable}
+                onCheckedChange={(v) => setForm({ ...form, isStitchable: v })}
+              />
+            </div>
+            {form.isStitchable && (
+              <div className="space-y-3 rounded-lg border p-3 bg-muted/30">
+                <div className="space-y-1.5">
+                  <Label htmlFor="p-stitch-base">Stitching base price</Label>
+                  <Input
+                    id="p-stitch-base"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={form.stitchingBasePrice}
+                    onChange={(e) => setForm({ ...form, stitchingBasePrice: Number(e.target.value) })}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium">Has size variants</p>
+                    <p className="text-xs text-muted-foreground">Standard XS–XXXL size variants.</p>
+                  </div>
+                  <Switch
+                    checked={form.hasSizeVariants}
+                    onCheckedChange={(v) => setForm({ ...form, hasSizeVariants: v })}
+                  />
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
+  // ---- View mode (plain text, not disabled inputs)
+  return (
+    <div className="grid gap-6 lg:grid-cols-3">
+      <Card className="lg:col-span-2">
+        <CardHeader>
+          <CardTitle className="text-base">Description</CardTitle>
+          {canEdit && (
+            <CardAction>
+              <Button variant="outline" size="sm" onClick={startEdit}>
+                <Pencil className="h-4 w-4" /> Edit
+              </Button>
+            </CardAction>
+          )}
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {product.shortDescription && (
+            <p className="text-sm font-medium">{product.shortDescription}</p>
+          )}
+          {product.description ? (
+            <p className="text-sm text-muted-foreground whitespace-pre-wrap">
+              {product.description}
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground italic">
+              No description provided.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Details</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <DetailRow label="Category" value={product.category?.name ?? '—'} />
+          <DetailRow label="Brand" value={product.brand?.name ?? '—'} />
+          <DetailRow
+            label="Variant count"
+            value={String(product.variants.length)}
+          />
+          <DetailRow
+            label="Slug"
+            value={<code className="font-mono text-xs">{product.slug}</code>}
+          />
+          {product.isStitchable && (
+            <div className="border-t pt-3 mt-3 space-y-3">
+              <div className="flex items-center gap-2">
+                <Shirt className="h-4 w-4 text-primary" />
+                <p className="text-xs font-medium uppercase text-muted-foreground">
+                  Stitching info
+                </p>
+              </div>
+              <DetailRow
+                label="Base price"
+                value={formatMoney(product.stitchingBasePrice)}
+              />
+              <DetailRow
+                label="Has size variants"
+                value={product.hasSizeVariants ? 'Yes' : 'No'}
+              />
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+// ----------------------------------------------------------------------------
+// VariantsTab — interactive table + per-row edit dialog
+// ----------------------------------------------------------------------------
+function VariantsTab({
+  product,
+  productId,
+  canEdit,
+}: {
+  product: ProductDetail
+  productId: string
+  canEdit: boolean
+}) {
+  const [editingVariant, setEditingVariant] = useState<ProductVariant | null>(null)
+
+  return (
+    <>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Tag className="h-4 w-4 text-primary" /> Variants
+          </CardTitle>
+          <CardDescription>
+            Each row is a Shopify variant with its own SKU, price, and inventory policy.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>SKU</TableHead>
+                  <TableHead>Attributes</TableHead>
+                  <TableHead className="text-right">Cost</TableHead>
+                  <TableHead className="text-right">Sale</TableHead>
+                  <TableHead className="text-right">Compare</TableHead>
+                  <TableHead>Fulfillment</TableHead>
+                  <TableHead>Stitching</TableHead>
+                  <TableHead className="text-right">Days</TableHead>
+                  <TableHead>Policy</TableHead>
+                  <TableHead className="text-center">Active</TableHead>
+                  {canEdit && <TableHead className="text-right">Actions</TableHead>}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {product.variants.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={canEdit ? 11 : 10} className="h-24 text-center text-muted-foreground text-sm">
+                      No variants on this product.
+                    </TableCell>
+                  </TableRow>
+                ) : (
+                  product.variants.map((v) => (
+                    <TableRow key={v.id}>
+                      <TableCell className="font-mono text-xs">
+                        <div className="flex items-center gap-1.5">
+                          {v.sku}
+                          {v.isDefault && (
+                            <Badge variant="secondary" className="text-[9px] py-0 px-1">DEFAULT</Badge>
+                          )}
+                        </div>
+                        {v.barcode && (
+                          <div className="text-[10px] text-muted-foreground">{v.barcode}</div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {Object.keys(v.attributeValues).length === 0 ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          <div className="space-y-0.5">
+                            {Object.entries(v.attributeValues).map(([k, val]) => (
+                              <div key={k}>
+                                <span className="text-muted-foreground">{k}:</span>{' '}
+                                <span className="font-medium">{val}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right text-xs">
+                        {formatMoney(v.costPrice)}
+                        {v.stitchingCharges > 0 && (
+                          <div className="text-[10px] text-muted-foreground">
+                            +{formatMoney(v.stitchingCharges)} st.
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right text-xs font-medium">
+                        {v.salePrice != null ? formatMoney(v.salePrice) : '—'}
+                      </TableCell>
+                      <TableCell className="text-right text-xs text-muted-foreground">
+                        {v.comparePrice != null ? formatMoney(v.comparePrice) : '—'}
+                      </TableCell>
+                      <TableCell>
+                        <FulfillmentTypeBadge type={v.fulfillmentType} />
+                      </TableCell>
+                      <TableCell className="text-xs">
+                        {v.fulfillmentType === 'made_to_order' ? (
+                          v.stitchingType
+                            ? STITCHING_LABELS[v.stitchingType] ?? v.stitchingType
+                            : <span className="text-muted-foreground">—</span>
+                        ) : (
+                          <span className="text-muted-foreground text-[10px]">Stock tracked</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right text-xs">
+                        {v.fulfillmentType === 'made_to_order' && v.productionDays > 0
+                          ? v.productionDays
+                          : '—'}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-[10px] font-mono">
+                          {v.inventoryPolicy}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-center">
+                        <VariantActiveSwitch
+                          productId={productId}
+                          variantId={v.id}
+                          isActive={v.isActive}
+                          canEdit={canEdit}
+                        />
+                      </TableCell>
+                      {canEdit && (
+                        <TableCell className="text-right">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            onClick={() => setEditingVariant(v)}
+                            aria-label={`Edit variant ${v.sku}`}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  ))
+                )}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Shopify Sync Preview (also on Variants tab as requested) */}
+      <Card className="mt-6">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Store className="h-4 w-4 text-primary" /> Shopify Sync Preview
+          </CardTitle>
+          <CardDescription>
+            What will be sent to Shopify per variant.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="p-0">
+          <div className="overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>SKU</TableHead>
+                  <TableHead>inventory_management</TableHead>
+                  <TableHead>inventory_policy</TableHead>
+                  <TableHead className="text-right">price</TableHead>
+                  <TableHead className="text-right">compare_at_price</TableHead>
+                  <TableHead className="text-right">grams</TableHead>
+                  <TableHead>requires_shipping</TableHead>
+                  <TableHead>taxable</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {product.variants.map((v) => (
+                  <TableRow key={v.id}>
+                    <TableCell className="font-mono text-xs">{v.sku}</TableCell>
+                    <TableCell>
+                      <code className="text-xs">
+                        {v.fulfillmentType === 'stock_based' ? 'shopify' : 'null'}
+                      </code>
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          'text-[10px] font-mono',
+                          v.inventoryPolicy === 'deny'
+                            ? 'border-amber-300 text-amber-700'
+                            : 'border-emerald-300 text-emerald-700',
+                        )}
+                      >
+                        {v.inventoryPolicy}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right text-xs">
+                      {v.salePrice != null ? formatMoney(v.salePrice) : '—'}
+                    </TableCell>
+                    <TableCell className="text-right text-xs text-muted-foreground">
+                      {v.comparePrice != null ? formatMoney(v.comparePrice) : 'null'}
+                    </TableCell>
+                    <TableCell className="text-right text-xs">{v.weightGrams}</TableCell>
+                    <TableCell>
+                      <code className="text-xs">{v.requiresShipping ? 'true' : 'false'}</code>
+                    </TableCell>
+                    <TableCell>
+                      <code className="text-xs">{v.isTaxable ? 'true' : 'false'}</code>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Variant edit dialog */}
+      {editingVariant && (
+        <VariantEditDialog
+          product={product}
+          variant={editingVariant}
+          onClose={() => setEditingVariant(null)}
+        />
+      )}
+    </>
+  )
+}
+
+/** Interactive is_active switch with optimistic update + revert on error. */
+function VariantActiveSwitch({
+  productId,
+  variantId,
+  isActive,
+  canEdit,
+}: {
+  productId: string
+  variantId: string
+  isActive: boolean
+  canEdit: boolean
+}) {
+  const queryClient = useQueryClient()
+
+  const mutation = useMutation({
+    mutationFn: (newVal: boolean) =>
+      api.post(`/api/products/${productId}/variants/${variantId}/toggle`, {
+        is_active: newVal,
+      }),
+    onMutate: async (newVal) => {
+      // Optimistic update — flip the cached variant's isActive immediately.
+      await queryClient.cancelQueries({ queryKey: ['product', productId] })
+      const prev = queryClient.getQueryData<{ product: ProductDetail }>(['product', productId])
+      if (prev) {
+        queryClient.setQueryData<{ product: ProductDetail }>(['product', productId], {
+          product: {
+            ...prev.product,
+            variants: prev.product.variants.map((v) =>
+              v.id === variantId ? { ...v, isActive: newVal } : v
+            ),
+          },
+        })
+      }
+      return { prev }
+    },
+    onError: (err, _newVal, context) => {
+      // Revert the optimistic update.
+      if (context?.prev) {
+        queryClient.setQueryData(['product', productId], context.prev)
+      }
+      toast.error(err instanceof FetchError ? err.message : 'Failed to toggle variant.')
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+      toast.success('Variant status updated.')
+    },
+  })
+
+  return (
+    <Switch
+      checked={isActive}
+      disabled={!canEdit || mutation.isPending}
+      onCheckedChange={(v) => mutation.mutate(v)}
+      aria-label="Toggle variant active"
+    />
+  )
+}
+
+/** Variant edit dialog with SKU-change confirmation step. */
+function VariantEditDialog({
+  product,
+  variant,
+  onClose,
+}: {
+  product: ProductDetail
+  variant: ProductVariant
+  onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [step, setStep] = useState<'edit' | 'confirm'>('edit')
+  const [form, setForm] = useState({
+    sku: variant.sku,
+    barcode: variant.barcode ?? '',
+    costPrice: variant.costPrice,
+    weightGrams: variant.weightGrams,
+    stitchingCharges: variant.stitchingCharges,
+    productionDays: variant.productionDays,
+    isTaxable: variant.isTaxable,
+    requiresShipping: variant.requiresShipping,
+  })
+
+  const mutation = useMutation({
+    mutationFn: (patch: Record<string, unknown>) =>
+      api.patch(`/api/products/${product.id}/variants/${variant.id}`, patch),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['product', product.id] })
+      toast.success('Variant updated.')
+      onClose()
+    },
+    onError: (err) => {
+      // Send the user back to the edit step so they can fix and retry.
+      setStep('edit')
+      toast.error(err instanceof FetchError ? err.message : 'Failed to update variant.')
+    },
+  })
+
+  function buildPatch(): Record<string, unknown> {
+    const patch: Record<string, unknown> = {}
+    if (form.sku !== variant.sku) patch.sku = form.sku
+    if (form.barcode !== (variant.barcode ?? '')) patch.barcode = form.barcode
+    if (form.costPrice !== variant.costPrice) patch.cost_price = form.costPrice
+    if (form.weightGrams !== variant.weightGrams) patch.weight_grams = form.weightGrams
+    if (form.stitchingCharges !== variant.stitchingCharges) patch.stitching_charges = form.stitchingCharges
+    if (form.productionDays !== variant.productionDays) patch.production_days = form.productionDays
+    if (form.isTaxable !== variant.isTaxable) patch.is_taxable = form.isTaxable
+    if (form.requiresShipping !== variant.requiresShipping) patch.requires_shipping = form.requiresShipping
+    return patch
+  }
+
+  function trySave() {
+    const patch = buildPatch()
+    if (Object.keys(patch).length === 0) {
+      toast.info('No changes to save.')
+      onClose()
+      return
+    }
+    if (patch.sku !== undefined) {
+      // SKU is changing — show the confirmation step before saving.
+      setStep('confirm')
+    } else {
+      mutation.mutate(patch)
+    }
+  }
+
+  function confirmSave() {
+    mutation.mutate(buildPatch())
+  }
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(o) => {
+        if (!o && !mutation.isPending) onClose()
+      }}
+    >
+      <DialogContent className="sm:max-w-lg">
+        {step === 'edit' ? (
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Pencil className="h-4 w-4" /> Edit variant
+              </DialogTitle>
+              <DialogDescription>
+                Update SKU, pricing, and physical attributes for this variant.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-2 max-h-[60vh] overflow-y-auto pr-1">
+              <div className="space-y-1.5">
+                <Label htmlFor="v-sku">SKU</Label>
+                <Input
+                  id="v-sku"
+                  value={form.sku}
+                  onChange={(e) => setForm({ ...form, sku: e.target.value })}
+                  className="font-mono"
+                />
+                {form.sku !== variant.sku && (
+                  <p className="text-xs text-amber-600 flex items-center gap-1">
+                    <AlertCircle className="h-3 w-3" />
+                    Changing SKU will require confirmation.
+                  </p>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="v-barcode">Barcode</Label>
+                <Input
+                  id="v-barcode"
+                  value={form.barcode}
+                  onChange={(e) => setForm({ ...form, barcode: e.target.value })}
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="v-cost">Cost price</Label>
+                  <Input
+                    id="v-cost"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={form.costPrice}
+                    onChange={(e) => setForm({ ...form, costPrice: Number(e.target.value) })}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="v-weight">Weight (g)</Label>
+                  <Input
+                    id="v-weight"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={form.weightGrams}
+                    onChange={(e) => setForm({ ...form, weightGrams: Number(e.target.value) })}
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="v-stitch">Stitching charges</Label>
+                  <Input
+                    id="v-stitch"
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={form.stitchingCharges}
+                    onChange={(e) => setForm({ ...form, stitchingCharges: Number(e.target.value) })}
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="v-days">Production days</Label>
+                  <Input
+                    id="v-days"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={form.productionDays}
+                    onChange={(e) => setForm({ ...form, productionDays: Number(e.target.value) })}
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-between rounded-lg border p-3">
+                <div>
+                  <p className="text-sm font-medium">Taxable</p>
+                  <p className="text-xs text-muted-foreground">Charge tax on this variant.</p>
+                </div>
+                <Switch
+                  checked={form.isTaxable}
+                  onCheckedChange={(v) => setForm({ ...form, isTaxable: v })}
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border p-3">
+                <div>
+                  <p className="text-sm font-medium">Requires shipping</p>
+                  <p className="text-xs text-muted-foreground">Variant is a physical product.</p>
+                </div>
+                <Switch
+                  checked={form.requiresShipping}
+                  onCheckedChange={(v) => setForm({ ...form, requiresShipping: v })}
+                />
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={onClose} disabled={mutation.isPending}>
+                Cancel
+              </Button>
+              <Button onClick={trySave} disabled={mutation.isPending}>
+                {mutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4" />
+                )}
+                Save changes
+              </Button>
+            </DialogFooter>
+          </>
+        ) : (
+          // ---- SKU change confirmation step
+          <>
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <AlertCircle className="h-5 w-5 text-amber-500" /> Confirm SKU change
+              </DialogTitle>
+              <DialogDescription>
+                Changing SKU won&apos;t affect history but may cause confusion with existing labels. Continue?
+              </DialogDescription>
+            </DialogHeader>
+            <div className="rounded-lg border bg-muted/30 p-3 text-sm space-y-1">
+              <div className="flex justify-between gap-3">
+                <span className="text-muted-foreground">Old SKU</span>
+                <code className="font-mono">{variant.sku}</code>
+              </div>
+              <div className="flex justify-between gap-3">
+                <span className="text-muted-foreground">New SKU</span>
+                <code className="font-mono font-medium">{form.sku}</code>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="ghost" onClick={() => setStep('edit')} disabled={mutation.isPending}>
+                Back
+              </Button>
+              <Button onClick={confirmSave} disabled={mutation.isPending}>
+                {mutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Check className="h-4 w-4" />
+                )}
+                Continue
+              </Button>
+            </DialogFooter>
+          </>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ----------------------------------------------------------------------------
+// ImagesTab — upload + delete + primary badge
+// ----------------------------------------------------------------------------
+function ImagesTab({
+  product,
+  productId,
+  canEdit,
+}: {
+  product: ProductDetail
+  productId: string
+  canEdit: boolean
+}) {
+  const queryClient = useQueryClient()
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [uploading, setUploading] = useState(false)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
+
+  // NOTE: The backend route `PATCH /api/products/[id]/images/[imageId]` for
+  // setting is_primary does not exist yet. Upload already auto-sets the first
+  // image as primary, so the manual primary toggle is intentionally skipped
+  // for now. When that route lands, wire a "Set Primary" star button per
+  // non-primary image here.
+
+  const uploadMutation = useMutation({
+    mutationFn: async (file: File) => {
+      // Use raw fetch — multipart FormData must NOT have a JSON Content-Type.
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await fetch(`/api/products/${productId}/images`, {
+        method: 'POST',
+        body: fd,
+        cache: 'no-store',
+      })
+      const text = await res.text()
+      let body: unknown = null
+      if (text) {
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
+      }
+      if (!res.ok) {
+        const msg =
+          body && typeof body === 'object' && 'error' in body
+            ? String((body as { error: unknown }).error)
+            : typeof body === 'string'
+              ? body
+              : 'Upload failed'
+        throw new FetchError(res.status, msg)
+      }
+      return body as { image_id: string; public_url: string; is_primary: boolean }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+      toast.success('Image uploaded.')
+    },
+    onError: (err) => {
+      toast.error(err instanceof FetchError ? err.message : 'Failed to upload image.')
+    },
+    onSettled: () => {
+      setUploading(false)
+    },
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (imageId: string) =>
+      api.delete(`/api/products/${productId}/images?image_id=${imageId}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+      toast.success('Image deleted.')
+    },
+    onError: (err) => {
+      toast.error(err instanceof FetchError ? err.message : 'Failed to delete image.')
+    },
+    onSettled: () => {
+      setDeletingId(null)
+    },
+  })
+
+  function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    // Reset input so the same file can be picked again later.
+    e.target.value = ''
+    if (!file) return
+    // Client-side size guard — backend also enforces 5 MB, but this avoids the
+    // round-trip for obviously-too-large files.
+    if (file.size > 5 * 1024 * 1024) {
+      toast.error('File too large. Maximum 5 MB.')
+      return
+    }
+    setUploading(true)
+    uploadMutation.mutate(file)
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <ImageIcon className="h-4 w-4 text-primary" /> Images
+        </CardTitle>
+        <CardDescription>
+          Product images used on the storefront and Shopify sync. First image becomes primary automatically.
+        </CardDescription>
+        {canEdit && (
+          <CardAction>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              className="hidden"
+              onChange={onPickFile}
+              disabled={uploading}
+            />
+            <Button
+              size="sm"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+            >
+              {uploading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Upload className="h-4 w-4" />
+              )}
+              Upload
+            </Button>
+          </CardAction>
+        )}
+      </CardHeader>
+      <CardContent>
+        {product.images.length === 0 ? (
+          <div className="text-center py-12 border border-dashed rounded-lg">
+            <div className="mx-auto h-12 w-12 rounded-full bg-muted flex items-center justify-center mb-3">
+              <ImageIcon className="h-6 w-6 text-muted-foreground" />
+            </div>
+            <p className="text-sm font-medium">No images yet</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              {canEdit
+                ? 'Upload images to showcase this product.'
+                : 'No images have been uploaded yet.'}
+            </p>
+          </div>
+        ) : (
+          <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
+            {product.images.map((img) => (
+              <div
+                key={img.id}
+                className="relative aspect-square rounded-lg border overflow-hidden bg-muted group"
+              >
+                <img
+                  src={img.publicUrl}
+                  alt={`${product.title} image ${img.displayOrder + 1}`}
+                  className="h-full w-full object-cover"
+                />
+                {img.isPrimary && (
+                  <div className="absolute top-2 left-2">
+                    <Badge className="bg-background/90 backdrop-blur text-foreground border-transparent text-[10px] gap-1">
+                      <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
+                      Primary
+                    </Badge>
+                  </div>
+                )}
+                {img.variantId && (
+                  <div className="absolute bottom-2 left-2">
+                    <Badge className="bg-background/90 backdrop-blur text-foreground border-transparent text-[10px]">
+                      Variant
+                    </Badge>
+                  </div>
+                )}
+                {canEdit && (
+                  <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                    <Button
+                      size="icon"
+                      variant="secondary"
+                      className="h-7 w-7"
+                      onClick={() => {
+                        setDeletingId(img.id)
+                        deleteMutation.mutate(img.id)
+                      }}
+                      disabled={deletingId === img.id || uploading}
+                      aria-label="Delete image"
+                      title="Delete image"
+                    >
+                      {deletingId === img.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   )

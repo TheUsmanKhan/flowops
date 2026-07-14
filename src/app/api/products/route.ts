@@ -198,6 +198,7 @@ export async function POST(req: Request) {
         brandId: d.brand_id || null,
         title: d.title,
         slug,
+        baseSku: d.base_sku || null,
         description: d.description || null,
         shortDescription: d.short_description || null,
         productType: d.product_type,

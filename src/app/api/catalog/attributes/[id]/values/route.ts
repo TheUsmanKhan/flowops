@@ -84,6 +84,7 @@ export async function POST(
         value: parsed.data.value,
         displayValue: parsed.data.displayValue,
         colorHex: parsed.data.colorHex || null,
+        skuCode: parsed.data.skuCode || parsed.data.displayValue.toUpperCase().replace(/\s+/g, ''),
         displayOrder: parsed.data.displayOrder,
         isActive: parsed.data.isActive,
       },

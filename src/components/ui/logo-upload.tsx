@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef } from 'react'
-import { Loader2, Upload, X, ImageIcon } from 'lucide-react'
+import { Loader2, Upload, X } from 'lucide-react'
 import { InitialsAvatar } from '@/components/ui/initials-avatar'
 import { cn } from '@/lib/utils'
 
@@ -9,6 +9,9 @@ import { cn } from '@/lib/utils'
  * Reusable logo upload field.
  * Uploads to /api/upload?type={type}&id={id} and calls onChange with the URL.
  * Shows a circular preview; supports removal.
+ *
+ * IMPORTANT: Real error messages from the server are surfaced — never
+ * swallowed into a generic "Upload failed".
  */
 export function LogoUpload({
   type,
@@ -33,6 +36,8 @@ export function LogoUpload({
 
   async function handleFile(file: File) {
     setError(null)
+
+    // Client-side validation before upload attempt
     if (file.size > 2 * 1024 * 1024) {
       setError('File too large. Maximum 2 MB.')
       return
@@ -41,6 +46,7 @@ export function LogoUpload({
       setError('Only JPG, PNG, and WebP images are allowed.')
       return
     }
+
     setUploading(true)
     try {
       const fd = new FormData()
@@ -49,14 +55,34 @@ export function LogoUpload({
         method: 'POST',
         body: fd,
       })
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}))
-        throw new Error(j.error || 'Upload failed')
+
+      const text = await res.text()
+      let body: unknown = null
+      if (text) {
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
       }
-      const { url } = (await res.json()) as { url: string }
+
+      if (!res.ok) {
+        // Surface the REAL error message from the server
+        const message =
+          body && typeof body === 'object' && 'error' in body
+            ? String((body as { error: unknown }).error)
+            : typeof body === 'string'
+              ? body
+              : `Upload failed (HTTP ${res.status})`
+        throw new Error(message)
+      }
+
+      const { url } = body as { url: string }
       onChange(url)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Upload failed')
+      // Surface the actual error, not a generic message
+      const msg = e instanceof Error ? e.message : 'Network error during upload'
+      setError(msg)
     } finally {
       setUploading(false)
     }
@@ -64,10 +90,7 @@ export function LogoUpload({
 
   return (
     <div className="flex flex-col items-center gap-3">
-      <div
-        className="relative group"
-        style={{ width: size, height: size }}
-      >
+      <div className="relative group" style={{ width: size, height: size }}>
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
@@ -75,6 +98,7 @@ export function LogoUpload({
           className={cn(
             'relative w-full h-full rounded-full overflow-hidden border-2 border-dashed border-border hover:border-primary/50 transition-colors flex items-center justify-center bg-muted/30',
             currentUrl && 'border-solid',
+            (disabled || uploading) && 'opacity-60 cursor-not-allowed',
           )}
         >
           {currentUrl ? (
@@ -95,7 +119,6 @@ export function LogoUpload({
               )}
             </div>
           )}
-          {/* overlay on hover */}
           {!disabled && !uploading && (
             <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white text-xs gap-1">
               <Upload className="h-4 w-4" />
@@ -106,7 +129,10 @@ export function LogoUpload({
         {currentUrl && !disabled && (
           <button
             type="button"
-            onClick={() => onChange(null)}
+            onClick={() => {
+              setError(null)
+              onChange(null)
+            }}
             className="absolute -top-1 -right-1 h-6 w-6 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center shadow-sm hover:scale-110 transition-transform"
             aria-label="Remove logo"
           >
@@ -125,7 +151,9 @@ export function LogoUpload({
           }}
         />
       </div>
-      {error && <p className="text-xs text-destructive">{error}</p>}
+      {error && (
+        <p className="text-xs text-destructive text-center max-w-[200px]">{error}</p>
+      )}
       <p className="text-xs text-muted-foreground text-center">
         {currentUrl ? 'Click to replace' : 'Click or drag to upload'}
         <br />

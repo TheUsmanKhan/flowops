@@ -50,6 +50,7 @@ export async function PATCH(
         ...(parsed.data.value ? { value: parsed.data.value } : {}),
         ...(parsed.data.displayValue ? { displayValue: parsed.data.displayValue } : {}),
         ...(parsed.data.colorHex !== undefined ? { colorHex: parsed.data.colorHex || null } : {}),
+        ...(parsed.data.skuCode !== undefined ? { skuCode: parsed.data.skuCode || null } : {}),
         ...(parsed.data.displayOrder !== undefined ? { displayOrder: parsed.data.displayOrder } : {}),
         ...(parsed.data.isActive !== undefined ? { isActive: parsed.data.isActive } : {}),
       },
