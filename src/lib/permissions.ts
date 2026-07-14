@@ -16,6 +16,13 @@ export const PERMISSIONS = {
   INVENTORY_RECEIVE: 'inventory.receive',
   INVENTORY_REPORT_LOSS: 'inventory.report_loss',
   INVENTORY_MANAGE_LOSS: 'inventory.manage_loss',
+  INVENTORY_MANAGE_LOCATIONS: 'inventory.manage_locations',
+  INVENTORY_MANAGE_SUPPLIERS: 'inventory.manage_suppliers',
+  INVENTORY_TRANSFER: 'inventory.transfer',
+  INVENTORY_MANAGE_PURCHASE_ORDERS: 'inventory.manage_purchase_orders',
+  INVENTORY_MANAGE_SUPPLIER_RETURNS: 'inventory.manage_supplier_returns',
+  INVENTORY_CYCLE_COUNT: 'inventory.cycle_count',
+  INVENTORY_MANAGE_PRODUCTION: 'inventory.manage_production',
 
   // Products
   PRODUCTS_VIEW: 'products.view',

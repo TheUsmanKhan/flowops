@@ -70,6 +70,22 @@ model Organization {
   companyVariantPricing  CompanyVariantPricing[]
   returnedStitchedInventory ReturnedStitchedInventory[]
   productFulfillmentCosts  ProductFulfillmentCost[]
+
+  // Sprint 6 back-relations
+  inventoryLocations   InventoryLocation[]
+  suppliers            Supplier[]
+  inventoryPools       InventoryPool[]
+  inventoryTransactions InventoryTransaction[]
+  avgCostHistory       AvgCostHistory[]
+  stockTransfers       StockTransfer[]
+  purchaseOrders       PurchaseOrder[]
+  purchaseOrderItems   PurchaseOrderItem[]
+  purchaseOrderReceipts PurchaseOrderReceipt[]
+  supplierReturns      SupplierReturn[]
+  stockLossRecords     StockLossRecord[]
+  cycleCounts          CycleCount[]
+  cycleCountItems      CycleCountItem[]
+  productionOrders     ProductionOrder[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -117,6 +133,16 @@ model Company {
   companyVariantPricing   CompanyVariantPricing[]
   returnedStitchedInventory ReturnedStitchedInventory[]
   productFulfillmentCosts  ProductFulfillmentCost[]
+
+  // Sprint 6 back-relations
+  inventoryLocations      InventoryLocation[]
+  suppliers               Supplier[]
+  inventoryTxnsCompany    InventoryTransaction[]
+  purchaseOrders          PurchaseOrder[]
+  supplierReturns         SupplierReturn[]
+  stockLossRecords        StockLossRecord[]
+  cycleCounts             CycleCount[]
+  productionOrders        ProductionOrder[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -204,6 +230,25 @@ model Employee {
   receivedReturnedItems  ReturnedStitchedInventory[] @relation("ReturnedItemReceiver")
   writtenOffReturnedItems ReturnedStitchedInventory[] @relation("ReturnedItemWriteOff")
   loggedFulfillmentCosts ProductFulfillmentCost[] @relation("FulfillmentCostLogger")
+
+  // Sprint 6 back-relations
+  createdLocations       InventoryLocation[] @relation("LocationCreator")
+  createdSuppliers       Supplier[] @relation("SupplierCreator")
+  inventoryTxnEmployee   InventoryTransaction[] @relation("InventoryTxnEmployee")
+  transferInitiator      StockTransfer[] @relation("TransferInitiator")
+  poCreator              PurchaseOrder[] @relation("POCreator")
+  poCanceller            PurchaseOrder[] @relation("POCanceller")
+  poReceiver             PurchaseOrderReceipt[] @relation("POReceiver")
+  supplierReturnReporter SupplierReturn[] @relation("SupplierReturnReporter")
+  supplierReturnResolver SupplierReturn[] @relation("SupplierReturnResolver")
+  stockLossReporter      StockLossRecord[] @relation("StockLossReporter")
+  stockLossApprover      StockLossRecord[] @relation("StockLossApprover")
+  stockLossResolver      StockLossRecord[] @relation("StockLossResolver")
+  cycleCountAssignee     CycleCount[] @relation("CycleCountAssignee")
+  cycleCountCreator      CycleCount[] @relation("CycleCountCreator")
+  cycleCountApprover     CycleCount[] @relation("CycleCountApprover")
+  cycleCountCounter      CycleCountItem[] @relation("CycleCountCounter")
+  productionOrderCreator ProductionOrder[] @relation("ProductionOrderCreator")
 
   @@unique([companyId, userId])
 }
@@ -468,6 +513,12 @@ model OrgProductVariant {
   // Dimensions for courier/international
   dimensions      String  @default("{}") // { length_cm, width_cm, height_cm }
 
+  // Sprint 6 — Inventory system columns
+  trackInventory      Boolean @default(true) // FALSE for made_to_order until first return; one-way TRUE→never back to FALSE
+  fabricSourceVariantId String? // self-reference: the stock_based variant fabric is drawn from for made_to_order production
+  fabricSourceVariant  OrgProductVariant? @relation("FabricSource", fields: [fabricSourceVariantId], references: [id])
+  fabricSourceFor      OrgProductVariant[] @relation("FabricSource")
+
   createdById     String?
   createdBy       Employee? @relation("VariantCreator", fields: [createdById], references: [id])
   createdAt       DateTime @default(now())
@@ -478,6 +529,17 @@ model OrgProductVariant {
   companyPricing  CompanyVariantPricing[]
   returnedInventory ReturnedStitchedInventory[]
   fulfillmentCosts ProductFulfillmentCost[]
+  inventoryPools  InventoryPool[]
+  inventoryTransactions InventoryTransaction[]
+  avgCostHistory  AvgCostHistory[]
+  stockTransfers  StockTransfer[]
+  stockLossRecords StockLossRecord[]
+  cycleCountItems CycleCountItem[]
+  productionOrdersStitched ProductionOrder[] @relation("StitchedVariantProduction")
+  productionOrdersFabric ProductionOrder[] @relation("FabricVariantProduction")
+  supplierReturns SupplierReturn[]
+  purchaseOrderItems PurchaseOrderItem[]
+  purchaseOrderReceiptItems PurchaseOrderReceiptItem[]
 
   @@index([productId])
   @@index([organizationId, fulfillmentType])
@@ -661,4 +723,513 @@ model ProductFulfillmentCost {
 
   @@index([companyId, orgVariantId, status])
   @@index([orderReference])
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SPRINT 6 — INVENTORY, WAREHOUSE, PURCHASE ORDER, SUPPLIER SYSTEM
+// 11 models: locations, suppliers, pools, transactions, avg_cost_history,
+// transfers, purchase_orders (+items+receipts), supplier_returns,
+// stock_loss, cycle_counts, production_orders.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Warehouse/dispatch/retail locations. company_id NULL = org-level shared.
+model InventoryLocation {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  companyId      String?  // NULL = org-level shared location
+  company        Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name           String
+  locationType   String   @default("warehouse") // warehouse | dispatch_hub | retail_store | transit | damaged_hold
+  address        String?  // JSONB: { street, city, province, postal_code, country }
+  city           String   @default("Lahore")
+  province       String   @default("Punjab")
+  countryCode    String   @default("PK")
+  postalCode     String?
+  contactPerson  String?
+  contactPhone   String?
+  isDefault      Boolean  @default(false)
+  isActive       Boolean  @default(true)
+
+  createdById    String?
+  createdBy      Employee? @relation("LocationCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  inventoryPools       InventoryPool[]
+  inventoryTransactions InventoryTransaction[]
+  avgCostHistory       AvgCostHistory[]
+  stockTransfersFrom   StockTransfer[] @relation("TransferFromLocation")
+  stockTransfersTo     StockTransfer[] @relation("TransferToLocation")
+  purchaseOrders       PurchaseOrder[]
+  supplierReturns      SupplierReturn[]
+  stockLossRecords     StockLossRecord[]
+  cycleCounts          CycleCount[]
+  productionOrders     ProductionOrder[]
+
+  @@index([organizationId])
+  @@index([companyId])
+}
+
+/// Suppliers. company_id NULL = org-level shared supplier.
+model Supplier {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  companyId      String?  // NULL = shared across org
+  company        Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name           String
+  contactPerson  String?
+  phone          String?
+  email          String?
+  address        String?  // JSONB
+
+  paymentTerms   String   @default("immediate") // immediate | net_15 | net_30 | net_45 | net_60
+  creditBalance  Decimal  @default(0) @db.Decimal(12, 2) // running credit owed BY supplier TO us
+  isActive       Boolean  @default(true)
+
+  createdById    String?
+  createdBy      Employee? @relation("SupplierCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  purchaseOrders  PurchaseOrder[]
+  supplierReturns SupplierReturn[]
+
+  @@index([organizationId])
+  @@index([companyId])
+}
+
+/// THE single source of truth for stock levels. One row per variant per location.
+model InventoryPool {
+  id             String   @id @default(cuid())
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  onHand         Int      @default(0)
+  reserved       Int      @default(0)
+  // available = onHand - reserved (computed in application layer)
+  incoming       Int      @default(0) // sum of undelivered PO quantities
+
+  avgCost        Decimal  @default(0) @db.Decimal(12, 4)
+  // totalStockValue = onHand * avgCost (computed in application layer)
+
+  reorderPoint   Int      @default(0)
+  reorderQuantity Int     @default(0)
+
+  lastReceivedAt DateTime?
+  lastSoldAt     DateTime?
+  lastCountedAt  DateTime?
+
+  updatedAt      DateTime @updatedAt
+
+  @@unique([orgVariantId, locationId])
+  @@index([organizationId, orgVariantId])
+  @@index([locationId])
+}
+
+/// Append-only ledger. Never update or delete rows.
+model InventoryTransaction {
+  id             String   @id @default(cuid())
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  companyId      String?  // NULL for org-level events
+  company        Company?  @relation(fields: [companyId], references: [id])
+  employeeId     String?
+  employee       Employee? @relation("InventoryTxnEmployee", fields: [employeeId], references: [id])
+
+  transactionType String  // opening_stock | purchase_received | sale_dispatched | order_reserved | order_unreserved | return_resellable | return_damaged | return_stitched_received | transfer_out | transfer_in | cycle_count_adjust | damage_writeoff | theft_writeoff | missing_writeoff | transit_loss | supplier_return | fabric_consumed_for_stitching
+
+  quantity       Int      // positive = in, negative = out
+  costPerUnit    Decimal  @default(0) @db.Decimal(12, 4)
+  // totalCostValue = ABS(quantity) * costPerUnit (computed in app)
+
+  avgCostBefore  Decimal? @db.Decimal(12, 4)
+  avgCostAfter   Decimal? @db.Decimal(12, 4)
+
+  referenceType  String?  // order | purchase_order | transfer | cycle_count | stock_loss | manual | opening | production_order | supplier_return
+  referenceId    String?
+
+  notes          String?
+  metadata       String   @default("{}")
+
+  recordedAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  avgCostHistory AvgCostHistory[]
+  purchaseOrderReceiptItems PurchaseOrderReceiptItem[]
+  supplierReturns SupplierReturn[]
+  stockLossRecords StockLossRecord[]
+  cycleCountItems CycleCountItem[]
+  productionOrdersFabric ProductionOrder[]
+
+  @@index([orgVariantId, recordedAt])
+  @@index([companyId, transactionType, recordedAt])
+  @@index([organizationId, transactionType, recordedAt])
+  @@index([referenceType, referenceId])
+}
+
+/// Audit trail of every average-cost change.
+model AvgCostHistory {
+  id             String   @id @default(cuid())
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  avgCostBefore  Decimal  @db.Decimal(12, 4)
+  avgCostAfter   Decimal  @db.Decimal(12, 4)
+  triggeredByTxnId String
+  triggeredByTxn InventoryTransaction @relation(fields: [triggeredByTxnId], references: [id])
+  triggerReason  String?
+  createdAt      DateTime @default(now())
+
+  @@index([orgVariantId])
+}
+
+/// Stock transfer between locations. Logistics cost tracked separately from WAC.
+model StockTransfer {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+
+  fromLocationId String
+  fromLocation   InventoryLocation @relation("TransferFromLocation", fields: [fromLocationId], references: [id])
+  toLocationId   String
+  toLocation     InventoryLocation @relation("TransferToLocation", fields: [toLocationId], references: [id])
+
+  quantity       Int      // CHECK > 0 enforced in app
+  costPerUnitAtTransfer Decimal @db.Decimal(12, 4) // sending location's avg_cost at transfer time
+  logisticsCost  Decimal  @default(0) @db.Decimal(12, 2) // separate expense, NEVER merged into WAC
+
+  status         String   @default("completed") // completed | in_transit | cancelled
+  notes          String?
+  initiatedById  String?
+  initiatedBy    Employee? @relation("TransferInitiator", fields: [initiatedById], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([orgVariantId])
+}
+
+/// Purchase order header.
+model PurchaseOrder {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  supplierId     String
+  supplier       Supplier @relation(fields: [supplierId], references: [id])
+
+  poNumber       String   @unique // PO-{year}-{sequence}
+  status         String   @default("draft") // draft | ordered | partially_received | received | cancelled
+
+  orderDate      DateTime @default(now())
+  expectedDeliveryDate DateTime?
+  deliveryLocationId String
+  deliveryLocation InventoryLocation @relation(fields: [deliveryLocationId], references: [id])
+
+  advancePayment Decimal  @default(0) @db.Decimal(12, 2)
+  paymentMethod  String?
+  notes          String?
+
+  createdById    String
+  createdBy      Employee @relation("POCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancelledBy    Employee? @relation("POCanceller", fields: [cancelledById], references: [id])
+  cancellationReason String?
+
+  items          PurchaseOrderItem[]
+  receipts       PurchaseOrderReceipt[]
+  supplierReturns SupplierReturn[]
+
+  @@index([companyId, status])
+  @@index([organizationId])
+}
+
+/// Line items on a purchase order.
+model PurchaseOrderItem {
+  id             String   @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  orderedQuantity Int     // CHECK > 0
+  receivedQuantity Int    @default(0)
+  costPerUnit     Decimal @db.Decimal(12, 4)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  receiptItems   PurchaseOrderReceiptItem[]
+
+  @@index([purchaseOrderId])
+}
+
+/// Each individual receiving event against a PO (supports partial deliveries).
+model PurchaseOrderReceipt {
+  id             String   @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  receivedAt     DateTime @default(now())
+  receivedById   String
+  receivedBy     Employee @relation("POReceiver", fields: [receivedById], references: [id])
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  items          PurchaseOrderReceiptItem[]
+
+  @@index([purchaseOrderId])
+}
+
+/// Line items within one receiving event — actual quantity and cost that arrived.
+model PurchaseOrderReceiptItem {
+  id             String   @id @default(cuid())
+  purchaseOrderReceiptId String
+  purchaseOrderReceipt PurchaseOrderReceipt @relation(fields: [purchaseOrderReceiptId], references: [id], onDelete: Cascade)
+  purchaseOrderItemId String
+  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id])
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+
+  receivedQuantity Int    // CHECK >= 0
+  actualCostPerUnit Decimal @db.Decimal(12, 4)
+  shortageQuantity Int    @default(0)
+  shortageReason  String?
+
+  inventoryTxnId String?
+  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+
+  createdAt      DateTime @default(now())
+}
+
+/// Supplier returns — stock sent back to supplier.
+model SupplierReturn {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  purchaseOrderId String?
+  purchaseOrder  PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  supplierId     String
+  supplier       Supplier @relation(fields: [supplierId], references: [id])
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+
+  quantity       Int      // CHECK > 0
+  costPerUnit    Decimal  @db.Decimal(12, 4)
+  // totalValue = quantity * costPerUnit (computed in app)
+
+  reason         String   // defective | wrong_item | quality_issue | excess_quantity | other
+  status         String   @default("pending") // pending | sent_to_supplier | refunded | replaced | credit_note | disputed | rejected
+  resolutionType String?  // refund | replacement | credit_note
+  resolutionAmount Decimal? @db.Decimal(12, 2)
+  replacementPoId String?
+
+  photos         String   @default("[]") // JSON array
+  notes          String?
+
+  inventoryTxnId String?
+  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+
+  reportedById   String
+  reportedBy     Employee @relation("SupplierReturnReporter", fields: [reportedById], references: [id])
+  resolvedById   String?
+  resolvedBy     Employee? @relation("SupplierReturnResolver", fields: [resolvedById], references: [id])
+  createdAt      DateTime @default(now())
+  resolvedAt     DateTime?
+
+  @@index([companyId, status])
+  @@index([supplierId])
+}
+
+/// Stock loss records — damaged/theft/missing/transit_loss.
+model StockLossRecord {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+
+  lossType       String   // damaged | theft | missing | transit_loss
+  subType        String?  // confirmed | suspected | admin_error | manufacturing
+  damageType     String?  // water_moisture | physical_impact | manufacturing_defect | transit_damage | storage_damage | other
+
+  quantity       Int
+  costPerUnit    Decimal  @db.Decimal(12, 4)
+  // totalLossValue = quantity * costPerUnit (computed in app)
+
+  investigationStatus String @default("none") // none | open | closed
+  resolution     String?  // written_off | recovered | error_corrected | claim_accepted | claim_rejected
+  responsibleParty String? // warehouse | courier | customer | employee | unknown
+  policeReportRef String?
+  insuranceClaimRef String?
+  insuranceRecovered Decimal @default(0) @db.Decimal(12, 2)
+  courierClaimRef String?
+  courierClaimStatus String? // not_filed | filed | accepted | rejected
+  courierRecovered Decimal @default(0) @db.Decimal(12, 2)
+
+  evidenceUrls   String   @default("[]") // JSON array
+  notes          String?
+
+  reportedById   String
+  reportedBy     Employee @relation("StockLossReporter", fields: [reportedById], references: [id])
+  approvedById   String?
+  approvedBy     Employee? @relation("StockLossApprover", fields: [approvedById], references: [id])
+  resolvedById   String?
+  resolvedBy     Employee? @relation("StockLossResolver", fields: [resolvedById], references: [id])
+
+  inventoryTxnId String?
+  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+  orderReferenceId String? // will reference orders table in future sprint
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  resolvedAt     DateTime?
+
+  @@index([companyId, lossType])
+  @@index([orgVariantId])
+}
+
+/// Cycle count header.
+model CycleCount {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+
+  countName      String
+  countType      String   @default("full") // full | partial | spot
+  status         String   @default("scheduled") // scheduled | in_progress | pending_review | approved | cancelled
+
+  scheduledAt    DateTime
+  startedAt      DateTime?
+  completedAt    DateTime?
+  approvedAt     DateTime?
+
+  assignedToId   String?
+  assignedTo     Employee? @relation("CycleCountAssignee", fields: [assignedToId], references: [id])
+  createdById    String
+  createdBy      Employee @relation("CycleCountCreator", fields: [createdById], references: [id])
+  approvedById   String?
+  approvedBy     Employee? @relation("CycleCountApprover", fields: [approvedById], references: [id])
+
+  notes          String?
+  totalDiscrepancies Int  @default(0)
+  totalVarianceValue Decimal @default(0) @db.Decimal(16, 2)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  items          CycleCountItem[]
+
+  @@index([companyId, status])
+}
+
+/// Individual items in a cycle count.
+model CycleCountItem {
+  id             String   @id @default(cuid())
+  cycleCountId   String
+  cycleCount     CycleCount @relation(fields: [cycleCountId], references: [id], onDelete: Cascade)
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  systemQuantity Int
+  countedQuantity Int?
+  // discrepancy = countedQuantity - systemQuantity (computed in app)
+  discrepancyValue Decimal? @db.Decimal(16, 2)
+
+  discrepancyReason String? // recording_error | theft_suspected | damage_not_recorded | transfer_not_recorded | unknown | no_discrepancy
+
+  adjustmentApproved Boolean @default(false)
+  inventoryTxnId String?
+  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+
+  countedById    String?
+  countedBy      Employee? @relation("CycleCountCounter", fields: [countedById], references: [id])
+  countedAt      DateTime?
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  @@index([cycleCountId])
+}
+
+/// Production order for made-to-order fabric tracking.
+model ProductionOrder {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+
+  stitchedVariantId String
+  stitchedVariant OrgProductVariant @relation("StitchedVariantProduction", fields: [stitchedVariantId], references: [id])
+  fabricVariantId String
+  fabricVariant   OrgProductVariant @relation("FabricVariantProduction", fields: [fabricVariantId], references: [id])
+  fabricLocationId String
+  fabricLocation  InventoryLocation @relation(fields: [fabricLocationId], references: [id])
+
+  quantity       Int      @default(1)
+
+  status         String   @default("pending") // pending | fabric_reserved | in_production | completed | dispatched | cancelled
+
+  stitchingCost  Decimal  @default(0) @db.Decimal(12, 2)
+  fabricCost     Decimal  @default(0) @db.Decimal(12, 2)
+  // totalCost = stitchingCost + fabricCost (computed in app)
+
+  assignedTailor String?
+  estimatedCompletionDate DateTime?
+  actualCompletionDate    DateTime?
+
+  referenceType  String   @default("order")
+  referenceId    String?  // will link to orders table in future sprint
+
+  fabricTxnId    String?
+  fabricTxn      InventoryTransaction? @relation(fields: [fabricTxnId], references: [id])
+
+  createdById    String
+  createdBy      Employee @relation("ProductionOrderCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  cancelledAt    DateTime?
+  cancellationReason String?
+
+  @@index([companyId, status])
+  @@index([stitchedVariantId])
 }
