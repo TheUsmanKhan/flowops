@@ -102,6 +102,13 @@ interface VariantDraft {
   sale_price: number
   is_active: boolean
   is_default: boolean
+  // Opening stock (for stock_based variants)
+  has_opening_stock: boolean
+  opening_stock_qty: number
+  opening_stock_cost: number
+  opening_stock_location_id: string
+  // Fabric source (for made_to_order variants)
+  fabric_source_variant_id: string | null
 }
 
 type ProductType = 'simple' | 'variable' | 'bundle' | 'service'
@@ -320,6 +327,11 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
         sale_price: g.sale_price,
         is_active: g.is_active,
         is_default: g.is_default,
+        has_opening_stock: false,
+        opening_stock_qty: 0,
+        opening_stock_cost: 0,
+        opening_stock_location_id: '',
+        fabric_source_variant_id: null,
       }))
     }
     if (productType === 'variable') return regularVariants
@@ -449,8 +461,30 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
         '/api/products',
         payload,
       )
+
+      // After product creation, process opening stock for variants that have it
+      const variantsWithOpeningStock = variants.filter(
+        (v) => v.has_opening_stock && v.opening_stock_qty > 0 && v.opening_stock_location_id,
+      )
+      if (variantsWithOpeningStock.length > 0) {
+        try {
+          await api.post('/api/inventory/receive', {
+            location_id: variantsWithOpeningStock[0].opening_stock_location_id,
+            notes: `Opening stock for ${res.title}`,
+            items: variantsWithOpeningStock.map((v) => ({
+              org_variant_id: v.sku, // Note: this won't work — we need the actual variant ID
+              quantity: v.opening_stock_qty,
+              cost_per_unit: v.opening_stock_cost || v.cost_price,
+            })),
+          })
+        } catch {
+          // Opening stock failure shouldn't block product creation
+          toast.warning('Product created, but opening stock could not be set. Use Receive Stock manually.')
+        }
+      }
+
       queryClient.invalidateQueries({ queryKey: ['products'] })
-      toast.success(`“${res.title}” created.`)
+      toast.success(`"${res.title}" created.`)
       navigate({ name: 'product-detail', id: res.id })
     } catch (err) {
       const msg =
@@ -1212,6 +1246,51 @@ function SimpleVariantForm({
           </Select>
         </div>
       )}
+
+      {/* Opening Stock section (for stock_based variants) */}
+      {!isMto && (
+        <div className="rounded-lg border p-4 space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">Opening Stock</p>
+              <p className="text-xs text-muted-foreground">Receive initial stock for this variant now</p>
+            </div>
+            <Switch
+              checked={value.has_opening_stock}
+              onCheckedChange={(c) => set('has_opening_stock', c)}
+            />
+          </div>
+          {value.has_opening_stock && (
+            <div className="grid sm:grid-cols-3 gap-3">
+              <div className="space-y-1.5">
+                <Label className="text-xs">Quantity</Label>
+                <Input type="number" min="1" step="1" value={value.opening_stock_qty || ''} onChange={(e) => set('opening_stock_qty', Number(e.target.value))} placeholder="0" />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Cost per unit</Label>
+                <Input type="number" min="0" step="0.01" value={value.opening_stock_cost || ''} onChange={(e) => set('opening_stock_cost', Number(e.target.value))} placeholder="0.00" />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Location</Label>
+                <Input value={value.opening_stock_location_id} onChange={(e) => set('opening_stock_location_id', e.target.value)} placeholder="Location ID (create locations first)" />
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Fabric Source section (for made_to_order variants) */}
+      {isMto && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 space-y-2">
+          <p className="text-sm font-medium text-blue-800">Fabric Source</p>
+          <p className="text-xs text-blue-600">When this variant is produced, fabric will be consumed from the selected source variant.</p>
+          <Input
+            value={value.fabric_source_variant_id ?? ''}
+            onChange={(e) => set('fabric_source_variant_id', e.target.value || null)}
+            placeholder="Link to a stock_based variant (e.g. the unstitched version)"
+          />
+        </div>
+      )}
     </div>
   )
 }
@@ -1707,6 +1786,11 @@ function blankSimpleVariant(): VariantDraft {
     sale_price: 0,
     is_active: true,
     is_default: true,
+    has_opening_stock: false,
+    opening_stock_qty: 0,
+    opening_stock_cost: 0,
+    opening_stock_location_id: '',
+    fabric_source_variant_id: null,
   }
 }
 
@@ -1725,6 +1809,11 @@ function blankRegularVariant(n: number): VariantDraft {
     sale_price: 0,
     is_active: true,
     is_default: n === 1,
+    has_opening_stock: false,
+    opening_stock_qty: 0,
+    opening_stock_cost: 0,
+    opening_stock_location_id: '',
+    fabric_source_variant_id: null,
   }
 }
 

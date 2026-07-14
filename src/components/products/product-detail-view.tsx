@@ -56,6 +56,7 @@ import {
   Check,
   ImageIcon,
   Loader2,
+  Package,
   Pencil,
   Save,
   Shirt,
@@ -65,6 +66,11 @@ import {
   Trash2,
   Upload,
   X,
+  Warehouse,
+  ArrowLeftRight,
+  PackagePlus,
+  SlidersHorizontal,
+  TrendingUp,
 } from 'lucide-react'
 import {
   PRODUCT_SCOPE_LABELS,
@@ -277,6 +283,7 @@ export function ProductDetailView({ productId }: { productId: string }) {
             Images ({product.images.length})
           </TabsTrigger>
           <TabsTrigger value="shopify">Shopify Sync</TabsTrigger>
+          <TabsTrigger value="inventory">Inventory</TabsTrigger>
           {!product.isOwner && product.subscription && (
             <TabsTrigger value="pricing">Pricing</TabsTrigger>
           )}
@@ -353,6 +360,11 @@ export function ProductDetailView({ productId }: { productId: string }) {
               </div>
             </CardContent>
           </Card>
+        </TabsContent>
+
+        {/* Inventory */}
+        <TabsContent value="inventory">
+          <InventoryTab productId={productId} variants={product.variants} isStitchable={product.isStitchable} />
         </TabsContent>
 
         {/* Pricing (non-owner with subscription) */}
@@ -972,6 +984,24 @@ function VariantsTab({
 }) {
   const [editingVariant, setEditingVariant] = useState<ProductVariant | null>(null)
 
+  // Fetch inventory summary for live avg cost + stock display
+  const { data: invData } = useQuery<{ variants: InventorySummaryVariant[] }>({
+    queryKey: ['product-inventory', productId],
+    queryFn: () => api.get(`/api/inventory/summary?product_id=${productId}`),
+    staleTime: 15_000,
+  })
+
+  function getInvInfo(variantId: string) {
+    const v = invData?.variants?.find((x) => x.variantId === variantId)
+    if (!v) return null
+    return {
+      avgCost: v.locations.length > 0 ? v.locations[0].avgCost : null,
+      totalAvailable: v.totalAvailable,
+      isMTO: v.fulfillmentType === 'made_to_order',
+      hasStock: v.totalOnHand > 0,
+    }
+  }
+
   return (
     <>
       <Card>
@@ -991,6 +1021,8 @@ function VariantsTab({
                   <TableHead>SKU</TableHead>
                   <TableHead>Attributes</TableHead>
                   <TableHead className="text-right">Cost</TableHead>
+                  <TableHead className="text-right">Live Avg</TableHead>
+                  <TableHead className="text-right">Stock</TableHead>
                   <TableHead className="text-right">Sale</TableHead>
                   <TableHead className="text-right">Compare</TableHead>
                   <TableHead>Fulfillment</TableHead>
@@ -1004,7 +1036,7 @@ function VariantsTab({
               <TableBody>
                 {product.variants.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={canEdit ? 11 : 10} className="h-24 text-center text-muted-foreground text-sm">
+                    <TableCell colSpan={canEdit ? 13 : 12} className="h-24 text-center text-muted-foreground text-sm">
                       No variants on this product.
                     </TableCell>
                   </TableRow>
@@ -1043,6 +1075,25 @@ function VariantsTab({
                             +{formatMoney(v.stitchingCharges)} st.
                           </div>
                         )}
+                      </TableCell>
+                      <TableCell className="text-right text-xs text-muted-foreground" title="Live average cost from actual purchases — updates automatically when stock is received">
+                        {(() => {
+                          const inv = getInvInfo(v.id)
+                          return inv?.avgCost != null ? `Rs. ${formatMoney(inv.avgCost)}` : '—'
+                        })()}
+                      </TableCell>
+                      <TableCell className="text-right text-xs">
+                        {(() => {
+                          const inv = getInvInfo(v.id)
+                          if (!inv) return <span className="text-muted-foreground">—</span>
+                          if (inv.isMTO && !inv.hasStock) {
+                            return <Badge variant="outline" className="text-[9px] bg-purple-50 text-purple-700 border-purple-200">MTO</Badge>
+                          }
+                          if (inv.totalAvailable === 0) {
+                            return <span className="text-destructive font-medium" title="Out of stock">0</span>
+                          }
+                          return <span className="font-medium">{inv.totalAvailable}</span>
+                        })()}
                       </TableCell>
                       <TableCell className="text-right text-xs font-medium">
                         {v.salePrice != null ? formatMoney(v.salePrice) : '—'}
@@ -1673,6 +1724,199 @@ function ImagesTab({
         )}
       </CardContent>
     </Card>
+  )
+}
+
+// ----------------------------------------------------------------------------
+// Inventory Tab — per-variant stock summary, per-location breakdown, MTO banner
+// ----------------------------------------------------------------------------
+interface InventorySummaryVariant {
+  variantId: string
+  sku: string
+  fulfillmentType: string
+  trackInventory: boolean
+  totalOnHand: number
+  totalReserved: number
+  totalAvailable: number
+  totalValue: number
+  locations: Array<{
+    locationId: string
+    locationName: string
+    onHand: number
+    reserved: number
+    available: number
+    avgCost: number
+    incoming: number
+  }>
+}
+
+function InventoryTab({
+  productId,
+  variants,
+  isStitchable,
+}: {
+  productId: string
+  variants: ProductVariant[]
+  isStitchable: boolean
+}) {
+  const navigate = useAppStore((s) => s.navigate)
+  const can = useCan()
+  const { data, isLoading, isError, refetch } = useQuery<{ variants: InventorySummaryVariant[] }>({
+    queryKey: ['product-inventory', productId],
+    queryFn: () => api.get(`/api/inventory/summary?product_id=${productId}`),
+    staleTime: 15_000,
+  })
+
+  if (isLoading) {
+    return (
+      <Card>
+        <CardContent className="p-6 space-y-3">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="h-16 rounded bg-muted/50 animate-pulse" />
+          ))}
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (isError) {
+    return (
+      <Card>
+        <CardContent className="p-6 text-center">
+          <AlertCircle className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+          <p className="text-sm text-muted-foreground mb-3">Failed to load inventory data.</p>
+          <Button variant="outline" size="sm" onClick={() => refetch()}>Retry</Button>
+        </CardContent>
+      </Card>
+    )
+  }
+
+  if (!data || data.variants.length === 0) {
+    return (
+      <Card>
+        <CardContent className="p-6 text-center text-sm text-muted-foreground">
+          No inventory data for this product yet.
+        </CardContent>
+      </Card>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      {data.variants.map((v) => {
+        const variantInfo = variants.find((vv) => vv.id === v.variantId)
+        const isMTO = v.fulfillmentType === 'made_to_order'
+        const hasReturnedStock = isMTO && v.totalOnHand > 0
+
+        return (
+          <Card key={v.variantId}>
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <Tag className="h-4 w-4 text-muted-foreground" />
+                    <span className="font-mono text-sm">{v.sku}</span>
+                  </CardTitle>
+                  {variantInfo && (
+                    <div className="mt-1 flex items-center gap-2">
+                      <FulfillmentTypeBadge type={v.fulfillmentType} />
+                      {variantInfo.attributeValues && Object.keys(variantInfo.attributeValues).length > 0 && (
+                        <span className="text-xs text-muted-foreground">
+                          {Object.entries(variantInfo.attributeValues).map(([k, val]) => `${k}: ${val}`).join(' · ')}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div className="text-right">
+                  <div className="flex gap-4 text-sm">
+                    <div>
+                      <span className="text-muted-foreground">On Hand: </span>
+                      <span className="font-medium">{v.totalOnHand}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Available: </span>
+                      <span className="font-medium">{v.totalAvailable}</span>
+                    </div>
+                    <div>
+                      <span className="text-muted-foreground">Value: </span>
+                      <span className="font-medium">Rs. {formatMoney(v.totalValue)}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {/* MTO returned stock banner */}
+              {isMTO && !hasReturnedStock && (
+                <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+                  <Package className="h-4 w-4 inline mr-2" />
+                  No returned stock — next order triggers fresh production.
+                </div>
+              )}
+              {isMTO && hasReturnedStock && (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">
+                  <Package className="h-4 w-4 inline mr-2" />
+                  {v.totalOnHand} returned piece(s) available (Rs. {formatMoney(v.totalValue)}) — next order uses this stock automatically.
+                </div>
+              )}
+
+              {/* Per-location breakdown */}
+              {v.locations.length > 0 ? (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Location</TableHead>
+                      <TableHead className="text-right">On Hand</TableHead>
+                      <TableHead className="text-right">Reserved</TableHead>
+                      <TableHead className="text-right">Available</TableHead>
+                      <TableHead className="text-right">Avg Cost</TableHead>
+                      <TableHead className="text-right">Incoming</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {v.locations.map((loc) => (
+                      <TableRow key={loc.locationId}>
+                        <TableCell className="text-sm">{loc.locationName}</TableCell>
+                        <TableCell className="text-right text-sm font-medium">{loc.onHand}</TableCell>
+                        <TableCell className="text-right text-sm text-muted-foreground">{loc.reserved}</TableCell>
+                        <TableCell className="text-right text-sm font-medium">{loc.available}</TableCell>
+                        <TableCell className="text-right text-sm">Rs. {formatMoney(loc.avgCost)}</TableCell>
+                        <TableCell className="text-right text-sm text-muted-foreground">{loc.incoming > 0 ? loc.incoming : '—'}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              ) : (
+                <p className="text-xs text-muted-foreground py-2">No stock at any location.</p>
+              )}
+
+              {/* Quick action buttons */}
+              <div className="flex flex-wrap gap-2 pt-1">
+                {can(PERMISSIONS.INVENTORY_RECEIVE) && (
+                  <Button variant="outline" size="sm" onClick={() => navigate({ name: 'inventory-receive' })}>
+                    <PackagePlus className="h-3.5 w-3.5" /> Receive Stock
+                  </Button>
+                )}
+                {can(PERMISSIONS.INVENTORY_ADJUST) && (
+                  <Button variant="outline" size="sm" onClick={() => navigate({ name: 'inventory-adjust' })}>
+                    <SlidersHorizontal className="h-3.5 w-3.5" /> Adjust
+                  </Button>
+                )}
+                {can(PERMISSIONS.INVENTORY_TRANSFER) && (
+                  <Button variant="outline" size="sm" onClick={() => navigate({ name: 'inventory-transfer' })}>
+                    <ArrowLeftRight className="h-3.5 w-3.5" /> Transfer
+                  </Button>
+                )}
+                <Button variant="outline" size="sm" onClick={() => navigate({ name: 'inventory' })}>
+                  <TrendingUp className="h-3.5 w-3.5" /> View Full History
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )
+      })}
+    </div>
   )
 }
 
