@@ -31,6 +31,21 @@ import { ProductDetailView } from '@/components/products/product-detail-view'
 import { CatalogSettingsView } from '@/components/products/catalog-settings-view'
 import { ReturnedStitchedView } from '@/components/products/returned-stitched-view'
 import { OrgCatalogView } from '@/components/products/org-catalog-view'
+import { InventoryDashboardView } from '@/components/inventory/inventory-dashboard-view'
+import { LocationsView } from '@/components/inventory/locations-view'
+import { LocationDetailView } from '@/components/inventory/location-detail-view'
+import { SuppliersView } from '@/components/inventory/suppliers-view'
+import { SupplierDetailView } from '@/components/inventory/supplier-detail-view'
+import { ReceiveStockView } from '@/components/inventory/receive-stock-view'
+import { AdjustStockView } from '@/components/inventory/adjust-stock-view'
+import { TransferStockView } from '@/components/inventory/transfer-stock-view'
+import { PurchaseOrdersView } from '@/components/inventory/purchase-orders-view'
+import { PoCreateView } from '@/components/inventory/po-create-view'
+import { PoDetailView } from '@/components/inventory/po-detail-view'
+import { SupplierReturnsView } from '@/components/inventory/supplier-returns-view'
+import { ProductionOrdersView } from '@/components/inventory/production-orders-view'
+import { LossesView } from '@/components/inventory/losses-view'
+import { CycleCountsView } from '@/components/inventory/cycle-counts-view'
 import { Card, CardContent } from '@/components/ui/card'
 
 export default function Page() {
@@ -185,6 +200,36 @@ function renderRoute(
       return <ReturnedStitchedView />
     case 'org-catalog':
       return <OrgCatalogView />
+    case 'inventory':
+      return <InventoryDashboardView />
+    case 'inventory-locations':
+      return <LocationsView />
+    case 'inventory-location-detail':
+      return <LocationDetailView locationId={route.id} />
+    case 'inventory-suppliers':
+      return <SuppliersView />
+    case 'inventory-supplier-detail':
+      return <SupplierDetailView supplierId={route.id} />
+    case 'inventory-receive':
+      return <ReceiveStockView />
+    case 'inventory-adjust':
+      return <AdjustStockView />
+    case 'inventory-transfer':
+      return <TransferStockView />
+    case 'inventory-purchase-orders':
+      return <PurchaseOrdersView />
+    case 'inventory-po-create':
+      return <PoCreateView />
+    case 'inventory-po-detail':
+      return <PoDetailView poId={route.id} />
+    case 'inventory-supplier-returns':
+      return <SupplierReturnsView />
+    case 'inventory-production-orders':
+      return <ProductionOrdersView />
+    case 'inventory-losses':
+      return <LossesView />
+    case 'inventory-cycle-counts':
+      return <CycleCountsView />
     default:
       return <DashboardHome />
   }

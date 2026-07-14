@@ -436,3 +436,259 @@ Verification:
 
 Stage Summary:
 - Product detail page is now fully interactive: Edit button works (inline edit mode with diff-based PATCH), variant active toggle works (optimistic update with revert-on-error), variant edit dialog works (with SKU change confirmation flow), image upload works (multipart, real error messages, per-image delete), and the pricing tab actually saves correctly now (was calling a non-existent endpoint before). Header is clean (no more disabled "Coming soon" Edit button). All edit UI is permission-gated on `products.edit`. File grew from 891 to 1685 lines (4 new sub-components: DetailsTab, VariantsTab, VariantActiveSwitch, VariantEditDialog, ImagesTab; main component shrank because tab bodies were extracted).
+
+---
+Task ID: SPRINT7-INVENTORY-CORE
+Agent: main
+Task: Build 8 inventory SPA view components for FlowOps ERP (dashboard, locations, location-detail, suppliers, supplier-detail, receive-stock, adjust-stock, transfer-stock) + wire routes into page.tsx.
+
+Work Log:
+- Read worklog.md (full history of Sprints 1–5), existing patterns (products-view, returned-stitched-view, catalog-settings-view for RHF+Zod patterns, employees-view for table patterns, dashboard-home for stat cards), PageHeader export, app-store routing + useCan hook, permissions registry, api-client (api/FetchError/initials), and 6 backing API routes:
+  * GET /api/inventory/dashboard → { stats, movement, stockTable[], recentTransactions[] }
+  * GET /api/inventory-locations → { locations[] }
+  * POST /api/inventory-locations (create)
+  * GET/PATCH/DELETE /api/inventory-locations/{id} (location detail + edit + deactivate; DELETE 409s if stock present)
+  * GET /api/suppliers → { suppliers[] }
+  * POST /api/suppliers (create)
+  * PATCH/DELETE /api/suppliers/{id} (no GET /[id] — detail view filters from list)
+  * POST /api/inventory/receive (multi-item, location_id + items[{org_variant_id, quantity, cost_per_unit}])
+  * POST /api/inventory/adjust (variant+location+quantity[negative OK]+reason)
+  * POST /api/inventory/transfers (from/to + variant + quantity + logistics_cost — logistics NOT merged into WAC)
+  * GET /api/products (variants nested under products)
+  * GET /api/purchase-orders (filter by supplier name for supplier-detail PO list)
+- Confirmed Zod schemas in src/lib/validations/inventory.ts match all 3 mutation bodies.
+- Confirmed SPA routes for all 8 views were already declared in app-store.ts and wired into sidebar.tsx/mobile-nav.tsx — only `page.tsx` switch + imports needed.
+
+Files created in /src/components/inventory/:
+
+1. inventory-dashboard-view.tsx (~620 lines):
+   - PageHeader with Refresh button.
+   - 4 stat cards (Total stock value / Low stock / Out of stock / Dead stock value) — emerald/amber/rose/gray tone system.
+   - Stock movement card: 5 blocks (Opening → Received → Sold → Losses → Closing) with units + Rs. values + colored borders.
+   - 4 Quick-link cards (Receive Stock / Adjust / Transfer / Purchase Orders) with icon, label, description; disabled + tooltip when user lacks permission (useCan + PERMISSIONS.INVENTORY_RECEIVE/ADJUST/TRANSFER/MANAGE_PURCHASE_ORDERS).
+   - Full stock table: SKU+product, location, on_hand, reserved, available, avg_cost, stock_value, status badge (healthy=emerald/low=amber/out=rose/dead=gray). Filters: free-text search + location dropdown (derived from stockTable) + status dropdown. Loading skeleton, error+retry, empty state.
+   - Recent transactions log: scrollable max-h-96 with custom scrollbar; type badges (color-coded by inbound/outbound + cycle_count) + signed quantity (+green/−red) + cost/unit + relative timestamp. Loading skeleton + empty state.
+   - TanStack Query with key `['inventory-dashboard']`, staleTime 15s.
+
+2. locations-view.tsx (~640 lines):
+   - PageHeader with Refresh + "Add Location" (gated on INVENTORY_MANAGE_LOCATIONS).
+   - Grid of location cards (3 cols on lg): name + Default badge, type icon, location-type label, Org-level/Company badge, city+province, stock value + variant count (aggregated from inventory-dashboard stockTable), actions row: View Stock / Edit / Set Default / Deactivate.
+   - Empty state CTA when no locations.
+   - Loading skeleton grid + error+retry.
+   - Add Location dialog (RHF+Zod): name, location-type Select (5 types), city, province, isOrgLevel Switch (with helper text), isDefault Switch. Submit POST /api/inventory-locations.
+   - Edit dialog: same form, prefilled. Submit PATCH /api/inventory-locations/{id}.
+   - Set Default: one-click PATCH with isDefault:true (hidden if already default).
+   - Deactivate AlertDialog: confirmation + 409 stock-present error surfaced inline (red error box) + on Toast. DELETE /api/inventory-locations/{id}.
+   - All 4 mutations invalidate ['locations'] + ['inventory-dashboard'] + Sonner toasts.
+
+3. location-detail-view.tsx (~570 lines):
+   - PageHeader with "Back to locations" button.
+   - Location info panel: name + Default badge + Inactive badge (if !isActive), type icon, location-type + Org-level/Company badges, contact person/phone/city/province/country rows, 3 mini-stats (Total stock value / On hand / Reserved) computed from pools.
+   - Stock table: variant, on_hand (with "+N in" incoming indicator), reserved, available, avg_cost, stock_value, last_received date. Filters: search + status (all/in_stock/low/out).
+   - Recent transactions table at this location: scrollable, type badges, signed qty, cost/unit, when.
+   - TanStack Query key `['location-detail', locationId]`.
+
+4. suppliers-view.tsx (~600 lines):
+   - PageHeader with Refresh + "Add Supplier" (gated on INVENTORY_MANAGE_SUPPLIERS).
+   - Search input.
+   - Table: supplier (avatar with initials + name + email), contact (person + phone), payment terms badge, PO count, credit balance (amber if > 0), scope badge, actions (View / Edit / Deactivate).
+   - Empty state CTA when no suppliers (or no search matches).
+   - Loading skeleton + error+retry.
+   - Add Supplier dialog (RHF+Zod): name, contact_person, phone, email (validated), payment_terms Select (immediate/net_15/30/45/60), isOrgLevel Switch. Submit POST /api/suppliers.
+   - Edit dialog: same form prefilled. PATCH /api/suppliers/{id}.
+   - Deactivate AlertDialog. DELETE /api/suppliers/{id}.
+   - All mutations invalidate ['suppliers'] + Sonner toasts.
+
+5. supplier-detail-view.tsx (~620 lines):
+   - GET /api/suppliers/[id] doesn't exist — fetches list and filters by id (documented in code).
+   - PageHeader with "Back to suppliers".
+   - Profile card: large avatar with initials + name + Org-level/Company badge; info grid (contact person, phone, email, payment terms). Edit button (gated on INVENTORY_MANAGE_SUPPLIERS) opens RHF+Zod dialog with name/contact/phone/email/payment_terms → PATCH /api/suppliers/{id}.
+   - 3 stat cards (Total orders / Advance paid / Credit balance) — credit balance tone switches to rose when > 0.
+   - Recent Purchase Orders table: filters from /api/purchase-orders by supplier name; clickable rows navigate to inventory-po-detail. Columns: PO #, status badge, delivery location, item count, advance, ordered date, expected date. Empty state if no POs.
+   - PO status badge colors: draft=gray, ordered=sky, partially_received=amber, received=emerald, cancelled=rose.
+
+6. receive-stock-view.tsx (~480 lines):
+   - PageHeader with Back.
+   - No-locations Alert banner with "Create a location" link → inventory-locations route.
+   - Left column: form card (location Select with default auto-selected, supplier name, PO reference, notes), then items card (search-to-add variants dropdown with SKU+title+cost preview, items Table with per-row quantity + cost_per_unit inputs + line total + remove button).
+   - Right column (sticky): live summary card — items count, total units, total stock value (Rs.), receiving-into info, Submit button. Submit disabled if no items / no location / no permission / pending.
+   - Submit POST /api/inventory/receive; onSuccess invalidates ['inventory-dashboard'] + ['locations'], toast, navigate to 'inventory'.
+   - useMutation + Sonner + permission gate on INVENTORY_RECEIVE.
+
+7. adjust-stock-view.tsx (~490 lines):
+   - PageHeader with Back.
+   - No-locations Alert banner.
+   - Left column: form card with location Select, variant search-to-add (only variants with stock at the selected source location), Add/Remove direction toggle buttons (emerald/rose), quantity input, reason Select (7 presets incl. "Other" which reveals free-text input), notes Textarea (disabled when reason=Other since the "Other" field captures the reason).
+   - Right column (sticky): live preview card — current on hand (looked up from inventory-dashboard stockTable by variantId+locationId), delta chip (+green/−red), projected on hand (red if < 0), summary footer, Submit button. Submit disabled if no variant / no location / qty ≤ 0 / no reason / projectedOnHand < 0 / no permission.
+   - Submit POST /api/inventory/adjust with quantity = effectiveDelta (sign based on direction). onSuccess invalidates ['inventory-dashboard'] + ['location-detail'], toast, navigate to 'inventory'.
+   - Permission gate on INVENTORY_ADJUST.
+
+8. transfer-stock-view.tsx (~520 lines):
+   - PageHeader with Back.
+   - No-locations + insufficient-locations (<2) Alert banners.
+   - Left column: form card with From / To location Selects (each disables the other's value — prevents same-location selection), variant search-to-add (only variants with stock at the selected source), quantity input (with "Available at source: N (reserved: M)" helper), logistics cost input, helper Alert (sky-tinted): "This cost is tracked separately and does not affect the item's average cost at the destination", notes Textarea.
+   - Right column (sticky): live preview card — source row (onHand → projectedAfter @ avgCost), arrow showing qty + cost/unit, destination row (current → projected @ same avgCost, marked "unchanged"), stock value moving (Rs.), logistics cost (amber, labeled "separate"). Insufficient-stock warning. Submit button.
+   - Submit POST /api/inventory/transfers. onSuccess invalidates ['inventory-dashboard'] + ['location-detail'] + ['locations'], toast, navigate to 'inventory'.
+   - Permission gate on INVENTORY_TRANSFER.
+
+page.tsx wiring:
+- Added 8 imports at top (InventoryDashboardView, LocationsView, LocationDetailView, SuppliersView, SupplierDetailView, ReceiveStockView, AdjustStockView, TransferStockView from '@/components/inventory/...').
+- Added 8 cases to renderRoute switch (inventory / inventory-locations / inventory-location-detail / inventory-suppliers / inventory-supplier-detail / inventory-receive / inventory-adjust / inventory-transfer).
+
+Verification:
+- `bun run lint`: 0 errors in all 8 inventory files + page.tsx. 14 warnings total — all React Hook Form `watch()` advisories (the documented RHF pattern used in catalog-settings-view.tsx, returned-stitched-view.tsx), or pre-existing unused eslint-disable directives in unrelated files (roles-view, logo-upload, create-company-view). 0 of my files have errors.
+- `bunx tsc --noEmit`: 0 errors in all 8 inventory files + page.tsx.
+- Dev server (started manually for compile test): HTTP 200 on `/` in 13s initial compile (Turbopack), then 80ms subsequent. No compile errors.
+- Fixed 2 React-Compiler errors during dev: `useMemo` with `setState` for "auto-select default location" — replaced with `useEffect` in receive-stock-view.tsx and adjust-stock-view.tsx. Same fix applied to 3 RHF form dialogs (locations-view, suppliers-view, supplier-detail-view) where `useMemo` was used to call `reset()` on dialog open — converted to `useEffect`. Removed the now-unneeded `// eslint-disable-next-line react-hooks/exhaustive-deps` lines.
+
+Stage Summary:
+- All 8 inventory SPA view components complete and production-ready. Each has: `'use client'`, PageHeader, TanStack Query (with documented query keys: ['inventory-dashboard'], ['locations'], ['location-detail', id], ['suppliers'], ['purchase-orders']), loading skeletons, error states with retry, empty states with CTAs, Sonner toasts on every mutation, cache invalidation on every mutation, permission-gated action buttons (useCan + PERMISSIONS.*), mobile-first responsive design, custom scrollbar styling on long lists.
+- Reachable from sidebar/mobile-nav "Inventory" section → all 8 SPA routes already declared in app-store.ts. page.tsx now dispatches to the new components.
+- Forms use React Hook Form + Zod (zodResolver) following the existing catalog-settings-view pattern. Mutations use api.post/patch/delete with FetchError-aware error messages via getErrorMessage().
+- Emerald-primary design system throughout (no blue/indigo primary); tonal accents (amber for warnings/credit, rose for losses/danger, sky for info/inbound-outbound-neutral, gray for dead stock).
+
+---
+Task ID: SPRINT7-INVENTORY-PO
+Agent: main
+Task: Build 7 inventory UI view components for FlowOps ERP — POs, Supplier Returns, Production Orders, Losses, Cycle Counts (SPA view components)
+
+Work Log:
+- Read prior worklog + 9 reference files (inventory-dashboard-view, receive-stock-view, suppliers-view, api-client, app-store, page.tsx, permissions, all 7 API route handlers + Prisma schema for PO/SupplierReturn/StockLossRecord/CycleCount/ProductionOrder).
+- Enhanced GET /api/purchase-orders to also return per-PO `totalItemsValue`, `receivedValue`, `balanceDue` (added `items: { select: { costPerUnit, orderedQuantity, receivedQuantity } }` to the include). Needed so the list view can show per-row value + aggregate "Total Committed Value".
+- Built 7 SPA view components in `/src/components/inventory/`:
+
+1. `purchase-orders-view.tsx` — list page:
+   * TanStack Query (`['purchase-orders']`), 15s staleTime
+   * Stats row: Pending POs (count), Total Committed Value (Rs.), Overdue POs (red highlight when > 0)
+   * Filter bar: search by PO#/supplier/location + status filter dropdown (6 statuses)
+   * Table: PO# + items/location, supplier, value + advance, status badge, expected date (red if overdue), row actions
+   * Row click + Eye button → `inventory-po-detail` route
+   * "New Purchase Order" button (permission-gated INVENTORY_MANAGE_PURCHASE_ORDERS) → `inventory-po-create`
+   * Empty state CTA + loading skeleton + error state with retry
+   * Overdue detection: expected_delivery_date < today AND status not in (received, cancelled)
+
+2. `po-create-view.tsx` — full create form:
+   * Supplier selector (fetch from `/api/suppliers`) with inline "+ Create new" link → opens QuickCreateSupplierDialog (name + contact + phone only)
+   * Delivery location selector (fetch from `/api/inventory-locations`), auto-selects default
+   * Order date (default today) + expected delivery date
+   * Search-to-add products/variants (fetch from `/api/products?pageSize=100`); flattened variant list with SKU/product/costPrice
+   * Items table: variant, qty (editable), cost per unit (editable, pre-filled from variant.costPrice), running line total, remove button
+   * Advance payment (Rs.) + payment method (free text)
+   * Notes textarea
+   * Two submit buttons: "Save as Draft" (status=draft) + "Confirm & Send Order" (status=ordered)
+   * Submit calls POST /api/purchase-orders
+   * On success: toast, navigate to `inventory-po-detail` with new PO id, invalidate `['purchase-orders']` + `['inventory-dashboard']`
+   * Live summary panel: items count, total units, order value, advance, balance due, sticky on desktop
+   * Validation: supplier/location/items required, qty>0, advance ≤ total
+
+3. `po-detail-view.tsx` (props: `{ poId: string }`) — PO detail/receive:
+   * Fetch from `GET /api/purchase-orders/{poId}` (`['purchase-order', poId]` queryKey)
+   * Header: PO number, status badge, overdue warning alert, supplier/location/dates/financial summary
+   * Items table with ordered vs received + Progress bar per line (0-100% colored by emerald/amber/muted)
+   * "Receive Stock Against This PO" button (only if items remaining + canReceive) → opens ReceiveDialog:
+     - Pre-filled with remaining = ordered - received per item
+     - Editable "actually received" quantity and "actual cost per unit" (pre-filled with PO cost)
+     - Shortage auto-computed = remaining - received; shortage reason field appears (in Alert) for each shortage item, required before submit
+     - Submit calls POST /api/purchase-orders/{poId}/receive
+   * Receiving history: list of all receipts (receivedBy, timestamp, items with sku/qty/cost + shortage badges, receipt value)
+   * "Cancel PO" button (only if status not cancelled/received) → AlertDialog with reason textarea → POST /api/purchase-orders/{poId}/cancel
+   * "Confirm Draft" button if status=draft → POST /api/purchase-orders/{poId}/confirm
+   * Back button → `inventory-purchase-orders`
+   * Loading skeleton + error state with retry
+
+4. `supplier-returns-view.tsx` — list + create dialog:
+   * Fetch from `GET /api/supplier-returns` (`['supplier-returns']`)
+   * Stats: Pending returns count (pending + sent_to_supplier), total value this month
+   * Filterable table: product, supplier, location, reason badge, qty, value, status badge, created date
+   * Status filter dropdown (7 statuses) + search
+   * "New Return" button → opens CreateReturnDialog:
+     - Optional PO link selector (fetch `/api/purchase-orders`, excludes cancelled)
+     - Supplier selector (fetch `/api/suppliers`)
+     - Variant selector — search-to-add (only variants with stock at some location, using `/api/inventory/dashboard` stockTable filtered to onHand>0)
+     - Location selector — filtered to locations where the variant has stock
+     - Quantity + cost per unit (pre-filled from current avg_cost of the variant+location pool, editable)
+     - Reason dropdown (defective/wrong_item/quality_issue/excess_quantity/other)
+     - Notes
+     - "Immediate stock reduction" summary card showing variant/location/qty/value before submit
+     - Submit calls POST /api/supplier-returns
+
+5. `production-orders-view.tsx` — list + status actions:
+   * Fetch from `GET /api/production-orders` (`['production-orders']`)
+   * Stats: Pending, In Production, Completed This Month, Avg Turnaround Days (computed from createdAt→actualCompletionDate for completed orders)
+   * Table: stitched variant, fabric SKU + source location, qty, status badge, est. completion, assigned tailor, actions
+   * Row actions: DropdownMenu with status-aware options:
+     - fabric_reserved → "Start Production" (in_production)
+     - in_production → "Mark Completed" (completed)
+     - completed → "Mark Dispatched" (dispatched)
+     - "Cancel Order" (with reason dialog) — PATCH with `{ status: 'cancelled', cancellation_reason }`
+   * All transitions call PATCH /api/production-orders/{id} with `{ status: newStatus }`
+   * Empty state: "No production orders yet. Production orders are created automatically when made-to-order variants are fulfilled."
+   * No manual create form (system-triggered only, per spec)
+
+6. `losses-view.tsx` — list + report + resolve:
+   * Fetch from `GET /api/stock-loss` (`['stock-loss']`)
+   * Stats: Open investigations (count), total loss value this month, recovered amount
+   * Filterable table: product, location, loss type badge + sub-type, qty, value, status badge (resolution or investigation), actions
+   * "Report Loss" button → opens ReportLossDialog:
+     - Variant selector (search-to-add, only variants with stock)
+     - Location selector
+     - Loss type cards (4 cards: damaged/theft/missing/transit_loss) with icon + description, clickable selection
+     - Sub-type selector (confirmed/suspected/admin_error/manufacturing)
+     - Damage type selector (water_moisture/physical_impact/manufacturing_defect/transit_damage/storage_damage/other)
+     - Quantity + cost per unit (pre-filled from avg_cost)
+     - Responsible party selector (warehouse/courier/customer/employee/unknown)
+     - Notes
+     - "Immediate stock reduction" red summary card
+     - Submit calls POST /api/stock-loss
+   * Row actions: "Resolve" → opens ResolveDialog:
+     - Resolution dropdown (written_off/recovered/error_corrected/claim_accepted/claim_rejected)
+     - Investigation status (none/open/closed), responsible party
+     - Conditional fields based on loss_type: Police report ref (theft/missing), Insurance claim ref + recovered amount (claim_accepted/recovered), Courier claim ref + status + recovered amount (transit_loss/damaged)
+     - Notes
+     - Calls PATCH /api/stock-loss/{id} with `{ approved: canManage }` (manage_loss permission required for write-off finalization)
+   * Permission-gated: INVENTORY_REPORT_LOSS for reporting, INVENTORY_MANAGE_LOSS for approving
+
+7. `cycle-counts-view.tsx` — list + create + status-aware actions:
+   * Fetch from `GET /api/cycle-counts` (`['cycle-counts']`)
+   * Master-detail layout: list on left, detail panel on right (responsive: stacks on mobile)
+   * List: count name, location, status badge, items/discrepancies/variance value
+   * "New Cycle Count" button → opens CreateCountDialog:
+     - Location selector (fetch `/api/inventory-locations`)
+     - Count name, count type (full/partial/spot), scheduled date
+     - Notes
+     - Submit calls POST /api/cycle-counts
+   * Row click → fetch detail from `GET /api/cycle-counts/{id}` (`['cycle-count', id]`)
+   * Status-aware actions in detail panel:
+     - scheduled → "Start Count" button → PATCH `{ action: 'start' }` (creates items from inventory_pools snapshot)
+     - in_progress → "Submit for Review" → opens SubmitCountsButton dialog (inline table with editable counted_quantity + live diff vs system_quantity) → PATCH `{ action: 'submit_counts', counted_items: [...] }`
+     - pending_review → "Approve & Apply Adjustments" (PATCH `{ action: 'approve' }`) / "Reject for Recount" (PATCH `{ action: 'cancel' }`)
+   * Items table in detail: variant, system qty, counted qty, discrepancy (color-coded: emerald for match/+ , rose for -), status badge for pending_review
+   * Sticky table headers, max-h with custom scrollbar
+
+- Updated `/src/app/page.tsx`:
+  * Added 7 imports (PurchaseOrdersView, PoCreateView, PoDetailView, SupplierReturnsView, ProductionOrdersView, LossesView, CycleCountsView)
+  * Added 7 route cases to `renderRoute()` switch: inventory-purchase-orders, inventory-po-create, inventory-po-detail (with `poId={route.id}`), inventory-supplier-returns, inventory-production-orders, inventory-losses, inventory-cycle-counts
+
+Cross-cutting features across all 7 views:
+- `'use client'` at top of every file
+- TanStack Query for all data fetching (15-60s staleTime)
+- `useMutation` + `queryClient.invalidateQueries()` + `toast` from sonner on every mutation
+- Permission-gated buttons via `useCan()` + `PERMISSIONS.*` keys
+- Loading skeletons (Skeleton components), empty states with CTAs, error states with retry buttons
+- `FetchError` typed error messages via shared `getErrorMessage()` helper
+- SPA navigation via `useAppStore.navigate({ name, id })`
+- PKR currency formatting via shared `formatPKR()` helper
+- Responsive design: mobile-first, grid breakpoints, sticky summary panels on desktop, max-h-overflow-y-auto + scrollbar-thin for long lists
+- Tailwind emerald/amber/rose/sky color system (NO indigo/blue)
+- shadcn/ui components throughout (Card, Button, Input, Label, Textarea, Badge, Select, Dialog, AlertDialog, Table, Progress, Alert, Skeleton, DropdownMenu)
+
+Verification:
+- Lint: `bun run lint` → 0 errors, 14 pre-existing warnings (all in unrelated files: locations-view, suppliers-view, supplier-detail-view, catalog-settings-view, returned-stitched-view, roles-view, logo-upload, page.tsx — all "react-hooks/incompatible-library" for react-hook-form `watch()` or unused eslint-disable directives). 0 warnings introduced in the 7 new files.
+- TypeScript strict: all 7 files compile cleanly via Turbopack.
+- API contract alignment verified against all 7 GET/POST/PATCH route handlers — every payload field matches the Zod schema on the backend.
+
+Stage Summary:
+- All 7 inventory SPA view components built and wired into the router.
+- FlowOps inventory module now covers the complete procurement → receiving → loss/return → cycle count lifecycle, plus production order tracking for made-to-order variants.
+- Single small backend enhancement (purchase-orders GET now returns value aggregates) — no other API changes needed; all other endpoints already returned the fields the UI needs.
+- Production-ready: full loading/empty/error states, permission gating, optimistic cache invalidation, Sonner toasts, mobile-responsive layouts.

@@ -17,6 +17,16 @@ import {
   Sliders,
   ChevronDown,
   Globe,
+  Warehouse,
+  Truck,
+  ArrowLeftRight,
+  ShoppingCart,
+  Undo2,
+  Factory,
+  AlertTriangle,
+  ClipboardCheck,
+  PackagePlus,
+  SlidersHorizontal,
   type LucideIcon,
 } from 'lucide-react'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -46,6 +56,26 @@ const NAV: NavItem[] = [
       { route: { name: 'product-settings' }, label: 'Catalog Settings', icon: Sliders, matchPrefixes: ['product-settings'] },
     ],
   },
+  {
+    route: { name: 'inventory' },
+    label: 'Inventory',
+    icon: Warehouse,
+    permission: PERMISSIONS.INVENTORY_VIEW,
+    matchPrefixes: ['inventory'],
+    children: [
+      { route: { name: 'inventory' }, label: 'Dashboard', icon: LayoutDashboard, matchPrefixes: ['inventory'] },
+      { route: { name: 'inventory-locations' }, label: 'Locations', icon: Warehouse, matchPrefixes: ['inventory-location'] },
+      { route: { name: 'inventory-suppliers' }, label: 'Suppliers', icon: Truck, matchPrefixes: ['inventory-supplier'] },
+      { route: { name: 'inventory-receive' }, label: 'Receive Stock', icon: PackagePlus, matchPrefixes: ['inventory-receive'] },
+      { route: { name: 'inventory-adjust' }, label: 'Adjust Stock', icon: SlidersHorizontal, matchPrefixes: ['inventory-adjust'] },
+      { route: { name: 'inventory-transfer' }, label: 'Transfer Stock', icon: ArrowLeftRight, matchPrefixes: ['inventory-transfer'] },
+      { route: { name: 'inventory-purchase-orders' }, label: 'Purchase Orders', icon: ShoppingCart, matchPrefixes: ['inventory-po'] },
+      { route: { name: 'inventory-supplier-returns' }, label: 'Supplier Returns', icon: Undo2, matchPrefixes: ['inventory-supplier-return'] },
+      { route: { name: 'inventory-production-orders' }, label: 'Production Orders', icon: Factory, matchPrefixes: ['inventory-production'] },
+      { route: { name: 'inventory-losses' }, label: 'Losses & Write-offs', icon: AlertTriangle, matchPrefixes: ['inventory-loss'] },
+      { route: { name: 'inventory-cycle-counts' }, label: 'Cycle Counts', icon: ClipboardCheck, matchPrefixes: ['inventory-cycle'] },
+    ],
+  },
   { route: { name: 'employees' }, label: 'Employees', icon: Users, permission: PERMISSIONS.EMPLOYEES_VIEW, matchPrefixes: ['employees'] },
   { route: { name: 'roles' }, label: 'Roles & Permissions', icon: ShieldCheck, permission: PERMISSIONS.SETTINGS_ROLES_MANAGE, matchPrefixes: ['roles'] },
   { route: { name: 'org-catalog' }, label: 'Org Catalog', icon: Globe, elevatedOnly: true, matchPrefixes: ['org-catalog'] },
@@ -61,7 +91,7 @@ export function Sidebar() {
   const can = useCan()
   const activeCompany = useAppStore((s) => s.activeCompany)
   const employee = useAppStore((s) => s.employee)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set(['Products']))
+  const [expanded, setExpanded] = useState<Set<string>>(new Set(['Products', 'Inventory']))
 
   const isElevated = employee?.isElevated ?? false
 

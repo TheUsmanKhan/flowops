@@ -36,6 +36,21 @@ export type AppRoute =
   | { name: 'product-settings' }
   | { name: 'returned-stitched' }
   | { name: 'org-catalog' }
+  | { name: 'inventory' }
+  | { name: 'inventory-locations' }
+  | { name: 'inventory-location-detail'; id: string }
+  | { name: 'inventory-suppliers' }
+  | { name: 'inventory-supplier-detail'; id: string }
+  | { name: 'inventory-receive' }
+  | { name: 'inventory-adjust' }
+  | { name: 'inventory-transfer' }
+  | { name: 'inventory-purchase-orders' }
+  | { name: 'inventory-po-create' }
+  | { name: 'inventory-po-detail'; id: string }
+  | { name: 'inventory-supplier-returns' }
+  | { name: 'inventory-losses' }
+  | { name: 'inventory-production-orders' }
+  | { name: 'inventory-cycle-counts' }
 
 interface AppState {
   // session

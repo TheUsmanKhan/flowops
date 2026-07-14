@@ -46,6 +46,7 @@ export async function GET(req: Request) {
       include: {
         supplier: { select: { name: true } },
         deliveryLocation: { select: { name: true } },
+        items: { select: { costPerUnit: true, orderedQuantity: true, receivedQuantity: true } },
         _count: { select: { items: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -53,17 +54,31 @@ export async function GET(req: Request) {
     })
 
     return Response.json({
-      orders: orders.map((po) => ({
-        id: po.id,
-        poNumber: po.poNumber,
-        status: po.status,
-        supplier: po.supplier.name,
-        deliveryLocation: po.deliveryLocation.name,
-        orderDate: po.orderDate.toISOString(),
-        expectedDeliveryDate: po.expectedDeliveryDate?.toISOString() ?? null,
-        advancePayment: Number(po.advancePayment),
-        itemCount: po._count.items,
-      })),
+      orders: orders.map((po) => {
+        const totalItemsValue = po.items.reduce(
+          (sum, item) => sum + Number(item.costPerUnit) * item.orderedQuantity,
+          0,
+        )
+        const receivedValue = po.items.reduce(
+          (sum, item) =>
+            sum + Number(item.costPerUnit) * Math.min(item.receivedQuantity, item.orderedQuantity),
+          0,
+        )
+        return {
+          id: po.id,
+          poNumber: po.poNumber,
+          status: po.status,
+          supplier: po.supplier.name,
+          deliveryLocation: po.deliveryLocation.name,
+          orderDate: po.orderDate.toISOString(),
+          expectedDeliveryDate: po.expectedDeliveryDate?.toISOString() ?? null,
+          advancePayment: Number(po.advancePayment),
+          itemCount: po._count.items,
+          totalItemsValue,
+          receivedValue,
+          balanceDue: Math.max(0, totalItemsValue - Number(po.advancePayment)),
+        }
+      }),
     })
   } catch (err) {
     return handleError(err)
