@@ -81,9 +81,23 @@ export async function POST(req: Request) {
       isOrgLevel?: boolean
       contactPerson?: string
       contactPhone?: string
+      isDefault?: boolean
     }>(req)
     if (!body.name || body.name.trim().length < 2) {
       throw new ApiError(400, 'Location name is required')
+    }
+
+    // If is_default = true, unset any existing default for this company scope
+    const scopeCompanyId = body.isOrgLevel ? null : company.id
+    if (body.isDefault) {
+      await db.inventoryLocation.updateMany({
+        where: {
+          organizationId: orgId,
+          companyId: scopeCompanyId,
+          isDefault: true,
+        },
+        data: { isDefault: false },
+      })
     }
 
     const location = await db.inventoryLocation.create({
@@ -96,6 +110,7 @@ export async function POST(req: Request) {
         province: body.province || 'Punjab',
         contactPerson: body.contactPerson || null,
         contactPhone: body.contactPhone || null,
+        isDefault: body.isDefault ?? false,
         createdById: caller.id,
       },
     })

@@ -435,3 +435,166 @@ export async function generatePoNumber(organizationId: string): Promise<string> 
 
   return `${prefix}${String(count + 1).padStart(3, '0')}`
 }
+
+/**
+ * Increment incoming stock on a pool (for PO ordering).
+ * This is the ONLY function that writes to inventory_pools.incoming directly
+ * — it's a live projection field, not a ledgered movement.
+ * Creates the pool row if it doesn't exist.
+ */
+export async function incrementIncomingStock(
+  orgVariantId: string,
+  locationId: string,
+  organizationId: string,
+  qty: number,
+): Promise<void> {
+  await db.inventoryPool.upsert({
+    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+    update: { incoming: { increment: qty } },
+    create: {
+      orgVariantId,
+      locationId,
+      organizationId,
+      incoming: qty,
+    },
+  })
+}
+
+/**
+ * Decrement incoming stock (never below 0).
+ * Used when cancelling POs or receiving against POs.
+ */
+export async function decrementIncomingStock(
+  orgVariantId: string,
+  locationId: string,
+  qty: number,
+): Promise<void> {
+  const pool = await db.inventoryPool.findUnique({
+    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+    select: { incoming: true },
+  })
+  if (!pool) return
+  const newIncoming = Math.max(0, pool.incoming - qty)
+  await db.inventoryPool.update({
+    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+    data: { incoming: newIncoming },
+  })
+}
+
+/**
+ * Check and fulfill a made-to-order variant.
+ *
+ * The central decision function:
+ * 1. Check if returned stock is available for this variant
+ * 2. If yes: return { source: 'existing_stock', location_id, available }
+ * 3. If no: create a production order, consume fabric, return { source: 'fresh_production' }
+ */
+export async function checkAndFulfillMadeToOrderVariant(
+  orgVariantId: string,
+  quantity: number,
+  companyId: string,
+  preferredLocationId?: string,
+): Promise<{
+  source: 'existing_stock' | 'fresh_production'
+  locationId?: string
+  available?: number
+  productionOrderId?: string
+  estimatedCompletionDate?: Date
+  error?: string
+}> {
+  // 1. Check returned stock availability
+  const availability = await checkReturnedStockAvailability(orgVariantId)
+  const totalAvailable = availability.reduce((sum, a) => sum + a.available, 0)
+
+  if (totalAvailable >= quantity) {
+    // Use existing stock — find the best location (most available)
+    const best = availability
+      .filter((a) => a.available > 0)
+      .sort((a, b) => b.available - a.available)[0]
+    return {
+      source: 'existing_stock',
+      locationId: best.locationId,
+      available: best.available,
+    }
+  }
+
+  // 2. Not enough returned stock — create a production order
+  const variant = await db.orgProductVariant.findUnique({
+    where: { id: orgVariantId },
+    select: {
+      id: true,
+      fabricSourceVariantId: true,
+      stitchingCharges: true,
+      productionDays: true,
+      organizationId: true,
+    },
+  })
+
+  if (!variant) return { source: 'fresh_production', error: 'Variant not found' }
+  if (!variant.fabricSourceVariantId) {
+    return { source: 'fresh_production', error: 'No fabric source variant linked to this made_to_order variant' }
+  }
+
+  // Find fabric stock at the preferred location or any location with stock
+  const fabricPools = await db.inventoryPool.findMany({
+    where: {
+      orgVariantId: variant.fabricSourceVariantId,
+      onHand: { gt: 0 },
+    },
+    include: { location: { select: { id: true, name: true } } },
+  })
+
+  const fabricLocation = preferredLocationId
+    ? fabricPools.find((p) => p.locationId === preferredLocationId)
+    : fabricPools[0]
+
+  if (!fabricLocation || fabricLocation.onHand - fabricLocation.reserved < quantity) {
+    return {
+      source: 'fresh_production',
+      error: `Insufficient fabric stock. Available: ${fabricLocation?.onHand ?? 0}, required: ${quantity}`,
+    }
+  }
+
+  const fabricCost = Number(fabricLocation.avgCost) * quantity
+  const estimatedCompletionDate = new Date()
+  estimatedCompletionDate.setDate(estimatedCompletionDate.getDate() + (variant.productionDays || 5))
+
+  // Consume fabric
+  const txnResult = await processInventoryTransaction({
+    orgVariantId: variant.fabricSourceVariantId,
+    locationId: fabricLocation.locationId,
+    organizationId: variant.organizationId,
+    companyId,
+    transactionType: 'fabric_consumed_for_stitching',
+    quantity,
+    costPerUnit: Number(fabricLocation.avgCost),
+    referenceType: 'production_order',
+  })
+
+  if (!txnResult.success) {
+    return { source: 'fresh_production', error: `Fabric consumption failed: ${txnResult.error}` }
+  }
+
+  // Create production order
+  const productionOrder = await db.productionOrder.create({
+    data: {
+      organizationId: variant.organizationId,
+      companyId,
+      stitchedVariantId: orgVariantId,
+      fabricVariantId: variant.fabricSourceVariantId,
+      fabricLocationId: fabricLocation.locationId,
+      quantity,
+      status: 'fabric_reserved',
+      stitchingCost: Number(variant.stitchingCharges) || 0,
+      fabricCost,
+      estimatedCompletionDate,
+      fabricTxnId: txnResult.transactionId ?? null,
+    },
+  })
+
+  return {
+    source: 'fresh_production',
+    productionOrderId: productionOrder.id,
+    estimatedCompletionDate,
+  }
+}
