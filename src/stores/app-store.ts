@@ -49,6 +49,7 @@ export type AppRoute =
   | { name: 'inventory-po-detail'; id: string }
   | { name: 'inventory-supplier-returns' }
   | { name: 'inventory-losses' }
+  | { name: 'inventory-loss-detail'; id: string }
   | { name: 'inventory-production-orders' }
   | { name: 'inventory-cycle-counts' }
 

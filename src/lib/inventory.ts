@@ -598,3 +598,53 @@ export async function checkAndFulfillMadeToOrderVariant(
     estimatedCompletionDate,
   }
 }
+
+/**
+ * Quarantine stock for theft/missing loss investigations.
+ * Directly increments inventory_pools.reserved — does NOT call
+ * process_inventory_transaction() since no actual movement has occurred.
+ * This is a soft-hold that reduces available stock without touching on_hand.
+ */
+export async function quarantineStock(
+  orgVariantId: string,
+  locationId: string,
+  quantity: number,
+): Promise<{ success: boolean; error?: string }> {
+  const pool = await db.inventoryPool.findUnique({
+    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+  })
+  if (!pool) {
+    return { success: false, error: 'No inventory pool exists for this variant+location.' }
+  }
+  const available = pool.onHand - pool.reserved
+  if (available < quantity) {
+    return { success: false, error: `Insufficient available stock. Available: ${available}, required: ${quantity}.` }
+  }
+  await db.inventoryPool.update({
+    where: { id: pool.id },
+    data: { reserved: { increment: quantity } },
+  })
+  return { success: true }
+}
+
+/**
+ * Release quarantined stock (reverse of quarantineStock).
+ * Directly decrements inventory_pools.reserved.
+ * Used when resolving theft/missing investigations (regardless of outcome —
+ * the write_off path creates a separate transaction that decrements on_hand).
+ */
+export async function releaseQuarantine(
+  orgVariantId: string,
+  locationId: string,
+  quantity: number,
+): Promise<void> {
+  const pool = await db.inventoryPool.findUnique({
+    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+  })
+  if (!pool) return
+  const newReserved = Math.max(0, pool.reserved - quantity)
+  await db.inventoryPool.update({
+    where: { id: pool.id },
+    data: { reserved: newReserved },
+  })
+}

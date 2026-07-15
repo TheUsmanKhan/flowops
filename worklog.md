@@ -692,3 +692,93 @@ Stage Summary:
 - FlowOps inventory module now covers the complete procurement → receiving → loss/return → cycle count lifecycle, plus production order tracking for made-to-order variants.
 - Single small backend enhancement (purchase-orders GET now returns value aggregates) — no other API changes needed; all other endpoints already returned the fields the UI needs.
 - Production-ready: full loading/empty/error states, permission gating, optimistic cache invalidation, Sonner toasts, mobile-responsive layouts.
+
+---
+Task ID: SPRINT8-STOCK-LOSS-UI
+Agent: main
+Task: Rebuild Stock Loss frontend for FlowOps ERP — full replacement of losses-view.tsx + new loss-detail-view.tsx + page.tsx route wiring. 5 loss types (damaged/theft/missing/transit_loss/supplier_dispute) with distinct behaviors.
+
+Work Log:
+- Read worklog.md and the existing losses-view.tsx to understand the prior 4-type unified-report flow (POST /api/stock-loss with PATCH /api/stock-loss/{id} for resolution) and the legacy single-dialog flow.
+- Inspected the actual backend routes that have since replaced the old single-endpoint pattern:
+  * `GET /api/stock-loss?loss_type=&investigation_status=` — list with filter params.
+  * `GET /api/stock-loss/stats` — returns per-type `{count, value, quantity}` aggregates for the current month + `activeInvestigations` + `pendingCourierClaims` counts.
+  * `GET /api/stock-loss/[id]` — full detail with `inventoryTxn`, `supplierReturn`, `reportedBy`/`resolvedBy`, evidence URLs (JSON array), police/courier/insurance refs.
+  * `POST /api/stock-loss/report-damaged` — instant write-off (damage_writeoff txn). Body: `{org_variant_id, location_id, quantity, damage_type, responsible_party, evidence_urls?, notes?}`. Backend rejects if `available < quantity`.
+  * `POST /api/stock-loss/report-theft` — quarantine (reserved++). Body: `{org_variant_id, location_id, quantity, sub_type: 'confirmed'|'suspected', police_report_ref?, evidence_urls?, notes?}`. Sets investigation_status='open', resolution=null.
+  * `POST /api/stock-loss/report-transit` — no inventory txn (stock already removed at dispatch). Body: `{org_variant_id, location_id, quantity, order_reference_id, courier_claim_ref?, notes?}`.
+  * `POST /api/stock-loss/resolve` — handles 2 paths:
+    - Theft/Missing (`investigationStatus='open'`): releases quarantine, optionally creates theft_writeoff/missing_writeoff txn if `resolution='written_off'`. Body: `{loss_id, resolution: 'written_off'|'recovered'|'error_corrected', notes?}`.
+    - Transit Loss (`resolution=null`): updates courier claim status. Body: `{loss_id, resolution: 'claim_accepted'|'claim_rejected', courier_recovered?, notes?}`. Requires `courier_recovered` when accepting.
+- Inspected `lib/validations/stock-loss.ts` to confirm payload shapes; the old single `POST /api/stock-loss` + `PATCH /api/stock-loss/{id}` API no longer exists.
+- Confirmed `inventory-loss-detail` route already declared in `stores/app-store.ts` (id-based), and `inventory-supplier-returns` route exists for the Supplier Dispute "View Return" link.
+- Confirmed permission keys `INVENTORY_REPORT_LOSS` ('inventory.report_loss') and `INVENTORY_MANAGE_LOSS` ('inventory.manage_loss') in `lib/permissions.ts`.
+
+Files created/replaced:
+
+1. `src/components/inventory/losses-view.tsx` (FULL REPLACE — ~1,400 lines):
+   * `'use client'`, TanStack Query + Sonner + useCan + useAppStore throughout.
+   * **Stats row**: 5 colored StatCards (Damaged=orange, Theft=red, Missing=yellow, Transit Loss=purple, Supplier Disputes=slate) showing count + value + quantity this month from `/api/stock-loss/stats`. Plus 2 compact CountCards: Active Investigations (sky) + Pending Courier Claims (purple).
+   * **Filter bar**: loss_type dropdown (All/Damaged/Theft/Missing/Transit Loss/Supplier Dispute) + investigation_status dropdown (All/Open/Closed). Filter params passed as URL query to `/api/stock-loss`. Query key includes filter values so React Query refetches on change.
+   * **Table columns**: Product/Variant (title + SKU), Loss Type (colored badge per the spec palette + sub-type caption), Quantity, Value (PKR), Responsible Party (label), Status (resolution badge if set, else investigation badge), Reported By, Date, Actions.
+   * **Row Actions**: `[View]` always → `navigate({name:'inventory-loss-detail', id})`. `[Resolve]` shown only if row is resolvable (theft/missing with investigation_status='open' OR transit_loss with resolution=null) AND user has `inventory.manage_loss`. Supplier Dispute rows show `[View Return]` instead of `[Resolve]` → navigates to `inventory-supplier-returns`.
+   * **[+ Report Loss]** button (gated by `inventory.report_loss`) opens ReportLossDialog with internal stage machine: `'select'` → `'damaged'` | `'theft'` | `'transit'`.
+   * **Type picker cards**: Damaged 💧 / Theft 🚨 / Transit Loss 📦 with descriptions, plus an amber Alert noting "Missing stock is reported through Cycle Counts, not here."
+   * **Shared `useVariantAndLocationData` hook**: fetches `/api/inventory-locations`, `/api/products?pageSize=100`, `/api/inventory/dashboard`. Builds: variantOptions list (with onHand/reserved/available/avgCost aggregated across pools), locationsForVariant map (for Damaged/Theft location filtering — only show locations with stock), poolMap keyed `${variantId}|${locationId}` for available-stock validation.
+   * **Shared `VariantPicker` component**: search-by-SKU-or-title with results dropdown, "Change" button when selected. Used by all 3 forms.
+   * **Damaged form**: variant picker, location selector (filtered to pools with stock + shows available count per option), quantity input with live "Available" read-only box, damage_type dropdown (water_moisture/physical_impact/manufacturing_defect/transit_damage/storage_damage/other), responsible_party dropdown (warehouse/courier/customer/employee — 4 options per backend enum), notes textarea, orange review Alert: "This will immediately reduce your available stock by X and write off Rs. Y." Submits `POST /api/stock-loss/report-damaged`. Validates qty > available (insufficient-stock destructive Alert).
+   * **Theft form**: variant picker, location selector (filtered to pools with stock), quantity, sub-type radio (Suspected/Confirmed) with full explanations, police_report_ref input shown only when Confirmed (required), notes, rose review Alert: "This will quarantine X pieces (they'll no longer be sellable) while you investigate. No financial loss is recorded until you resolve this investigation." Submits `POST /api/stock-loss/report-theft`.
+   * **Transit form**: order_reference_id text input (required), variant picker, dispatch_location selector (all locations — stock may already be 0), quantity, courier_claim_ref text input (optional), notes, purple review Alert: "This stock was already removed from inventory when it was dispatched. This report only tracks the courier claim." Submits `POST /api/stock-loss/report-transit`.
+   * **ResolveDialog** dispatcher routes to ResolveTheftDialog (for theft/missing) or ResolveTransitDialog (for transit_loss) based on `target.lossType`.
+   * **ResolveTheftDialog**: Radio cards for Written Off / Recovered / Error Corrected with full explanations; notes textarea; conditional Alerts (rose for write-off financial impact, emerald for recovered, sky for error_corrected); [Resolve Investigation] button opens an AlertDialog confirmation summarizing the financial impact before `POST /api/stock-loss/resolve` with `{loss_id, resolution, notes}`.
+   * **ResolveTransitDialog**: Radio cards for Claim Accepted (with amount recovered input + live shortfall calculation) / Claim Rejected; notes textarea; [Resolve Claim] button submits `POST /api/stock-loss/resolve` with `{loss_id, resolution, courier_recovered}`.
+   * **All mutations**: `useMutation` + `queryClient.invalidateQueries({queryKey:['stock-losses']})` + `queryClient.invalidateQueries({queryKey:['inventory-dashboard']})` + Sonner toast on success/error.
+   * **Empty state, loading skeletons (6-row), error state with retry button**.
+
+2. `src/components/inventory/loss-detail-view.tsx` (NEW — ~1,050 lines):
+   * Props: `{ lossId: string }`. Fetches `GET /api/stock-loss/${lossId}` with queryKey `['stock-loss', lossId]`, 10s staleTime.
+   * Back button → `inventory-losses`. Refresh button. Loading skeleton, error state with retry.
+   * **Two-column grid** (`lg:grid-cols-2 gap-6 items-start`):
+     - **LEFT — LossDetailsCard**: colored type icon + product/SKU header with type badge, big Quantity + Loss Value display, DetailRow entries for Location, Responsible Party, Sub-type, Damage type, Reported (date + reporter), Investigation badge, Police report ref, Courier claim ref (with status badge), Order reference, Insurance claim ref (with recovered amount), Notes (whitespace-pre-wrap), Evidence photo grid (3-col, opens in new tab — uses `<img>` with eslint-disable since evidence URLs are external storage).
+     - **RIGHT — varies by loss_type**:
+       * `damaged` → DamagedStatusCard: "✅ Written Off" emerald banner explaining damage_writeoff txn + financial impact, linked inventory transaction details (txn ID, qty, cost/unit, finalized date), "No further action required" Alert.
+       * `supplier_dispute` → SupplierDisputeCard: slate Alert explaining "This loss was automatically recorded because the related supplier return was rejected", supplier return details card (supplier, qty, cost, reason, status), [View Original Supplier Return →] button → `inventory-supplier-returns` list (no dedicated supplier-return-detail route exists in the app).
+       * `transit_loss` + `resolution=null` → TransitClaimCard with "Claim pending" purple banner, ResolveTransitForm (inline): Claim Accepted (with amount + live shortfall) / Claim Rejected radio, notes, [Resolve Claim] → `POST /api/stock-loss/resolve`.
+       * `transit_loss` + resolved → TransitClaimCard with outcome banner (emerald if accepted, slate if rejected), original-loss/recovered/shortfall breakdown, ResolvedByFooter.
+       * `theft`/`missing` + `investigationStatus='open'` → TheftInvestigationCard with "Investigation Open" sky banner, ResolveTheftForm (inline): Written Off / Recovered / Error Corrected radio cards, notes, financial-impact Alert, [Resolve Investigation] → AlertDialog confirmation → `POST /api/stock-loss/resolve`.
+       * `theft`/`missing` + closed → TheftInvestigationCard with closed resolution banner (rose for written_off with linked txn, emerald for recovered, sky for error_corrected), linked write-off txn details if applicable, ResolvedByFooter (resolved_by + resolved_at).
+   * **Permission gating**: resolution forms only rendered when `can(PERMISSIONS.INVENTORY_MANAGE_LOSS)`; otherwise an informational Alert tells the user to contact an inventory manager.
+   * **ResolvedByFooter** component shows resolved_by + resolved_at for closed investigations and resolved transit claims.
+   * **Inline forms reuse the same payload contracts** as the list-view dialogs (`{loss_id, resolution, notes}` for theft/missing; `{loss_id, resolution, courier_recovered}` for transit).
+   * On successful resolution: invalidates `['stock-loss', lossId]` + `['stock-losses']` + `['inventory-dashboard']`, fires Sonner toast, form state resets via `useEffect` on `record.id`.
+
+3. `src/app/page.tsx`:
+   * Added `import { LossDetailView } from '@/components/inventory/loss-detail-view'`.
+   * Added `case 'inventory-loss-detail': return <LossDetailView lossId={route.id} />` to `renderRoute()` switch (route type already declared in app-store).
+
+Cross-cutting features:
+- `'use client'` at top of every file.
+- TanStack Query for all data fetching (10–60s staleTime).
+- `useMutation` + `queryClient.invalidateQueries()` on `['stock-losses']` + `['inventory-dashboard']` + Sonner toasts on every mutation.
+- Permission-gated buttons via `useCan()` + `PERMISSIONS.INVENTORY_REPORT_LOSS` / `PERMISSIONS.INVENTORY_MANAGE_LOSS`.
+- Loading skeletons, empty states with CTAs, error states with retry buttons.
+- `FetchError`-typed error messages via shared `getErrorMessage()` helper.
+- SPA navigation via `useAppStore.navigate({name, id})`.
+- PKR currency formatting via shared `formatPKR()` helper; `formatDate`/`formatDateTime` for ISO timestamps.
+- Tailwind color system per spec: orange (damaged), rose (theft), amber (missing), purple (transit_loss), slate (supplier_dispute), sky (open investigations), emerald (resolved/recovered). NO indigo/blue.
+- shadcn/ui components throughout: Card, Button, Input, Label, Textarea, Badge, Select, Dialog, AlertDialog, Table, RadioGroup, Alert, Skeleton.
+- Mobile-first responsive: filter bar stacks on mobile, table scrolls horizontally, two-column detail collapses to single column on mobile, type-picker cards stack to 1-col on mobile.
+
+Verification:
+- Lint: `bun run lint` → 0 errors, 15 pre-existing warnings (all in unrelated files: create-company-view, create-organization-view, catalog-settings-view, returned-stitched-view, roles-view, logo-upload — react-hook-form `watch()` + unused eslint-disable directives). 0 warnings introduced in the 2 new files or page.tsx edit.
+- TypeScript strict: `npx tsc --noEmit` reports 0 errors in losses-view.tsx, loss-detail-view.tsx, and page.tsx (all errors are pre-existing in unrelated API/lib/onboarding/settings files).
+- API contract alignment verified against all 5 backend route handlers — every payload field matches the corresponding Zod schema (`reportDamagedLossSchema`, `reportTheftLossSchema`, `reportTransitLossSchema`, `resolveTheftOrMissingLossSchema`, `resolveTransitLossSchema`).
+- The old `POST /api/stock-loss` and `PATCH /api/stock-loss/{id}` endpoints are no longer referenced anywhere in the new UI.
+
+Stage Summary:
+- Stock Loss UI completely rebuilt around the 5-type loss model with distinct inventory/financial behaviors per type.
+- Loss list now shows the 5 type-specific stat cards + active-investigations + pending-courier-claims counts, with type/status filters that map directly to backend query params.
+- Report Loss flow is a single dialog with 3 sub-forms (Damaged/Theft/Transit), each with type-specific fields, available-stock validation, and a colored "review text" Alert summarizing the inventory/financial impact before submit.
+- Resolve flows split into two paths: theft/missing uses an AlertDialog-confirmed Written Off / Recovered / Error Corrected radio; transit_loss uses a Claim Accepted (with amount) / Claim Rejected radio. Both submit to `POST /api/stock-loss/resolve`.
+- New loss-detail-view.tsx provides a per-record detail page with left-column loss info and a right column that varies by loss_type (damaged → written-off status + linked txn; theft/missing open → inline resolution form; theft/missing closed → resolution banner + linked txn; transit_loss → courier claim section with inline or finalized state; supplier_dispute → read-only with link to original return).
+- Production-ready: full loading/empty/error states, permission gating, optimistic cache invalidation, Sonner toasts, mobile-responsive layouts, custom scrollbars on long lists/dialogs.

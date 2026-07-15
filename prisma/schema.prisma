@@ -1059,6 +1059,9 @@ model SupplierReturn {
   inventoryTxnId String?
   inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
 
+  // Populated when status transitions to 'rejected' — back-relation to auto-created stock_loss_records entry
+  linkedLossRecord StockLossRecord? @relation("SupplierReturnLossLink")
+
   reportedById   String
   reportedBy     Employee @relation("SupplierReturnReporter", fields: [reportedById], references: [id])
   resolvedById   String?
@@ -1070,7 +1073,7 @@ model SupplierReturn {
   @@index([supplierId])
 }
 
-/// Stock loss records — damaged/theft/missing/transit_loss.
+/// Stock loss records — 5 types: damaged, theft, missing, transit_loss, supplier_dispute.
 model StockLossRecord {
   id             String   @id @default(cuid())
   organizationId String
@@ -1082,7 +1085,7 @@ model StockLossRecord {
   locationId     String
   location       InventoryLocation @relation(fields: [locationId], references: [id])
 
-  lossType       String   // damaged | theft | missing | transit_loss
+  lossType       String   // damaged | theft | missing | transit_loss | supplier_dispute
   subType        String?  // confirmed | suspected | admin_error | manufacturing
   damageType     String?  // water_moisture | physical_impact | manufacturing_defect | transit_damage | storage_damage | other
 
@@ -1092,7 +1095,7 @@ model StockLossRecord {
 
   investigationStatus String @default("none") // none | open | closed
   resolution     String?  // written_off | recovered | error_corrected | claim_accepted | claim_rejected
-  responsibleParty String? // warehouse | courier | customer | employee | unknown
+  responsibleParty String? // warehouse | courier | customer | employee | unknown | supplier
   policeReportRef String?
   insuranceClaimRef String?
   insuranceRecovered Decimal @default(0) @db.Decimal(12, 2)
@@ -1112,13 +1115,18 @@ model StockLossRecord {
 
   inventoryTxnId String?
   inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
-  orderReferenceId String? // will reference orders table in future sprint
+  orderReferenceId String? // for transit_loss: references the dispatched order (future)
+
+  // ONLY set when loss_type = 'supplier_dispute' — links to originating rejected return
+  supplierReturnId String? @unique
+  supplierReturn   SupplierReturn? @relation("SupplierReturnLossLink", fields: [supplierReturnId], references: [id])
 
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   resolvedAt     DateTime?
 
-  @@index([companyId, lossType])
+  @@index([companyId, lossType, investigationStatus])
+  @@index([companyId, createdAt])
   @@index([orgVariantId])
 }
 

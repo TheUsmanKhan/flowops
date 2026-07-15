@@ -73,6 +73,40 @@ export async function PATCH(
       })
     }
 
+    // If status = 'rejected': auto-create a supplier_dispute stock_loss_records entry
+    if (body.status === 'rejected' && !record.linkedLossRecord) {
+      const lossRecord = await db.stockLossRecord.create({
+        data: {
+          organizationId: orgId,
+          companyId,
+          orgVariantId: record.orgVariantId,
+          locationId: record.locationId,
+          lossType: 'supplier_dispute',
+          subType: 'confirmed',
+          quantity: record.quantity,
+          costPerUnit: record.costPerUnit,
+          investigationStatus: 'none',
+          resolution: 'written_off',
+          responsibleParty: 'supplier',
+          notes: `Auto-created from rejected supplier return. ${body.notes || ''}`,
+          reportedById: caller.id,
+          resolvedById: caller.id,
+          resolvedAt: new Date(),
+          supplierReturnId: id,
+        },
+      })
+      await insertAuditLog({
+        action: 'stock_loss.supplier_dispute_created',
+        entityType: 'stock_loss',
+        entityId: lossRecord.id,
+        companyId,
+        organizationId: orgId,
+        userId: user.id,
+        employeeId: caller.id,
+        newValues: { supplierReturnId: id, quantity: record.quantity },
+      })
+    }
+
     await insertAuditLog({
       action: 'supplier_return.resolved',
       entityType: 'supplier_return',

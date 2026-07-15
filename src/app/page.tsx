@@ -45,6 +45,7 @@ import { PoDetailView } from '@/components/inventory/po-detail-view'
 import { SupplierReturnsView } from '@/components/inventory/supplier-returns-view'
 import { ProductionOrdersView } from '@/components/inventory/production-orders-view'
 import { LossesView } from '@/components/inventory/losses-view'
+import { LossDetailView } from '@/components/inventory/loss-detail-view'
 import { CycleCountsView } from '@/components/inventory/cycle-counts-view'
 import { Card, CardContent } from '@/components/ui/card'
 
@@ -228,6 +229,8 @@ function renderRoute(
       return <ProductionOrdersView />
     case 'inventory-losses':
       return <LossesView />
+    case 'inventory-loss-detail':
+      return <LossDetailView lossId={route.id} />
     case 'inventory-cycle-counts':
       return <CycleCountsView />
     default:

@@ -213,7 +213,7 @@ export async function PATCH(
     }
 
     if (action === 'approve') {
-      // Process cycle_count_adjust transactions for items with discrepancies
+      // Process items with discrepancies
       const items = await db.cycleCountItem.findMany({
         where: { cycleCountId: id, countedQuantity: { not: null } },
       })
@@ -223,30 +223,87 @@ export async function PATCH(
         const discrepancy = item.countedQuantity - item.systemQuantity
         if (discrepancy === 0) continue
 
-        // Process a cycle_count_adjust transaction
-        // quantity = the NEW on_hand value (set directly)
-        const txnResult = await processInventoryTransaction({
-          orgVariantId: item.orgVariantId,
-          locationId: count.locationId,
-          organizationId: orgId,
-          companyId: company.id,
-          employeeId: caller.id,
-          transactionType: 'cycle_count_adjust',
-          quantity: item.countedQuantity,
-          costPerUnit: null,
-          referenceType: 'cycle_count',
-          referenceId: id,
-          notes: `Cycle count adjustment: ${item.systemQuantity} → ${item.countedQuantity}`,
-        })
+        const absDiscrepancy = Math.abs(discrepancy)
 
-        if (txnResult.success && txnResult.transactionId) {
-          await db.cycleCountItem.update({
-            where: { id: item.id },
-            data: {
-              adjustmentApproved: true,
-              inventoryTxnId: txnResult.transactionId,
-            },
+        // If shortage AND discrepancy_reason is theft_suspected or unknown:
+        // create a missing stock_loss_records entry (quarantine) instead of adjusting
+        if (discrepancy < 0 && (item.discrepancyReason === 'theft_suspected' || item.discrepancyReason === 'unknown')) {
+          // Quarantine the missing quantity
+          const { quarantineStock } = await import('@/lib/inventory')
+          const quarantineResult = await quarantineStock(item.orgVariantId, count.locationId, absDiscrepancy)
+          if (quarantineResult.success) {
+            // Fetch avg_cost for the loss record
+            const pool = await db.inventoryPool.findUnique({
+              where: { orgVariantId_locationId: { orgVariantId: item.orgVariantId, locationId: count.locationId } },
+            })
+            const avgCost = pool ? Number(pool.avgCost) : 0
+
+            // Create missing stock_loss_records entry
+            await db.stockLossRecord.create({
+              data: {
+                organizationId: orgId,
+                companyId: company.id,
+                orgVariantId: item.orgVariantId,
+                locationId: count.locationId,
+                lossType: 'missing',
+                subType: 'suspected',
+                quantity: absDiscrepancy,
+                costPerUnit: avgCost,
+                investigationStatus: 'open',
+                resolution: null,
+                responsibleParty: 'unknown',
+                notes: `Auto-created from cycle count ${count.countName}. Discrepancy reason: ${item.discrepancyReason}`,
+                reportedById: caller.id,
+                // metadata linking back to cycle count could go in notes
+              },
+            })
+          }
+          // Still need to adjust the on_hand to match counted quantity
+          // The quarantine reduced available, but on_hand needs to be set to counted value
+          const txnResult = await processInventoryTransaction({
+            orgVariantId: item.orgVariantId,
+            locationId: count.locationId,
+            organizationId: orgId,
+            companyId: company.id,
+            employeeId: caller.id,
+            transactionType: 'cycle_count_adjust',
+            quantity: item.countedQuantity,
+            costPerUnit: null,
+            referenceType: 'cycle_count',
+            referenceId: id,
+            notes: `Cycle count adjustment (shortage - quarantined as missing): ${item.systemQuantity} → ${item.countedQuantity}`,
           })
+          if (txnResult.success && txnResult.transactionId) {
+            await db.cycleCountItem.update({
+              where: { id: item.id },
+              data: { adjustmentApproved: true, inventoryTxnId: txnResult.transactionId },
+            })
+          }
+        } else {
+          // Normal cycle_count_adjust for recording_error, transfer_not_recorded, damage_not_recorded, or surplus
+          const txnResult = await processInventoryTransaction({
+            orgVariantId: item.orgVariantId,
+            locationId: count.locationId,
+            organizationId: orgId,
+            companyId: company.id,
+            employeeId: caller.id,
+            transactionType: 'cycle_count_adjust',
+            quantity: item.countedQuantity,
+            costPerUnit: null,
+            referenceType: 'cycle_count',
+            referenceId: id,
+            notes: `Cycle count adjustment: ${item.systemQuantity} → ${item.countedQuantity}`,
+          })
+
+          if (txnResult.success && txnResult.transactionId) {
+            await db.cycleCountItem.update({
+              where: { id: item.id },
+              data: {
+                adjustmentApproved: true,
+                inventoryTxnId: txnResult.transactionId,
+              },
+            })
+          }
         }
       }
 
