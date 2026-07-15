@@ -86,6 +86,7 @@ model Organization {
   cycleCounts          CycleCount[]
   cycleCountItems      CycleCountItem[]
   productionOrders     ProductionOrder[]
+  attributeValueRules  AttributeValueRule[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -400,6 +401,9 @@ model OrgAttribute {
 
   values         OrgAttributeValue[]
 
+  // Sprint 9 — Generic attribute rules (e.g. "Unstitched" forces "One Size")
+  rulesAsForcedAttr   AttributeValueRule[] @relation("ForcedAttribute")
+
   @@unique([organizationId, name])
   @@index([organizationId])
 }
@@ -419,7 +423,33 @@ model OrgAttributeValue {
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
 
+  // Sprint 9 — back-relations for attribute value rules
+  rulesAsTrigger AttributeValueRule[] @relation("TriggerValue")
+  rulesAsForced  AttributeValueRule[] @relation("ForcedValue")
+
   @@unique([attributeId, value])
+  @@index([organizationId])
+}
+
+/// Generic conditional rules: "when trigger value is selected, force another attribute to a specific value."
+/// e.g. Piece Type = "Unstitched" forces Size = "One Size"
+model AttributeValueRule {
+  id                      String   @id @default(cuid())
+  organizationId          String
+  organization            Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  triggerAttributeValueId String
+  triggerAttributeValue   OrgAttributeValue @relation("TriggerValue", fields: [triggerAttributeValueId], references: [id], onDelete: Cascade)
+
+  forcesAttributeId       String
+  forcesAttribute         OrgAttribute @relation("ForcedAttribute", fields: [forcesAttributeId], references: [id], onDelete: Cascade)
+
+  forcesValueId           String
+  forcesValue             OrgAttributeValue @relation("ForcedValue", fields: [forcesValueId], references: [id], onDelete: Cascade)
+
+  createdAt               DateTime @default(now())
+
+  @@unique([triggerAttributeValueId, forcesAttributeId])
   @@index([organizationId])
 }
 

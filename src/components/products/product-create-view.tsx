@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
@@ -25,7 +25,6 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -48,16 +47,17 @@ import {
   Plus,
   Zap,
   Trash2,
+  Sparkles,
 } from 'lucide-react'
 import {
-  FULFILLMENT_LABELS,
   PRODUCT_TYPE_LABELS,
   PRODUCT_SCOPE_LABELS,
-  STITCHING_LABELS,
-  STANDARD_SIZES,
-  DEFAULT_PRODUCTION_DAYS,
 } from '@/lib/constants/fulfillment-types'
 import { cn } from '@/lib/utils'
+import {
+  AttributeSelector,
+  type SelectionState,
+} from '@/components/products/attribute-selector'
 
 // ----------------------------------------------------------------------------
 // Types
@@ -115,32 +115,6 @@ type ProductType = 'simple' | 'variable' | 'bundle' | 'service'
 type ProductScope = 'private' | 'organization' | 'selective'
 
 const STEPS = ['Basic Details', 'Variants & Pricing', 'Scope & Confirm'] as const
-
-const STITCHING_OPTIONS: Array<{
-  key: 'stitched_basic' | 'stitched_heavy' | 'custom_order'
-  label: string
-  icon: typeof Scissors
-  description: string
-}> = [
-  {
-    key: 'stitched_basic',
-    label: 'Basic Stitching',
-    icon: Scissors,
-    description: 'Standard fit & finish for everyday wear.',
-  },
-  {
-    key: 'stitched_heavy',
-    label: 'Heavy Embroidery',
-    icon: Shirt,
-    description: 'Intricate embroidery work for formal pieces.',
-  },
-  {
-    key: 'custom_order',
-    label: 'Custom Order',
-    icon: Package,
-    description: 'Bespoke tailoring with measurements on file.',
-  },
-]
 
 const PRODUCT_TYPE_OPTIONS: Array<{
   key: ProductType
@@ -221,25 +195,10 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
   // Step 2 — simple mode
   const [simpleVariant, setSimpleVariant] = useState<VariantDraft>(blankSimpleVariant())
 
-  // Step 2 — stitchable mode
-  const [includeUnstitched, setIncludeUnstitched] = useState(true)
-  const [baseFabricCost, setBaseFabricCost] = useState<number>(0)
-  const [includeSizes, setIncludeSizes] = useState(false)
-  const [selectedSizes, setSelectedSizes] = useState<string[]>([])
-  const [customSizes, setCustomSizes] = useState<string[]>([])
-  const [customSizeInput, setCustomSizeInput] = useState('')
-  const [stitchingTypes, setStitchingTypes] = useState<
-    Array<{
-      type: 'stitched_basic' | 'stitched_heavy' | 'custom_order'
-      enabled: boolean
-      charge: number
-      productionDays: number
-    }>
-  >([
-    { type: 'stitched_basic', enabled: true, charge: 0, productionDays: DEFAULT_PRODUCTION_DAYS.stitched_basic },
-    { type: 'stitched_heavy', enabled: false, charge: 0, productionDays: DEFAULT_PRODUCTION_DAYS.stitched_heavy },
-    { type: 'custom_order', enabled: false, charge: 0, productionDays: DEFAULT_PRODUCTION_DAYS.custom_order },
-  ])
+  // Step 2 — stitchable / generic-attribute mode
+  const [attributeSelection, setAttributeSelection] = useState<SelectionState>({
+    selectedAttributes: [],
+  })
   const [generatedVariants, setGeneratedVariants] = useState<
     Array<GeneratedVariant & { sale_price: number; is_active: boolean }>
   >([])
@@ -285,7 +244,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
       const variants = collectVariantsForValidation()
       if (variants.length === 0) {
         if (isStitchable && productType === 'variable') {
-          return 'Generate at least one variant using the “Generate Variants” button.'
+          return 'Pick at least one attribute and value to generate variants.'
         }
         return 'Add at least one variant.'
       }
@@ -296,14 +255,6 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
         }
         if (typeof v.cost_price !== 'number' || v.cost_price < 0) {
           return `Variant ${v.sku || '(unnamed)'} needs a valid cost price.`
-        }
-      }
-      if (isStitchable && productType === 'variable') {
-        if (stitchingTypes.every((s2) => !s2.enabled)) {
-          return 'Enable at least one stitching type.'
-        }
-        if (includeUnstitched && (!baseFabricCost || baseFabricCost < 0)) {
-          return 'Enter the unstitched fabric cost.'
         }
       }
     }
@@ -349,53 +300,77 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
     setStep((s) => Math.min(s + 1, STEPS.length - 1))
   }
 
-  // ---- Stitchable: generate variants via API
-  async function generateVariants() {
-    setSubmitError(null)
-    const enabledTypes = stitchingTypes.filter((s) => s.enabled).map((s) => s.type)
-    if (enabledTypes.length === 0) {
-      setSubmitError('Enable at least one stitching type.')
-      return
-    }
-    if (includeUnstitched && (!baseFabricCost || baseFabricCost < 0)) {
-      setSubmitError('Enter the unstitched fabric cost.')
-      return
-    }
-    setGenerating(true)
-    try {
-      const sizes = includeSizes ? [...selectedSizes, ...customSizes] : []
-      const res = await api.post<{ variants: GeneratedVariant[] }>(
-        '/api/products/generate-stitched',
-        {
+  // ---- Generic attribute mode: regenerate variants whenever the attribute
+  // selection changes. Calls the generate endpoint with the selection and a
+  // dummy product id (the route doesn't use the id — it accepts product_slug
+  // in the body and returns pure combinations).
+  const lastReqIdRef = useRef(0)
+  const handleAttributeChange = useCallback(
+    (selection: SelectionState) => {
+      setAttributeSelection(selection)
+      if (selection.selectedAttributes.length === 0) {
+        setGeneratedVariants([])
+        return
+      }
+      const reqId = ++lastReqIdRef.current
+      setGenerating(true)
+      api
+        .post<{
+          combinations: Array<{
+            attribute_values: Record<string, string>
+            suggested_sku: string
+            suggested_fulfillment_type: string
+          }>
+        }>(`/api/products/new/variants/generate`, {
           product_slug: slug,
           base_sku: baseSku.trim() || undefined,
-          sizes,
-          stitching_types: enabledTypes,
-          base_fabric_cost: Number(baseFabricCost) || 0,
-          base_stitching: stitchingTypes.find((s) => s.type === 'stitched_basic')?.charge ?? 0,
-          heavy_stitching: stitchingTypes.find((s) => s.type === 'stitched_heavy')?.charge ?? 0,
-          custom_stitching: stitchingTypes.find((s) => s.type === 'custom_order')?.charge ?? 0,
-          include_unstitched: includeUnstitched,
-        },
-      )
-      // Default sale price = cost + 30% markup so the user has a starting point
-      setGeneratedVariants(
-        res.variants.map((v) => ({
-          ...v,
-          sale_price: Math.ceil((v.cost_price * 1.3) * 100) / 100,
-          is_active: true,
-        })),
-      )
-      toast.success(`${res.variants.length} variants generated.`)
-    } catch (err) {
-      const msg =
-        err instanceof FetchError ? err.message : 'Failed to generate variants.'
-      setSubmitError(msg)
-      toast.error(msg)
-    } finally {
-      setGenerating(false)
-    }
-  }
+          selected_attributes: selection.selectedAttributes,
+        })
+        .then((res) => {
+          // Stale-response guard — keep only the latest reply.
+          if (reqId !== lastReqIdRef.current) return
+          // Preserve user edits (sale_price, is_active, cost_price) for
+          // existing SKUs; default new ones with a 30% markup on cost (=0).
+          setGeneratedVariants((prev) => {
+            const prevBySku = new Map(prev.map((v) => [v.sku, v]))
+            return res.combinations.map((c, i) => {
+              const existing = prevBySku.get(c.suggested_sku)
+              return {
+                sku: c.suggested_sku,
+                attribute_values: c.attribute_values,
+                cost_price: existing?.cost_price ?? 0,
+                stitching_charges: existing?.stitching_charges ?? 0,
+                fulfillment_type: c.suggested_fulfillment_type,
+                stitching_type:
+                  existing?.stitching_type ??
+                  (c.suggested_fulfillment_type === 'made_to_order'
+                    ? 'stitched_basic'
+                    : 'unstitched'),
+                production_days: existing?.production_days ?? 0,
+                requires_shipping: existing?.requires_shipping ?? true,
+                allow_backorder: existing?.allow_backorder ?? false,
+                is_default: existing?.is_default ?? i === 0,
+                sale_price: existing?.sale_price ?? 0,
+                is_active: existing?.is_active ?? true,
+              }
+            })
+          })
+        })
+        .catch((err) => {
+          if (reqId !== lastReqIdRef.current) return
+          const msg =
+            err instanceof FetchError
+              ? err.message
+              : 'Failed to generate variant combinations.'
+          setSubmitError(msg)
+          toast.error(msg)
+        })
+        .finally(() => {
+          if (reqId === lastReqIdRef.current) setGenerating(false)
+        })
+    },
+    [slug, baseSku],
+  )
 
   // ---- Submit final product
   async function submit() {
@@ -427,12 +402,13 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
       brand_id: brandId || undefined,
       product_scope: productScope,
       is_stitchable: isStitchable,
-      stitching_base_price:
-        isStitchable && productType === 'variable' ? Number(baseFabricCost) || 0 : 0,
+      stitching_base_price: 0,
       has_size_variants:
-        isStitchable && productType === 'variable'
-          ? includeSizes && (selectedSizes.length + customSizes.length) > 0
-          : false,
+        isStitchable &&
+        productType === 'variable' &&
+        attributeSelection.selectedAttributes.some(
+          (a) => a.attribute_name.toLowerCase() === 'size',
+        ),
       is_active: true,
       is_featured: isFeatured,
       variants: variants.map((v) => ({
@@ -729,28 +705,15 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
               />
             )}
 
-            {/* Mode B: Stitchable variable product */}
+            {/* Mode B: Stitchable variable product (generic attribute-driven) */}
             {productType === 'variable' && isStitchable && (
               <StitchableVariantBuilder
                 slug={slug}
-                includeUnstitched={includeUnstitched}
-                setIncludeUnstitched={setIncludeUnstitched}
-                baseFabricCost={baseFabricCost}
-                setBaseFabricCost={setBaseFabricCost}
-                includeSizes={includeSizes}
-                setIncludeSizes={setIncludeSizes}
-                selectedSizes={selectedSizes}
-                setSelectedSizes={setSelectedSizes}
-                customSizes={customSizes}
-                setCustomSizes={setCustomSizes}
-                customSizeInput={customSizeInput}
-                setCustomSizeInput={setCustomSizeInput}
-                stitchingTypes={stitchingTypes}
-                setStitchingTypes={setStitchingTypes}
+                selection={attributeSelection}
+                onSelectionChange={handleAttributeChange}
                 generatedVariants={generatedVariants}
                 setGeneratedVariants={setGeneratedVariants}
                 generating={generating}
-                onGenerate={generateVariants}
               />
             )}
 
@@ -1295,87 +1258,32 @@ function SimpleVariantForm({
   )
 }
 
-// ---- Stitchable variant builder (Mode B)
+// ---- Stitchable variant builder (Mode B) — generic attribute-driven
 function StitchableVariantBuilder({
-  slug,
-  includeUnstitched,
-  setIncludeUnstitched,
-  baseFabricCost,
-  setBaseFabricCost,
-  includeSizes,
-  setIncludeSizes,
-  selectedSizes,
-  setSelectedSizes,
-  customSizes,
-  setCustomSizes,
-  customSizeInput,
-  setCustomSizeInput,
-  stitchingTypes,
-  setStitchingTypes,
+  selection,
+  onSelectionChange,
   generatedVariants,
   setGeneratedVariants,
   generating,
-  onGenerate,
 }: {
   slug: string
-  includeUnstitched: boolean
-  setIncludeUnstitched: (v: boolean) => void
-  baseFabricCost: number
-  setBaseFabricCost: (v: number) => void
-  includeSizes: boolean
-  setIncludeSizes: (v: boolean) => void
-  selectedSizes: string[]
-  setSelectedSizes: (v: string[]) => void
-  customSizes: string[]
-  setCustomSizes: (v: string[]) => void
-  customSizeInput: string
-  setCustomSizeInput: (v: string) => void
-  stitchingTypes: Array<{
-    type: 'stitched_basic' | 'stitched_heavy' | 'custom_order'
-    enabled: boolean
-    charge: number
-    productionDays: number
-  }>
-  setStitchingTypes: (v: StitchableVariantBuilderPropsArg) => void
+  selection: SelectionState
+  onSelectionChange: (selection: SelectionState) => void
   generatedVariants: Array<GeneratedVariant & { sale_price: number; is_active: boolean }>
-  setGeneratedVariants: (v: Array<GeneratedVariant & { sale_price: number; is_active: boolean }>) => void
+  setGeneratedVariants: (
+    v: Array<GeneratedVariant & { sale_price: number; is_active: boolean }>,
+  ) => void
   generating: boolean
-  onGenerate: () => void
 }) {
-  function toggleSize(size: string) {
-    if (selectedSizes.includes(size)) {
-      setSelectedSizes(selectedSizes.filter((s) => s !== size))
-    } else {
-      setSelectedSizes([...selectedSizes, size])
+  // Collect the union of attribute keys across all generated variants so the
+  // preview table can render dynamic columns.
+  const attributeKeys = useMemo(() => {
+    const keys = new Set<string>()
+    for (const v of generatedVariants) {
+      for (const k of Object.keys(v.attribute_values)) keys.add(k)
     }
-  }
-  function addCustomSize() {
-    const s = customSizeInput.trim().toUpperCase()
-    if (!s) return
-    if ([...STANDARD_SIZES, ...customSizes].includes(s)) {
-      setCustomSizeInput('')
-      return
-    }
-    setCustomSizes([...customSizes, s])
-    setCustomSizeInput('')
-  }
-  function toggleStitchingType(t: 'stitched_basic' | 'stitched_heavy' | 'custom_order') {
-    setStitchingTypes(
-      stitchingTypes.map((s) =>
-        s.type === t ? { ...s, enabled: !s.enabled } : s,
-      ),
-    )
-  }
-  function setStitchingCharge(t: 'stitched_basic' | 'stitched_heavy' | 'custom_order', charge: number) {
-    setStitchingTypes(
-      stitchingTypes.map((s) => (s.type === t ? { ...s, charge } : s)),
-    )
-  }
-  function setStitchingDays(t: 'stitched_basic' | 'stitched_heavy' | 'custom_order', days: number) {
-    setStitchingTypes(
-      stitchingTypes.map((s) => (s.type === t ? { ...s, productionDays: days } : s)),
-    )
-  }
+    return Array.from(keys)
+  }, [generatedVariants])
 
   function updateGenerated(
     index: number,
@@ -1386,202 +1294,92 @@ function StitchableVariantBuilder({
     )
   }
 
+  const totalSelectedValues = selection.selectedAttributes.reduce(
+    (sum, a) => sum + a.selected_values.length,
+    0,
+  )
+
   return (
     <div className="space-y-5">
-      {/* Top toggles */}
-      <div className="grid sm:grid-cols-2 gap-4">
-        <ToggleRow
-          label="Include unstitched option?"
-          description="A standalone fabric SKU with no stitching."
-          checked={includeUnstitched}
-          onChange={setIncludeUnstitched}
-          icon={Shirt}
-        />
-        <div className={cn('rounded-lg border p-3 space-y-2', !includeUnstitched && 'opacity-50 pointer-events-none')}>
-          <Label>Unstitched fabric cost</Label>
-          <Input
-            type="number"
-            min="0"
-            step="0.01"
-            value={baseFabricCost || ''}
-            onChange={(e) => setBaseFabricCost(Number(e.target.value))}
-            placeholder="0.00"
-          />
-          <p className="text-xs text-muted-foreground">Base cost used for all generated variants.</p>
-        </div>
+      {/* Intro blurb */}
+      <div className="rounded-lg border border-primary/20 bg-primary/[0.03] p-3 text-xs text-muted-foreground">
+        <p className="flex items-center gap-1.5 font-medium text-foreground">
+          <Sparkles className="h-3.5 w-3.5 text-primary" /> Generic attribute-driven variants
+        </p>
+        <p className="mt-1">
+          Pick up to 3 attributes (Shopify limit) and toggle the values you want
+          to sell. We&apos;ll generate every valid SKU combination for you,
+          respecting any conditional rules you&apos;ve set up in catalog settings.
+        </p>
       </div>
 
-      <ToggleRow
-        label="Include size variants?"
-        description="Generate size-specific SKUs (S, M, L, etc)."
-        checked={includeSizes}
-        onChange={setIncludeSizes}
-        icon={Tag}
+      {/* The selector */}
+      <AttributeSelector
+        onChange={onSelectionChange}
+        initialSelection={selection.selectedAttributes.length > 0 ? selection : undefined}
       />
 
-      {includeSizes && (
-        <div className="rounded-lg border p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <p className="text-sm font-medium">Sizes</p>
-            <p className="text-xs text-muted-foreground">
-              {selectedSizes.length + customSizes.length} selected
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {STANDARD_SIZES.map((s) => {
-              const active = selectedSizes.includes(s)
-              return (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => toggleSize(s)}
-                  className={cn(
-                    'h-9 min-w-9 px-3 rounded-md border text-sm font-medium transition-colors',
-                    active
-                      ? 'border-primary bg-primary text-primary-foreground'
-                      : 'border-border hover:border-primary/40 hover:bg-muted/40',
-                  )}
-                >
-                  {s}
-                </button>
-              )
-            })}
-            {customSizes.map((s) => (
-              <button
-                key={s}
-                type="button"
-                onClick={() => setCustomSizes(customSizes.filter((x) => x !== s))}
-                className="h-9 px-3 rounded-md border border-primary bg-primary text-primary-foreground text-sm font-medium inline-flex items-center gap-1.5"
-              >
-                {s}
-                <span className="text-primary-foreground/70">×</span>
-              </button>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <Input
-              value={customSizeInput}
-              onChange={(e) => setCustomSizeInput(e.target.value)}
-              placeholder="Custom size (e.g. 38, M-Tall)"
-              className="max-w-xs"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.preventDefault()
-                  addCustomSize()
-                }
-              }}
-            />
-            <Button type="button" variant="outline" onClick={addCustomSize}>
-              <Plus className="h-4 w-4" /> Add size
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* Stitching types */}
-      <div className="rounded-lg border p-4 space-y-3">
-        <p className="text-sm font-medium">Stitching types</p>
-        <p className="text-xs text-muted-foreground">
-          Pick the stitching options customers can choose from. Each gets its own SKU(s).
-        </p>
-        <div className="space-y-3">
-          {STITCHING_OPTIONS.map((opt) => {
-            const cfg = stitchingTypes.find((s) => s.type === opt.key)!
-            return (
-              <div
-                key={opt.key}
-                className={cn(
-                  'rounded-md border p-3 transition-colors',
-                  cfg.enabled ? 'border-primary/40 bg-primary/5' : 'border-border',
-                )}
-              >
-                <div className="flex items-start gap-3">
-                  <Checkbox
-                    checked={cfg.enabled}
-                    onCheckedChange={() => toggleStitchingType(opt.key)}
-                    className="mt-0.5"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <opt.icon className="h-4 w-4 text-muted-foreground" />
-                      <p className="text-sm font-medium">{opt.label}</p>
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {opt.description}
-                    </p>
-                    {cfg.enabled && (
-                      <div className="grid sm:grid-cols-2 gap-3 mt-3">
-                        <div className="space-y-1">
-                          <Label className="text-xs">Stitching charge</Label>
-                          <Input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={cfg.charge || ''}
-                            onChange={(e) => setStitchingCharge(opt.key, Number(e.target.value))}
-                            placeholder="0.00"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <Label className="text-xs">Production days</Label>
-                          <Input
-                            type="number"
-                            min="0"
-                            step="1"
-                            value={cfg.productionDays || ''}
-                            onChange={(e) => setStitchingDays(opt.key, Number(e.target.value))}
-                            placeholder="e.g. 7"
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )
-          })}
-        </div>
-      </div>
-
-      {/* Generate */}
+      {/* Live preview count */}
       <div className="flex items-center justify-between rounded-lg border border-primary/20 bg-primary/5 p-3">
         <div>
-          <p className="text-sm font-medium">Generate variants</p>
-          <p className="text-xs text-muted-foreground">
-            Creates SKU combinations from your selections.
+          <p className="text-sm font-medium flex items-center gap-1.5">
+            {generating ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+            ) : (
+              <Zap className="h-3.5 w-3.5 text-primary" />
+            )}
+            Variant preview
+          </p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {selection.selectedAttributes.length === 0 ? (
+              <>Select at least one attribute and value to see combinations.</>
+            ) : totalSelectedValues === 0 ? (
+              <>Select at least one value to see combinations.</>
+            ) : generating ? (
+              <>Calculating combinations…</>
+            ) : (
+              <>
+                <span className="font-medium text-foreground">
+                  {generatedVariants.length}
+                </span>{' '}
+                variant{generatedVariants.length === 1 ? '' : 's'} will be
+                generated.
+              </>
+            )}
           </p>
         </div>
-        <Button onClick={onGenerate} disabled={generating}>
-          {generating ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
-          ) : (
-            <Zap className="h-4 w-4" />
-          )}
-          Generate Variants
-        </Button>
+        {generatedVariants.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setGeneratedVariants([])}
+            disabled={generating}
+          >
+            Clear preview
+          </Button>
+        )}
       </div>
 
-      {/* Preview table */}
+      {/* Preview table — dynamic attribute columns + per-row editable fields */}
       {generatedVariants.length > 0 && (
         <div className="rounded-lg border overflow-hidden">
           <div className="flex items-center justify-between p-3 border-b bg-muted/30">
             <p className="text-sm font-medium">
               Generated variants ({generatedVariants.length})
             </p>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setGeneratedVariants([])}
-            >
-              Clear
-            </Button>
+            <p className="text-xs text-muted-foreground">
+              Adjust prices, fulfillment, and active state per row.
+            </p>
           </div>
           <div className="max-h-96 overflow-y-auto scrollbar-thin">
             <table className="w-full text-sm">
               <thead className="bg-muted/30 sticky top-0 z-10">
                 <tr className="text-left text-xs text-muted-foreground">
-                  <th className="px-3 py-2 font-medium">Piece type</th>
-                  <th className="px-3 py-2 font-medium">Size</th>
+                  {attributeKeys.map((k) => (
+                    <th key={k} className="px-3 py-2 font-medium">
+                      {k}
+                    </th>
+                  ))}
                   <th className="px-3 py-2 font-medium">SKU</th>
                   <th className="px-3 py-2 font-medium">Cost</th>
                   <th className="px-3 py-2 font-medium">Fulfillment</th>
@@ -1592,21 +1390,49 @@ function StitchableVariantBuilder({
               <tbody>
                 {generatedVariants.map((v, i) => (
                   <tr key={v.sku} className="border-t">
-                    <td className="px-3 py-2 text-xs">
-                      {v.attribute_values['Piece Type'] ?? '—'}
-                    </td>
-                    <td className="px-3 py-2 text-xs">
-                      {v.attribute_values['Size'] ?? '—'}
-                    </td>
-                    <td className="px-3 py-2 font-mono text-xs">{v.sku}</td>
-                    <td className="px-3 py-2 text-xs">
-                      <div>{formatMoney(v.cost_price)}</div>
-                      <div className="text-[10px] text-muted-foreground">
-                        fabric {formatMoney(v.cost_price - v.stitching_charges)} + stitching {formatMoney(v.stitching_charges)}
-                      </div>
+                    {attributeKeys.map((k) => (
+                      <td key={k} className="px-3 py-2 text-xs">
+                        {v.attribute_values[k] ?? '—'}
+                      </td>
+                    ))}
+                    <td className="px-3 py-2">
+                      <Input
+                        value={v.sku}
+                        onChange={(e) =>
+                          updateGenerated(i, { sku: e.target.value })
+                        }
+                        className="h-8 w-40 text-xs font-mono"
+                      />
                     </td>
                     <td className="px-3 py-2">
-                      <FulfillmentBadge type={v.fulfillment_type} />
+                      <Input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={v.cost_price || ''}
+                        onChange={(e) =>
+                          updateGenerated(i, { cost_price: Number(e.target.value) })
+                        }
+                        className="h-8 w-20 text-xs"
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <Select
+                        value={v.fulfillment_type}
+                        onValueChange={(val) =>
+                          updateGenerated(i, {
+                            fulfillment_type: val as 'stock_based' | 'made_to_order',
+                          })
+                        }
+                      >
+                        <SelectTrigger className="h-8 w-32 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="stock_based">Stock Tracked</SelectItem>
+                          <SelectItem value="made_to_order">Made to Order</SelectItem>
+                        </SelectContent>
+                      </Select>
                     </td>
                     <td className="px-3 py-2">
                       <Input
@@ -1634,21 +1460,16 @@ function StitchableVariantBuilder({
         </div>
       )}
 
-      {generatedVariants.length === 0 && (
+      {generatedVariants.length === 0 && !generating && (
         <p className="text-xs text-muted-foreground text-center py-4 border border-dashed rounded-lg">
-          No variants generated yet. Click <span className="font-medium">Generate Variants</span> above.
+          {selection.selectedAttributes.length === 0
+            ? 'Pick attributes and values above to see combinations.'
+            : 'Pick at least one value above to see combinations.'}
         </p>
       )}
     </div>
   )
 }
-
-type StitchableVariantBuilderPropsArg = Array<{
-  type: 'stitched_basic' | 'stitched_heavy' | 'custom_order'
-  enabled: boolean
-  charge: number
-  productionDays: number
-}>
 
 // ---- Regular variant builder (Mode C)
 function RegularVariantBuilder({
@@ -1827,10 +1648,6 @@ function slugify(s: string): string {
     .slice(0, 80) || 'product'
 }
 
-function formatMoney(n: number): string {
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n)
-}
-
 function attrsToText(attrs: Record<string, string>): string {
   return Object.entries(attrs)
     .map(([k, v]) => `${k}: ${v}`)
@@ -1848,20 +1665,4 @@ function textToAttrs(text: string): Record<string, string> {
   return out
 }
 
-// Reused badge for fulfillment type
-function FulfillmentBadge({ type }: { type: string }) {
-  const label = FULFILLMENT_LABELS[type] ?? type
-  const isStock = type === 'stock_based'
-  return (
-    <Badge
-      className={cn(
-        'border-transparent text-[10px]',
-        isStock
-          ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100'
-          : 'bg-sky-100 text-sky-700 hover:bg-sky-100',
-      )}
-    >
-      {label}
-    </Badge>
-  )
-}
+

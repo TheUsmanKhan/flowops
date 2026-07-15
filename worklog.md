@@ -782,3 +782,66 @@ Stage Summary:
 - Resolve flows split into two paths: theft/missing uses an AlertDialog-confirmed Written Off / Recovered / Error Corrected radio; transit_loss uses a Claim Accepted (with amount) / Claim Rejected radio. Both submit to `POST /api/stock-loss/resolve`.
 - New loss-detail-view.tsx provides a per-record detail page with left-column loss info and a right column that varies by loss_type (damaged → written-off status + linked txn; theft/missing open → inline resolution form; theft/missing closed → resolution banner + linked txn; transit_loss → courier claim section with inline or finalized state; supplier_dispute → read-only with link to original return).
 - Production-ready: full loading/empty/error states, permission gating, optimistic cache invalidation, Sonner toasts, mobile-responsive layouts, custom scrollbars on long lists/dialogs.
+
+---
+Task ID: SPRINT9-GENERIC-ATTRIBUTES
+Agent: main
+Task: Build the generic AttributeSelector component and refactor StitchableVariantBuilder (Mode B) in product-create-view.tsx to use it. Replace hardcoded Size/Stitching UI with a fully attribute-driven system.
+
+Work Log:
+- Read worklog.md (full history of prior sprints) and the existing `src/components/products/product-create-view.tsx` (1,867 lines) to understand the Mode B StitchableVariantBuilder — it had hardcoded `includeUnstitched` / `baseFabricCost` / `includeSizes` / `selectedSizes` / `customSizes` / `stitchingTypes` state and called `POST /api/products/generate-stitched` with stitching_type enums.
+- Inspected the four backend routes the new component depends on:
+  * `GET /api/catalog/available-attributes` — returns `{ attributes: [{id, name, displayName, attributeType, displayOrder, values: [...]}], rules: [{id, triggerValueId, triggerValueInfo, forcesAttributeId, forcesAttributeName, forcesValueId, forcesValueInfo}] }`.
+  * `POST /api/catalog/inline-attribute` — body `{ name, display_name?, attribute_type?, initial_values?: [{value, display_value?, sku_code?, color_hex?}] }` → returns the new attribute with values.
+  * `POST /api/catalog/inline-value` — body `{ attribute_id, value, display_value?, sku_code?, color_hex? }` → returns the new value.
+  * `POST /api/products/[id]/variants/generate` — body `{ product_slug, base_sku?, selected_attributes: SelectionStateAttribute[] }` → returns `{ combinations: [{ attribute_values, suggested_sku, suggested_fulfillment_type }] }`. The route doesn't read the path `id` — only `product_slug` from the body — so a dummy `'new'` id is safe for the wizard (product isn't created until final submit). The route applies `attribute_value_rules` at generation time so rule-violating combinations are never returned.
+- Confirmed `PERMISSIONS.PRODUCTS_MANAGE_CATALOG` ('products.manage_catalog') in `lib/permissions.ts` and `useCan()` in `stores/app-store.ts`.
+
+Files created/replaced:
+
+1. `src/components/products/attribute-selector.tsx` (NEW — ~820 lines):
+   * `'use client'`, TanStack Query (`queryKey: ['available-attributes']`, 30s staleTime), `useMutation` for inline value + attribute creation, Sonner toasts, `useCan()` + `PERMISSIONS.PRODUCTS_MANAGE_CATALOG` gating on all create-buttons.
+   * **Selection UI:** Each attribute renders as a checkbox-expandable block (checkbox + name + meta + collapsible chevron). When checked, value pills render below (multi-select toggleable). Color-type attributes show a color swatch + name. "+ Add Custom {Attribute Name}" button under each attribute's pills. "+ Create New Attribute" button at the bottom (only if `< 3` selected and user has catalog permission).
+   * **Max-3 enforcement:** Once 3 attributes are checked, remaining checkboxes are `disabled` and wrapped in a `Tooltip` with the exact copy: *"Products can use up to 3 attributes (Shopify compatibility). Uncheck one to select a different attribute."* Capacity counter shown in header (`{N}/3 selected`).
+   * **Conditional Rule Enforcement (GENERIC):** Pure `recomputeLocks(attrIds, valueMap, ruleList)` walks every rule and adds a lock when (a) the trigger value is currently selected AND (b) the forced attribute is currently selected. Locked value pills show a `Lock` icon and are non-deselectable (toast on click attempt). Locks are recomputed on every attribute toggle and every value toggle. No hardcoded "Piece Type" / "Size" / "Unstitched" — purely rule-data-driven.
+   * **Inline Value Creation Dialog:** Value text input (required), SKU Code (optional, helper "Leave blank to auto-generate"), Color Hex picker (only if `attributeType === 'color'`; native `<input type="color">` + hex text input). `[Add & Use Now]` calls `POST /api/catalog/inline-value`, optimistic `queryClient.setQueryData` so the new value appears instantly, `invalidateQueries(['available-attributes'])` for background refetch, toast, auto-select the new value pill (and ensure parent attribute is checked).
+   * **Inline Attribute Creation Dialog:** Key input (lowercase, no spaces), Display Name (optional), Type selector (select | color), Repeatable initial values list (value + optional SKU code + optional color swatch per row, "Add row" button). `[Create & Use Now]` calls `POST /api/catalog/inline-attribute`, optimistic cache update + invalidate, toast, auto-select the new attribute (and the first initial value if any).
+   * **RulesSummary Alert:** Surfaces active rules (only those where both trigger+forced attributes are currently selected) with amber styling and a Lock icon, so the user understands the auto-locking behavior. Describes rules by their attribute names — never hardcodes specific names.
+   * **States:** Loading skeleton (3 fake attribute blocks with skeleton pills); error card with retry button; empty state "No attributes found. Create your first attribute to start building variants." with a "Create attribute" button (catalog-permission-gated).
+   * **Output:** `onChange(selection: SelectionState)` fires on every change. SelectionState = `{ selectedAttributes: [{ attribute_id, attribute_name, display_order, selected_values: [{ value_id, value, display_value, sku_code }] }] }` (sorted by display_order ascending).
+   * **Initialization:** `useEffect` (guarded by `initedRef`) hydrates internal state from `initialSelection` once data arrives; subsequent prop changes don't re-trigger initialization.
+
+2. `src/components/products/product-create-view.tsx` (MODIFIED):
+   * **Imports cleaned:** Removed `Checkbox`, `Skeleton`, `STITCHING_LABELS`, `STANDARD_SIZES`, `DEFAULT_PRODUCTION_DAYS`. Removed the `STITCHING_OPTIONS` constant, the `formatMoney` helper, and the `FulfillmentBadge` helper (all unused after the Mode B rewrite). Added `useCallback`, `useRef`, `Sparkles` icon, `AttributeSelector` + `SelectionState` type.
+   * **State changes:** Removed `includeUnstitched`, `baseFabricCost`, `includeSizes`, `selectedSizes`, `customSizes`, `customSizeInput`, `stitchingTypes`. Added `attributeSelection: SelectionState` (initial `{ selectedAttributes: [] }`). Kept `generatedVariants` and `generating`.
+   * **Validation (`validateStep`):** Removed stitching-type / base-fabric-cost checks. New error message: "Pick at least one attribute and value to generate variants." when zero variants exist in stitchable mode.
+   * **`generateVariants` (old, removed):** Used `/api/products/generate-stitched` with hardcoded sizes + stitching types.
+   * **`handleAttributeChange` (new):** `useCallback` with deps `[slug, baseSku]`. On every AttributeSelector emission: (1) `setAttributeSelection(selection)`; (2) if empty, clear `generatedVariants`; (3) otherwise POST `/api/products/new/variants/generate` with `{ product_slug: slug, base_sku, selected_attributes: selection.selectedAttributes }`. Stale-response guard via `lastReqIdRef` (only the latest response is applied). Preserves user edits (cost_price, sale_price, is_active, fulfillment_type, stitching_type, production_days) for SKUs that already existed in `generatedVariants` (matched by SKU string). New SKUs default to `cost_price=0`, `sale_price=0`, `is_active=true`, `is_default=(i===0)`, `fulfillment_type=suggested_fulfillment_type`, `stitching_type='stitched_basic'` if MTO else `'unstitched'`.
+   * **Submit payload:** `stitching_base_price: 0` (was `baseFabricCost`). `has_size_variants` now derived from `attributeSelection.selectedAttributes.some(a => a.attribute_name.toLowerCase() === 'size')` rather than a separate toggle. Per-variant fields unchanged.
+   * **`StitchableVariantBuilder` (Mode B) — fully rewritten:** Props: `slug`, `selection`, `onSelectionChange`, `generatedVariants`, `setGeneratedVariants`, `generating`. Renders: intro blurb; `<AttributeSelector>`; live preview count card ("X variants will be generated"); preview table with **dynamic attribute columns** (computed from union of `attribute_values` keys across all generated variants) + per-row editable fields (SKU Input, Cost Input, Fulfillment Select, Sale price Input, Active Switch); empty-state copy.
+   * **Modes A (Simple/Bundle/Service) and C (Regular variable) — unchanged.** The `SimpleVariantForm` and `RegularVariantBuilder` are untouched. Only Mode B was replaced.
+
+Cross-cutting features:
+- `'use client'` at top of every new file.
+- TanStack Query for all data fetching (30s staleTime on `available-attributes`).
+- `useMutation` + `queryClient.setQueryData` (optimistic) + `queryClient.invalidateQueries(['available-attributes'])` + Sonner toasts on every mutation.
+- Permission-gated create-buttons via `useCan()` + `PERMISSIONS.PRODUCTS_MANAGE_CATALOG`.
+- Loading skeletons, empty states with CTAs, error states with retry buttons.
+- `FetchError`-typed error messages.
+- Tailwind color system per spec (NO indigo/blue). Primary uses `bg-primary` / `text-primary-foreground`. Rules summary uses amber accent for visibility. Lock icon uses muted foreground.
+- shadcn/ui components throughout: Card, Button, Input, Label, Badge, Checkbox, Skeleton, Dialog, Select, Tooltip, Alert.
+- Mobile-first responsive: attribute blocks stack 1-col on mobile, value pills wrap, dialogs are `sm:max-w-md` / `sm:max-w-lg`, preview table has `max-h-96 overflow-y-auto scrollbar-thin`.
+
+Verification:
+- Lint: `bun run lint` → 0 errors, 15 pre-existing warnings (all in unrelated files: page.tsx, locations-view, loss-detail-view, supplier-detail-view, suppliers-view, create-company-view, create-organization-view, catalog-settings-view, returned-stitched-view, roles-view, logo-upload). 0 warnings introduced in `attribute-selector.tsx` or `product-create-view.tsx`.
+- TypeScript strict: `npx tsc --noEmit` reports 0 errors in `attribute-selector.tsx` and `product-create-view.tsx`. All errors are pre-existing in unrelated files (company route, cycle-counts, dashboard, products, stock-loss, onboarding, settings).
+- API contract alignment verified against all 4 backend route handlers — every payload field matches the route's `readBody` shape and the return shapes match what the frontend consumes.
+
+Stage Summary:
+- The hardcoded Size/Stitching UI in Mode B of the product-creation wizard is replaced with a fully generic, attribute-driven `AttributeSelector` component.
+- Max-3-attribute cap (Shopify compatibility) is enforced with clear UX (disabled checkboxes + tooltip).
+- Conditional rules (`AttributeValueRule` rows) are enforced generically — when a trigger value is selected and its forced attribute is also selected, the forced value is auto-selected and locked with a Lock icon. Rule logic never hardcodes "Piece Type" / "Size" / "Unstitched" — it operates purely on `triggerValueId` / `forcesAttributeId` / `forcesValueId`.
+- Inline value + attribute creation lets users expand their catalog without leaving the product-creation flow. Both use optimistic `setQueryData` + `invalidateQueries` so the new entries appear instantly and a background refetch confirms server state.
+- The variant preview table now renders dynamic attribute columns instead of the old fixed "Piece type" / "Size" columns. Per-row editable fields (SKU, cost, fulfillment type, sale price, active) are preserved and the live "X variants will be generated" counter updates as selections change.
+- The generate endpoint is hit on every selection change (with a stale-response guard) using a dummy `'new'` path id; the route doesn't read the path id, only the `product_slug` in the body. User edits are preserved across regenerations by matching on SKU.
+- Production-ready: full loading/empty/error states, permission gating, optimistic cache invalidation, Sonner toasts, mobile-responsive layouts, custom scrollbars on long lists/dialogs.

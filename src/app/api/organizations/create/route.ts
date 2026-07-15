@@ -3,6 +3,7 @@ import { db } from '@/lib/db'
 import { uniqueSlug } from '@/lib/slugify'
 import { createOrganizationSchema } from '@/lib/validations/organization'
 import { insertAuditLog } from '@/lib/audit'
+import { seedDefaultAttributes } from '@/lib/attribute-seeding'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { buildSessionPayload } from '@/lib/session-payload'
 
@@ -162,6 +163,13 @@ export async function POST(req: Request) {
       employeeId: employee.id,
       newValues: { name: company.name, slug: company.slug, baseCurrency: company.baseCurrency },
     })
+
+    // 7. Seed default attributes (Piece Type, Size, Color, Fabric + Unstitched→OneSize rule)
+    try {
+      await seedDefaultAttributes(org.id, employee.id)
+    } catch (e) {
+      console.error('[attribute-seeding] Failed (non-blocking):', e)
+    }
 
     return Response.json(await buildSessionPayload(user.id))
   } catch (err) {
