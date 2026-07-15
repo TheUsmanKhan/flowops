@@ -3,6 +3,11 @@
 A production-grade, multi-tenant SaaS ERP for Pakistani e-commerce businesses.
 Built with Next.js 16, TypeScript, Tailwind CSS, shadcn/ui, Prisma, and Supabase Postgres.
 
+**System includes:** Authentication, Organizations, Companies, Employees, RBAC,
+Product Catalog (with stitched/unstitched variants), Inventory Management
+(with WAC costing), Purchase Orders, Suppliers, Stock Transfers, Cycle Counts,
+Production Orders, Stock Loss tracking, and an immutable audit log.
+
 ---
 
 ## Table of Contents
@@ -13,7 +18,7 @@ Built with Next.js 16, TypeScript, Tailwind CSS, shadcn/ui, Prisma, and Supabase
 4. [Configure Environment](#4-configure-environment)
 5. [Set Up the Database](#5-set-up-the-database)
 6. [Run the Dev Server](#6-run-the-dev-server)
-7. [Use the App](#7-use-the-app)
+7. [Using the App](#7-using-the-app)
 8. [Useful Scripts](#8-useful-scripts)
 9. [Project Structure](#9-project-structure)
 10. [Troubleshooting](#10-troubleshooting)
@@ -23,22 +28,15 @@ Built with Next.js 16, TypeScript, Tailwind CSS, shadcn/ui, Prisma, and Supabase
 
 ## 1. Prerequisites
 
-Install these on your PC (one-time setup).
-
 ### Node.js 20+
 
 Download from <https://nodejs.org/> and install the LTS version.
 
-Verify:
-
 ```bash
 node --version   # should print v20.x or higher
-npm --version
 ```
 
 ### Bun (recommended, faster than npm)
-
-Install Bun — it's a drop-in replacement for npm that's significantly faster:
 
 **macOS / Linux:**
 ```bash
@@ -50,24 +48,20 @@ curl -fsSL https://bun.sh/install | bash
 powershell -c "irm bun.sh/install.ps1 | iex"
 ```
 
-**Windows (npm fallback):**
-```powershell
-npm install -g bun
-```
-
 Verify:
 ```bash
 bun --version
 ```
 
-> You can use `npm` for every command in this guide — just replace `bun` with `npm` and `bunx` with `npx`.
+> You can use `npm` for every command — just replace `bun` with `npm` and `bunx` with `npx`.
 
 ### Supabase Account
 
-You need a Supabase project with a Postgres database. Sign up at <https://supabase.com> if you don't have one. This project uses:
+You need a Supabase project with a Postgres database. Sign up at <https://supabase.com>.
 
+This project connects to:
 - **Database host:** `aws-0-ap-northeast-1.pooler.supabase.com`
-- **Port:** `5432` (session-mode pooler — required for Prisma transactions)
+- **Port:** `5432` (session-mode pooler — required for Prisma)
 - **Database user:** `postgres.flafcggvqfgyafzekxzk`
 - **Database password:** `123@Usman123@`
 
@@ -75,14 +69,15 @@ You need a Supabase project with a Postgres database. Sign up at <https://supaba
 
 ## 2. Get the Project Files
 
-The full project lives in the workspace at `/home/z/my-project`. Copy these folders and files to a local directory (e.g. `C:\Users\YourName\flowops` on Windows, or `~/flowops` on macOS/Linux):
+Copy these folders and files from the workspace to your local machine:
 
 ### Copy these (keep the structure):
 
 ```
-src/                    # all application code
-prisma/                 # database schema
-public/                 # static assets
+src/                    # all application code (app, components, lib, stores, hooks)
+prisma/                 # database schema (38 models)
+public/                 # static assets (logo, uploads)
+scripts/                # test scripts (optional)
 package.json
 tsconfig.json
 next.config.ts
@@ -96,9 +91,9 @@ next-env.d.ts
 ### Skip these (regenerated or sandbox-only):
 
 ```
-node_modules/           # reinstall with bun install / npm install
+node_modules/           # reinstall with bun install
 .next/                  # build output, regenerated
-db/                     # old SQLite db, not needed (we use Supabase)
+db/                     # old SQLite db, not needed
 dev.log                 # dev server log
 Caddyfile               # sandbox gateway config
 examples/               # sandbox demos
@@ -106,6 +101,9 @@ skills/                 # sandbox AI skills
 upload/                 # sandbox uploads
 download/               # sandbox downloads
 tool-results/           # sandbox tool output
+agent-ctx/              # subagent context files
+worklog.md              # development work log
+SETUP.md                # this file (you're reading it)
 ```
 
 > Create a fresh `.env` file in the project root (see Step 4).
@@ -114,30 +112,24 @@ tool-results/           # sandbox tool output
 
 ## 3. Install Dependencies
 
-Open a terminal in your project folder and run:
-
 ```bash
-# With Bun (recommended)
 bun install
-
-# OR with npm
-npm install
 ```
 
-This installs Next.js 16, React 19, Prisma, shadcn/ui, Tailwind CSS, Zustand, TanStack Query, React Hook Form, Zod, and all other dependencies listed in `package.json`.
+This installs: Next.js 16, React 19, Prisma 6, shadcn/ui, Tailwind CSS 4, Zustand, TanStack Query, React Hook Form, Zod, Sonner, date-fns, Lucide, and all other dependencies.
 
 ---
 
 ## 4. Configure Environment
 
-Create a file named `.env` in the **project root** (same folder as `package.json`) with the following content:
+Create a file named `.env` in the **project root** (same folder as `package.json`):
 
 ```env
 # FlowOps — Supabase Postgres
-# Session-mode pooler (port 5432) — supports Prisma interactive transactions
+# Session-mode pooler (port 5432) — supports Prisma operations
 DATABASE_URL="postgresql://postgres.flafcggvqfgyafzekxzk:123%40Usman123%40@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
-# Same session pooler — used by Prisma for migrations / db push
+# Same pooler — used by Prisma for migrations / db push
 DIRECT_URL="postgresql://postgres.flafcggvqfgyafzekxzk:123%40Usman123%40@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
 # Session signing secret (HMAC cookie sessions)
@@ -149,9 +141,9 @@ SESSION_SECRET="flowops-dev-secret-change-in-production-32b"
 
 1. **Keep the `%40` encoding in the password.** The `@` character in `123@Usman123@` must be URL-encoded as `%40`, otherwise Prisma will fail to parse the connection string.
 
-2. **Use port 5432, not 6543.** The transaction-mode pooler on port 6543 (with `?pgbouncer=true`) does **not** support Prisma interactive transactions and will crash the server on multi-write operations. The session-mode pooler on port 5432 works correctly.
+2. **Use port 5432, not 6543.** Port 6543 (transaction-mode pooler with `?pgbouncer=true`) does **not** support Prisma's operations and will crash on multi-write operations. Port 5432 (session-mode pooler) works correctly.
 
-3. **Don't set `DATABASE_URL` in your shell.** Shell environment variables override the `.env` file. If you have a stale `DATABASE_URL` set globally, unset it before running the dev server:
+3. **Don't set `DATABASE_URL` in your shell.** Shell environment variables override the `.env` file. If you have a stale `DATABASE_URL` set globally, unset it:
    ```bash
    # macOS / Linux
    unset DATABASE_URL
@@ -168,46 +160,76 @@ SESSION_SECRET="flowops-dev-secret-change-in-production-32b"
 
 ## 5. Set Up the Database
 
-Push the Prisma schema to your Supabase Postgres database. This creates all 10 tables with their relations, unique constraints, and indexes:
+Push the Prisma schema to your Supabase Postgres database. This creates all 38 tables with their relations, unique constraints, and indexes:
 
 ```bash
 bun run db:push
-# or: npx prisma db push
 ```
 
 You should see:
-
 ```
 🚀 Your database is now in sync with your Prisma schema. Done in ~5s
 ```
 
-Then generate the Prisma client (this creates the typed database client used throughout the app):
+Then generate the Prisma client:
 
 ```bash
 bun run db:generate
-# or: npx prisma generate
 ```
 
-### Tables created
+### Tables created (38 models across 6 modules)
 
-The schema (`prisma/schema.prisma`) defines these 10 tables:
-
+#### Sprint 1 — Core Platform (10 tables)
 | Table | Purpose |
 |---|---|
 | `Profile` | Registered users (email, password hash, name) |
 | `Organization` | Top-level tenant (umbrella for companies) |
-| `Company` | Legal operating entity (all business data lives here) |
+| `Company` | Legal operating entity |
 | `Role` | Company-scoped roles (system elevated + custom) |
 | `RolePermission` | Permission keys assigned to custom roles |
-| `Employee` | Employment records (one user can have many, per company) |
-| `Invitation` | Token-based email invitations to join a company |
-| `UserSetting` | Active workspace context + preferences per user |
+| `Employee` | Employment records (one user per company) |
+| `Invitation` | Token-based email invitations |
+| `UserSetting` | Active workspace context + preferences |
 | `AuditLog` | Immutable append-only event log |
-| `MetricEvent` | Raw numeric events for future KPI dashboards |
+| `MetricEvent` | Raw numeric events for KPI dashboards |
+
+#### Sprint 3 — Product Catalog (12 tables)
+| Table | Purpose |
+|---|---|
+| `OrgCategory` | Hierarchical org-level categories |
+| `OrgBrand` | Org-level brands |
+| `OrgAttribute` | Variant attribute definitions (Size, Color, Piece Type) |
+| `OrgAttributeValue` | Values for each attribute (S, M, L, Red, Navy) |
+| `OrgProduct` | Master product record (stitchable flag, base SKU) |
+| `OrgProductVariant` | Shopify-compatible variants (fulfillment_type, stitching_type) |
+| `OrgProductImage` | Product/variant images |
+| `OrgProductBundle` | Bundle component definitions |
+| `SelectiveProductAccess` | Per-company selective sharing |
+| `CompanyProductSetting` | Per-company product subscription |
+| `CompanyVariantPricing` | Per-company variant sale/compare prices |
+| `ProductFulfillmentCost` | Made-to-order production cost tracking |
+
+#### Sprint 6 — Inventory System (16 tables)
+| Table | Purpose |
+|---|---|
+| `InventoryLocation` | Warehouse/dispatch/retail locations |
+| `Supplier` | Suppliers (org-level shared or company-specific) |
+| `InventoryPool` | Stock levels — one row per variant per location |
+| `InventoryTransaction` | Append-only ledger (17 transaction types) |
+| `AvgCostHistory` | WAC change audit trail |
+| `StockTransfer` | Inter-location transfers (logistics cost separate) |
+| `PurchaseOrder` | PO header (draft → ordered → received) |
+| `PurchaseOrderItem` | PO line items |
+| `PurchaseOrderReceipt` | Receiving events (supports partial deliveries) |
+| `PurchaseOrderReceiptItem` | Actual received quantities + costs |
+| `SupplierReturn` | Stock sent back to suppliers |
+| `StockLossRecord` | Damaged/theft/missing/transit loss tracking |
+| `CycleCount` | Cycle count header (full/partial/spot) |
+| `CycleCountItem` | Per-variant counted vs system quantities |
+| `ProductionOrder` | Made-to-order fabric consumption tracking |
+| `ReturnedStitchedInventory` | Legacy table (superseded by unified inventory) |
 
 ### Resetting the database (⚠️ destructive)
-
-If you ever want a completely fresh database (deletes all data):
 
 ```bash
 bun run db:reset
@@ -219,11 +241,9 @@ bun run db:reset
 
 ```bash
 bun run dev
-# or: npm run dev
 ```
 
 You should see:
-
 ```
 ▲ Next.js 16.1.3 (Turbopack)
 - Local:        http://localhost:3000
@@ -232,59 +252,85 @@ You should see:
 
 Open **<http://localhost:3000>** in your browser.
 
-> The first page load takes ~8-10 seconds while Turbopack compiles the routes. Subsequent loads are instant.
+> The first page load takes ~8-10 seconds while Turbopack compiles. Subsequent loads are instant.
 
 ---
 
-## 7. Use the App
+## 7. Using the App
 
-### Option A — Use the existing test account
+### Test Account
 
-An account is already set up in the database from our verification:
+An account already exists in the database:
 
 - **Email:** `usman@flowops.pk`
 - **Password:** `Test1234!`
+- **Company:** "Usman Commerce" (already onboarded)
 
-This account is already onboarded with a company called "Usman Commerce". Just sign in and you'll land on the dashboard.
+### Or Register Fresh
 
-### Option B — Register a fresh account
+1. Click **"Create an account"** on the login screen
+2. Fill in name, email, password (min 8 chars)
+3. Complete the **3-step onboarding wizard** (Organization → Company → Review)
+4. You become the **Owner** with 4 system roles seeded (Owner, Founder, Co-Founder, Investor)
 
-1. On the login screen, click **"Create an account"**
-2. Fill in your full name, email, and password (min 8 characters)
-3. You'll be taken through the **3-step onboarding wizard**:
-   - **Step 1 — Organization:** Enter an organization name (umbrella for your companies)
-   - **Step 2 — Company:** Enter company name, NTN/STRN, province, city, address
-   - **Step 3 — Review:** Confirm and click "Create workspace"
-4. You become the **Owner** of a new company. Four system roles are seeded automatically: Owner, Founder, Co-Founder, Investor (all elevated).
+### Feature Map
 
-### Features you can test
-
-| Feature | Where to find it |
+#### Core Platform
+| Feature | Where |
 |---|---|
-| Dashboard (KPI cards, recent activity, quick actions) | Landing page after login |
-| Employee directory (search, filter by status/role) | Sidebar → **Employees** |
-| Invite an employee by email | Employees → **Invite employee** button |
-| View employee detail (role, department, status) | Click any employee row |
-| Suspend / terminate / reactivate an employee | Employee detail → **Employment status** |
-| Roles & Permissions management | Sidebar → **Roles & Permissions** |
-| Create a custom role with granular permissions | Roles → **New role** |
-| Edit role permissions (24 keys across 8 modules) | Roles → **Edit** |
-| Switch between companies (if you have multiple) | Navbar → workspace dropdown (top-left) |
-| Company settings (tax info, address, currency) | Sidebar → **Settings** → Company settings |
-| Organization overview | Sidebar → **Organization** |
-| Immutable audit log (filterable, paginated) | Sidebar → **Audit Log** |
-| Personal settings | Sidebar → **Settings** |
-| Sign out | Navbar → user menu (top-right) → **Sign out** |
+| Dashboard (KPIs, recent activity) | Sidebar → Dashboard |
+| Employee directory + invite | Sidebar → Employees |
+| Roles & Permissions (24+ keys, 10+ modules) | Sidebar → Roles & Permissions |
+| Workspace switcher (multi-company) | Navbar top-left dropdown |
+| Company settings (tax, address, currency) | Sidebar → Company Settings |
+| Organization settings + catalog | Sidebar → Organization |
+| Audit log (immutable, filterable) | Sidebar → Audit Log |
+| Create new organization/company | Workspace switcher → Create New |
 
-### Testing the invitation flow
+#### Product Catalog
+| Feature | Where |
+|---|---|
+| Product list (search, filter) | Sidebar → Products → All Products |
+| Create product (3-step wizard with stitching variants) | Sidebar → Products → Add Product |
+| Product detail (Overview, Variants, Images, Shopify Sync, Inventory, Pricing) | Click any product |
+| Variant editing (SKU, cost, active toggle) | Product detail → Variants tab |
+| Inline product editing | Product detail → Overview tab → Edit |
+| Image upload + management | Product detail → Images tab |
+| Catalog settings (Categories, Brands, Attributes) | Sidebar → Products → Catalog Settings |
+| Org Catalog (promote/demote/subscribe) | Sidebar → Org Catalog (elevated only) |
+| Returned stitched stock | Sidebar → Products → Returned Stock |
 
-To test accepting an invitation:
+#### Inventory Management
+| Feature | Where |
+|---|---|
+| Inventory dashboard (stock value, low/out/dead stock) | Sidebar → Inventory → Dashboard |
+| Locations (create, edit, deactivate) | Sidebar → Inventory → Locations |
+| Suppliers (create, edit, credit balance) | Sidebar → Inventory → Suppliers |
+| Receive stock (direct, multi-item) | Sidebar → Inventory → Receive Stock |
+| Adjust stock (manual +/-) | Sidebar → Inventory → Adjust Stock |
+| Transfer stock (between locations) | Sidebar → Inventory → Transfer Stock |
+| Purchase orders (create, receive, cancel) | Sidebar → Inventory → Purchase Orders |
+| Supplier returns | Sidebar → Inventory → Supplier Returns |
+| Production orders (MTO fabric tracking) | Sidebar → Inventory → Production Orders |
+| Stock losses & write-offs | Sidebar → Inventory → Losses & Write-offs |
+| Cycle counts (start, count, approve) | Sidebar → Inventory → Cycle Counts |
 
-1. Sign in as `usman@flowops.pk`
-2. Go to **Employees → Invite employee**
-3. Invite a second email you control (e.g. `colleague@example.com`)
-4. Register a new account with that email
-5. On the new account's onboarding screen, the pending invitation will appear — accept it to join "Usman Commerce" as the assigned role
+### Key Business Logic
+
+**Stitched vs Unstitched:**
+- Unstitched variants → `stock_based` fulfillment (normal inventory tracking)
+- Stitched variants → `made_to_order` fulfillment (no stock held, produced on demand)
+- One product can have both variant types
+
+**Weighted Average Cost (WAC):**
+- `new_avg = (existing_qty × old_avg + new_qty × new_cost) / total_qty`
+- Cost is locked at transaction time — never retroactively recalculated
+- Logistics cost on transfers is tracked separately (never merged into WAC)
+
+**Made-to-Order Fulfillment:**
+1. Check if returned stock exists → use it first (saves stitching cost)
+2. If no returned stock → create production order, consume fabric from source variant
+3. Returned items flip `track_inventory` from FALSE to TRUE (one-way, permanent)
 
 ---
 
@@ -292,12 +338,12 @@ To test accepting an invitation:
 
 | Command | What it does |
 |---|---|
-| `bun run dev` | Start the dev server on <http://localhost:3000> |
-| `bun run build` | Create a production build |
-| `bun run start` | Run the production build |
+| `bun run dev` | Start dev server on http://localhost:3000 |
+| `bun run build` | Create production build |
+| `bun run start` | Run production build |
 | `bun run lint` | Check code quality with ESLint |
 | `bun run db:push` | Push schema changes to Supabase |
-| `bun run db:generate` | Regenerate the Prisma client (after schema changes) |
+| `bun run db:generate` | Regenerate Prisma client (after schema changes) |
 | `bun run db:reset` | ⚠️ Drop & recreate all tables (loses all data) |
 
 ---
@@ -307,47 +353,81 @@ To test accepting an invitation:
 ```
 flowops/
 ├── prisma/
-│   └── schema.prisma              # 10-table multi-tenant schema
+│   └── schema.prisma                # 38-model multi-tenant schema
 ├── src/
 │   ├── app/
-│   │   ├── page.tsx               # Single SPA route (view router)
-│   │   ├── layout.tsx             # Root layout + providers
-│   │   ├── globals.css            # Emerald-primary design system
-│   │   └── api/                   # All REST API routes
-│   │       ├── auth/              # register, login, logout, me, forgot/reset
-│   │       ├── onboarding/        # create-company, invitations, accept-invite
-│   │       ├── workspace/         # switch active company
-│   │       ├── employees/         # list, invite, detail, terminate
-│   │       ├── roles/             # list, create, update, delete
-│   │       ├── audit-logs/        # paginated audit trail
-│   │       ├── company/           # company settings get/patch
-│   │       └── dashboard/         # KPI overview
+│   │   ├── page.tsx                 # Single SPA route (view router)
+│   │   ├── layout.tsx              # Root layout + providers
+│   │   ├── globals.css             # Emerald-primary design system
+│   │   └── api/                    # All REST API routes
+│   │       ├── auth/               # register, login, logout, me, forgot/reset
+│   │       ├── onboarding/         # create-org, create-company, accept-invite
+│   │       ├── workspace/          # switch active company
+│   │       ├── employees/          # list, invite, detail, terminate
+│   │       ├── roles/              # list, create, update, delete
+│   │       ├── products/           # CRUD, variants, images, promote, pricing
+│   │       ├── catalog/            # categories, brands, attributes CRUD
+│   │       ├── inventory-locations/# location CRUD + detail
+│   │       ├── suppliers/          # supplier CRUD
+│   │       ├── inventory/          # dashboard, summary, receive, adjust, transfers
+│   │       ├── purchase-orders/    # create, list, detail, receive, confirm, cancel
+│   │       ├── supplier-returns/   # create, resolve, dispute
+│   │       ├── stock-loss/         # report, resolve
+│   │       ├── cycle-counts/       # create, start, submit, approve
+│   │       ├── production-orders/  # create, update status
+│   │       ├── returned-stitched/  # list, receive, stats
+│   │       ├── org/catalog/        # org-wide catalog overview
+│   │       ├── audit-logs/         # paginated audit trail
+│   │       ├── company/            # company settings
+│   │       ├── dashboard/          # KPI overview
+│   │       └── upload/             # file/logo upload
 │   ├── components/
-│   │   ├── auth/                  # Login, Register, Forgot, Reset forms
-│   │   ├── onboarding/            # Wizard, selector, invite card
-│   │   ├── layout/                # Sidebar, Navbar, WorkspaceSwitcher
-│   │   ├── dashboard/             # Dashboard home
-│   │   ├── employees/             # Directory, invite, detail
-│   │   ├── roles/                 # Roles list, editor, permission selector
-│   │   ├── settings/              # Org, company, personal, audit views
-│   │   └── ui/                    # shadcn/ui components
+│   │   ├── auth/                   # Login, Register, Forgot, Reset forms
+│   │   ├── onboarding/             # Org/company wizards, invite cards
+│   │   ├── layout/                 # Sidebar, Navbar, WorkspaceSwitcher, MobileNav
+│   │   ├── dashboard/              # Dashboard home
+│   │   ├── employees/              # Directory, invite, detail
+│   │   ├── roles/                  # Roles list, editor, permission selector
+│   │   ├── products/               # Product list, create wizard, detail, badges
+│   │   ├── inventory/              # Dashboard, locations, suppliers, receive, adjust,
+│   │   │                           #   transfer, POs, supplier returns, production orders,
+│   │   │                           #   losses, cycle counts
+│   │   ├── settings/               # Org, company, personal, audit views
+│   │   ├── workspace/              # Workspace switcher
+│   │   └── ui/                     # shadcn/ui components (50+ components)
 │   ├── lib/
-│   │   ├── db.ts                  # Prisma client
-│   │   ├── session.ts             # HMAC signed-cookie sessions
-│   │   ├── auth.ts                # scrypt password hashing
-│   │   ├── workspace.ts           # getWorkspace, hasPermission, requirePermission
-│   │   ├── permissions.ts         # 24 permission keys across 8 modules
-│   │   ├── audit.ts               # insertAuditLog helper
-│   │   ├── metrics.ts             # insertMetricEvent helper
-│   │   ├── session-payload.ts     # builds full session response
-│   │   ├── slugify.ts             # URL-safe slug generator
-│   │   ├── types.ts               # shared TypeScript types
-│   │   ├── api-client.ts          # frontend fetch helpers
-│   │   └── validations/           # Zod schemas (auth, company, employee, invitation)
+│   │   ├── db.ts                   # Prisma client singleton
+│   │   ├── session.ts              # HMAC signed-cookie sessions
+│   │   ├── auth.ts                 # scrypt password hashing
+│   │   ├── workspace.ts            # getWorkspace, hasPermission, requirePermission
+│   │   ├── permissions.ts          # 40+ permission keys across 10+ modules
+│   │   ├── inventory.ts            # processInventoryTransaction (core WAC engine),
+│   │   │                           #   checkAndFulfillMadeToOrderVariant, incrementIncomingStock
+│   │   ├── audit.ts                # insertAuditLog helper
+│   │   ├── metrics.ts              # insertMetricEvent helper
+│   │   ├── session-payload.ts      # builds full session response
+│   │   ├── slugify.ts              # URL-safe slug generator
+│   │   ├── types.ts                # shared TypeScript types
+│   │   ├── api-client.ts           # frontend fetch helpers
+│   │   ├── constants/
+│   │   │   └── fulfillment-types.ts # fulfillment/stitching constants + Shopify mappings
+│   │   ├── data/
+│   │   │   ├── currencies.ts       # 160 world currencies
+│   │   │   └── countries.ts        # 90+ countries, provinces, timezones
+│   │   └── validations/
+│   │       ├── auth.ts             # auth Zod schemas
+│   │       ├── company.ts          # company Zod schemas
+│   │       ├── employee.ts         # employee Zod schemas
+│   │       ├── invitation.ts       # invitation Zod schemas
+│   │       ├── organization.ts     # org/company creation schemas
+│   │       ├── product.ts          # product + variant schemas
+│   │       └── inventory.ts        # 15 inventory schemas
 │   ├── stores/
-│   │   └── app-store.ts           # Zustand: session + SPA view routing
+│   │   └── app-store.ts            # Zustand: session + SPA view routing
 │   └── hooks/
-├── .env                           # Supabase credentials (create this)
+│       ├── use-toast.ts            # toast hook
+│       └── use-mobile.ts           # mobile detection
+├── .env                            # Supabase credentials (create this)
 ├── package.json
 ├── next.config.ts
 ├── tsconfig.json
@@ -363,124 +443,106 @@ flowops/
 
 ### "the URL must start with the protocol postgresql://"
 
-Your `.env` file isn't being loaded. Fixes:
-
-- Make sure `.env` is in the **project root** (same folder as `package.json`), not in a subfolder.
-- Restart the dev server after creating/editing `.env`.
-- Don't set `DATABASE_URL` in your shell — it overrides the `.env` file. Unset it:
+Your `.env` file isn't being loaded:
+- Make sure `.env` is in the **project root** (same folder as `package.json`)
+- Restart the dev server after creating/editing `.env`
+- Don't set `DATABASE_URL` in your shell — it overrides `.env`. Unset it:
   ```bash
-  unset DATABASE_URL DIRECT_URL   # macOS/Linux
-  Remove-Item Env:DATABASE_URL, Env:DIRECT_URL   # Windows
+  unset DATABASE_URL DIRECT_URL    # macOS/Linux
+  Remove-Item Env:DATABASE_URL    # Windows
   ```
 
 ### Connection refused / can't reach Supabase
 
-- Confirm your PC has internet access.
-- Check that your Supabase project isn't **paused** (free-tier projects auto-pause after ~1 week of inactivity). Wake it from the Supabase dashboard: <https://supabase.com/dashboard>
-- Verify the pooler host and port: `aws-0-ap-northeast-1.pooler.supabase.com:5432`
+- Confirm your PC has internet access
+- Check that your Supabase project isn't **paused** (free-tier auto-pause after ~1 week). Wake it at <https://supabase.com/dashboard>
+- Verify: `aws-0-ap-northeast-1.pooler.supabase.com:5432`
 
-### Prisma crashes on multi-write operations (transactions)
+### Prisma crashes on multi-write operations
 
-You're probably using the transaction-mode pooler (port 6543 with `?pgbouncer=true`). Switch to the **session-mode pooler on port 5432** (no `pgbouncer` param) in your `.env`. See [Step 4](#4-configure-environment).
+You're using port 6543 with `?pgbouncer=true`. Switch to **port 5432** (session-mode pooler, no pgbouncer param). See [Step 4](#4-configure-environment).
 
-### "A pending invitation already exists for this email"
+### "PERMISSIONS is not defined" runtime error
 
-An invite was already sent to that email. Either:
-- Use a different email, or
-- Revoke the existing invitation from the Supabase dashboard (Table Editor → `Invitation` table → set `status` to `revoked`), or
-- Run `bun run db:reset` to wipe all data (⚠️ destructive).
-
-### Forgot password flow doesn't send an email
-
-By design — the sandbox had no outbound SMTP, so the `/api/auth/forgot-password` endpoint records the request but doesn't actually send email. The UI shows a "check your email" confirmation regardless.
-
-To enable real email recovery, wire the endpoint to an email provider:
-- **Resend:** <https://resend.com>
-- **SendGrid:** <https://sendgrid.com>
-- **Supabase Auth's `resetPasswordForEmail`:** if you migrate to Supabase Auth
-
-The file to edit is `src/app/api/auth/forgot-password/route.ts`.
-
-### Port 3000 already in use
-
-Edit `package.json` and change the dev script:
-```json
-"dev": "next dev -p 3001 2>&1 | tee dev.log"
-```
-Or run with a custom port:
-```bash
-bunx next dev -p 3001
-```
+Missing import. Add `import { PERMISSIONS } from '@/lib/permissions'` to the top of the file throwing the error.
 
 ### "Cannot find module '@prisma/client'"
 
-You need to generate the Prisma client after installing dependencies:
+Generate the Prisma client after installing:
 ```bash
 bun run db:generate
 ```
 
+### Port 3000 already in use
+
+```bash
+bunx next dev -p 3001
+```
+
 ### Changes to `prisma/schema.prisma` aren't reflected
 
-After editing the schema, always run:
 ```bash
-bun run db:push      # apply changes to the database
-bun run db:generate  # regenerate the typed client
+bun run db:push      # apply changes to database
+bun run db:generate  # regenerate typed client
 ```
 Then restart the dev server.
 
-### TypeScript errors on `bun run build`
+### Forgot password doesn't send email
 
-The `next.config.ts` has `typescript.ignoreBuildErrors: true`, so builds won't fail on type errors. For type-checking during development, run:
-```bash
-bunx tsc --noEmit
-```
+By design — the endpoint records the request but doesn't send email (no SMTP configured). To enable real email, wire `src/app/api/auth/forgot-password/route.ts` to an email provider (Resend, SendGrid, or Supabase Auth).
+
+### First page load is slow (~8-10 seconds)
+
+This is normal — Turbopack compiles all routes on first access. Subsequent navigation is instant. For production, use `bun run build && bun run start`.
 
 ---
 
 ## 11. Architecture Notes
 
-### Single SPA route
+### Single SPA Route
 
-The app lives on a single route (`/`). Navigation between "pages" (dashboard, employees, roles, etc.) is handled client-side by a Zustand store (`src/stores/app-store.ts`) using a `route` state object. This keeps the app always reachable from the root URL.
+The app lives on a single route (`/`). Navigation is handled client-side by Zustand (`src/stores/app-store.ts`) with a `route` state object. This keeps the app always reachable from the root URL.
 
-### Multi-tenant isolation
+### Multi-Tenant Isolation
 
-Enforced in the **application layer** (since Prisma doesn't have Postgres RLS):
-
-- `getWorkspace()` in `src/lib/workspace.ts` resolves the caller's active company from their session.
-- `hasPermission(ctx, key)` checks the user's role permissions (elevated roles bypass all checks).
-- `requirePermission(ctx, key)` throws a 403 if the user lacks the permission.
-- Every company-scoped API route resolves the active company from the session — **never** from client input.
+Enforced in the **application layer**:
+- `getWorkspace()` resolves the caller's active company from their session
+- `hasPermission(ctx, key)` checks role permissions (elevated roles bypass all checks)
+- `requirePermission(ctx, key)` throws 403 if permission is missing
+- Every company-scoped API route resolves the active company from the session — **never** from client input
 
 ### Authentication
 
-HMAC-signed cookies (no external auth service). See `src/lib/session.ts`:
-- `createSessionToken(userId)` — creates `userId.timestamp.hmac`
-- `verifySessionToken(token)` — validates the HMAC and checks expiry (30 days)
-- Passwords are hashed with Node's built-in `scrypt` (`src/lib/auth.ts`)
+HMAC-signed cookies (no external auth service):
+- `createSessionToken(userId)` → `userId.timestamp.hmac`
+- `verifySessionToken(token)` → validates HMAC + checks 30-day expiry
+- Passwords hashed with Node's built-in `scrypt`
 
-### Audit logging
+### Inventory Engine (`src/lib/inventory.ts`)
 
-Every mutating API route calls `insertAuditLog()` from `src/lib/audit.ts`. The `AuditLog` table is **append-only** — no update or delete operations are exposed. This is the foundation for the future KPI system.
+The `processInventoryTransaction()` function is the **only** way to modify `inventory_pools`. It handles:
+- WAC recalculation: `new_avg = (existing_qty × old_avg + new_qty × new_cost) / total_qty`
+- 17 transaction types (purchase_received, sale_dispatched, transfer_out/in, damage_writeoff, etc.)
+- Stock validation for OUT-direction transactions
+- `track_inventory` one-way flip (FALSE→TRUE on first return, never back)
+- Immutable ledger row insertion with avg_cost_before/after
+- `avg_cost_history` recording on cost changes
+
+### Shopify Compatibility
+
+- Max 3 attribute keys per variant (enforced in Zod + UI)
+- `fulfillment_type` maps to Shopify's `inventory_management` + `inventory_policy`
+- `stock_based` → `inventory_management: "shopify"`, `policy: "deny"`
+- `made_to_order` → `inventory_management: null`, `policy: "continue"`
+- Fields: SKU, barcode, compare_at_price, weight, requires_shipping, taxable
 
 ### Permissions
 
-24 permission keys across 8 modules, defined as typed constants in `src/lib/permissions.ts`:
-
-- Inventory (view, create, adjust, delete)
-- Orders (view, create, fulfill, cancel)
+40+ permission keys across 10+ modules in `src/lib/permissions.ts`:
+- Inventory (view, receive, adjust, transfer, manage_locations, manage_suppliers, manage_purchase_orders, manage_supplier_returns, report_loss, manage_loss, cycle_count, manage_production)
+- Products (view, create, edit, manage_catalog, subscribe, pricing, promote)
 - Employees (view, invite, terminate, manage)
-- Finance (view, manage)
-- Reports (view, export)
-- Settings (company view/edit, roles manage)
-- Integrations (view, manage)
-- KPI & Audit (view, manage, audit view)
-
-Never hardcode permission strings — always import from `src/lib/permissions.ts`.
-
-### Database connection
-
-Prisma + Supabase Postgres, using the **session-mode pooler** (port 5432). The transaction-mode pooler (port 6543 + PgBouncer) doesn't support Prisma's interactive transactions, so all multi-write operations use sequential `await` calls instead of `db.$transaction()`.
+- Orders, Finance, Reports, Settings, Integrations, KPI & Audit
 
 ---
 
@@ -490,7 +552,7 @@ Prisma + Supabase Postgres, using the **session-mode pooler** (port 5432). The t
 # 1. Install deps
 bun install
 
-# 2. Create .env (see Step 4)
+# 2. Create .env (see Step 4 — must use port 5432, password URL-encoded with %40)
 
 # 3. Push schema to Supabase + generate client
 bun run db:push
@@ -500,7 +562,7 @@ bun run db:generate
 bun run dev
 ```
 
-Open <http://localhost:3000> → sign in with `usman@flowops.pk` / `Test1234!` → or register a new account.
+Open <http://localhost:3000> → sign in with `usman@flowops.pk` / `Test1234!`
 
 ---
 
