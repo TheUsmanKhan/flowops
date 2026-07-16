@@ -52,6 +52,7 @@ import {
 import {
   PRODUCT_TYPE_LABELS,
   PRODUCT_SCOPE_LABELS,
+  FULFILLMENT_LABELS,
 } from '@/lib/constants/fulfillment-types'
 import { cn } from '@/lib/utils'
 import {
@@ -86,6 +87,8 @@ interface GeneratedVariant {
   requires_shipping: boolean
   allow_backorder: boolean
   is_default: boolean
+  opening_stock_qty?: number
+  opening_stock_cost?: number
 }
 
 interface VariantDraft {
@@ -428,33 +431,41 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
         is_active: v.is_active,
         is_default: v.is_default,
         sale_price: Number(v.sale_price) || 0,
+        fabric_source_variant_id: v.fabric_source_variant_id || undefined,
       })),
     }
 
     setSubmitting(true)
     try {
-      const res = await api.post<{ id: string; slug: string; title: string }>(
+      const res = await api.post<{ id: string; slug: string; title: string; variantIds: string[] }>(
         '/api/products',
         payload,
       )
 
       // After product creation, process opening stock for variants that have it
-      const variantsWithOpeningStock = variants.filter(
-        (v) => v.has_opening_stock && v.opening_stock_qty > 0 && v.opening_stock_location_id,
-      )
+      // Use the actual variant UUIDs returned by the API (matched by index)
+      const variantsWithOpeningStock = variants
+        .map((v, i) => ({ variant: v, variantId: res.variantIds?.[i] }))
+        .filter(
+          ({ variant }) =>
+            variant.has_opening_stock &&
+            variant.opening_stock_qty > 0 &&
+            variant.opening_stock_location_id,
+        )
+
       if (variantsWithOpeningStock.length > 0) {
         try {
           await api.post('/api/inventory/receive', {
-            location_id: variantsWithOpeningStock[0].opening_stock_location_id,
+            location_id: variantsWithOpeningStock[0].variant.opening_stock_location_id,
             notes: `Opening stock for ${res.title}`,
-            items: variantsWithOpeningStock.map((v) => ({
-              org_variant_id: v.sku, // Note: this won't work — we need the actual variant ID
-              quantity: v.opening_stock_qty,
-              cost_per_unit: v.opening_stock_cost || v.cost_price,
+            items: variantsWithOpeningStock.map(({ variant, variantId }) => ({
+              org_variant_id: variantId,
+              quantity: variant.opening_stock_qty,
+              cost_per_unit: variant.opening_stock_cost || variant.cost_price,
             })),
           })
+          toast.success('Opening stock recorded.')
         } catch {
-          // Opening stock failure shouldn't block product creation
           toast.warning('Product created, but opening stock could not be set. Use Receive Stock manually.')
         }
       }
@@ -1137,6 +1148,14 @@ function SimpleVariantForm({
 
   const isMto = value.fulfillment_type === 'made_to_order'
 
+  // Fetch locations for the opening stock dropdown
+  const { data: locData } = useQuery<{ locations: Array<{ id: string; name: string }> }>({
+    queryKey: ['inventory-locations'],
+    queryFn: () => api.get('/api/inventory-locations'),
+    staleTime: 60_000,
+  })
+  const locations = locData?.locations ?? []
+
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted-foreground">
@@ -1235,7 +1254,21 @@ function SimpleVariantForm({
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs">Location</Label>
-                <Input value={value.opening_stock_location_id} onChange={(e) => set('opening_stock_location_id', e.target.value)} placeholder="Location ID (create locations first)" />
+                {locations.length === 0 ? (
+                  <p className="text-xs text-amber-600 py-2">No locations yet. Create one in Inventory → Locations first.</p>
+                ) : (
+                  <Select
+                    value={value.opening_stock_location_id}
+                    onValueChange={(v) => set('opening_stock_location_id', v)}
+                  >
+                    <SelectTrigger className="h-9 text-xs"><SelectValue placeholder="Select location" /></SelectTrigger>
+                    <SelectContent>
+                      {locations.map((l) => (
+                        <SelectItem key={l.id} value={l.id}>{l.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
               </div>
             </div>
           )}
@@ -1246,11 +1279,11 @@ function SimpleVariantForm({
       {isMto && (
         <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 space-y-2">
           <p className="text-sm font-medium text-blue-800">Fabric Source</p>
-          <p className="text-xs text-blue-600">When this variant is produced, fabric will be consumed from the selected source variant.</p>
+          <p className="text-xs text-blue-600">When this variant is produced, fabric will be consumed from the selected source variant. Leave blank if not applicable.</p>
           <Input
             value={value.fabric_source_variant_id ?? ''}
             onChange={(e) => set('fabric_source_variant_id', e.target.value || null)}
-            placeholder="Link to a stock_based variant (e.g. the unstitched version)"
+            placeholder="Variant UUID of the stock_based fabric source (set after product creation)"
           />
         </div>
       )}
@@ -1456,6 +1489,45 @@ function StitchableVariantBuilder({
                 ))}
               </tbody>
             </table>
+          </div>
+
+          {/* Per-row opening stock + fabric source (expandable) */}
+          <div className="border-t bg-muted/20 p-3 space-y-2">
+            <p className="text-xs text-muted-foreground">Opening stock and fabric source options (optional, per variant):</p>
+            {generatedVariants.map((v, i) => (
+              <div key={`opts-${v.sku}`} className="rounded border bg-background p-2 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono font-medium">{v.sku}</span>
+                  <Badge variant="outline" className={cn('text-[9px]', v.fulfillment_type === 'stock_based' ? 'bg-sky-50 text-sky-700 border-sky-200' : 'bg-purple-50 text-purple-700 border-purple-200')}>{FULFILLMENT_LABELS[v.fulfillment_type] ?? v.fulfillment_type}</Badge>
+                </div>
+                {v.fulfillment_type === 'stock_based' ? (
+                  <div className="flex flex-wrap items-center gap-2 pl-2">
+                    <span className="text-xs text-muted-foreground">Opening stock:</span>
+                    <Input
+                      type="number"
+                      min="0"
+                      placeholder="Qty"
+                      className="h-7 w-16 text-xs"
+                      value={v.opening_stock_qty ?? ''}
+                      onChange={(e) => updateGenerated(i, { opening_stock_qty: Number(e.target.value) })}
+                    />
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="Cost/unit"
+                      className="h-7 w-20 text-xs"
+                      value={v.opening_stock_cost ?? ''}
+                      onChange={(e) => updateGenerated(i, { opening_stock_cost: Number(e.target.value) })}
+                    />
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 pl-2">
+                    <span className="text-xs text-blue-600">MTO — fabric source set after creation via variant edit</span>
+                  </div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}

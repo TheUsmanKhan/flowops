@@ -24,7 +24,7 @@ export async function seedDefaultAttributes(
       createdById,
       values: {
         create: [
-          { organizationId, value: 'Unstitched', displayValue: 'Unstitched', skuCode: 'UNST', displayOrder: 1 },
+          { organizationId, value: 'Unstitched', displayValue: 'Unstitched', skuCode: 'UN', displayOrder: 1 },
           { organizationId, value: 'Stitched', displayValue: 'Stitched', skuCode: 'ST', displayOrder: 2 },
         ],
       },

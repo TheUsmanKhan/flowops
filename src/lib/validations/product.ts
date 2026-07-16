@@ -77,6 +77,7 @@ export const variantSchema = z
     is_active: z.boolean().default(true),
     is_default: z.boolean().default(false),
     sale_price: z.number().min(0, 'Sale price is required'),
+    fabric_source_variant_id: z.string().optional().nullable(),
   })
   .superRefine((data, ctx) => {
     // Shopify limit: max 3 attribute keys

@@ -244,6 +244,7 @@ export async function POST(req: Request) {
           inventoryPolicy: syncInventoryPolicy(fulfillmentType, v.allow_backorder),
           isDefault: v.is_default,
           isActive: v.is_active,
+          fabricSourceVariantId: v.fabric_source_variant_id || null,
           createdById: caller.id,
         },
       })
@@ -295,7 +296,7 @@ export async function POST(req: Request) {
       numericValue: 1,
     })
 
-    return Response.json({ id: product.id, slug: product.slug, title: product.title })
+    return Response.json({ id: product.id, slug: product.slug, title: product.title, variantIds: variantRecords.map(v => v.id) })
   } catch (err) {
     return handleError(err)
   }

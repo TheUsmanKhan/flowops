@@ -79,6 +79,7 @@ import {
 } from '@/lib/constants/fulfillment-types'
 import { FulfillmentTypeBadge } from '@/components/products/fulfillment-type-badge'
 import { PERMISSIONS } from '@/lib/permissions'
+import { ParentChildVariantTable } from '@/components/products/parent-child-variant-table'
 import { cn } from '@/lib/utils'
 
 // ----------------------------------------------------------------------------
@@ -285,7 +286,7 @@ export function ProductDetailView({ productId }: { productId: string }) {
           </TabsTrigger>
           <TabsTrigger value="shopify">Shopify Sync</TabsTrigger>
           <TabsTrigger value="inventory">Inventory</TabsTrigger>
-          {!product.isOwner && product.subscription && (
+          {product.subscription && (
             <TabsTrigger value="pricing">Pricing</TabsTrigger>
           )}
         </TabsList>
@@ -295,9 +296,9 @@ export function ProductDetailView({ productId }: { productId: string }) {
           <DetailsTab product={product} productId={productId} canEdit={canEdit} />
         </TabsContent>
 
-        {/* Variants (interactive table + edit dialog) */}
+        {/* Variants (parent-child grouped table) */}
         <TabsContent value="variants">
-          <VariantsTab product={product} productId={productId} canEdit={canEdit} />
+          <ParentChildVariantTable productId={productId} mode="cost" />
         </TabsContent>
 
         {/* Images (upload + delete) */}
@@ -368,16 +369,10 @@ export function ProductDetailView({ productId }: { productId: string }) {
           <InventoryTab productId={productId} variants={product.variants} isStitchable={product.isStitchable} />
         </TabsContent>
 
-        {/* Pricing (non-owner with subscription) */}
-        {!product.isOwner && product.subscription && (
+        {/* Pricing (parent-child grouped pricing table) */}
+        {product.subscription && (
           <TabsContent value="pricing">
-            <PricingTab
-              productId={productId}
-              variants={product.variants}
-              onUpdate={() => {
-                queryClient.invalidateQueries({ queryKey: ['product', productId] })
-              }}
-            />
+            <ParentChildVariantTable productId={productId} mode="pricing" />
           </TabsContent>
         )}
       </Tabs>
