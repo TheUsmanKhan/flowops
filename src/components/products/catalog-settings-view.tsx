@@ -51,6 +51,8 @@ import {
   AlertCircle,
   Check,
   X,
+  ArrowUp,
+  ArrowDown,
 } from 'lucide-react'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1324,6 +1326,7 @@ function AttributesTab() {
       }),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['attributes'] })
+      queryClient.invalidateQueries({ queryKey: ['available-attributes'] })
       toast.success('Attribute created')
       setAddAttrOpen(false)
       // Pre-select the new attribute once the list refreshes.
@@ -1347,6 +1350,7 @@ function AttributesTab() {
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['attributes'] })
+      queryClient.invalidateQueries({ queryKey: ['available-attributes'] })
       toast.success('Attribute updated')
       setEditAttrTarget(null)
     },
@@ -1361,6 +1365,7 @@ function AttributesTab() {
     mutationFn: (id: string) => api.delete(`/api/catalog/attributes/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['attributes'] })
+      queryClient.invalidateQueries({ queryKey: ['available-attributes'] })
       toast.success('Attribute deleted')
       setDeleteAttrTarget(null)
       setDeleteAttrError(null)
@@ -1369,6 +1374,30 @@ function AttributesTab() {
     onError: (err) => {
       toast.error(
         err instanceof FetchError ? err.message : 'Failed to delete attribute.',
+      )
+    },
+  })
+
+  const reorderAttrMutation = useMutation({
+    mutationFn: ({ id, direction }: { id: string; direction: 'up' | 'down' }) => {
+      const index = attributes.findIndex((a) => a.id === id)
+      if (index === -1) throw new Error('Attribute not found')
+      const swapIndex = direction === 'up' ? index - 1 : index + 1
+      if (swapIndex < 0 || swapIndex >= attributes.length) throw new Error('Cannot move further')
+      const current = attributes[index]
+      const swap = attributes[swapIndex]
+      return Promise.all([
+        api.patch(`/api/catalog/attributes/${current.id}`, { displayOrder: swap.displayOrder }),
+        api.patch(`/api/catalog/attributes/${swap.id}`, { displayOrder: current.displayOrder }),
+      ])
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['attributes'] })
+      queryClient.invalidateQueries({ queryKey: ['available-attributes'] })
+    },
+    onError: (err) => {
+      toast.error(
+        err instanceof FetchError ? err.message : 'Failed to reorder attribute.',
       )
     },
   })
@@ -1412,7 +1441,7 @@ function AttributesTab() {
       <div className="grid gap-4 lg:grid-cols-[1fr_1.6fr]">
         {/* Left panel: attribute cards */}
         <div className="space-y-2">
-          {attributes.map((attr) => {
+          {attributes.map((attr, attrIndex) => {
             const isSelected = attr.id === selectedId
             return (
               <Card
@@ -1469,6 +1498,32 @@ function AttributesTab() {
                     </p>
                   </div>
                   <div className="flex items-center gap-0.5 shrink-0">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      disabled={attrIndex === 0 || reorderAttrMutation.isPending}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        reorderAttrMutation.mutate({ id: attr.id, direction: 'up' })
+                      }}
+                      title="Move up (controls SKU generation order)"
+                    >
+                      <ArrowUp className="h-3 w-3" />
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7"
+                      disabled={attrIndex === attributes.length - 1 || reorderAttrMutation.isPending}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        reorderAttrMutation.mutate({ id: attr.id, direction: 'down' })
+                      }}
+                      title="Move down (controls SKU generation order)"
+                    >
+                      <ArrowDown className="h-3 w-3" />
+                    </Button>
                     <Button
                       variant="ghost"
                       size="icon"
@@ -1737,6 +1792,14 @@ function AttributeValuesPanel({ attribute }: { attribute: Attribute | null }) {
   const [addOpen, setAddOpen] = useState(false)
   const [editTarget, setEditTarget] = useState<AttributeValue | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<AttributeValue | null>(null)
+  const [deleteValueWarning, setDeleteValueWarning] = useState<string | null>(null)
+
+  // Fetch rules to check if a value is referenced before deletion
+  const { data: rulesData } = useQuery<{ rules: Array<{ triggerValueId: string; forcesValueId: string; triggerValueInfo: { value: string }; forcesValueInfo: { value: string } }> }>({
+    queryKey: ['available-attributes'],
+    queryFn: () => api.get('/api/catalog/available-attributes'),
+    staleTime: 60_000,
+  })
 
   const createValueMutation = useMutation({
     mutationFn: ({ attrId, values }: { attrId: string; values: AttributeValueFormValues }) =>
@@ -1744,10 +1807,12 @@ function AttributeValuesPanel({ attribute }: { attribute: Attribute | null }) {
         value: values.value,
         displayValue: values.displayValue,
         colorHex: values.colorHex || undefined,
+        skuCode: values.skuCode || undefined,
         displayOrder: values.displayOrder ?? 0,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['attributes'] })
+      queryClient.invalidateQueries({ queryKey: ['available-attributes'] })
       toast.success('Value added')
       setAddOpen(false)
     },
@@ -1764,10 +1829,12 @@ function AttributeValuesPanel({ attribute }: { attribute: Attribute | null }) {
         value: values.value,
         displayValue: values.displayValue,
         colorHex: values.colorHex || null,
+        skuCode: values.skuCode || undefined,
         displayOrder: values.displayOrder ?? 0,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['attributes'] })
+      queryClient.invalidateQueries({ queryKey: ['available-attributes'] })
       toast.success('Value updated')
       setEditTarget(null)
     },
@@ -1782,8 +1849,10 @@ function AttributeValuesPanel({ attribute }: { attribute: Attribute | null }) {
     mutationFn: (id: string) => api.delete(`/api/catalog/attribute-values/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['attributes'] })
+      queryClient.invalidateQueries({ queryKey: ['available-attributes'] })
       toast.success('Value deleted')
       setDeleteTarget(null)
+      setDeleteValueWarning(null)
     },
     onError: (err) => {
       toast.error(
@@ -1902,7 +1971,20 @@ function AttributeValuesPanel({ attribute }: { attribute: Attribute | null }) {
                       variant="ghost"
                       size="icon"
                       className="h-7 w-7 text-destructive hover:text-destructive"
-                      onClick={() => setDeleteTarget(v)}
+                      onClick={() => {
+                        // Check if this value is referenced by an attribute_value_rule
+                        const rules = rulesData?.rules ?? []
+                        const triggerRule = rules.find((r) => r.triggerValueId === v.id)
+                        const forcedRule = rules.find((r) => r.forcesValueId === v.id)
+                        let warning: string | null = null
+                        if (triggerRule) {
+                          warning = `This value is used by an automatic rule (it forces "${triggerRule.forcesValueInfo?.value}" when selected). Removing it may cause issues with existing variants. Are you sure?`
+                        } else if (forcedRule) {
+                          warning = `This value is used by an automatic rule (forced when "${forcedRule.triggerValueInfo?.value}" is selected). Removing it may cause issues with existing variants. Are you sure?`
+                        }
+                        setDeleteValueWarning(warning)
+                        setDeleteTarget(v)
+                      }}
                       title="Delete value"
                     >
                       <Trash2 className="h-3 w-3" />
@@ -1954,10 +2036,13 @@ function AttributeValuesPanel({ attribute }: { attribute: Attribute | null }) {
       <DeleteConfirmDialog
         open={!!deleteTarget}
         onOpenChange={(v) => {
-          if (!v) setDeleteTarget(null)
+          if (!v) {
+            setDeleteTarget(null)
+            setDeleteValueWarning(null)
+          }
         }}
         title="Delete attribute value"
-        description="This permanently removes the value. Variants referencing it may need to be updated."
+        description={deleteValueWarning || "This permanently removes the value. Variants referencing it may need to be updated."}
         itemName={deleteTarget?.displayValue ?? ''}
         isPending={deleteValueMutation.isPending}
         error={null}
