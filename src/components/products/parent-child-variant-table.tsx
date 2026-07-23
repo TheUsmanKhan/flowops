@@ -83,6 +83,59 @@ interface VariantGroupsResponse {
   groups: VariantGroup[]
 }
 
+// Shape returned by /api/inventory/summary?product_id=...
+interface InventorySummaryVariant {
+  variantId: string
+  totalOnHand: number
+  totalReserved: number
+  totalAvailable: number
+  totalValue: number
+  locations: Array<{ locationId: string; locationName: string; onHand: number; reserved: number; available: number; avgCost: number }>
+}
+interface InventorySummaryResponse {
+  variants: InventorySummaryVariant[]
+}
+
+/**
+ * Fetches live inventory per variant for this product and returns a map keyed
+ * by variantId. Used by the parent-child table to display on-hand stock
+ * alongside cost/price columns. Reads from the same inventory_pools data as
+ * the Inventory tab and the Inventory Dashboard — no parallel data source.
+ */
+function useVariantInventoryMap(productId: string) {
+  const { data } = useQuery<InventorySummaryResponse>({
+    queryKey: ['product-inventory', productId],
+    queryFn: () => api.get(`/api/inventory/summary?product_id=${productId}`),
+    staleTime: 15_000,
+  })
+  const map = new Map<string, InventorySummaryVariant>()
+  for (const v of data?.variants ?? []) {
+    map.set(v.variantId, v)
+  }
+  return map
+}
+
+/** Compact stock cell — shows on_hand, with available in muted subtext. */
+function StockCell({ inv }: { inv?: InventorySummaryVariant }) {
+  if (!inv) {
+    return <span className="text-xs text-muted-foreground">—</span>
+  }
+  const onHand = inv.totalOnHand
+  const available = inv.totalAvailable
+  if (onHand === 0) {
+    return <span className="text-xs text-muted-foreground">0</span>
+  }
+  const lowStock = available > 0 && available <= 5
+  return (
+    <div className="text-xs leading-tight">
+      <span className={cn('font-medium', lowStock ? 'text-amber-700' : 'text-foreground')}>{onHand}</span>
+      {available !== onHand && (
+        <div className="text-[10px] text-muted-foreground">{available} avail.</div>
+      )}
+    </div>
+  )
+}
+
 // ──────────────────────────────────────────────────────────────
 // Main component
 // ──────────────────────────────────────────────────────────────
@@ -108,6 +161,9 @@ export function ParentChildVariantTable({
     queryFn: () => api.get(`/api/products/${productId}/variant-groups`),
     staleTime: 15_000,
   })
+
+  // Live inventory per variant — powers the read-only Stock column.
+  const inventoryMap = useVariantInventoryMap(productId)
 
   function toggleGroup(parentValue: string) {
     setExpandedGroups((prev) => {
@@ -170,6 +226,7 @@ export function ParentChildVariantTable({
           canEditPrice={canEditPrice}
           queryClient={queryClient}
           onEdit={(v) => setEditingVariant(v)}
+          inventoryMap={inventoryMap}
         />
         {editingVariant && (
           <VariantEditDialog
@@ -206,6 +263,7 @@ export function ParentChildVariantTable({
           canEditPrice={canEditPrice}
           queryClient={queryClient}
           onEditVariant={(v) => setEditingVariant(v)}
+          inventoryMap={inventoryMap}
         />
       ))}
       {editingVariant && (
@@ -235,6 +293,7 @@ function GroupCard({
   canEditPrice,
   queryClient,
   onEditVariant,
+  inventoryMap,
 }: {
   group: VariantGroup
   productId: string
@@ -247,6 +306,7 @@ function GroupCard({
   canEditPrice: boolean
   queryClient: ReturnType<typeof useQueryClient>
   onEditVariant: (v: ChildVariant) => void
+  inventoryMap: Map<string, InventorySummaryVariant>
 }) {
   const [parentCost, setParentCost] = useState('')
   const [parentSale, setParentSale] = useState('')
@@ -352,6 +412,7 @@ function GroupCard({
                   {childAttrKeys.map((k) => (<th key={k} className="px-3 py-2 font-medium">{k}</th>))}
                   <th className="px-3 py-2 font-medium">SKU</th>
                   <th className="px-3 py-2 font-medium">Fulfillment</th>
+                  <th className="px-3 py-2 font-medium text-center">Stock</th>
                   {showCost && <th className="px-3 py-2 font-medium text-right">Cost</th>}
                   {showPricing && <th className="px-3 py-2 font-medium text-right">Sale</th>}
                   {showPricing && <th className="px-3 py-2 font-medium text-right">Compare</th>}
@@ -372,6 +433,7 @@ function GroupCard({
                     canEditPrice={canEditPrice}
                     queryClient={queryClient}
                     onEdit={() => onEditVariant(child)}
+                    inventory={inventoryMap.get(child.variantId)}
                   />
                 ))}
               </tbody>
@@ -396,6 +458,7 @@ function ChildRow({
   canEditPrice,
   queryClient,
   onEdit,
+  inventory,
 }: {
   child: ChildVariant
   childAttrKeys: string[]
@@ -406,6 +469,7 @@ function ChildRow({
   canEditPrice: boolean
   queryClient: ReturnType<typeof useQueryClient>
   onEdit: () => void
+  inventory?: InventorySummaryVariant
 }) {
   const [costValue, setCostValue] = useState(String(child.costPrice))
   const [saleValue, setSaleValue] = useState(child.salePrice != null ? String(child.salePrice) : '')
@@ -495,6 +559,7 @@ function ChildRow({
         {child.barcode && <div className="text-[10px] text-muted-foreground">{child.barcode}</div>}
       </td>
       <td className="px-3 py-2"><FulfillmentTypeBadge type={child.fulfillmentType} /></td>
+      <td className="px-3 py-2 text-center"><StockCell inv={inventory} /></td>
       {showCost && (
         <td className="px-3 py-2">
           <div className="flex items-center gap-1 justify-end">
@@ -697,6 +762,7 @@ function FlatVariantTable({
   canEditPrice,
   queryClient,
   onEdit,
+  inventoryMap,
 }: {
   groups: VariantGroup[]
   productId: string
@@ -706,6 +772,7 @@ function FlatVariantTable({
   canEditPrice: boolean
   queryClient: ReturnType<typeof useQueryClient>
   onEdit: (v: ChildVariant) => void
+  inventoryMap: Map<string, InventorySummaryVariant>
 }) {
   const allChildren = groups.flatMap((g) => g.children)
 
@@ -719,6 +786,7 @@ function FlatVariantTable({
                 <th className="px-3 py-2 font-medium">Variant</th>
                 <th className="px-3 py-2 font-medium">SKU</th>
                 <th className="px-3 py-2 font-medium">Fulfillment</th>
+                <th className="px-3 py-2 font-medium text-center">Stock</th>
                 {showCost && <th className="px-3 py-2 font-medium text-right">Cost</th>}
                 {showPricing && <th className="px-3 py-2 font-medium text-right">Sale</th>}
                 {showPricing && <th className="px-3 py-2 font-medium text-right">Compare</th>}
@@ -741,6 +809,7 @@ function FlatVariantTable({
                     canEditPrice={canEditPrice}
                     queryClient={queryClient}
                     onEdit={() => onEdit(child)}
+                    inventory={inventoryMap.get(child.variantId)}
                   />
                 )
               })}
@@ -762,6 +831,7 @@ function FlatRow({
   canEditPrice,
   queryClient,
   onEdit,
+  inventory,
 }: {
   child: ChildVariant
   attrValues: string
@@ -772,6 +842,7 @@ function FlatRow({
   canEditPrice: boolean
   queryClient: ReturnType<typeof useQueryClient>
   onEdit: () => void
+  inventory?: InventorySummaryVariant
 }) {
   const [costValue, setCostValue] = useState(String(child.costPrice))
   const [saleValue, setSaleValue] = useState(child.salePrice != null ? String(child.salePrice) : '')
@@ -820,6 +891,7 @@ function FlatRow({
         {child.barcode && <div className="text-[10px] text-muted-foreground">{child.barcode}</div>}
       </td>
       <td className="px-3 py-2"><FulfillmentTypeBadge type={child.fulfillmentType} /></td>
+      <td className="px-3 py-2 text-center"><StockCell inv={inventory} /></td>
       {showCost && (
         <td className="px-3 py-2 text-right">
           {canEditCost ? (

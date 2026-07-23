@@ -59,6 +59,19 @@ export const receiveStockSchema = z.object({
 export type ReceiveStockInput = z.infer<typeof receiveStockSchema>
 
 // ──────────────────────────────────────────────────────────────
+// OPENING STOCK (per-variant, used by product creation flow)
+// ──────────────────────────────────────────────────────────────
+
+export const openingStockSchema = z.object({
+  org_variant_id: z.string().min(1, 'Variant ID is required'),
+  location_id: z.string().min(1, 'Location is required'),
+  quantity: z.number().int().positive('Quantity must be a positive integer'),
+  cost_per_unit: z.number().min(0, 'Cost per unit must be 0 or positive'),
+  notes: z.string().max(1000).optional().or(z.literal('')),
+})
+export type OpeningStockInput = z.infer<typeof openingStockSchema>
+
+// ──────────────────────────────────────────────────────────────
 // ADJUST STOCK (manual)
 // ──────────────────────────────────────────────────────────────
 

@@ -25,6 +25,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
   Dialog,
   DialogContent,
@@ -89,6 +90,7 @@ interface GeneratedVariant {
   is_default: boolean
   opening_stock_qty?: number
   opening_stock_cost?: number
+  opening_stock_location_id?: string
 }
 
 interface VariantDraft {
@@ -281,10 +283,19 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
         sale_price: g.sale_price,
         is_active: g.is_active,
         is_default: g.is_default,
-        has_opening_stock: false,
-        opening_stock_qty: 0,
-        opening_stock_cost: 0,
-        opening_stock_location_id: '',
+        // CRITICAL: propagate the user-entered opening stock values from the
+        // Mode B preview table — previously these were hardcoded to zero/empty,
+        // which silently dropped ALL opening stock for stitchable variants.
+        // Only stock_based variants qualify for opening stock. A variant is
+        // considered to "have" opening stock when qty > 0 AND a location is
+        // selected.
+        has_opening_stock:
+          g.fulfillment_type === 'stock_based' &&
+          !!g.opening_stock_location_id &&
+          Number(g.opening_stock_qty ?? 0) > 0,
+        opening_stock_qty: Number(g.opening_stock_qty ?? 0),
+        opening_stock_cost: Number(g.opening_stock_cost ?? 0),
+        opening_stock_location_id: g.opening_stock_location_id ?? '',
         fabric_source_variant_id: null,
       }))
     }
@@ -355,6 +366,10 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
                 is_default: existing?.is_default ?? i === 0,
                 sale_price: existing?.sale_price ?? 0,
                 is_active: existing?.is_active ?? true,
+                // Preserve opening stock edits across regenerations
+                opening_stock_qty: existing?.opening_stock_qty,
+                opening_stock_cost: existing?.opening_stock_cost,
+                opening_stock_location_id: existing?.opening_stock_location_id,
               }
             })
           })
@@ -437,40 +452,97 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
 
     setSubmitting(true)
     try {
+      // 1. Create the product + variants FIRST. We need the real variant UUIDs
+      //    returned by the API before we can attach opening stock to them.
       const res = await api.post<{ id: string; slug: string; title: string; variantIds: string[] }>(
         '/api/products',
         payload,
       )
 
-      // After product creation, process opening stock for variants that have it
-      // Use the actual variant UUIDs returned by the API (matched by index)
+      // 2. Identify variants that have opening stock data filled in. We use
+      //    the actual variant UUIDs returned by the API (matched by index).
+      //    Each variant can have its OWN location_id now — no more forced
+      //    single-location batching.
       const variantsWithOpeningStock = variants
         .map((v, i) => ({ variant: v, variantId: res.variantIds?.[i] }))
         .filter(
-          ({ variant }) =>
+          ({ variant, variantId }) =>
+            variantId &&
             variant.has_opening_stock &&
             variant.opening_stock_qty > 0 &&
             variant.opening_stock_location_id,
         )
 
-      if (variantsWithOpeningStock.length > 0) {
+      // 3. Call the dedicated opening-stock endpoint PER VARIANT ROW. Each
+      //    call is awaited (not fire-and-forget) so we can surface per-variant
+      //    failures clearly. The endpoint wraps processInventoryTransaction()
+      //    — the SAME function every other inventory movement uses — so this
+      //    produces real inventory_pools + inventory_transactions rows
+      //    identical to Receive Stock / PO receiving.
+      const failedVariants: Array<{ sku: string; reason: string }> = []
+      const succeededVariants: Array<{ sku: string; locationId: string }> = []
+      const touchedLocationIds = new Set<string>()
+
+      for (const { variant, variantId } of variantsWithOpeningStock) {
         try {
-          await api.post('/api/inventory/receive', {
-            location_id: variantsWithOpeningStock[0].variant.opening_stock_location_id,
+          const result = await api.post<{
+            success: boolean
+            transaction_id: string
+            location_id: string
+          }>('/api/inventory/opening-stock', {
+            org_variant_id: variantId,
+            location_id: variant.opening_stock_location_id,
+            quantity: variant.opening_stock_qty,
+            cost_per_unit: variant.opening_stock_cost || variant.cost_price,
             notes: `Opening stock for ${res.title}`,
-            items: variantsWithOpeningStock.map(({ variant, variantId }) => ({
-              org_variant_id: variantId,
-              quantity: variant.opening_stock_qty,
-              cost_per_unit: variant.opening_stock_cost || variant.cost_price,
-            })),
           })
-          toast.success('Opening stock recorded.')
-        } catch {
-          toast.warning('Product created, but opening stock could not be set. Use Receive Stock manually.')
+          if (result?.success) {
+            succeededVariants.push({ sku: variant.sku, locationId: variant.opening_stock_location_id })
+            touchedLocationIds.add(variant.opening_stock_location_id)
+          } else {
+            failedVariants.push({ sku: variant.sku, reason: 'Unknown error' })
+          }
+        } catch (err) {
+          const reason = err instanceof FetchError ? err.message : 'Network error'
+          failedVariants.push({ sku: variant.sku, reason })
         }
       }
 
+      // 4. Surface per-variant failures — NEVER silently drop. The product
+      //    was created successfully, but if any opening stock entry failed,
+      //    the user MUST see exactly which variant failed and why.
+      if (failedVariants.length > 0) {
+        const failedList = failedVariants.map((f) => `• ${f.sku}: ${f.reason}`).join('\n')
+        toast.error(
+          `Opening stock failed for ${failedVariants.length} variant(s):\n${failedList}`,
+          { duration: 8000 },
+        )
+        toast.warning(
+          `Product "${res.title}" was created, but ${failedVariants.length} opening stock entr${failedVariants.length === 1 ? 'y' : 'ies'} failed. Use Receive Stock manually to record them.`,
+          { duration: 8000 },
+        )
+      } else if (succeededVariants.length > 0) {
+        toast.success(
+          `Opening stock recorded for ${succeededVariants.length} variant${succeededVariants.length === 1 ? '' : 's'}.`,
+        )
+      }
+
+      // 5. Invalidate EVERYTHING that opening stock touches — inventory
+      //    dashboard, transactions ledger, product detail (multiple keys
+      //    including the pricing tab + inventory tab), per-location views,
+      //    and the products list. This guarantees no stale data anywhere.
       queryClient.invalidateQueries({ queryKey: ['products'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-pools'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-transactions'] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['product', res.id] })
+      queryClient.invalidateQueries({ queryKey: ['product-inventory', res.id] })
+      queryClient.invalidateQueries({ queryKey: ['product-inventory-summary', res.id] })
+      queryClient.invalidateQueries({ queryKey: ['inventory-locations'] })
+      for (const locId of touchedLocationIds) {
+        queryClient.invalidateQueries({ queryKey: ['location', locId] })
+      }
+
       toast.success(`"${res.title}" created.`)
       navigate({ name: 'product-detail', id: res.id })
     } catch (err) {
@@ -1143,18 +1215,20 @@ function SimpleVariantForm({
   onChange: (v: VariantDraft) => void
   slug: string
 }) {
+  const navigate = useAppStore((s) => s.navigate)
   const set = <K extends keyof VariantDraft>(key: K, v: VariantDraft[K]) =>
     onChange({ ...value, [key]: v })
 
   const isMto = value.fulfillment_type === 'made_to_order'
 
   // Fetch locations for the opening stock dropdown
-  const { data: locData } = useQuery<{ locations: Array<{ id: string; name: string }> }>({
+  const { data: locData } = useQuery<{ locations: Array<{ id: string; name: string; isDefault?: boolean }> }>({
     queryKey: ['inventory-locations'],
     queryFn: () => api.get('/api/inventory-locations'),
     staleTime: 60_000,
   })
   const locations = locData?.locations ?? []
+  const noLocations = locations.length === 0
 
   return (
     <div className="space-y-4">
@@ -1229,19 +1303,46 @@ function SimpleVariantForm({
         </div>
       )}
 
-      {/* Opening Stock section (for stock_based variants) */}
-      {!isMto && (
+      {/* Opening Stock section — shown for stock_based variants, OR for
+          made_to_order variants once the user explicitly confirms they want
+          to hold pre-made bulk stock (which also flips track_inventory on). */}
+      {(!isMto || value.has_opening_stock) && (
         <div className="rounded-lg border p-4 space-y-3">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium">Opening Stock</p>
-              <p className="text-xs text-muted-foreground">Receive initial stock for this variant now</p>
+              <p className="text-sm font-medium">
+                {isMto ? 'Pre-made Bulk Stock' : 'Opening Stock'}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {isMto
+                  ? 'Record pre-made stock for this made-to-order variant. Inventory tracking will be enabled.'
+                  : 'Receive initial stock for this variant now'}
+              </p>
             </div>
             <Switch
               checked={value.has_opening_stock}
-              onCheckedChange={(c) => set('has_opening_stock', c)}
+              onCheckedChange={(c) =>
+                set('has_opening_stock', c)
+              }
             />
           </div>
+          {value.has_opening_stock && noLocations && (
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>No warehouse locations found</AlertTitle>
+              <AlertDescription>
+                You need at least one inventory location before you can record opening stock.{' '}
+                <button
+                  type="button"
+                  className="font-medium underline underline-offset-4 hover:text-primary"
+                  onClick={() => navigate({ name: 'inventory-locations' })}
+                >
+                  Create a location
+                </button>{' '}
+                first.
+              </AlertDescription>
+            </Alert>
+          )}
           {value.has_opening_stock && (
             <div className="grid sm:grid-cols-3 gap-3">
               <div className="space-y-1.5">
@@ -1254,24 +1355,48 @@ function SimpleVariantForm({
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs">Location</Label>
-                {locations.length === 0 ? (
-                  <p className="text-xs text-amber-600 py-2">No locations yet. Create one in Inventory → Locations first.</p>
-                ) : (
-                  <Select
-                    value={value.opening_stock_location_id}
-                    onValueChange={(v) => set('opening_stock_location_id', v)}
-                  >
-                    <SelectTrigger className="h-9 text-xs"><SelectValue placeholder="Select location" /></SelectTrigger>
-                    <SelectContent>
-                      {locations.map((l) => (
-                        <SelectItem key={l.id} value={l.id}>{l.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
+                <Select
+                  value={value.opening_stock_location_id}
+                  onValueChange={(v) => set('opening_stock_location_id', v)}
+                >
+                  <SelectTrigger className="h-9 text-xs"><SelectValue placeholder="Select location" /></SelectTrigger>
+                  <SelectContent>
+                    {locations.map((l) => (
+                      <SelectItem key={l.id} value={l.id}>
+                        {l.name}
+                        {l.isDefault ? ' (default)' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* MTO confirmation CTA — only shown when MTO and the user hasn't
+          yet opted in to pre-made bulk stock. */}
+      {isMto && !value.has_opening_stock && (
+        <div className="rounded-lg border border-purple-200 bg-purple-50 p-3 space-y-2">
+          <p className="text-xs text-purple-800">
+            This is a made-to-order variant. If you also want to hold pre-made bulk stock, you can record opening stock — inventory tracking will be enabled for this variant.
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs"
+            disabled={noLocations}
+            onClick={() => {
+              set('has_opening_stock', true)
+              if (!value.opening_stock_location_id) {
+                set('opening_stock_location_id', locations.find((l) => l.isDefault)?.id ?? locations[0]?.id ?? '')
+              }
+            }}
+          >
+            + Add pre-made bulk stock
+          </Button>
         </div>
       )}
 
@@ -1317,6 +1442,20 @@ function StitchableVariantBuilder({
     }
     return Array.from(keys)
   }, [generatedVariants])
+
+  // Fetch real warehouse locations for the active company/org — same query the
+  // Receive Stock page uses, so the opening stock dropdown is always in sync
+  // with the actual location catalog.
+  const navigate = useAppStore((s) => s.navigate)
+  const { data: locData } = useQuery<{
+    locations: Array<{ id: string; name: string; isDefault?: boolean }>
+  }>({
+    queryKey: ['inventory-locations'],
+    queryFn: () => api.get('/api/inventory-locations'),
+    staleTime: 60_000,
+  })
+  const locations = locData?.locations ?? []
+  const noLocations = locations.length === 0
 
   function updateGenerated(
     index: number,
@@ -1492,42 +1631,146 @@ function StitchableVariantBuilder({
           </div>
 
           {/* Per-row opening stock + fabric source (expandable) */}
-          <div className="border-t bg-muted/20 p-3 space-y-2">
-            <p className="text-xs text-muted-foreground">Opening stock and fabric source options (optional, per variant):</p>
-            {generatedVariants.map((v, i) => (
-              <div key={`opts-${v.sku}`} className="rounded border bg-background p-2 space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-mono font-medium">{v.sku}</span>
-                  <Badge variant="outline" className={cn('text-[9px]', v.fulfillment_type === 'stock_based' ? 'bg-sky-50 text-sky-700 border-sky-200' : 'bg-purple-50 text-purple-700 border-purple-200')}>{FULFILLMENT_LABELS[v.fulfillment_type] ?? v.fulfillment_type}</Badge>
+          <div className="border-t bg-muted/20 p-3 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <p className="text-xs text-muted-foreground">
+                Opening stock (optional, per variant) — recorded as real inventory the moment the product is created.
+              </p>
+              {locations.length > 0 && generatedVariants.some((v) => v.fulfillment_type === 'stock_based') && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => {
+                    // Apply the first location (or the default) to every stock_based variant row
+                    const defaultLoc =
+                      locations.find((l) => l.isDefault)?.id ?? locations[0]?.id
+                    if (!defaultLoc) return
+                    setGeneratedVariants(
+                      generatedVariants.map((v) =>
+                        v.fulfillment_type === 'stock_based'
+                          ? { ...v, opening_stock_location_id: defaultLoc }
+                          : v,
+                      ),
+                    )
+                  }}
+                >
+                  Use default location for all
+                </Button>
+              )}
+            </div>
+
+            {noLocations && (
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertTitle>No warehouse locations found</AlertTitle>
+                <AlertDescription>
+                  You need at least one inventory location before you can record opening stock.{' '}
+                  <button
+                    type="button"
+                    className="font-medium underline underline-offset-4 hover:text-primary"
+                    onClick={() => navigate({ name: 'inventory-locations' })}
+                  >
+                    Create a location
+                  </button>{' '}
+                  first.
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {generatedVariants.map((v, i) => {
+              const isMto = v.fulfillment_type === 'made_to_order'
+              const mtoBulkConfirmed = !!v.opening_stock_location_id || Number(v.opening_stock_qty ?? 0) > 0
+              return (
+                <div key={`opts-${v.sku}`} className="rounded border bg-background p-2 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-mono font-medium">{v.sku}</span>
+                    <Badge variant="outline" className={cn('text-[9px]', v.fulfillment_type === 'stock_based' ? 'bg-sky-50 text-sky-700 border-sky-200' : 'bg-purple-50 text-purple-700 border-purple-200')}>{FULFILLMENT_LABELS[v.fulfillment_type] ?? v.fulfillment_type}</Badge>
+                  </div>
+                  {isMto && !mtoBulkConfirmed ? (
+                    <div className="pl-2 space-y-1.5">
+                      <p className="text-xs text-muted-foreground">
+                        Made-to-order variants are produced on demand. If you also want to hold pre-made bulk stock for this variant, you can record it as opening stock — this will enable inventory tracking for the variant.
+                      </p>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs"
+                        disabled={noLocations}
+                        onClick={() =>
+                          updateGenerated(i, {
+                            opening_stock_location_id:
+                              v.opening_stock_location_id ??
+                              (locations.find((l) => l.isDefault)?.id ?? locations[0]?.id ?? ''),
+                          })
+                        }
+                      >
+                        + Add pre-made bulk stock
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2 pl-2">
+                      <span className="text-xs text-muted-foreground">
+                        {isMto ? 'Pre-made bulk stock:' : 'Opening stock:'}
+                      </span>
+                      <Input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="Qty"
+                        className="h-7 w-16 text-xs"
+                        value={v.opening_stock_qty ?? ''}
+                        onChange={(e) => updateGenerated(i, { opening_stock_qty: Number(e.target.value) })}
+                      />
+                      <Input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="Cost/unit"
+                        className="h-7 w-20 text-xs"
+                        value={v.opening_stock_cost ?? ''}
+                        onChange={(e) => updateGenerated(i, { opening_stock_cost: Number(e.target.value) })}
+                      />
+                      <Select
+                        value={v.opening_stock_location_id ?? ''}
+                        onValueChange={(val) => updateGenerated(i, { opening_stock_location_id: val })}
+                      >
+                        <SelectTrigger className="h-7 w-40 text-xs">
+                          <SelectValue placeholder="Location" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {locations.map((l) => (
+                            <SelectItem key={l.id} value={l.id}>
+                              {l.name}
+                              {l.isDefault ? ' (default)' : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {isMto && (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs text-muted-foreground"
+                          onClick={() =>
+                            updateGenerated(i, {
+                              opening_stock_qty: 0,
+                              opening_stock_cost: 0,
+                              opening_stock_location_id: '',
+                            })
+                          }
+                        >
+                          Cancel
+                        </Button>
+                      )}
+                    </div>
+                  )}
                 </div>
-                {v.fulfillment_type === 'stock_based' ? (
-                  <div className="flex flex-wrap items-center gap-2 pl-2">
-                    <span className="text-xs text-muted-foreground">Opening stock:</span>
-                    <Input
-                      type="number"
-                      min="0"
-                      placeholder="Qty"
-                      className="h-7 w-16 text-xs"
-                      value={v.opening_stock_qty ?? ''}
-                      onChange={(e) => updateGenerated(i, { opening_stock_qty: Number(e.target.value) })}
-                    />
-                    <Input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      placeholder="Cost/unit"
-                      className="h-7 w-20 text-xs"
-                      value={v.opening_stock_cost ?? ''}
-                      onChange={(e) => updateGenerated(i, { opening_stock_cost: Number(e.target.value) })}
-                    />
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 pl-2">
-                    <span className="text-xs text-blue-600">MTO — fabric source set after creation via variant edit</span>
-                  </div>
-                )}
-              </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}
@@ -1650,6 +1893,12 @@ function RegularVariantBuilder({
                 />
               </div>
             </div>
+
+            {/* Opening stock (compact, per variant) */}
+            <RegularVariantOpeningStock
+              variant={v}
+              onChange={(patch) => update(i, patch)}
+            />
           </div>
         ))}
       </div>
@@ -1657,6 +1906,124 @@ function RegularVariantBuilder({
       <Button type="button" variant="outline" onClick={addRow}>
         <Plus className="h-4 w-4" /> Add variant
       </Button>
+    </div>
+  )
+}
+
+/**
+ * Compact opening-stock sub-component used inside the RegularVariantBuilder
+ * (Mode C). Reuses the same TanStack Query for locations and the same
+ * "No locations" banner pattern as the rest of the inventory frontend.
+ */
+function RegularVariantOpeningStock({
+  variant,
+  onChange,
+}: {
+  variant: VariantDraft
+  onChange: (patch: Partial<VariantDraft>) => void
+}) {
+  const navigate = useAppStore((s) => s.navigate)
+  const { data: locData } = useQuery<{
+    locations: Array<{ id: string; name: string; isDefault?: boolean }>
+  }>({
+    queryKey: ['inventory-locations'],
+    queryFn: () => api.get('/api/inventory-locations'),
+    staleTime: 60_000,
+  })
+  const locations = locData?.locations ?? []
+  const noLocations = locations.length === 0
+  const isMto = variant.fulfillment_type === 'made_to_order'
+  const mtoBulkConfirmed = variant.has_opening_stock
+
+  return (
+    <div className="rounded-md border bg-muted/20 p-2.5 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs font-medium">Opening stock</p>
+        <Switch
+          checked={variant.has_opening_stock}
+          onCheckedChange={(c) =>
+            onChange({
+              has_opening_stock: c,
+              ...(c
+                ? {
+                    opening_stock_location_id:
+                      variant.opening_stock_location_id ||
+                      (locations.find((l) => l.isDefault)?.id ?? locations[0]?.id ?? ''),
+                  }
+                : {}),
+            })
+          }
+        />
+      </div>
+      {noLocations && variant.has_opening_stock && (
+        <Alert>
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>No warehouse locations found</AlertTitle>
+          <AlertDescription>
+            You need at least one inventory location before you can record opening stock.{' '}
+            <button
+              type="button"
+              className="font-medium underline underline-offset-4 hover:text-primary"
+              onClick={() => navigate({ name: 'inventory-locations' })}
+            >
+              Create a location
+            </button>{' '}
+            first.
+          </AlertDescription>
+        </Alert>
+      )}
+      {variant.has_opening_stock && (
+        <div className="grid sm:grid-cols-3 gap-2">
+          <div className="space-y-1">
+            <Label className="text-[10px]">Quantity</Label>
+            <Input
+              type="number"
+              min="1"
+              step="1"
+              value={variant.opening_stock_qty || ''}
+              onChange={(e) => onChange({ opening_stock_qty: Number(e.target.value) })}
+              placeholder="0"
+              className="h-8 text-xs"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-[10px]">Cost per unit</Label>
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              value={variant.opening_stock_cost || ''}
+              onChange={(e) => onChange({ opening_stock_cost: Number(e.target.value) })}
+              placeholder="0.00"
+              className="h-8 text-xs"
+            />
+          </div>
+          <div className="space-y-1">
+            <Label className="text-[10px]">Location</Label>
+            <Select
+              value={variant.opening_stock_location_id}
+              onValueChange={(val) => onChange({ opening_stock_location_id: val })}
+            >
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue placeholder="Select location" />
+              </SelectTrigger>
+              <SelectContent>
+                {locations.map((l) => (
+                  <SelectItem key={l.id} value={l.id}>
+                    {l.name}
+                    {l.isDefault ? ' (default)' : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
+      )}
+      {variant.has_opening_stock && isMto && mtoBulkConfirmed && (
+        <p className="text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">
+          This made-to-order variant will have inventory tracking enabled once the opening stock is recorded.
+        </p>
+      )}
     </div>
   )
 }

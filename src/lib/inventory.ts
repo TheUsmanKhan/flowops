@@ -275,8 +275,13 @@ export async function processInventoryTransaction(
       data: updateData,
     })
 
-    // 6. Handle track_inventory flip for made_to_order variants on first return
-    if (transactionType === 'return_stitched_received') {
+    // 6. Handle track_inventory flip for made_to_order variants on first
+    //    return OR on opening_stock entry (e.g. user confirms "pre-made bulk
+    //    stock" for an MTO variant during product creation). One-way FALSE → TRUE.
+    if (
+      transactionType === 'return_stitched_received' ||
+      transactionType === 'opening_stock'
+    ) {
       const variant = await db.orgProductVariant.findUnique({
         where: { id: orgVariantId },
         select: { trackInventory: true, fulfillmentType: true },
