@@ -609,7 +609,7 @@ function FlatVariantTable({
                 <th className="px-3 py-2 font-medium">Fulfillment</th>
                 {showCost && <th className="px-3 py-2 font-medium text-right">Cost</th>}
                 {showPricing && <th className="px-3 py-2 font-medium text-right">Sale</th>}
-                {showPricing && <th className="px-3 py-2 font-medium text-right">Compare</th>
+                {showPricing && <th className="px-3 py-2 font-medium text-right">Compare</th>}
               </tr>
             </thead>
             <tbody>
