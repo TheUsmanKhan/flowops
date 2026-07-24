@@ -257,48 +257,52 @@ function GroupCard<T extends WizardGroupableVariant>({
     ? Object.keys(group.children[0].attribute_values).filter((k) => k !== parentAttrName)
     : []
 
-  // ── Cascade handlers (pure local state, no network) ──
+  // ── Cascade handler (pure local state, no network) ──
+  // Bug 1 fix: ONE handler cascades ALL THREE fields (cost, sale, compare)
+  // independently to their respective synced children. Each field only
+  // updates children whose relevant synced flag is true, so the three flags
+  // remain INDEPENDENT.
 
-  function applyCostToGroup() {
+  function applyAllToGroup() {
     const cost = Number(parentCost)
+    const sale = Number(parentSale)
+    const compare = parentCompare ? Number(parentCompare) : null
+
     if (isNaN(cost) || cost < 0) {
       toast.error('Enter a valid cost price')
       return
     }
-    const updated = allVariants.map((v) => {
-      const isChild = group.children.some((c) => c.sku === v.sku)
-      if (isChild && v.cost_price_synced_with_parent) {
-        return { ...v, cost_price: cost }
-      }
-      return v
-    })
-    onVariantsChange(updated)
-    const affectedCount = group.children.filter((c) => c.cost_price_synced_with_parent).length
-    toast.success(`Applied Rs. ${cost} to ${affectedCount} variant(s)`)
-  }
-
-  function applySaleToGroup() {
-    const sale = Number(parentSale)
     if (isNaN(sale) || sale < 0) {
       toast.error('Enter a valid sale price')
       return
     }
-    const compare = parentCompare ? Number(parentCompare) : null
+
     const updated = allVariants.map((v) => {
       const isChild = group.children.some((c) => c.sku === v.sku)
       if (!isChild) return v
       const patch: Partial<T> = {}
+      // Cost cascades to cost-synced children only
+      if (v.cost_price_synced_with_parent) {
+        ;(patch as Record<string, unknown>).cost_price = cost
+      }
+      // Sale cascades to sale-synced children only
       if (v.sale_price_synced_with_parent) {
         ;(patch as Record<string, unknown>).sale_price = sale
       }
+      // Compare cascades to compare-synced children only
       if (v.compare_price_synced_with_parent) {
         ;(patch as Record<string, unknown>).compare_price = compare
       }
       return Object.keys(patch).length > 0 ? { ...v, ...patch } : v
     })
     onVariantsChange(updated)
+
+    const costCount = group.children.filter((c) => c.cost_price_synced_with_parent).length
     const saleCount = group.children.filter((c) => c.sale_price_synced_with_parent).length
-    toast.success(`Applied sale price to ${saleCount} variant(s)`)
+    const compareCount = group.children.filter((c) => c.compare_price_synced_with_parent).length
+    toast.success(
+      `Applied to group — Cost: ${costCount}, Sale: ${saleCount}, Compare: ${compareCount} variant(s)`,
+    )
   }
 
   function updateChild(sku: string, patch: Partial<T>) {
@@ -348,8 +352,7 @@ function GroupCard<T extends WizardGroupableVariant>({
               onCostChange={setParentCost}
               onSaleChange={setParentSale}
               onCompareChange={setParentCompare}
-              onApplyCost={applyCostToGroup}
-              onApplySale={applySaleToGroup}
+              onApplyAll={applyAllToGroup}
               showCost={showCost}
               showPricing={showPricing}
               canEditCost={canEdit}

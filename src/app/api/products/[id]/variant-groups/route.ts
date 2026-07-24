@@ -110,6 +110,7 @@ export async function GET(
           costPrice: Number(item.dbVariant.costPrice),
           costPriceSyncedWithParent: item.dbVariant.costPriceSyncedWithParent,
           fulfillmentType: item.dbVariant.fulfillmentType,
+          trackInventory: item.dbVariant.trackInventory,
           isActive: item.dbVariant.isActive,
           salePrice: item.pricing ? Number(item.pricing.salePrice) : null,
           comparePrice: item.pricing?.comparePrice ? Number(item.pricing.comparePrice) : null,

@@ -109,9 +109,17 @@ export function ParentGroupHeader({
 }
 
 /**
- * The parent group input row — Cost Price + Apply, Sale Price + Compare Price + Apply to Group.
- * This is rendered BELOW the collapsible header (inside the expanded card body),
- * not inside the header itself, because the inputs should not toggle the card.
+ * The parent group input row — Cost Price + Sale Price + Compare Price +
+ * a single "Apply to Group" button that cascades ALL THREE fields
+ * independently to their respective synced children.
+ *
+ * Bug 1 fix: previously there were TWO separate Apply buttons ("Apply" for
+ * cost, "Apply to Group" for sale+compare), which caused users to only
+ * cascade sale price and miss cost/compare. Now there is ONE button that
+ * cascades all three fields at once — each field only updates children
+ * whose relevant synced flag is true, so the three flags remain
+ * INDEPENDENT (cost_price_synced_with_parent, sale_price_synced_with_parent,
+ * compare_price_synced_with_parent).
  */
 export function ParentGroupInputs({
   parentCost,
@@ -120,8 +128,7 @@ export function ParentGroupInputs({
   onCostChange,
   onSaleChange,
   onCompareChange,
-  onApplyCost,
-  onApplySale,
+  onApplyAll,
   showCost,
   showPricing,
   canEditCost,
@@ -134,8 +141,8 @@ export function ParentGroupInputs({
   onCostChange: (v: string) => void
   onSaleChange: (v: string) => void
   onCompareChange: (v: string) => void
-  onApplyCost: () => void
-  onApplySale: () => void
+  /** Single handler that cascades cost + sale + compare to synced children. */
+  onApplyAll: () => void
   showCost: boolean
   showPricing: boolean
   canEditCost: boolean
@@ -151,30 +158,15 @@ export function ParentGroupInputs({
         {showCost && canEditCost && (
           <div className="space-y-1">
             <Label className="text-xs">Cost Price</Label>
-            <div className="flex items-center gap-1">
-              <Input
-                type="number"
-                min="0"
-                step="0.01"
-                value={parentCost}
-                onChange={(e) => onCostChange(e.target.value)}
-                className="h-8 w-28 text-sm"
-                placeholder="0.00"
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={onApplyCost}
-                disabled={applying}
-              >
-                {applying ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <Check className="h-3 w-3" />
-                )}{' '}
-                Apply
-              </Button>
-            </div>
+            <Input
+              type="number"
+              min="0"
+              step="0.01"
+              value={parentCost}
+              onChange={(e) => onCostChange(e.target.value)}
+              className="h-8 w-28 text-sm"
+              placeholder="0.00"
+            />
           </div>
         )}
         {showPricing && canEditPrice && (
@@ -203,22 +195,22 @@ export function ParentGroupInputs({
                 placeholder="0.00"
               />
             </div>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={onApplySale}
-              disabled={applying}
-              className="mb-0.5"
-            >
-              {applying ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Check className="h-3 w-3" />
-              )}{' '}
-              Apply to Group
-            </Button>
           </>
         )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={onApplyAll}
+          disabled={applying}
+          className="mb-0.5"
+        >
+          {applying ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <Check className="h-3 w-3" />
+          )}{' '}
+          Apply to Group
+        </Button>
       </div>
     </div>
   )

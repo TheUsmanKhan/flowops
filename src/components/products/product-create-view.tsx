@@ -109,6 +109,15 @@ interface GeneratedVariant {
   opening_stock_qty?: number
   opening_stock_cost?: number
   opening_stock_location_id?: string
+  // Bug 2 fix: track_inventory is a SEPARATE mutable field from
+  // fulfillment_type. fulfillment_type never changes (describes HOW the
+  // variant is normally fulfilled); track_inventory changes when opening
+  // stock is added to a made_to_order variant (flips to true). The badge
+  // in the Opening Stock table reads THIS field, not fulfillment_type.
+  // Default: stock_based → true, made_to_order → false. Flipped to true
+  // optimistically in local state when the user enters Qty > 0 for an MTO
+  // variant's opening stock.
+  track_inventory: boolean
 }
 
 interface VariantDraft {
@@ -391,6 +400,13 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
                 opening_stock_qty: existing?.opening_stock_qty,
                 opening_stock_cost: existing?.opening_stock_cost,
                 opening_stock_location_id: existing?.opening_stock_location_id,
+                // Bug 2 fix: track_inventory defaults based on fulfillment_type
+                // (stock_based → true, made_to_order → false). Preserved for
+                // existing variants so the user's opening stock entry isn't
+                // lost on regeneration.
+                track_inventory:
+                  existing?.track_inventory ??
+                  c.suggested_fulfillment_type === 'stock_based',
               }
             })
           })
@@ -1868,11 +1884,17 @@ function OpeningStockTable({
       const next = new Set(prev)
       if (next.has(sku)) {
         next.delete(sku)
-        // Discard any unsaved entry on collapse
+        // Discard any unsaved entry on collapse — also revert track_inventory
+        // to false since no stock will be recorded for this MTO variant.
         onChange(
           variants.map((v) =>
             v.sku === sku
-              ? { ...v, opening_stock_qty: 0, opening_stock_location_id: '' }
+              ? {
+                  ...v,
+                  opening_stock_qty: 0,
+                  opening_stock_location_id: '',
+                  track_inventory: v.fulfillment_type === 'stock_based',
+                }
               : v,
           ),
         )
@@ -1893,7 +1915,18 @@ function OpeningStockTable({
   }
 
   function updateVariant(sku: string, patch: Partial<GeneratedVariant>) {
-    onChange(variants.map((v) => (v.sku === sku ? { ...v, ...patch } : v)))
+    // Bug 2 fix: when opening_stock_qty changes for a made_to_order variant,
+    // optimistically flip track_inventory in local state so the badge updates
+    // live in the wizard. If Qty is cleared back to 0, revert track_inventory
+    // to false (since no stock will actually be recorded for it).
+    const target = variants.find((v) => v.sku === sku)
+    const isMto = target?.fulfillment_type === 'made_to_order'
+    const finalPatch = { ...patch }
+    if (isMto && 'opening_stock_qty' in patch) {
+      const newQty = Number(patch.opening_stock_qty ?? 0)
+      finalPatch.track_inventory = newQty > 0
+    }
+    onChange(variants.map((v) => (v.sku === sku ? { ...v, ...finalPatch } : v)))
   }
 
   function applyDefaultLocationToAll() {
@@ -1981,16 +2014,22 @@ function OpeningStockTable({
                     </div>
                   </TableCell>
                   <TableCell className="px-3 py-2">
+                    {/* Bug 2 fix: badge reads track_inventory (mutable), NOT
+                        fulfillment_type (immutable). A made_to_order variant
+                        with opening stock added shows "Stock Tracked" because
+                        track_inventory is now true. */}
                     <Badge
                       variant="outline"
                       className={cn(
                         'text-[9px]',
-                        v.fulfillment_type === 'stock_based'
+                        v.track_inventory
                           ? 'bg-sky-50 text-sky-700 border-sky-200'
                           : 'bg-purple-50 text-purple-700 border-purple-200',
                       )}
                     >
-                      {FULFILLMENT_LABELS[v.fulfillment_type] ?? v.fulfillment_type}
+                      {v.track_inventory
+                        ? FULFILLMENT_LABELS.stock_based
+                        : FULFILLMENT_LABELS.made_to_order}
                     </Badge>
                   </TableCell>
                   {/* Qty — visible only when row is expanded */}

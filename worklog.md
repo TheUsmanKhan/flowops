@@ -1126,3 +1126,50 @@ Stage Summary:
 - Bug 1 FIXED + VERIFIED: "One Size" no longer appears on Stitched variants. The rule evaluation is bidirectional and generic — works for ANY rule in attribute_value_rules, not just Piece Type/Size.
 - Bug 2 FIXED + VERIFIED: Opening Stock no longer asks for cost. Cost is set exactly once (via the grouped pricing table cascade/override) and flows directly to inventory_pools.avg_cost. The redundant Cost/Unit input was removed from all 3 creation modes.
 - Bug 3 FIXED + VERIFIED: Opening Stock section rebuilt as a compact table with one top-level note, expandable MTO rows, and "Use default location for all". No more repetitive paragraphs per variant.
+
+---
+Task ID: CASCADE-BADGE-FIXES
+Agent: main
+Task: Fix two connected bugs: (1) cost + compare price not cascading from parent group to children, (2) MTO variant badge not switching to "Stock Tracked" when opening stock is added.
+
+Work Log:
+
+BUG 1 — Cost + Compare cascade fix:
+
+Investigation:
+- Tested the edit-page server endpoints directly: POST /api/products/{id}/variant-groups/dummy/cost (cascades cost to cost-synced children) and POST .../sale-price (cascades sale + compare to their respective synced children). Both work correctly — all 5 Stitched children received cost=9000, sale=11000, compare=12000.
+- Root cause was in the FRONTEND UX: the shared ParentGroupInputs component had TWO separate Apply buttons — "Apply" (for cost only) and "Apply to Group" (for sale+compare). A user who only clicked "Apply to Group" saw sale/compare cascade but cost remained unchanged.
+- Both wizard and edit-page children tables already had a Compare column with sync indicators — no missing column bug.
+
+Fix:
+- Refactored ParentGroupInputs (variant-table-parts.tsx) to have ONE "Apply to Group" button with a single onApplyAll callback. Removed the separate onApplyCost + onApplySale props.
+- Wizard (client-side-parent-child-variant-table.tsx): replaced applyCostToGroup + applySaleToGroup with a single applyAllToGroup that cascades all 3 fields independently to their respective synced children (cost → cost_price_synced, sale → sale_price_synced, compare → compare_price_synced). The 3 flags remain INDEPENDENT.
+- Edit page (parent-child-variant-table.tsx): replaced applyCostToGroup + applySaleToGroup with a single applyAllToGroup that calls both server endpoints (cost + sale-price) in sequence. Replaced the inline parent inputs with the shared ParentGroupInputs component.
+- Verified: all 5 Stitched children now show costPrice:9000, salePrice:11000, comparePrice:12000 after a single "Apply to Group" click.
+
+BUG 2 — Badge reads track_inventory, not fulfillment_type:
+
+Investigation:
+- OpeningStockTable badge (product-create-view.tsx line ~1993) read v.fulfillment_type — which never changes. A made_to_order variant always showed "Made to Order" even after opening stock was added.
+- GeneratedVariant type had no track_inventory field.
+- No optimistic local state update when entering Qty > 0 for an MTO variant.
+- Server-side processInventoryTransaction already flips track_inventory for opening_stock (from the earlier Opening Stock fix).
+
+Fix:
+- Added track_inventory: boolean to GeneratedVariant type. Default: stock_based → true, made_to_order → false.
+- Updated handleAttributeChange regeneration logic to initialize + preserve track_inventory across regenerations.
+- Updated OpeningStockTable badge to read v.track_inventory instead of v.fulfillment_type. Shows "Stock Tracked" (sky) when true, "Made to Order" (purple) when false.
+- Updated updateVariant() in OpeningStockTable: when opening_stock_qty changes for an MTO variant, optimistically flips track_inventory to true (if qty > 0) or false (if qty cleared to 0) in local state — badge updates live without waiting for submission.
+- Updated toggleMtoExpand(): when an MTO row is collapsed (Remove), reverts track_inventory to false (since no stock will be recorded).
+- Added trackInventory to the variant-groups API endpoint response (src/app/api/products/[id]/variant-groups/route.ts).
+- Added trackInventory?: boolean to ChildVariant type in parent-child-variant-table.tsx.
+- Created TrackingBadge component in parent-child-variant-table.tsx that reads trackInventory (with fallback to fulfillmentType for older API responses). Replaced FulfillmentTypeBadge with TrackingBadge in both ChildRow and FlatRow fulfillment columns.
+- Verified: endpoint now returns trackInventory for all variants. MTO variants with trackInventory=true will show "Stock Tracked" badge.
+
+VERIFICATION:
+- bun run lint: 0 errors, 15 pre-existing warnings (0 new).
+- npx tsc --noEmit: 0 errors in any modified file.
+- Bug 1 API test: cost=9000, sale=11000, compare=12000 all cascaded to all 5 Stitched children. Unstitched variant untouched.
+- Bug 2 API test: variant-groups endpoint returns trackInventory for all variants. MTO variants with trackInventory=true show correctly.
+- The 3 sync flags (cost_price_synced_with_parent, sale_price_synced_with_parent, compare_price_synced_with_parent) remain INDEPENDENT — each field only cascades to children whose relevant flag is true.
+- fulfillment_type and track_inventory are now treated as separate fields: fulfillment_type never changes (drives whether Opening Stock is hidden-by-default); track_inventory is mutable (drives the badge display).

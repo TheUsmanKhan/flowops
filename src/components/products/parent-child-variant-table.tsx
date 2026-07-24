@@ -41,6 +41,7 @@ import {
   Star,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ParentGroupInputs } from '@/components/products/variant-table-parts'
 
 // ──────────────────────────────────────────────────────────────
 // Types
@@ -53,6 +54,10 @@ interface ChildVariant {
   costPrice: number
   costPriceSyncedWithParent: boolean
   fulfillmentType: string
+  // Bug 2 fix: trackInventory is a separate mutable field. The badge reads
+  // THIS (not fulfillmentType) to show whether the variant currently holds
+  // tracked stock.
+  trackInventory?: boolean
   isActive: boolean
   isDefault: boolean
   salePrice: number | null
@@ -133,6 +138,38 @@ function StockCell({ inv }: { inv?: InventorySummaryVariant }) {
         <div className="text-[10px] text-muted-foreground">{available} avail.</div>
       )}
     </div>
+  )
+}
+
+/**
+ * Bug 2 fix: badge that reads trackInventory (mutable), NOT fulfillmentType
+ * (immutable). A made_to_order variant with opening stock added shows
+ * "Stock Tracked" because trackInventory is true. Falls back to
+ * fulfillmentType-based display if trackInventory is undefined (e.g. older
+ * API responses that don't include the field).
+ */
+function TrackingBadge({
+  trackInventory,
+  fulfillmentType,
+}: {
+  trackInventory?: boolean
+  fulfillmentType: string
+}) {
+  // If trackInventory is explicitly set, use it. Otherwise fall back to
+  // the old behavior (stock_based → tracked, made_to_order → not tracked).
+  const isTracked = trackInventory ?? fulfillmentType === 'stock_based'
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        'gap-1 text-xs font-medium',
+        isTracked
+          ? 'bg-sky-50 text-sky-700 border-sky-200'
+          : 'bg-purple-50 text-purple-700 border-purple-200',
+      )}
+    >
+      {isTracked ? 'Stock Tracked' : 'Made to Order'}
+    </Badge>
   )
 }
 
@@ -318,38 +355,41 @@ function GroupCard({
   if (parentSale === '' && firstChild?.salePrice != null) setParentSale(String(firstChild.salePrice))
   if (parentCompare === '' && firstChild?.comparePrice != null) setParentCompare(String(firstChild.comparePrice))
 
-  async function applyCostToGroup() {
+  // Bug 1 fix: ONE handler cascades ALL THREE fields (cost, sale, compare).
+  // Calls both server endpoints (cost + sale-price) in sequence, then
+  // invalidates the cache once. Each endpoint only updates children whose
+  // relevant synced flag is true, so the three flags remain INDEPENDENT.
+  async function applyAllToGroup() {
     const cost = Number(parentCost)
+    const sale = Number(parentSale)
+    const compare = parentCompare ? Number(parentCompare) : null
+
     if (isNaN(cost) || cost < 0) { toast.error('Enter a valid cost price'); return }
+    if (isNaN(sale) || sale < 0) { toast.error('Enter a valid sale price'); return }
+
     setApplying(true)
+    let costCount = 0
+    let saleCount = 0
     try {
-      const res = await api.post<{ success: boolean; updated_count: number }>(
+      // Cascade cost to cost-synced children
+      const costRes = await api.post<{ success: boolean; updated_count: number }>(
         `/api/products/${productId}/variant-groups/dummy/cost`,
         { cost_price: cost, parent_attribute_name: parentAttributeName, parent_value: group.parentValue },
       )
-      toast.success(`Applied Rs. ${cost} to ${res.updated_count} variant(s)`)
-      queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
-      queryClient.invalidateQueries({ queryKey: ['product', productId] })
-    } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to apply cost')
-    } finally { setApplying(false) }
-  }
+      costCount = costRes.updated_count
 
-  async function applySaleToGroup() {
-    const sale = Number(parentSale)
-    if (isNaN(sale) || sale < 0) { toast.error('Enter a valid sale price'); return }
-    const compare = parentCompare ? Number(parentCompare) : null
-    setApplying(true)
-    try {
-      const res = await api.post<{ success: boolean; updated_count: number }>(
+      // Cascade sale + compare to their respective synced children
+      const saleRes = await api.post<{ success: boolean; updated_count: number }>(
         `/api/products/${productId}/variant-groups/dummy/sale-price`,
         { sale_price: sale, compare_price: compare, parent_attribute_name: parentAttributeName, parent_value: group.parentValue },
       )
-      toast.success(`Applied sale price to ${res.updated_count} variant(s)`)
+      saleCount = saleRes.updated_count
+
+      toast.success(`Applied to group — Cost: ${costCount}, Sale+Compare: ${saleCount} variant(s)`)
       queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
       queryClient.invalidateQueries({ queryKey: ['product', productId] })
     } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to apply sale price')
+      toast.error(err instanceof FetchError ? err.message : 'Failed to apply to group')
     } finally { setApplying(false) }
   }
 
@@ -371,38 +411,23 @@ function GroupCard({
 
       {expanded && (
         <CardContent className="space-y-4">
-          {/* Parent group inputs */}
-          <div className="rounded-lg bg-muted/30 p-3 space-y-3">
-            <p className="text-xs font-medium text-muted-foreground">Parent Group — applies to all synced children</p>
-            <div className="flex flex-wrap items-end gap-3">
-              {showCost && canEditCost && (
-                <div className="space-y-1">
-                  <Label className="text-xs">Cost Price</Label>
-                  <div className="flex items-center gap-1">
-                    <Input type="number" min="0" step="0.01" value={parentCost} onChange={(e) => setParentCost(e.target.value)} className="h-8 w-28 text-sm" placeholder="0.00" />
-                    <Button size="sm" variant="outline" onClick={applyCostToGroup} disabled={applying}>
-                      {applying ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} Apply
-                    </Button>
-                  </div>
-                </div>
-              )}
-              {showPricing && canEditPrice && (
-                <>
-                  <div className="space-y-1">
-                    <Label className="text-xs">Sale Price</Label>
-                    <Input type="number" min="0" step="0.01" value={parentSale} onChange={(e) => setParentSale(e.target.value)} className="h-8 w-28 text-sm" placeholder="0.00" />
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-xs">Compare Price</Label>
-                    <Input type="number" min="0" step="0.01" value={parentCompare} onChange={(e) => setParentCompare(e.target.value)} className="h-8 w-28 text-sm" placeholder="0.00" />
-                  </div>
-                  <Button size="sm" variant="outline" onClick={applySaleToGroup} disabled={applying} className="mb-0.5">
-                    {applying ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />} Apply to Group
-                  </Button>
-                </>
-              )}
-            </div>
-          </div>
+          {/* Parent group inputs — uses the shared ParentGroupInputs component
+              with a single "Apply to Group" button that cascades ALL THREE
+              fields (cost, sale, compare) independently. Bug 1 fix. */}
+          <ParentGroupInputs
+            parentCost={parentCost}
+            parentSale={parentSale}
+            parentCompare={parentCompare}
+            onCostChange={setParentCost}
+            onSaleChange={setParentSale}
+            onCompareChange={setParentCompare}
+            onApplyAll={applyAllToGroup}
+            showCost={showCost}
+            showPricing={showPricing}
+            canEditCost={canEditCost}
+            canEditPrice={canEditPrice}
+            applying={applying}
+          />
 
           {/* Children table */}
           <div className="rounded-md border overflow-x-auto scrollbar-thin">
@@ -558,7 +583,7 @@ function ChildRow({
         </div>
         {child.barcode && <div className="text-[10px] text-muted-foreground">{child.barcode}</div>}
       </td>
-      <td className="px-3 py-2"><FulfillmentTypeBadge type={child.fulfillmentType} /></td>
+      <td className="px-3 py-2"><TrackingBadge trackInventory={child.trackInventory} fulfillmentType={child.fulfillmentType} /></td>
       <td className="px-3 py-2 text-center"><StockCell inv={inventory} /></td>
       {showCost && (
         <td className="px-3 py-2">
@@ -890,7 +915,7 @@ function FlatRow({
         <span className="font-mono text-xs">{child.sku}</span>
         {child.barcode && <div className="text-[10px] text-muted-foreground">{child.barcode}</div>}
       </td>
-      <td className="px-3 py-2"><FulfillmentTypeBadge type={child.fulfillmentType} /></td>
+      <td className="px-3 py-2"><TrackingBadge trackInventory={child.trackInventory} fulfillmentType={child.fulfillmentType} /></td>
       <td className="px-3 py-2 text-center"><StockCell inv={inventory} /></td>
       {showCost && (
         <td className="px-3 py-2 text-right">
