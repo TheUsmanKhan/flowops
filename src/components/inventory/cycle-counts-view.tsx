@@ -107,6 +107,7 @@ interface CycleCountItemRow {
   discrepancyValue: number | null
   discrepancyReason: string | null
   adjustmentApproved: boolean
+  inventoryTxnId?: string | null
   notes: string | null
   countedAt: string | null
 }
@@ -187,6 +188,47 @@ const COUNT_TYPE_LABEL: Record<CountType, string> = {
   full: 'Full Count',
   partial: 'Partial',
   spot: 'Spot Check',
+}
+
+/**
+ * Discrepancy reason options for cycle count items.
+ * These values are sent to the backend and drive the approve-time behavior:
+ *   - theft_suspected / unknown → shortage is QUARANTINED + a missing
+ *     stock_loss_record is auto-created (investigation opens)
+ *   - recording_error / transfer_not_recorded / damage_not_recorded /
+ *     no_discrepancy → standard cycle_count_adjust (on_hand set to counted)
+ *   - surplus (positive discrepancy) → standard adjust (on_hand set to counted)
+ *
+ * The backend reads these from item.discrepancyReason in the approve action.
+ */
+type DiscrepancyReason =
+  | 'recording_error'
+  | 'theft_suspected'
+  | 'damage_not_recorded'
+  | 'transfer_not_recorded'
+  | 'unknown'
+  | 'no_discrepancy'
+
+const DISCREPANCY_REASONS: Array<{
+  value: DiscrepancyReason
+  label: string
+  hint: string
+}> = [
+  { value: 'no_discrepancy', label: 'No discrepancy', hint: 'Count matches — no action needed.' },
+  { value: 'recording_error', label: 'Recording error', hint: 'Data-entry mistake in a prior receive/adjust/transfer.' },
+  { value: 'transfer_not_recorded', label: 'Transfer not recorded', hint: 'Stock moved to/from another location but the transfer was not logged.' },
+  { value: 'damage_not_recorded', label: 'Damage not recorded', hint: 'Units were damaged but no stock-loss report was filed.' },
+  { value: 'theft_suspected', label: 'Theft suspected', hint: 'Shortage appears stolen — will quarantine + open a missing-stock investigation on approval.' },
+  { value: 'unknown', label: 'Unknown', hint: 'Cause cannot be determined — will quarantine + open a missing-stock investigation on approval.' },
+]
+
+const DISCREPANCY_REASON_LABEL: Record<DiscrepancyReason, string> = {
+  recording_error: 'Recording error',
+  theft_suspected: 'Theft suspected',
+  damage_not_recorded: 'Damage not recorded',
+  transfer_not_recorded: 'Transfer not recorded',
+  unknown: 'Unknown',
+  no_discrepancy: 'No discrepancy',
 }
 
 const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
@@ -683,12 +725,18 @@ function CycleCountDetailPanel({
                   <TableHead className="text-right">System</TableHead>
                   <TableHead className="text-right">Counted</TableHead>
                   <TableHead className="text-right">Discrepancy</TableHead>
+                  {(count.status === 'pending_review' || count.status === 'approved') && (
+                    <TableHead>Reason</TableHead>
+                  )}
                   {count.status === 'pending_review' && <TableHead>Status</TableHead>}
+                  {count.status === 'approved' && <TableHead>Adjustment</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {count.items.map((item) => {
                   const disc = item.discrepancy
+                  const reason = item.discrepancyReason as DiscrepancyReason | null
+                  const isQuarantined = reason === 'theft_suspected' || reason === 'unknown'
                   return (
                     <TableRow key={item.id}>
                       <TableCell>
@@ -697,6 +745,11 @@ function CycleCountDetailPanel({
                           <span className="text-xs text-muted-foreground font-mono">
                             {item.variant.sku}
                           </span>
+                          {item.notes && (
+                            <span className="text-[10px] text-muted-foreground mt-0.5 italic">
+                              {item.notes}
+                            </span>
+                          )}
                         </div>
                       </TableCell>
                       <TableCell className="text-right tabular-nums text-muted-foreground">
@@ -723,15 +776,42 @@ function CycleCountDetailPanel({
                           </span>
                         )}
                       </TableCell>
+                      {(count.status === 'pending_review' || count.status === 'approved') && (
+                        <TableCell>
+                          {disc !== null && disc !== 0 && reason ? (
+                            <Badge
+                              variant="outline"
+                              className={`text-[10px] ${
+                                isQuarantined
+                                  ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                  : 'bg-amber-50 text-amber-700 border-amber-200'
+                              }`}
+                            >
+                              {DISCREPANCY_REASON_LABEL[reason] ?? reason}
+                            </Badge>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                      )}
                       {count.status === 'pending_review' && (
                         <TableCell>
                           {disc !== null && disc !== 0 ? (
-                            <Badge
-                              variant="outline"
-                              className="text-[10px] bg-amber-50 text-amber-700 border-amber-200"
-                            >
-                              Pending
-                            </Badge>
+                            isQuarantined ? (
+                              <Badge
+                                variant="outline"
+                                className="text-[10px] bg-rose-50 text-rose-700 border-rose-200"
+                              >
+                                Quarantine on approve
+                              </Badge>
+                            ) : (
+                              <Badge
+                                variant="outline"
+                                className="text-[10px] bg-amber-50 text-amber-700 border-amber-200"
+                              >
+                                Pending
+                              </Badge>
+                            )
                           ) : disc === 0 ? (
                             <Badge
                               variant="outline"
@@ -741,6 +821,34 @@ function CycleCountDetailPanel({
                             </Badge>
                           ) : (
                             <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                      )}
+                      {count.status === 'approved' && (
+                        <TableCell>
+                          {disc === null || disc === 0 ? (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          ) : item.adjustmentApproved ? (
+                            <div className="flex flex-col gap-0.5">
+                              <Badge
+                                variant="outline"
+                                className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200 w-fit"
+                              >
+                                Applied
+                              </Badge>
+                              {isQuarantined && (
+                                <span className="text-[10px] text-rose-600">
+                                  + Missing stock report opened
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] bg-gray-100 text-gray-600 border-gray-200 w-fit"
+                            >
+                              Not applied
+                            </Badge>
                           )}
                         </TableCell>
                       )}
@@ -778,14 +886,24 @@ function SubmitCountsButton({
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
   const [counts, setCounts] = useState<Record<string, string>>({})
+  // Per-item reason + notes — only meaningful for discrepant rows
+  const [reasons, setReasons] = useState<Record<string, DiscrepancyReason>>({})
+  const [notes, setNotes] = useState<Record<string, string>>({})
 
   useEffect(() => {
     if (open) {
-      const init: Record<string, string> = {}
+      const initCounts: Record<string, string> = {}
+      const initReasons: Record<string, DiscrepancyReason> = {}
+      const initNotes: Record<string, string> = {}
       for (const i of items) {
-        init[i.id] = i.countedQuantity === null ? String(i.systemQuantity) : String(i.countedQuantity)
+        initCounts[i.id] = i.countedQuantity === null ? String(i.systemQuantity) : String(i.countedQuantity)
+        // Preserve existing reason if re-opening after a previous submit attempt
+        initReasons[i.id] = (i.discrepancyReason as DiscrepancyReason) ?? 'no_discrepancy'
+        initNotes[i.id] = i.notes ?? ''
       }
-      setCounts(init)
+      setCounts(initCounts)
+      setReasons(initReasons)
+      setNotes(initNotes)
     }
   }, [open, items])
 
@@ -802,10 +920,18 @@ function SubmitCountsButton({
     onError: (err) => toast.error(getErrorMessage(err)),
   })
 
-  const totalDiscrepancies = items.filter((i) => {
+  // Build a list of discrepant item IDs (counted != system)
+  const discrepantItems = items.filter((i) => {
     const c = parseInt(counts[i.id] ?? '0', 10) || 0
     return c !== i.systemQuantity
-  }).length
+  })
+  const totalDiscrepancies = discrepantItems.length
+
+  // Items requiring a reason (shortage with theft/unknown triggers quarantine)
+  const itemsNeedingReason = discrepantItems.filter((i) => {
+    const c = parseInt(counts[i.id] ?? '0', 10) || 0
+    return c < i.systemQuantity // shortage
+  })
 
   return (
     <>
@@ -813,29 +939,33 @@ function SubmitCountsButton({
         <Send className="h-4 w-4" /> Submit for Review
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto scrollbar-thin">
+        <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto scrollbar-thin">
           <DialogHeader>
             <DialogTitle>Submit counted quantities</DialogTitle>
             <DialogDescription>
-              Enter the actual counted quantity for each item. Discrepancies will be highlighted.
+              Enter the actual counted quantity for each item. Discrepancies require a reason — theft/unknown will open a missing-stock investigation on approval.
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-md border max-h-[55vh] overflow-y-auto scrollbar-thin">
+          <div className="rounded-md border max-h-[50vh] overflow-y-auto scrollbar-thin">
             <Table>
-              <TableHeader className="sticky top-0 bg-background">
+              <TableHeader className="sticky top-0 bg-background z-10">
                 <TableRow>
                   <TableHead>Variant</TableHead>
                   <TableHead className="text-right">System</TableHead>
-                  <TableHead className="w-28">Counted</TableHead>
+                  <TableHead className="w-24">Counted</TableHead>
                   <TableHead className="text-right">Diff</TableHead>
+                  <TableHead className="w-44">Reason</TableHead>
+                  <TableHead className="w-32">Notes</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {items.map((i) => {
                   const c = parseInt(counts[i.id] ?? '0', 10) || 0
                   const diff = c - i.systemQuantity
+                  const isDiscrepancy = diff !== 0
+                  const isShortage = diff < 0
                   return (
-                    <TableRow key={i.id}>
+                    <TableRow key={i.id} className={isDiscrepancy ? 'bg-amber-50/40' : ''}>
                       <TableCell>
                         <div className="flex flex-col">
                           <span className="text-sm font-medium">{i.variant.productTitle}</span>
@@ -871,31 +1001,120 @@ function SubmitCountsButton({
                         {diff > 0 ? '+' : ''}
                         {diff}
                       </TableCell>
+                      <TableCell>
+                        {isDiscrepancy ? (
+                          <Select
+                            value={reasons[i.id] ?? 'no_discrepancy'}
+                            onValueChange={(val) =>
+                              setReasons((prev) => ({ ...prev, [i.id]: val as DiscrepancyReason }))
+                            }
+                          >
+                            <SelectTrigger className="h-8 text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {DISCREPANCY_REASONS.map((r) => (
+                                <SelectItem
+                                  key={r.value}
+                                  value={r.value}
+                                  className="text-xs"
+                                >
+                                  {r.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {isDiscrepancy ? (
+                          <Input
+                            type="text"
+                            className="h-8 text-xs"
+                            placeholder="Optional"
+                            value={notes[i.id] ?? ''}
+                            onChange={(e) =>
+                              setNotes((prev) => ({ ...prev, [i.id]: e.target.value }))
+                            }
+                          />
+                        ) : (
+                          <span className="text-xs text-muted-foreground">—</span>
+                        )}
+                      </TableCell>
                     </TableRow>
                   )
                 })}
               </TableBody>
             </Table>
           </div>
+
+          {/* Contextual alerts */}
           {totalDiscrepancies > 0 && (
             <Alert>
               <AlertTriangle className="h-4 w-4" />
               <AlertTitle>{totalDiscrepancies} item{totalDiscrepancies === 1 ? '' : 's'} with discrepancies</AlertTitle>
               <AlertDescription>
                 On approval, these will be applied as cycle count adjustments to your inventory.
+                {itemsNeedingReason.length > 0 && (
+                  <>
+                    {' '}
+                    <span className="font-medium text-amber-700">
+                      {itemsNeedingReason.length} shortage{itemsNeedingReason.length === 1 ? '' : 's'} — if marked theft/unknown, stock will be quarantined and a missing-stock investigation will open automatically.
+                    </span>
+                  </>
+                )}
               </AlertDescription>
             </Alert>
           )}
+
+          {/* Show selected reason hints for shortage rows */}
+          {itemsNeedingReason.length > 0 && (
+            <div className="space-y-1.5">
+              {itemsNeedingReason.map((i) => {
+                const reason = reasons[i.id] ?? 'no_discrepancy'
+                const hint = DISCREPANCY_REASONS.find((r) => r.value === reason)?.hint
+                if (!hint || reason === 'no_discrepancy') return null
+                const isQuarantine = reason === 'theft_suspected' || reason === 'unknown'
+                return (
+                  <div
+                    key={i.id}
+                    className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${
+                      isQuarantine
+                        ? 'border-rose-200 bg-rose-50 text-rose-800'
+                        : 'border-amber-200 bg-amber-50/60 text-amber-800'
+                    }`}
+                  >
+                    <span className="font-mono font-medium shrink-0">{i.variant.sku}:</span>
+                    <span>{hint}</span>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>
               Cancel
             </Button>
             <Button
               onClick={() => {
-                const counted_items = items.map((i) => ({
-                  item_id: i.id,
-                  counted_quantity: parseInt(counts[i.id] ?? '0', 10) || 0,
-                }))
+                const counted_items = items.map((i) => {
+                  const c = parseInt(counts[i.id] ?? '0', 10) || 0
+                  const diff = c - i.systemQuantity
+                  const payload: SubmitCountsPayload['counted_items'][number] = {
+                    item_id: i.id,
+                    counted_quantity: c,
+                  }
+                  if (diff !== 0) {
+                    payload.discrepancy_reason = reasons[i.id] ?? 'recording_error'
+                    if (notes[i.id]?.trim()) {
+                      payload.notes = notes[i.id].trim()
+                    }
+                  }
+                  return payload
+                })
                 submitMutation.mutate({ action: 'submit_counts', counted_items })
               }}
               disabled={submitMutation.isPending}

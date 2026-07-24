@@ -1192,3 +1192,36 @@ Stage Summary:
 - Cycle Count is now WORKING. The critical "companyId is not defined" bug blocked all PATCH actions — without this fix, no cycle count could be started, submitted, or approved.
 - The full flow works: create (scheduled) → start (in_progress, items snapshot from inventory_pools with avg_cost) → submit_counts (pending_review, discrepancy + variance calculated) → approve (approved, processInventoryTransaction called for each discrepant item, on_hand set to counted value, inventory_txn + audit_log recorded) → cancel (cancelled).
 - The theft/unknown quarantine path in approve works correctly (creates stock_loss_records + quarantines stock) when discrepancy_reason is provided — but the frontend's SubmitCountsButton currently doesn't send discrepancy_reason, so this path won't fire from the UI. This is a UX gap, not a backend bug.
+
+---
+Task ID: CYCLE-COUNT-DISCREPANCY-REASON-UX
+Agent: main
+Task: Fix the UX gap where the Submit Counts dialog didn't let users categorize discrepancies, so the theft/missing quarantine path never fired from the UI.
+
+Work Log:
+- Added a `DiscrepancyReason` type + `DISCREPANCY_REASONS` constant array (with value/label/hint for each reason) + `DISCREPANCY_REASON_LABEL` lookup map. The 6 reasons match the backend's expected values: recording_error, theft_suspected, damage_not_recorded, transfer_not_recorded, unknown, no_discrepancy.
+- Rebuilt the SubmitCountsButton dialog to include TWO new columns per row: Reason (Select dropdown) + Notes (text input). Both only appear for discrepant rows (diff !== 0); non-discrepant rows show "—".
+- The Reason dropdown defaults to `no_discrepancy` and lets the user pick from the 6 options. The theft_suspected and unknown options have rose-colored hint banners that appear below the table explaining "will quarantine + open a missing-stock investigation on approval".
+- The submit handler now sends `discrepancy_reason` + `notes` in the payload for every discrepant item (the `SubmitCountsPayload` type already supported these fields — they just weren't being populated).
+- Updated the detail panel's items table to show:
+  * A "Reason" column during `pending_review` and `approved` — shows a colored badge (rose for theft/unknown, amber for other reasons).
+  * A "Status" column during `pending_review` — shows "Quarantine on approve" (rose) for theft/unknown shortages, "Pending" (amber) for other discrepancies, "Match" (emerald) for zero-diff items.
+  * An "Adjustment" column during `approved` — shows "Applied" (emerald) + "+ Missing stock report opened" (rose) for quarantined items, "Not applied" (gray) if the adjustment failed.
+  * Per-item notes displayed as italic text under the variant name.
+- Added `inventoryTxnId` to the `CycleCountItemRow` type so the UI can show whether the adjustment was applied.
+
+VERIFICATION (end-to-end with theft_suspected reason):
+- Before: GJG-UNST-OS onHand=5, available=5, reserved=0
+- Create + start: 6 items snapshot from inventory_pools
+- Submit: counted=2, system=5, discrepancy=-3, reason=theft_suspected, notes="3 units missing from shelf..."
+- Approve: status=approved
+- After: GJG-UNST-OS onHand=2 (set to counted), reserved=3 (quarantined), available=-1
+- Stock loss record: GJG-UNST-OS qty=3, status=open (missing-stock investigation auto-opened)
+- The reason + notes are saved in the cycle count detail and visible in the review table.
+
+Stage Summary:
+- The Cycle Count feature is now fully functional end-to-end from the UI.
+- Users can categorize each discrepancy with a reason (recording_error / theft_suspected / damage_not_recorded / transfer_not_recorded / unknown) + optional notes.
+- Theft/unknown shortages trigger the quarantine + missing-stock investigation path on approval — verified working: reserved increased by 3, on_hand set to counted, stock_loss_record created with status=open.
+- The detail panel shows the reason + status + adjustment outcome per item, so the approver has full context before approving and can see the result after.
+- Lint: 0 errors. TypeScript: 0 new errors (1 pre-existing isDefault error in CreateCountDialog, unrelated).
