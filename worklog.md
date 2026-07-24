@@ -1072,3 +1072,57 @@ Stage Summary:
 - The flat fallback (hasMeaningfulGrouping: false) renders correctly for single-attribute products.
 - The submit sequencing is correct: product + variants + pricing created atomically in POST /api/products, then opening stock per variant, with per-variant error surfacing.
 - The AttributeSelector, Opening Stock section, and all other wizard features are unchanged.
+
+---
+Task ID: WIZARD-BUGS-1-2-3
+Agent: main
+Task: Fix three connected bugs in the product creation wizard's Variants & Pricing step: (1) "One Size" incorrectly appearing on Stitched variants, (2) Opening Stock Cost field redundant/disconnected from parent-group cascade, (3) Opening Stock UI cluttered and not user-friendly.
+
+Work Log:
+
+BUG 1 — Bidirectional rule evaluation (src/app/api/products/[id]/variants/generate/route.ts):
+- Root cause: the rule filter only handled the INCLUSION direction (if trigger value present, forced attribute MUST equal forced value) but NOT the EXCLUSION direction (if trigger value NOT present, forced value must NOT appear).
+- Confirmed via DB inspection: 1 rule exists — Unstitched → forces Size = One Size. The old code correctly prevented Unstitched+M, but did NOT prevent Stitched+OneSize.
+- Confirmed this is the ONLY combination-generation code (the wizard always calls /api/products/new/variants/generate; no client-side cartesian product exists). So fixing it once here fixes both contexts.
+- Rewrote the rule filter to be BIDIRECTIONAL:
+  * INCLUSION (hasTrigger=true): forcedPart.value_id MUST equal forcesValueId, else skip.
+  * EXCLUSION (hasTrigger=false): forcedPart.value_id must NOT equal forcesValueId, else skip.
+- The logic is fully generic — reads rule table data, never special-cases "Piece Type" or "Size" by name.
+- Verified with real data:
+  * Piece Type (UN+ST) + Size (OS, XS, S, M, L) → exactly 5 variants: UN-OS, ST-XS, ST-S, ST-M, ST-L. ST-OS count = 0, UN-XS count = 0. ✅
+  * Piece Type + Size + Color (3 attributes) → 6 variants: UN-OS-RED, UN-OS-NAVY, ST-XS-RED, ST-XS-NAVY, ST-S-RED, ST-S-NAVY. Color combines freely with both branches. ST-OS = 0, UN-XS = 0, UN-S = 0. ✅
+  * No "-OS" segment ever combined with "-ST-" in any SKU. ✅
+
+BUG 2 — Remove redundant Opening Stock cost input (product-create-view.tsx):
+- Removed the "Cost/Unit" Input from ALL three creation modes' Opening Stock sections:
+  * Mode A (SimpleVariantForm): replaced the Input with a read-only display: "Rs. {cost_price} (set above)".
+  * Mode B (StitchableVariantBuilder): the entire opening stock section was rebuilt as OpeningStockTable (see Bug 3) — cost is a read-only reference column showing "Rs. {cost_price} (set above)".
+  * Mode C (RegularVariantOpeningStock): replaced the Input with the same read-only display.
+- Updated the submit handler (line 508): changed `cost_per_unit: variant.opening_stock_cost || variant.cost_price` to `cost_per_unit: variant.cost_price` — the opening stock now ALWAYS uses the variant's current cost_price (set via the grouped pricing table), with no divergent value possible.
+- Verified end-to-end: created a product with cost_price=1500, opening stock qty=10. The opening-stock endpoint received cost_per_unit=1500, and inventory_pools.avg_cost=1500. The cost flows: grouped pricing table → variant.cost_price → opening stock → inventory_pools.avg_cost. ✅
+- Confirmed no other input in the creation wizard asks for cost redundantly — cost is now entered exactly ONCE per variant (via parent-group cascade or individual override in the ClientSideParentChildVariantTable).
+- Receive Stock / PO receiving forms are NOT touched (those legitimately need a fresh cost per batch for WAC recalculation).
+
+BUG 3 — Rebuild Opening Stock UI as compact table (product-create-view.tsx):
+- Replaced the stacked-card layout (which repeated the same explanatory paragraph per MTO variant) with a new OpeningStockTable component using shadcn/ui Table.
+- ONE explanatory note at the top of the section: "Made-to-order variants don't hold stock by default. If you have pre-made bulk stock for any of them, you can add it below — this will enable inventory tracking for that specific variant."
+- Compact table with columns: Variant (SKU + attribute values), Type (fulfillment badge), Qty (input), Cost (read-only reference per Bug 2), Location (select), Action.
+- Stock_based variants: Qty + Location inputs always visible in the row.
+- Made_to_order variants: collapsed by default, showing only a "[+ Add stock]" button in the Action column. Clicking it expands JUST that row inline to reveal Qty + Location inputs (cost is always read-only). Clicking "[x] Remove" collapses the row and discards any unsaved entry.
+- "Use default location for all" button at the top — now applies to every row with an active Qty entry OR a stock_based variant (including newly-expanded MTO rows).
+- "No warehouse locations found" Alert banner stays at the top (not per-row).
+- Max height with scroll overflow (max-h-80 overflow-y-auto scrollbar-thin) for products with many variants.
+- The underlying data flow is unchanged: onVariantsChange callback updates the same generatedVariants local state, and createOpeningStockForNewVariant() is called the same way on final submit.
+
+VERIFICATION:
+- bun run lint: 0 errors, 15 pre-existing warnings (0 new).
+- npx tsc --noEmit: 0 errors in any modified file.
+- Bug 1 API test: 5 variants (not 6+), no ST-OS, no UN-XS/S/M/L. 3-attribute test: Color combines freely, no ST-OS.
+- Bug 2 end-to-end: product created with cost_price=1500 → opening-stock endpoint received cost_per_unit=1500 → inventory_pools.avg_cost=1500. No divergent cost possible.
+- Bug 3 browser: wizard step 2 renders without console or server errors.
+- Server log: all 200 responses, no 500s or compilation errors.
+
+Stage Summary:
+- Bug 1 FIXED + VERIFIED: "One Size" no longer appears on Stitched variants. The rule evaluation is bidirectional and generic — works for ANY rule in attribute_value_rules, not just Piece Type/Size.
+- Bug 2 FIXED + VERIFIED: Opening Stock no longer asks for cost. Cost is set exactly once (via the grouped pricing table cascade/override) and flows directly to inventory_pools.avg_cost. The redundant Cost/Unit input was removed from all 3 creation modes.
+- Bug 3 FIXED + VERIFIED: Opening Stock section rebuilt as a compact table with one top-level note, expandable MTO rows, and "Use default location for all". No more repetitive paragraphs per variant.

@@ -27,6 +27,14 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -49,6 +57,7 @@ import {
   Zap,
   Trash2,
   Sparkles,
+  X,
 } from 'lucide-react'
 import {
   PRODUCT_TYPE_LABELS,
@@ -505,7 +514,12 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
             org_variant_id: variantId,
             location_id: variant.opening_stock_location_id,
             quantity: variant.opening_stock_qty,
-            cost_per_unit: variant.opening_stock_cost || variant.cost_price,
+            // Cost is set EXACTLY ONCE per variant — via the parent-group
+            // cascade or individual override in the grouped pricing table above.
+            // The Opening Stock section no longer has its own cost input; it
+            // uses the variant's current cost_price directly, so the two can
+            // never diverge. See Bug 2 fix.
+            cost_per_unit: variant.cost_price,
             notes: `Opening stock for ${res.title}`,
           })
           if (result?.success) {
@@ -1361,9 +1375,13 @@ function SimpleVariantForm({
                 <Label className="text-xs">Quantity</Label>
                 <Input type="number" min="1" step="1" value={value.opening_stock_qty || ''} onChange={(e) => set('opening_stock_qty', Number(e.target.value))} placeholder="0" />
               </div>
+              {/* Cost — read-only reference (Bug 2 fix). Set via the cost_price field above. */}
               <div className="space-y-1.5">
                 <Label className="text-xs">Cost per unit</Label>
-                <Input type="number" min="0" step="0.01" value={value.opening_stock_cost || ''} onChange={(e) => set('opening_stock_cost', Number(e.target.value))} placeholder="0.00" />
+                <div className="h-9 flex items-center px-3 rounded-md border bg-muted/30 text-xs text-muted-foreground">
+                  Rs. {Number(value.cost_price || 0).toLocaleString()}{' '}
+                  <span className="text-[10px] text-muted-foreground/70 ml-1">(set above)</span>
+                </div>
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs">Location</Label>
@@ -1554,150 +1572,24 @@ function StitchableVariantBuilder({
         />
       )}
 
-      {/* Per-row opening stock section — stays below the variant table,
-          unchanged. This is the same opening stock UI that was already here;
-          it reads from the same generatedVariants local state. */}
+      {/* ── Opening Stock section — compact table, one top-level note ──
+          Bug 2 fix: cost is NOT entered here — it's shown as a read-only
+          reference (the variant's current cost_price from the grouped
+          pricing table above). The submit handler passes cost_price
+          directly to createOpeningStockForNewVariant(), so the two can
+          never diverge.
+          Bug 3 fix: rebuilt as a compact table (not stacked cards) with
+          ONE explanatory note at the top (not per-row). Made-to-order
+          variants are collapsed by default with a [+ Add stock] button
+          that expands just that row inline. */}
       {generatedVariants.length > 0 && (
-        <div className="rounded-lg border bg-muted/20 p-3 space-y-3">
-          <div className="flex items-center justify-between gap-2 flex-wrap">
-            <p className="text-xs text-muted-foreground">
-              Opening stock (optional, per variant) — recorded as real inventory the moment the product is created.
-            </p>
-            {locations.length > 0 && generatedVariants.some((v) => v.fulfillment_type === 'stock_based') && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-7 text-xs"
-                onClick={() => {
-                  const defaultLoc =
-                    locations.find((l) => l.isDefault)?.id ?? locations[0]?.id
-                  if (!defaultLoc) return
-                  setGeneratedVariants(
-                    generatedVariants.map((v) =>
-                      v.fulfillment_type === 'stock_based'
-                        ? { ...v, opening_stock_location_id: defaultLoc }
-                        : v,
-                    ),
-                  )
-                }}
-              >
-                Use default location for all
-              </Button>
-            )}
-          </div>
-
-          {noLocations && (
-            <Alert>
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>No warehouse locations found</AlertTitle>
-              <AlertDescription>
-                You need at least one inventory location before you can record opening stock.{' '}
-                <button
-                  type="button"
-                  className="font-medium underline underline-offset-4 hover:text-primary"
-                  onClick={() => navigate({ name: 'inventory-locations' })}
-                >
-                  Create a location
-                </button>{' '}
-                first.
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {generatedVariants.map((v, i) => {
-            const isMto = v.fulfillment_type === 'made_to_order'
-            const mtoBulkConfirmed = !!v.opening_stock_location_id || Number(v.opening_stock_qty ?? 0) > 0
-            return (
-              <div key={`opts-${v.sku}`} className="rounded border bg-background p-2 space-y-2">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-mono font-medium">{v.sku}</span>
-                  <Badge variant="outline" className={cn('text-[9px]', v.fulfillment_type === 'stock_based' ? 'bg-sky-50 text-sky-700 border-sky-200' : 'bg-purple-50 text-purple-700 border-purple-200')}>{FULFILLMENT_LABELS[v.fulfillment_type] ?? v.fulfillment_type}</Badge>
-                </div>
-                {isMto && !mtoBulkConfirmed ? (
-                  <div className="pl-2 space-y-1.5">
-                    <p className="text-xs text-muted-foreground">
-                      Made-to-order variants are produced on demand. If you also want to hold pre-made bulk stock for this variant, you can record it as opening stock — this will enable inventory tracking for the variant.
-                    </p>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs"
-                      disabled={noLocations}
-                      onClick={() =>
-                        updateGenerated(i, {
-                          opening_stock_location_id:
-                            v.opening_stock_location_id ??
-                            (locations.find((l) => l.isDefault)?.id ?? locations[0]?.id ?? ''),
-                        })
-                      }
-                    >
-                      + Add pre-made bulk stock
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="flex flex-wrap items-center gap-2 pl-2">
-                    <span className="text-xs text-muted-foreground">
-                      {isMto ? 'Pre-made bulk stock:' : 'Opening stock:'}
-                    </span>
-                    <Input
-                      type="number"
-                      min="0"
-                      step="1"
-                      placeholder="Qty"
-                      className="h-7 w-16 text-xs"
-                      value={v.opening_stock_qty ?? ''}
-                      onChange={(e) => updateGenerated(i, { opening_stock_qty: Number(e.target.value) })}
-                    />
-                    <Input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      placeholder="Cost/unit"
-                      className="h-7 w-20 text-xs"
-                      value={v.opening_stock_cost ?? ''}
-                      onChange={(e) => updateGenerated(i, { opening_stock_cost: Number(e.target.value) })}
-                    />
-                    <Select
-                      value={v.opening_stock_location_id ?? ''}
-                      onValueChange={(val) => updateGenerated(i, { opening_stock_location_id: val })}
-                    >
-                      <SelectTrigger className="h-7 w-40 text-xs">
-                        <SelectValue placeholder="Location" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {locations.map((l) => (
-                          <SelectItem key={l.id} value={l.id}>
-                            {l.name}
-                            {l.isDefault ? ' (default)' : ''}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    {isMto && (
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs text-muted-foreground"
-                        onClick={() =>
-                          updateGenerated(i, {
-                            opening_stock_qty: 0,
-                            opening_stock_cost: 0,
-                            opening_stock_location_id: '',
-                          })
-                        }
-                      >
-                        Cancel
-                      </Button>
-                    )}
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </div>
+        <OpeningStockTable
+          variants={generatedVariants}
+          locations={locations}
+          noLocations={noLocations}
+          onChange={setGeneratedVariants}
+          onNavigateLocations={() => navigate({ name: 'inventory-locations' })}
+        />
       )}
 
       {generatedVariants.length === 0 && !generating && (
@@ -1911,17 +1803,13 @@ function RegularVariantOpeningStock({
               className="h-8 text-xs"
             />
           </div>
+          {/* Cost — read-only reference (Bug 2 fix). Set via the cost_price field in the row above. */}
           <div className="space-y-1">
             <Label className="text-[10px]">Cost per unit</Label>
-            <Input
-              type="number"
-              min="0"
-              step="0.01"
-              value={variant.opening_stock_cost || ''}
-              onChange={(e) => onChange({ opening_stock_cost: Number(e.target.value) })}
-              placeholder="0.00"
-              className="h-8 text-xs"
-            />
+            <div className="h-8 flex items-center px-3 rounded-md border bg-muted/30 text-[10px] text-muted-foreground">
+              Rs. {Number(variant.cost_price || 0).toLocaleString()}{' '}
+              <span className="text-[9px] text-muted-foreground/70 ml-1">(set above)</span>
+            </div>
           </div>
           <div className="space-y-1">
             <Label className="text-[10px]">Location</Label>
@@ -1949,6 +1837,249 @@ function RegularVariantOpeningStock({
           This made-to-order variant will have inventory tracking enabled once the opening stock is recorded.
         </p>
       )}
+    </div>
+  )
+}
+
+// ----------------------------------------------------------------------------
+// OpeningStockTable — compact table for the wizard's Opening Stock section
+// (Bug 2 + Bug 3 fix). Cost is read-only (set via the grouped pricing table
+// above); made-to-order variants collapse to a [+ Add stock] button.
+// ----------------------------------------------------------------------------
+function OpeningStockTable({
+  variants,
+  locations,
+  noLocations,
+  onChange,
+  onNavigateLocations,
+}: {
+  variants: GeneratedVariant[]
+  locations: Array<{ id: string; name: string; isDefault?: boolean }>
+  noLocations: boolean
+  onChange: (v: GeneratedVariant[]) => void
+  onNavigateLocations: () => void
+}) {
+  // Track which MTO rows are expanded (by SKU). Stock_based rows are always
+  // "expanded" (inputs always visible) since they're the primary use case.
+  const [expandedMtoSkus, setExpandedMtoSkus] = useState<Set<string>>(new Set())
+
+  function toggleMtoExpand(sku: string) {
+    setExpandedMtoSkus((prev) => {
+      const next = new Set(prev)
+      if (next.has(sku)) {
+        next.delete(sku)
+        // Discard any unsaved entry on collapse
+        onChange(
+          variants.map((v) =>
+            v.sku === sku
+              ? { ...v, opening_stock_qty: 0, opening_stock_location_id: '' }
+              : v,
+          ),
+        )
+      } else {
+        next.add(sku)
+        // Pre-fill the default location on expand
+        const defaultLoc = locations.find((l) => l.isDefault)?.id ?? locations[0]?.id ?? ''
+        onChange(
+          variants.map((v) =>
+            v.sku === sku && !v.opening_stock_location_id
+              ? { ...v, opening_stock_location_id: defaultLoc }
+              : v,
+          ),
+        )
+      }
+      return next
+    })
+  }
+
+  function updateVariant(sku: string, patch: Partial<GeneratedVariant>) {
+    onChange(variants.map((v) => (v.sku === sku ? { ...v, ...patch } : v)))
+  }
+
+  function applyDefaultLocationToAll() {
+    const defaultLoc = locations.find((l) => l.isDefault)?.id ?? locations[0]?.id
+    if (!defaultLoc) return
+    // Apply to every row that currently has an active Qty entry OR is a
+    // stock_based variant (whose inputs are always visible).
+    onChange(
+      variants.map((v) => {
+        const hasActiveQty = Number(v.opening_stock_qty ?? 0) > 0
+        if (v.fulfillment_type === 'stock_based' || hasActiveQty) {
+          return { ...v, opening_stock_location_id: defaultLoc }
+        }
+        return v
+      }),
+    )
+  }
+
+  return (
+    <div className="rounded-lg border overflow-hidden">
+      {/* Header — ONE explanatory note for the whole section (Bug 3 fix) */}
+      <div className="p-3 border-b bg-muted/30 space-y-2">
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <div className="space-y-1">
+            <p className="text-sm font-medium">Opening Stock</p>
+            <p className="text-xs text-muted-foreground">
+              Made-to-order variants don&apos;t hold stock by default. If you have pre-made bulk stock for any of them, you can add it below — this will enable inventory tracking for that specific variant.
+            </p>
+          </div>
+          {locations.length > 0 && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs shrink-0"
+              onClick={applyDefaultLocationToAll}
+            >
+              Use default location for all
+            </Button>
+          )}
+        </div>
+        {noLocations && (
+          <Alert>
+            <AlertCircle className="h-4 w-4" />
+            <AlertTitle>No warehouse locations found</AlertTitle>
+            <AlertDescription>
+              You need at least one inventory location before you can record opening stock.{' '}
+              <button
+                type="button"
+                className="font-medium underline underline-offset-4 hover:text-primary"
+                onClick={onNavigateLocations}
+              >
+                Create a location
+              </button>{' '}
+              first.
+            </AlertDescription>
+          </Alert>
+        )}
+      </div>
+
+      {/* Compact table — one row per variant */}
+      <div className="max-h-80 overflow-y-auto scrollbar-thin">
+        <Table>
+          <TableHeader>
+            <TableRow className="text-left text-xs text-muted-foreground">
+              <TableHead className="px-3 py-2 font-medium">Variant</TableHead>
+              <TableHead className="px-3 py-2 font-medium">Type</TableHead>
+              <TableHead className="px-3 py-2 font-medium text-right">Qty</TableHead>
+              <TableHead className="px-3 py-2 font-medium text-right">Cost</TableHead>
+              <TableHead className="px-3 py-2 font-medium">Location</TableHead>
+              <TableHead className="px-3 py-2 font-medium text-right">Action</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {variants.map((v) => {
+              const isMto = v.fulfillment_type === 'made_to_order'
+              const isExpanded = !isMto || expandedMtoSkus.has(v.sku)
+              const attrLabel = Object.values(v.attribute_values).join(' / ') || v.sku
+              return (
+                <TableRow key={v.sku} className="text-xs">
+                  <TableCell className="px-3 py-2">
+                    <div className="flex flex-col">
+                      <span className="font-mono font-medium">{v.sku}</span>
+                      <span className="text-[10px] text-muted-foreground">{attrLabel}</span>
+                    </div>
+                  </TableCell>
+                  <TableCell className="px-3 py-2">
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        'text-[9px]',
+                        v.fulfillment_type === 'stock_based'
+                          ? 'bg-sky-50 text-sky-700 border-sky-200'
+                          : 'bg-purple-50 text-purple-700 border-purple-200',
+                      )}
+                    >
+                      {FULFILLMENT_LABELS[v.fulfillment_type] ?? v.fulfillment_type}
+                    </Badge>
+                  </TableCell>
+                  {/* Qty — visible only when row is expanded */}
+                  <TableCell className="px-3 py-2 text-right">
+                    {isExpanded ? (
+                      <Input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="0"
+                        className="h-7 w-16 text-xs text-right ml-auto"
+                        value={v.opening_stock_qty ?? ''}
+                        onChange={(e) =>
+                          updateVariant(v.sku, { opening_stock_qty: Number(e.target.value) })
+                        }
+                      />
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  {/* Cost — READ-ONLY reference (Bug 2 fix). Never editable here. */}
+                  <TableCell className="px-3 py-2 text-right">
+                    <span className="text-xs text-muted-foreground">
+                      Rs. {Number(v.cost_price || 0).toLocaleString()}
+                      <span className="block text-[9px] text-muted-foreground/70">(set above)</span>
+                    </span>
+                  </TableCell>
+                  {/* Location — visible only when row is expanded */}
+                  <TableCell className="px-3 py-2">
+                    {isExpanded ? (
+                      <Select
+                        value={v.opening_stock_location_id ?? ''}
+                        onValueChange={(val) =>
+                          updateVariant(v.sku, { opening_stock_location_id: val })
+                        }
+                      >
+                        <SelectTrigger className="h-7 w-36 text-xs">
+                          <SelectValue placeholder="Location" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {locations.map((l) => (
+                            <SelectItem key={l.id} value={l.id}>
+                              {l.name}
+                              {l.isDefault ? ' (default)' : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  {/* Action — expand/collapse for MTO; nothing for stock_based */}
+                  <TableCell className="px-3 py-2 text-right">
+                    {isMto ? (
+                      isExpanded ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs text-muted-foreground"
+                          onClick={() => toggleMtoExpand(v.sku)}
+                          title="Remove opening stock for this variant"
+                        >
+                          <X className="h-3 w-3" /> Remove
+                        </Button>
+                      ) : (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs"
+                          disabled={noLocations}
+                          onClick={() => toggleMtoExpand(v.sku)}
+                          title="Add pre-made bulk stock for this made-to-order variant"
+                        >
+                          <Plus className="h-3 w-3" /> Add stock
+                        </Button>
+                      )
+                    ) : (
+                      <span className="text-[10px] text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </div>
     </div>
   )
 }

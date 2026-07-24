@@ -22,9 +22,28 @@ interface SelectedAttribute {
  * Generate variant combinations from selected attributes.
  * Pure calculation — does NOT write to database.
  *
- * Applies attribute_value_rules during generation (prevention, not post-filter):
- * if a trigger value is in the combination, the forced attribute MUST equal
- * the forced value — invalid combinations are never generated.
+ * Applies attribute_value_rules during generation (prevention, not post-filter).
+ * Each rule (trigger_attribute_value_id → forces_attribute_id → forces_value_id)
+ * is evaluated BIDIRECTIONALLY:
+ *
+ *   1. INCLUSION: if a combination contains the trigger value, then the
+ *      forced attribute MUST equal the forced value. Any combination pairing
+ *      the trigger value with a DIFFERENT value of the forced attribute is
+ *      skipped. (e.g. Unstitched + Size=M is invalid — Unstitched forces
+ *      Size=One Size.)
+ *
+ *   2. EXCLUSION: if a combination does NOT contain the trigger value, then
+ *      the forced attribute must NOT equal the forced value. The forced value
+ *      is "reserved" for the trigger value — it must never appear alongside
+ *      any other value of the trigger attribute. (e.g. Stitched + Size=One
+ *      Size is invalid — One Size is reserved for Unstitched only.)
+ *
+ * This bidirectional evaluation guarantees that the forced value (e.g. "One
+ * Size") ONLY ever appears alongside the trigger value (e.g. "Unstitched")
+ * and never alongside any sibling value of the trigger attribute (e.g. never
+ * alongside "Stitched"). The logic is fully generic — it reads the rule
+ * table's data and never special-cases attribute names like "Piece Type" or
+ * "Size".
  *
  * SKU concatenation order follows each attribute's display_order (ascending).
  */
@@ -91,20 +110,36 @@ export async function POST(
 
     const rawCombinations = cartesianProduct(arrays)
 
-    // Filter combinations using rules (prevention at generation time)
+    // Filter combinations using rules (prevention at generation time).
+    // Each rule is evaluated BIDIRECTIONALLY — see the function-level docstring
+    // above for the full explanation of INCLUSION vs EXCLUSION.
     const validCombinations = rawCombinations.filter((combo) => {
       for (const rule of rules) {
         // Does this combo include the trigger value?
         const hasTrigger = combo.some((part) => part.value_id === rule.triggerAttributeValueId)
-        if (!hasTrigger) continue
 
-        // Find the forced attribute's value in this combo
+        // Find the forced attribute's value in this combo (if the forced
+        // attribute is part of this product's selection at all).
         const forcedPart = combo.find((part) => part.attribute_id === rule.forcesAttributeId)
-        if (!forcedPart) continue // forced attribute not in this product's selection — skip rule
+        if (!forcedPart) continue // forced attribute not in this product's selection — rule n/a
 
-        // The forced attribute's value MUST equal the forced value
-        if (forcedPart.value_id !== rule.forcesValueId) {
-          return false // INVALID combination — skip it
+        if (hasTrigger) {
+          // ── INCLUSION direction ──
+          // The trigger value is present, so the forced attribute MUST equal
+          // the forced value. Any other value of the forced attribute makes
+          // this combination invalid.
+          if (forcedPart.value_id !== rule.forcesValueId) {
+            return false
+          }
+        } else {
+          // ── EXCLUSION direction ──
+          // The trigger value is NOT present, so the forced value must NOT
+          // appear either — it is reserved exclusively for the trigger value.
+          // This prevents e.g. "Stitched + One Size" when the rule is
+          // "Unstitched → forces Size = One Size".
+          if (forcedPart.value_id === rule.forcesValueId) {
+            return false
+          }
         }
       }
       return true
