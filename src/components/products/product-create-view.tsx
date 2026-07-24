@@ -60,6 +60,7 @@ import {
   AttributeSelector,
   type SelectionState,
 } from '@/components/products/attribute-selector'
+import { ClientSideParentChildVariantTable } from '@/components/products/client-side-parent-child-variant-table'
 
 // ----------------------------------------------------------------------------
 // Types
@@ -88,6 +89,14 @@ interface GeneratedVariant {
   requires_shipping: boolean
   allow_backorder: boolean
   is_default: boolean
+  sale_price: number
+  is_active: boolean
+  compare_price: number | null
+  // Parent-child pricing cascade flags — default true for freshly generated
+  // variants; flipped to false when a user overrides an individual child.
+  cost_price_synced_with_parent: boolean
+  sale_price_synced_with_parent: boolean
+  compare_price_synced_with_parent: boolean
   opening_stock_qty?: number
   opening_stock_cost?: number
   opening_stock_location_id?: string
@@ -204,9 +213,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
   const [attributeSelection, setAttributeSelection] = useState<SelectionState>({
     selectedAttributes: [],
   })
-  const [generatedVariants, setGeneratedVariants] = useState<
-    Array<GeneratedVariant & { sale_price: number; is_active: boolean }>
-  >([])
+  const [generatedVariants, setGeneratedVariants] = useState<GeneratedVariant[]>([])
   const [generating, setGenerating] = useState(false)
 
   // Step 2 — regular variable mode
@@ -275,7 +282,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
         attribute_values: g.attribute_values,
         cost_price: g.cost_price,
         stitching_charges: g.stitching_charges,
-        compare_price: null,
+        compare_price: g.compare_price,
         weight_grams: 0,
         fulfillment_type: g.fulfillment_type as 'stock_based' | 'made_to_order',
         stitching_type: g.stitching_type as VariantDraft['stitching_type'],
@@ -366,6 +373,11 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
                 is_default: existing?.is_default ?? i === 0,
                 sale_price: existing?.sale_price ?? 0,
                 is_active: existing?.is_active ?? true,
+                compare_price: existing?.compare_price ?? null,
+                // Default synced=true for new variants; preserve for existing
+                cost_price_synced_with_parent: existing?.cost_price_synced_with_parent ?? true,
+                sale_price_synced_with_parent: existing?.sale_price_synced_with_parent ?? true,
+                compare_price_synced_with_parent: existing?.compare_price_synced_with_parent ?? true,
                 // Preserve opening stock edits across regenerations
                 opening_stock_qty: existing?.opening_stock_qty,
                 opening_stock_cost: existing?.opening_stock_cost,
@@ -1427,22 +1439,10 @@ function StitchableVariantBuilder({
   slug: string
   selection: SelectionState
   onSelectionChange: (selection: SelectionState) => void
-  generatedVariants: Array<GeneratedVariant & { sale_price: number; is_active: boolean }>
-  setGeneratedVariants: (
-    v: Array<GeneratedVariant & { sale_price: number; is_active: boolean }>,
-  ) => void
+  generatedVariants: GeneratedVariant[]
+  setGeneratedVariants: (v: GeneratedVariant[]) => void
   generating: boolean
 }) {
-  // Collect the union of attribute keys across all generated variants so the
-  // preview table can render dynamic columns.
-  const attributeKeys = useMemo(() => {
-    const keys = new Set<string>()
-    for (const v of generatedVariants) {
-      for (const k of Object.keys(v.attribute_values)) keys.add(k)
-    }
-    return Array.from(keys)
-  }, [generatedVariants])
-
   // Fetch real warehouse locations for the active company/org — same query the
   // Receive Stock page uses, so the opening stock dropdown is always in sync
   // with the actual location catalog.
@@ -1459,7 +1459,7 @@ function StitchableVariantBuilder({
 
   function updateGenerated(
     index: number,
-    patch: Partial<GeneratedVariant & { sale_price: number; is_active: boolean }>,
+    patch: Partial<GeneratedVariant>,
   ) {
     setGeneratedVariants(
       generatedVariants.map((v, i) => (i === index ? { ...v, ...patch } : v)),
@@ -1470,6 +1470,14 @@ function StitchableVariantBuilder({
     (sum, a) => sum + a.selected_values.length,
     0,
   )
+
+  // Map SelectionState attributes to the GroupableAttribute shape expected by
+  // the ClientSideParentChildVariantTable (which uses the shared grouping utility).
+  const groupableAttributes = selection.selectedAttributes.map((a) => ({
+    attribute_id: a.attribute_id,
+    name: a.attribute_name,
+    display_order: a.display_order,
+  }))
 
   return (
     <div className="space-y-5">
@@ -1532,246 +1540,163 @@ function StitchableVariantBuilder({
         )}
       </div>
 
-      {/* Preview table — dynamic attribute columns + per-row editable fields */}
+      {/* Grouped / flat variant table — uses the SAME shared grouping
+          utility as the edit page's ParentChildVariantTable. When 2+ attributes
+          are selected, renders collapsible parent-group cards with cost/sale
+          price cascade + per-child override/re-sync. When <2 attributes,
+          renders the flat preview table. All state changes are local (no
+          network calls) until the wizard's final submit. */}
       {generatedVariants.length > 0 && (
-        <div className="rounded-lg border overflow-hidden">
-          <div className="flex items-center justify-between p-3 border-b bg-muted/30">
-            <p className="text-sm font-medium">
-              Generated variants ({generatedVariants.length})
-            </p>
+        <ClientSideParentChildVariantTable
+          variants={generatedVariants}
+          selectedAttributes={groupableAttributes}
+          onVariantsChange={setGeneratedVariants}
+        />
+      )}
+
+      {/* Per-row opening stock section — stays below the variant table,
+          unchanged. This is the same opening stock UI that was already here;
+          it reads from the same generatedVariants local state. */}
+      {generatedVariants.length > 0 && (
+        <div className="rounded-lg border bg-muted/20 p-3 space-y-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
             <p className="text-xs text-muted-foreground">
-              Adjust prices, fulfillment, and active state per row.
+              Opening stock (optional, per variant) — recorded as real inventory the moment the product is created.
             </p>
-          </div>
-          <div className="max-h-96 overflow-y-auto scrollbar-thin">
-            <table className="w-full text-sm">
-              <thead className="bg-muted/30 sticky top-0 z-10">
-                <tr className="text-left text-xs text-muted-foreground">
-                  {attributeKeys.map((k) => (
-                    <th key={k} className="px-3 py-2 font-medium">
-                      {k}
-                    </th>
-                  ))}
-                  <th className="px-3 py-2 font-medium">SKU</th>
-                  <th className="px-3 py-2 font-medium">Cost</th>
-                  <th className="px-3 py-2 font-medium">Fulfillment</th>
-                  <th className="px-3 py-2 font-medium">Sale price</th>
-                  <th className="px-3 py-2 font-medium text-center">Active</th>
-                </tr>
-              </thead>
-              <tbody>
-                {generatedVariants.map((v, i) => (
-                  <tr key={v.sku} className="border-t">
-                    {attributeKeys.map((k) => (
-                      <td key={k} className="px-3 py-2 text-xs">
-                        {v.attribute_values[k] ?? '—'}
-                      </td>
-                    ))}
-                    <td className="px-3 py-2">
-                      <Input
-                        value={v.sku}
-                        onChange={(e) =>
-                          updateGenerated(i, { sku: e.target.value })
-                        }
-                        className="h-8 w-40 text-xs font-mono"
-                      />
-                    </td>
-                    <td className="px-3 py-2">
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={v.cost_price || ''}
-                        onChange={(e) =>
-                          updateGenerated(i, { cost_price: Number(e.target.value) })
-                        }
-                        className="h-8 w-20 text-xs"
-                      />
-                    </td>
-                    <td className="px-3 py-2">
-                      <Select
-                        value={v.fulfillment_type}
-                        onValueChange={(val) =>
-                          updateGenerated(i, {
-                            fulfillment_type: val as 'stock_based' | 'made_to_order',
-                          })
-                        }
-                      >
-                        <SelectTrigger className="h-8 w-32 text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="stock_based">Stock Tracked</SelectItem>
-                          <SelectItem value="made_to_order">Made to Order</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </td>
-                    <td className="px-3 py-2">
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={v.sale_price || ''}
-                        onChange={(e) =>
-                          updateGenerated(i, { sale_price: Number(e.target.value) })
-                        }
-                        className="h-8 w-24 text-xs"
-                      />
-                    </td>
-                    <td className="px-3 py-2 text-center">
-                      <Switch
-                        checked={v.is_active}
-                        onCheckedChange={(c) => updateGenerated(i, { is_active: c })}
-                      />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Per-row opening stock + fabric source (expandable) */}
-          <div className="border-t bg-muted/20 p-3 space-y-3">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <p className="text-xs text-muted-foreground">
-                Opening stock (optional, per variant) — recorded as real inventory the moment the product is created.
-              </p>
-              {locations.length > 0 && generatedVariants.some((v) => v.fulfillment_type === 'stock_based') && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 text-xs"
-                  onClick={() => {
-                    // Apply the first location (or the default) to every stock_based variant row
-                    const defaultLoc =
-                      locations.find((l) => l.isDefault)?.id ?? locations[0]?.id
-                    if (!defaultLoc) return
-                    setGeneratedVariants(
-                      generatedVariants.map((v) =>
-                        v.fulfillment_type === 'stock_based'
-                          ? { ...v, opening_stock_location_id: defaultLoc }
-                          : v,
-                      ),
-                    )
-                  }}
-                >
-                  Use default location for all
-                </Button>
-              )}
-            </div>
-
-            {noLocations && (
-              <Alert>
-                <AlertCircle className="h-4 w-4" />
-                <AlertTitle>No warehouse locations found</AlertTitle>
-                <AlertDescription>
-                  You need at least one inventory location before you can record opening stock.{' '}
-                  <button
-                    type="button"
-                    className="font-medium underline underline-offset-4 hover:text-primary"
-                    onClick={() => navigate({ name: 'inventory-locations' })}
-                  >
-                    Create a location
-                  </button>{' '}
-                  first.
-                </AlertDescription>
-              </Alert>
+            {locations.length > 0 && generatedVariants.some((v) => v.fulfillment_type === 'stock_based') && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs"
+                onClick={() => {
+                  const defaultLoc =
+                    locations.find((l) => l.isDefault)?.id ?? locations[0]?.id
+                  if (!defaultLoc) return
+                  setGeneratedVariants(
+                    generatedVariants.map((v) =>
+                      v.fulfillment_type === 'stock_based'
+                        ? { ...v, opening_stock_location_id: defaultLoc }
+                        : v,
+                    ),
+                  )
+                }}
+              >
+                Use default location for all
+              </Button>
             )}
+          </div>
 
-            {generatedVariants.map((v, i) => {
-              const isMto = v.fulfillment_type === 'made_to_order'
-              const mtoBulkConfirmed = !!v.opening_stock_location_id || Number(v.opening_stock_qty ?? 0) > 0
-              return (
-                <div key={`opts-${v.sku}`} className="rounded border bg-background p-2 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-mono font-medium">{v.sku}</span>
-                    <Badge variant="outline" className={cn('text-[9px]', v.fulfillment_type === 'stock_based' ? 'bg-sky-50 text-sky-700 border-sky-200' : 'bg-purple-50 text-purple-700 border-purple-200')}>{FULFILLMENT_LABELS[v.fulfillment_type] ?? v.fulfillment_type}</Badge>
+          {noLocations && (
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertTitle>No warehouse locations found</AlertTitle>
+              <AlertDescription>
+                You need at least one inventory location before you can record opening stock.{' '}
+                <button
+                  type="button"
+                  className="font-medium underline underline-offset-4 hover:text-primary"
+                  onClick={() => navigate({ name: 'inventory-locations' })}
+                >
+                  Create a location
+                </button>{' '}
+                first.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {generatedVariants.map((v, i) => {
+            const isMto = v.fulfillment_type === 'made_to_order'
+            const mtoBulkConfirmed = !!v.opening_stock_location_id || Number(v.opening_stock_qty ?? 0) > 0
+            return (
+              <div key={`opts-${v.sku}`} className="rounded border bg-background p-2 space-y-2">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono font-medium">{v.sku}</span>
+                  <Badge variant="outline" className={cn('text-[9px]', v.fulfillment_type === 'stock_based' ? 'bg-sky-50 text-sky-700 border-sky-200' : 'bg-purple-50 text-purple-700 border-purple-200')}>{FULFILLMENT_LABELS[v.fulfillment_type] ?? v.fulfillment_type}</Badge>
+                </div>
+                {isMto && !mtoBulkConfirmed ? (
+                  <div className="pl-2 space-y-1.5">
+                    <p className="text-xs text-muted-foreground">
+                      Made-to-order variants are produced on demand. If you also want to hold pre-made bulk stock for this variant, you can record it as opening stock — this will enable inventory tracking for the variant.
+                    </p>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      disabled={noLocations}
+                      onClick={() =>
+                        updateGenerated(i, {
+                          opening_stock_location_id:
+                            v.opening_stock_location_id ??
+                            (locations.find((l) => l.isDefault)?.id ?? locations[0]?.id ?? ''),
+                        })
+                      }
+                    >
+                      + Add pre-made bulk stock
+                    </Button>
                   </div>
-                  {isMto && !mtoBulkConfirmed ? (
-                    <div className="pl-2 space-y-1.5">
-                      <p className="text-xs text-muted-foreground">
-                        Made-to-order variants are produced on demand. If you also want to hold pre-made bulk stock for this variant, you can record it as opening stock — this will enable inventory tracking for the variant.
-                      </p>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2 pl-2">
+                    <span className="text-xs text-muted-foreground">
+                      {isMto ? 'Pre-made bulk stock:' : 'Opening stock:'}
+                    </span>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="1"
+                      placeholder="Qty"
+                      className="h-7 w-16 text-xs"
+                      value={v.opening_stock_qty ?? ''}
+                      onChange={(e) => updateGenerated(i, { opening_stock_qty: Number(e.target.value) })}
+                    />
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="Cost/unit"
+                      className="h-7 w-20 text-xs"
+                      value={v.opening_stock_cost ?? ''}
+                      onChange={(e) => updateGenerated(i, { opening_stock_cost: Number(e.target.value) })}
+                    />
+                    <Select
+                      value={v.opening_stock_location_id ?? ''}
+                      onValueChange={(val) => updateGenerated(i, { opening_stock_location_id: val })}
+                    >
+                      <SelectTrigger className="h-7 w-40 text-xs">
+                        <SelectValue placeholder="Location" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {locations.map((l) => (
+                          <SelectItem key={l.id} value={l.id}>
+                            {l.name}
+                            {l.isDefault ? ' (default)' : ''}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {isMto && (
                       <Button
                         type="button"
-                        variant="outline"
+                        variant="ghost"
                         size="sm"
-                        className="h-7 text-xs"
-                        disabled={noLocations}
+                        className="h-7 text-xs text-muted-foreground"
                         onClick={() =>
                           updateGenerated(i, {
-                            opening_stock_location_id:
-                              v.opening_stock_location_id ??
-                              (locations.find((l) => l.isDefault)?.id ?? locations[0]?.id ?? ''),
+                            opening_stock_qty: 0,
+                            opening_stock_cost: 0,
+                            opening_stock_location_id: '',
                           })
                         }
                       >
-                        + Add pre-made bulk stock
+                        Cancel
                       </Button>
-                    </div>
-                  ) : (
-                    <div className="flex flex-wrap items-center gap-2 pl-2">
-                      <span className="text-xs text-muted-foreground">
-                        {isMto ? 'Pre-made bulk stock:' : 'Opening stock:'}
-                      </span>
-                      <Input
-                        type="number"
-                        min="0"
-                        step="1"
-                        placeholder="Qty"
-                        className="h-7 w-16 text-xs"
-                        value={v.opening_stock_qty ?? ''}
-                        onChange={(e) => updateGenerated(i, { opening_stock_qty: Number(e.target.value) })}
-                      />
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        placeholder="Cost/unit"
-                        className="h-7 w-20 text-xs"
-                        value={v.opening_stock_cost ?? ''}
-                        onChange={(e) => updateGenerated(i, { opening_stock_cost: Number(e.target.value) })}
-                      />
-                      <Select
-                        value={v.opening_stock_location_id ?? ''}
-                        onValueChange={(val) => updateGenerated(i, { opening_stock_location_id: val })}
-                      >
-                        <SelectTrigger className="h-7 w-40 text-xs">
-                          <SelectValue placeholder="Location" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {locations.map((l) => (
-                            <SelectItem key={l.id} value={l.id}>
-                              {l.name}
-                              {l.isDefault ? ' (default)' : ''}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {isMto && (
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 text-xs text-muted-foreground"
-                          onClick={() =>
-                            updateGenerated(i, {
-                              opening_stock_qty: 0,
-                              opening_stock_cost: 0,
-                              opening_stock_location_id: '',
-                            })
-                          }
-                        >
-                          Cancel
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       )}
 

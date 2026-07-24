@@ -3,6 +3,7 @@ import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
+import { determineParentAttribute } from '@/lib/utils/variant-grouping'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -46,14 +47,18 @@ export async function POST(
 
     const attrs = JSON.parse(variant.attributeValues) as Record<string, string>
 
-    // Determine parent attribute (lowest display_order)
+    // Determine parent attribute using the SHARED utility (same as the
+    // variant-groups endpoint and the creation wizard).
     const attributeNames = Object.keys(attrs)
     const attributes = await db.orgAttribute.findMany({
       where: { organizationId: orgId, name: { in: attributeNames } },
       orderBy: { displayOrder: 'asc' },
     })
     if (attributes.length === 0) throw new ApiError(400, 'Cannot determine parent attribute.')
-    const parentAttr = attributes[0]
+    const parentAttr = determineParentAttribute(
+      attributes.map((a) => ({ attribute_id: a.id, name: a.name, display_order: a.displayOrder })),
+    )
+    if (!parentAttr) throw new ApiError(400, 'Cannot determine parent attribute.')
     const parentValue = attrs[parentAttr.name]
 
     // Find a sibling that's currently synced to get the current parent cost

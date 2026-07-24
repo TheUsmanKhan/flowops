@@ -996,3 +996,79 @@ Stage Summary:
 - Per-variant failures are surfaced clearly with the specific SKU + error reason — never silently dropped.
 - Cache invalidation covers every affected query key.
 - Works across all three creation modes (Simple, Stitchable/Variable, Regular Variable) and both table structures (flat preview table in wizard + ParentChildVariantTable on edit page).
+
+---
+Task ID: CLIENT-SIDE-GROUPED-TABLE
+Agent: main
+Task: Extract shared variant grouping logic into a pure utility, create a client-side parent-child variant table for the creation wizard, wire it into StitchableVariantBuilder, and confirm submit sequencing.
+
+Work Log:
+
+PART 1 — Shared grouping utility (/lib/utils/variant-grouping.ts):
+- Created /lib/utils/ directory (didn't exist previously).
+- Wrote determineParentAttribute(selectedAttributes): returns the attribute with the lowest display_order. Returns null if empty. Returns the single attribute if only 1 (caller decides if grouping is meaningful).
+- Wrote groupVariantsByParentAttribute(variants, parentAttributeName): if parentAttributeName is null OR fewer than 2 distinct attribute keys across all variants → hasMeaningfulGrouping: false with single group. Otherwise buckets by parent attribute value preserving input order → hasMeaningfulGrouping: true. Generic over T extends GroupableVariant so extra fields pass through untouched.
+- Also added computeVariantGrouping() convenience function that calls both in sequence.
+- Pure: no DB calls, no Supabase, no Next.js imports — importable from both server and client.
+
+PART 1 (refactor) — Server endpoint (/api/products/[id]/variant-groups/route.ts):
+- Replaced inline grouping logic (lines 59-75: `parentAttr = attributes[0]`, `hasMultipleAttributes`, `groupMap`) with calls to determineParentAttribute() + groupVariantsByParentAttribute().
+- Server still does its own DB fetching (orgId scoping, attribute metadata, variant + pricing includes). Only the "which is the parent" and "how to bucket" decisions go through the shared utility.
+- Response shape unchanged: { parentAttributeName, parentAttributeDisplayName, hasMultipleAttributes, groups: [{ parentValue, childCount, children: [...] }] }.
+- Verified with real data: single-attribute product → hasMultipleAttributes=false, 1 group "All variants". Multi-attribute product (Piece Type + Size, 6 variants) → hasMultipleAttributes=true, 2 groups: "Unstitched" (1 child) + "Stitched" (5 children).
+
+PART 1 (dedup) — Refactored resync-cost and resync-price routes:
+- Found duplicate "determine parent attribute" logic in /api/products/[id]/variants/[variantId]/resync-cost/route.ts (line 56: `const parentAttr = attributes[0]`) and resync-price/route.ts (line 59).
+- Both now import and call determineParentAttribute() from the shared utility.
+- No duplicate grouping logic remains anywhere in the codebase.
+
+PART 2a — Shared presentational sub-components (/components/products/variant-table-parts.tsx):
+- Extracted: SyncIndicator (Link2 emerald / Unlink amber icon), ParentGroupInputs (cost/sale/compare inputs + Apply buttons), CostCell/SaleCell/CompareCell (input + sync indicator), ResyncButton.
+- Purely presentational — receive data + callbacks, render. Parent components decide whether callbacks call server mutations or local state.
+- Used by both the edit-page ParentChildVariantTable and the new wizard ClientSideParentChildVariantTable.
+
+PART 2b — ClientSideParentChildVariantTable (/components/products/client-side-parent-child-variant-table.tsx):
+- Generic component <T extends WizardGroupableVariant> that accepts variants + selectedAttributes + onVariantsChange as props.
+- Calls determineParentAttribute() + groupVariantsByParentAttribute() from the shared utility (synchronous, no network).
+- If hasMeaningfulGrouping=false → renders FlatVariantTable (same columns as the wizard's existing flat preview: attributes, SKU, Cost, Fulfillment, Sale Price, Active).
+- If hasMeaningfulGrouping=true → renders GroupedVariantTable with:
+  * Collapsible GroupCard per parent value (parent value + child count badge + Expand/Collapse button)
+  * ParentGroupInputs (Cost Price + Apply, Sale Price + Compare Price + Apply to Group) — uses shared presentational component
+  * Children table with: child attribute columns, SKU (editable), Fulfillment (select), Cost (input + SyncIndicator), Sale (input + SyncIndicator), Compare (input + SyncIndicator), Active (Switch), Actions (ResyncButton for overridden fields)
+- All state changes go through onVariantsChange callback (pure local state, no network calls).
+- "Apply to Group" updates only children where the relevant synced flag = true, via onVariantsChange.
+- Editing a child's value directly flips the synced flag to false (override).
+- Re-sync finds the value from a synced sibling (or falls back to the parent input value) and flips the synced flag back to true. Re-sync button is disabled with a tooltip when no synced siblings exist.
+- Parent input values re-initialize when the group's child set changes (via groupKey ref comparison + useEffect).
+
+PART 3 — Wire into creation wizard (product-create-view.tsx):
+- Added import for ClientSideParentChildVariantTable.
+- Extended GeneratedVariant interface to include: sale_price, is_active (moved from intersection type into the interface), compare_price, cost_price_synced_with_parent, sale_price_synced_with_parent, compare_price_synced_with_parent.
+- Updated handleAttributeChange regeneration logic to initialize new fields (default synced=true, compare_price=null) and preserve them across regenerations.
+- Updated collectVariantsForValidation to propagate compare_price from GeneratedVariant (was hardcoded to null).
+- Replaced the flat preview table in StitchableVariantBuilder with <ClientSideParentChildVariantTable variants={generatedVariants} selectedAttributes={groupableAttributes} onVariantsChange={setGeneratedVariants} />.
+- Kept the per-row Opening Stock section unchanged — it stays below the variant table as a separate section, reading from the same generatedVariants local state.
+- Kept the AttributeSelector, intro blurb, live preview count card, and empty-state message unchanged.
+- Mapped SelectionStateAttribute → GroupableAttribute (attribute_name→name) for the shared utility.
+- Simplified state type from Array<GeneratedVariant & { sale_price: number; is_active: boolean }> to GeneratedVariant[] (intersection now redundant).
+
+PART 4 — Submit sequencing confirmation:
+- Confirmed POST /api/products (route.ts lines 229-262) creates BOTH orgProductVariant (with costPrice) AND companyVariantPricing (with salePrice + comparePrice) atomically in the same call. Returns { id, slug, title, variantIds }.
+- Opening stock is called per-variant AFTER the product+variants+pricing are created, using the real variantIds from the response (already implemented in the previous Opening Stock fix).
+- compare_price now flows: grouped table edit → GeneratedVariant.compare_price → collectVariantsForValidation → VariantDraft.compare_price → payload.compare_price → companyVariantPricing.comparePrice.
+- Per-step error surfacing: if POST /api/products fails, the catch block shows the error. If opening stock fails for any variant, per-variant errors are surfaced with SKU + reason (already implemented). If pricing creation fails, it's part of the POST /api/products try/catch, so the error is surfaced.
+
+VERIFICATION:
+- bun run lint: 0 errors, 15 pre-existing warnings (all in unrelated files). 0 new warnings.
+- npx tsc --noEmit: 0 errors in any new/modified file. Pre-existing errors in inventory.ts (lines 401, 585) and organization-view.tsx (line 114) are unchanged.
+- Server endpoint tested with real data: single-attribute product → hasMultipleAttributes=false, flat table. Multi-attribute product (Piece Type + Size) → hasMultipleAttributes=true, 2 groups.
+- Browser: wizard step 1 renders correctly with no server errors. Title input fills successfully. Product type selector (Simple/Variable) visible.
+- No duplicate grouping logic remaining anywhere in the codebase (verified via grep for "lowest.*display_order", "attributes[0]", "hasMultipleAttributes" — all references now go through the shared utility or consume the API response field).
+
+Stage Summary:
+- The shared grouping utility (/lib/utils/variant-grouping.ts) is the SINGLE SOURCE OF TRUTH for "which attribute is the parent" and "how variants group under it". Both the server endpoint (edit page) and the client-side wizard component import and call these same functions.
+- The creation wizard now shows a grouped parent-child table when 2+ attributes are selected, with the SAME visual structure as the edit page (collapsible parent groups, Cost/Sale/Compare inputs with Apply to Group, per-child sync/override indicators, re-sync actions).
+- ALL state changes in the wizard are local (no network calls) until final submit. The grouped table updates instantly via onVariantsChange callback.
+- The flat fallback (hasMeaningfulGrouping: false) renders correctly for single-attribute products.
+- The submit sequencing is correct: product + variants + pricing created atomically in POST /api/products, then opening stock per variant, with per-variant error surfacing.
+- The AttributeSelector, Opening Stock section, and all other wizard features are unchanged.
