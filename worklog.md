@@ -1173,3 +1173,22 @@ VERIFICATION:
 - Bug 2 API test: variant-groups endpoint returns trackInventory for all variants. MTO variants with trackInventory=true show correctly.
 - The 3 sync flags (cost_price_synced_with_parent, sale_price_synced_with_parent, compare_price_synced_with_parent) remain INDEPENDENT — each field only cascades to children whose relevant flag is true.
 - fulfillment_type and track_inventory are now treated as separate fields: fulfillment_type never changes (drives whether Opening Stock is hidden-by-default); track_inventory is mutable (drives the badge display).
+
+---
+Task ID: CYCLE-COUNT-FIX
+Agent: main
+Task: Investigate and fix the Cycle Count feature — was it working?
+
+Work Log:
+- Investigated the full cycle count flow: API routes (GET/POST /api/cycle-counts, GET/PATCH /api/cycle-counts/[id]), frontend view (cycle-counts-view.tsx), Prisma schema (CycleCount + CycleCountItem), and the processInventoryTransaction core function's handling of 'cycle_count_adjust'.
+- Found CRITICAL BUG: the PATCH route (/api/cycle-counts/[id]/route.ts) crashed with "companyId is not defined" on EVERY action (start, submit_counts, approve, cancel). Root cause: line 99 referenced `companyId` but only `company` (the full object) was defined — `const companyId = company.id` was missing. This made the entire cycle count workflow completely non-functional.
+- Fixed by adding `const companyId = company.id` after the company check.
+- Found secondary bug: `discrepancyValue` was initialized to 0 when items were created during 'start', so the variance calculation in 'submit_counts' always produced 0. Fixed by initializing `discrepancyValue: pool.avgCost` (the avg_cost from the inventory pool snapshot).
+- Found third bug: the variance formula was `discrepancy * (discrepancyValue / systemQuantity)` which is wrong — it should be `discrepancy * discrepancyValue` (discrepancy units × avg_cost per unit). Fixed.
+- Added `inventoryTxnId` to the GET response so the detail view can show whether the adjustment was applied and link to the ledger transaction.
+- Verified end-to-end: create → start (6 items created) → submit counts (discrepancy=-2) → approve → inventory on_hand changed from 7 to 5. The cycle_count_adjust transaction correctly set on_hand to the counted value via processInventoryTransaction.
+
+Stage Summary:
+- Cycle Count is now WORKING. The critical "companyId is not defined" bug blocked all PATCH actions — without this fix, no cycle count could be started, submitted, or approved.
+- The full flow works: create (scheduled) → start (in_progress, items snapshot from inventory_pools with avg_cost) → submit_counts (pending_review, discrepancy + variance calculated) → approve (approved, processInventoryTransaction called for each discrepant item, on_hand set to counted value, inventory_txn + audit_log recorded) → cancel (cancelled).
+- The theft/unknown quarantine path in approve works correctly (creates stock_loss_records + quarantines stock) when discrepancy_reason is provided — but the frontend's SubmitCountsButton currently doesn't send discrepancy_reason, so this path won't fire from the UI. This is a UX gap, not a backend bug.

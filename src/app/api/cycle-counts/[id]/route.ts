@@ -63,6 +63,7 @@ export async function GET(
           discrepancyValue: item.discrepancyValue ? Number(item.discrepancyValue) : null,
           discrepancyReason: item.discrepancyReason,
           adjustmentApproved: item.adjustmentApproved,
+          inventoryTxnId: item.inventoryTxnId,
           notes: item.notes,
           countedAt: item.countedAt?.toISOString() ?? null,
         })),
@@ -94,6 +95,7 @@ export async function PATCH(
     const orgId = settings?.activeOrgId
     const company = settings?.activeCompany
     if (!orgId || !company) throw new ApiError(403, 'No active company')
+    const companyId = company.id
 
     const { id } = await params
     const count = await db.cycleCount.findFirst({ where: { id, companyId } })
@@ -125,7 +127,9 @@ export async function PATCH(
     const action = body.action
 
     if (action === 'start') {
-      // Create items from existing inventory_pools at the location
+      // Create items from existing inventory_pools at the location.
+      // discrepancyValue stores the avg_cost per unit so the variance
+      // calculation in submit_counts can compute the financial impact.
       const pools = await db.inventoryPool.findMany({
         where: { locationId: count.locationId },
         select: { orgVariantId: true, onHand: true, avgCost: true },
@@ -138,7 +142,7 @@ export async function PATCH(
             orgVariantId: pool.orgVariantId,
             organizationId: orgId,
             systemQuantity: pool.onHand,
-            discrepancyValue: 0,
+            discrepancyValue: pool.avgCost,
           },
         })
       }
@@ -173,7 +177,9 @@ export async function PATCH(
 
         const discrepancy = ci.counted_quantity - item.systemQuantity
         if (discrepancy !== 0) totalDiscrepancies++
-        const variance = discrepancy * (Number(item.discrepancyValue || 0) / (item.systemQuantity || 1))
+        // variance = discrepancy units × avg_cost per unit
+        // discrepancyValue stores the avg_cost from the inventory_pool snapshot
+        const variance = discrepancy * Number(item.discrepancyValue || 0)
         totalVariance += variance
 
         await db.cycleCountItem.update({
