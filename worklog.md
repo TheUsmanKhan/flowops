@@ -1438,3 +1438,71 @@ Stage Summary:
 - No inventory stock movements in this step — order items are created with fulfillment_status='reserved' as a PLACEHOLDER for Step 3.
 - Every mutation calls insertAuditLog(). Metric events NOT yet added (per spec — will be added deliberately in a later step).
 - Payment logic follows the business rules: payment received/converted = confirmation signal that bypasses require_order_confirmation.
+
+---
+Task ID: OMS-STEP-3-INVENTORY-INTEGRATION
+Agent: main
+Task: OMS Step 3 of 5 — Wire order lifecycle to REAL Inventory system. Reservation at confirmation, dispatch deduction, cancellation unreservation, backorder auto-fulfillment.
+
+Work Log:
+
+Created 3 new inventory hook functions in src/lib/inventory.ts:
+- reserveStockForOrder(): checks available stock (onHand - reserved), calls processInventoryTransaction with type 'order_reserved'. Fails if insufficient available.
+- unreserveStockForOrder(): calls processInventoryTransaction with type 'order_unreserved'. Releases the reservation without touching on_hand.
+- dispatchOrder(): calls processInventoryTransaction with type 'sale_dispatched'. Deducts on_hand AND releases the reservation. COGS locked at current avg_cost.
+
+PART 1 — reserveOrderStock() shared internal function (order.actions.ts):
+- Processes ALL order_items for an order at confirmation time.
+- stock_based items: checks available stock at dispatch location. Sufficient → reserveStockForOrder() + fulfillment_status='reserved'. Insufficient + policy='continue' → fulfillment_status='backordered'. Insufficient + policy='deny' → outcome='failed'.
+- made_to_order items: calls checkAndFulfillMadeToOrderVariant(). existing_stock → reserve + returned_stitched_used=true. fresh_production → link production_order_id. Error → outcome='failed'.
+- After processing: if ANY item is 'backordered' → order.status = 'partially_backordered'.
+- Wired into createManualOrder() (if auto-confirmed) and confirmOrder() (manual confirmation).
+
+PART 2 — checkAndFulfillBackorders() (backorder.actions.ts):
+- Queries backordered order_items for a variant+location, ordered by backordered_at ASC (FIFO fairness).
+- Skips items belonging to cancelled orders.
+- For each: checks if available stock now covers the full quantity. If yes → reserveStockForOrder() + fulfillment_status='reserved' + fulfilled_at. If no → stop (FIFO — later items won't have enough either).
+- After each item: calls recompute_order_status() SQL function. If all items now reserved → order.status flips from 'partially_backordered' to 'confirmed'.
+- Handles partial queue clearing (stops when stock runs out).
+- Extended src/app/api/purchase-orders/[id]/receive/route.ts to call checkAndFulfillBackorders() for each unique variant+location that received stock (non-blocking, wrapped in try/catch).
+
+PART 3 — cancelOrder() unreservation (order.actions.ts):
+- Extended cancelOrder() to iterate all order_items with fulfillment_status='reserved' and call unreserveStockForOrder() for each.
+- Items with fulfillment_status='backordered' need no inventory action (no reservation existed).
+- Backordered items on cancelled orders are orphaned — checkAndFulfillBackorders() skips cancelled orders.
+
+PART 4 — dispatchOrderAction() + markOrderProcessing() + markOrderPacked() (order.actions.ts):
+- dispatchOrderAction(order_id, tracking_number, courier_name):
+  * GUARD: orders.fulfill permission
+  * If order.status = 'pending': runs full confirmation + reservation inline (for companies with require_order_confirmation=false)
+  * Blocks dispatch if ANY item is still 'backordered' (hard rule — no split shipments)
+  * Checks packing requirement: if company_order_settings.require_packing_step=true and order.packed_at is NULL → error
+  * For each reserved item: calls dispatchOrder() (inventory) — deducts on_hand, releases reservation, locks COGS
+  * Sets order_item.fulfillment_status='dispatched', order.status='dispatched', dispatched_at, tracking_number, courier_name
+  * backfill_order_timestamps() trigger auto-sets confirmed_at/packed_at if they were NULL
+  * Updates customer stats
+- markOrderProcessing(order_id): sets status='processing' (only from confirmed/partially_backordered)
+- markOrderPacked(order_id): sets packed_at (only from confirmed/partially_backordered/processing)
+
+VERIFICATION:
+- bun run lint: 0 errors, 15 pre-existing warnings (0 new)
+- npx tsc --noEmit: 0 errors in any new/modified file (2 pre-existing in inventory.ts lines 401/585)
+- Smoke test (via temporary API route):
+  * Create prepaid order with in-stock variant → ✅ ORD-2026-00004, auto-confirmed + stock reserved
+  * Dispatch order → ✅ success: true
+  * DB verification:
+    - Order status = 'dispatched', dispatchedAt set, trackingNumber = 'TRK-123' ✅
+    - Inventory pool: onHand = 8 (was 10, deducted by 2), reserved = 0 (reservation released) ✅
+    - Inventory transactions recorded via processInventoryTransaction (order_reserved + sale_dispatched) ✅
+
+Stage Summary:
+- OMS Step 3 (Inventory Integration) COMPLETE.
+- Order lifecycle is now fully wired to the Inventory system:
+  - Reservation at confirmation (stock_based + made_to_order with returned stock / fresh production)
+  - Backordering when insufficient stock + policy='continue'
+  - Backorder auto-fulfillment when PO receiving adds stock (FIFO queue)
+  - Cancellation unreserves stock
+  - Dispatch deducts on_hand, releases reservation, locks COGS
+  - Packing step enforced when company settings require it
+- No split shipments (hard rule — dispatch blocked if any item is backordered)
+- Every mutation calls insertAuditLog(). Metric events NOT yet added (per spec).

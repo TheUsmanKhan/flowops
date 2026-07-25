@@ -199,6 +199,23 @@ export async function POST(
       },
     })
 
+    // OMS Step 3: After receiving stock, check if any backordered order_items
+    // can now be fulfilled. Call checkAndFulfillBackorders() for each unique
+    // variant+location combination that received stock in this receipt.
+    try {
+      const { checkAndFulfillBackorders } = await import('@/lib/actions/backorder.actions')
+      const processedVariants = new Set<string>()
+      for (const item of d.items) {
+        const key = `${item.org_variant_id}|${po.locationId}`
+        if (!processedVariants.has(key)) {
+          processedVariants.add(key)
+          await checkAndFulfillBackorders(item.org_variant_id, po.locationId)
+        }
+      }
+    } catch (e) {
+      console.error('[backorder-fulfillment] Failed (non-blocking):', e)
+    }
+
     return Response.json({
       success: true,
       receipt_id: receipt.id,

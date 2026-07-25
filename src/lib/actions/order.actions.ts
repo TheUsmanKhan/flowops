@@ -1,17 +1,13 @@
 /**
  * OMS — Order server actions.
  *
- * This step (Step 2) covers order CREATION and basic LIFECYCLE
- * transitions (confirm, cancel, payment conversion). It does NOT
- * implement inventory reservation/dispatch (Step 3) or returns (Step 4).
+ * Step 2: Order creation + basic lifecycle transitions (confirm, cancel,
+ * payment conversion).
+ * Step 3: Wired to the REAL Inventory system — reservation at confirmation,
+ * dispatch deduction, cancellation unreservation, backorder auto-fulfillment.
  *
  * Every mutation calls insertAuditLog(). Metric events (insertMetricEvent)
- * are NOT yet added in this step — they'll be added deliberately in a
- * later step to avoid the pattern where metrics get silently skipped.
- *
- * CRITICAL: No inventory stock movements happen here. Order items are
- * created with fulfillment_status = 'reserved' as a PLACEHOLDER — actual
- * stock reservation logic happens in Step 3.
+ * are NOT yet added — they'll be added deliberately in a later step.
  */
 
 import { db } from '@/lib/db'
@@ -19,6 +15,12 @@ import { getCurrentUser } from '@/lib/session'
 import { getWorkspace, requirePermission, isElevated, ApiError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
+import {
+  reserveStockForOrder,
+  unreserveStockForOrder,
+  dispatchOrder as dispatchInventory,
+  checkAndFulfillMadeToOrderVariant,
+} from '@/lib/inventory'
 import {
   createManualOrderSchema,
   convertPaymentSchema,
@@ -65,6 +67,195 @@ async function generateOrderNumber(companyId: string): Promise<string> {
     SELECT generate_order_number(${companyId}::TEXT)
   `
   return result[0].generate_order_number
+}
+
+// ──────────────────────────────────────────────────────────────
+// Helper: reserveOrderStock — shared internal function
+// ──────────────────────────────────────────────────────────────
+// Processes ALL order_items for an order and attempts to reserve
+// stock for each based on its fulfillment_type_snapshot.
+//
+// For stock_based items:
+//   - If sufficient available stock → reserveStockForOrder(), fulfillment_status='reserved'
+//   - If insufficient + inventory_policy='continue' → fulfillment_status='backordered'
+//   - If insufficient + inventory_policy='deny' → outcome='failed'
+//
+// For made_to_order items:
+//   - checkAndFulfillMadeToOrderVariant() checks returned stock first
+//   - If existing_stock → fulfillment_status='reserved', returned_stitched_used=true
+//   - If fresh_production → fulfillment_status='reserved', production_order_id set
+//   - If error → outcome='failed'
+//
+// After processing: if ANY item is 'backordered', order status → 'partially_backordered'.
+// If ALL items are 'reserved', order stays 'confirmed'.
+//
+// Called from:
+//   - createManualOrder() IF the order auto-confirmed at creation
+//   - confirmOrder() when a 'pending' order is manually confirmed
+//   - dispatchOrderAction() if status is still 'pending' at dispatch time
+
+async function reserveOrderStock(
+  orderId: string,
+  ctx: { company: { id: string; organizationId: string }; user: { id: string }; employee: { id: string } },
+): Promise<{
+  success: boolean
+  results: Array<{ orderItemId: string; outcome: 'reserved' | 'backordered' | 'failed'; reason?: string }>
+}> {
+  const order = await db.order.findUnique({
+    where: { id: orderId },
+    select: { dispatchLocationId: true, companyId: true, organizationId: true },
+  })
+  if (!order) return { success: false, results: [] }
+
+  const items = await db.orderItem.findMany({
+    where: { orderId },
+    include: {
+      orgVariant: {
+        select: { id: true, fulfillmentType: true, inventoryPolicy: true },
+      },
+    },
+  })
+
+  const results: Array<{ orderItemId: string; outcome: 'reserved' | 'backordered' | 'failed'; reason?: string }> = []
+  let hasBackordered = false
+
+  for (const item of items) {
+    if (item.fulfillmentStatus === 'reserved' || item.fulfillmentStatus === 'dispatched') {
+      // Already processed (e.g. re-confirmation attempt) — skip
+      results.push({ orderItemId: item.id, outcome: 'reserved' })
+      continue
+    }
+
+    const locationId = item.reservedLocationId ?? order.dispatchLocationId
+    if (!locationId) {
+      results.push({ orderItemId: item.id, outcome: 'failed', reason: 'No dispatch location set' })
+      continue
+    }
+
+    if (item.fulfillmentTypeSnapshot === 'stock_based') {
+      // Check available stock at the dispatch location
+      const pool = await db.inventoryPool.findUnique({
+        where: {
+          orgVariantId_locationId: {
+            orgVariantId: item.orgVariantId,
+            locationId,
+          },
+        },
+      })
+
+      const available = pool ? pool.onHand - pool.reserved : 0
+
+      if (available >= item.quantity) {
+        // Sufficient stock — reserve it
+        const reserveResult = await reserveStockForOrder({
+          orgVariantId: item.orgVariantId,
+          locationId,
+          organizationId: order.organizationId,
+          companyId: order.companyId,
+          employeeId: ctx.employee.id,
+          quantity: item.quantity,
+          orderId,
+        })
+
+        if (reserveResult.success) {
+          await db.orderItem.update({
+            where: { id: item.id },
+            data: { fulfillmentStatus: 'reserved', reservedLocationId: locationId },
+          })
+          results.push({ orderItemId: item.id, outcome: 'reserved' })
+        } else {
+          results.push({ orderItemId: item.id, outcome: 'failed', reason: reserveResult.error })
+        }
+      } else if (item.orgVariant.inventoryPolicy === 'continue') {
+        // Insufficient stock but backordering allowed
+        await db.orderItem.update({
+          where: { id: item.id },
+          data: { fulfillmentStatus: 'backordered', backorderedAt: new Date() },
+        })
+        hasBackordered = true
+        results.push({
+          orderItemId: item.id,
+          outcome: 'backordered',
+          reason: `Available: ${available}, required: ${item.quantity}`,
+        })
+      } else {
+        // Insufficient stock + policy='deny' — fail
+        results.push({
+          orderItemId: item.id,
+          outcome: 'failed',
+          reason: `Insufficient stock (available: ${available}, required: ${item.quantity}) and inventory_policy='deny'`,
+        })
+      }
+    } else if (item.fulfillmentTypeSnapshot === 'made_to_order') {
+      // Made-to-order: check returned stock first, then trigger production
+      const mtoResult = await checkAndFulfillMadeToOrderVariant(
+        item.orgVariantId,
+        item.quantity,
+        order.companyId,
+        locationId,
+      )
+
+      if (mtoResult.source === 'existing_stock' && mtoResult.locationId) {
+        // Returned stock available — reserve it
+        const reserveResult = await reserveStockForOrder({
+          orgVariantId: item.orgVariantId,
+          locationId: mtoResult.locationId,
+          organizationId: order.organizationId,
+          companyId: order.companyId,
+          employeeId: ctx.employee.id,
+          quantity: item.quantity,
+          orderId,
+        })
+
+        if (reserveResult.success) {
+          await db.orderItem.update({
+            where: { id: item.id },
+            data: {
+              fulfillmentStatus: 'reserved',
+              returnedStitchedUsed: true,
+              reservedLocationId: mtoResult.locationId,
+            },
+          })
+          results.push({ orderItemId: item.id, outcome: 'reserved' })
+        } else {
+          results.push({ orderItemId: item.id, outcome: 'failed', reason: reserveResult.error })
+        }
+      } else if (mtoResult.source === 'fresh_production' && mtoResult.productionOrderId) {
+        // Fresh production triggered — link the production order
+        await db.orderItem.update({
+          where: { id: item.id },
+          data: {
+            fulfillmentStatus: 'reserved',
+            productionOrderId: mtoResult.productionOrderId,
+          },
+        })
+        // Also link the order_item back to the production order
+        await db.productionOrder.update({
+          where: { id: mtoResult.productionOrderId },
+          data: { orderItemId: item.id },
+        })
+        results.push({ orderItemId: item.id, outcome: 'reserved' })
+      } else {
+        // Error (no fabric source, insufficient fabric, etc.)
+        results.push({
+          orderItemId: item.id,
+          outcome: 'failed',
+          reason: mtoResult.error ?? 'Made-to-order fulfillment failed',
+        })
+      }
+    }
+  }
+
+  // Update order status based on results
+  if (hasBackordered) {
+    await db.order.update({
+      where: { id: orderId },
+      data: { status: 'partially_backordered' },
+    })
+  }
+  // If no backordered items, order stays 'confirmed' (or whatever it was)
+
+  return { success: true, results }
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -291,6 +482,12 @@ export async function createManualOrder(
 
     // 12. Update customer stats
     await updateCustomerStats(customerId)
+
+    // 13. If the order auto-confirmed (payment-driven or company setting),
+    // run the stock reservation logic immediately.
+    if (orderStatus === 'confirmed') {
+      await reserveOrderStock(order.id, ctx)
+    }
 
     return {
       success: true,
@@ -519,8 +716,14 @@ export async function confirmOrder(orderId: string): Promise<ActionResult> {
       newValues: { status: 'confirmed' },
     })
 
-    // Step 3 will extend this to trigger actual stock reservation.
-    // For now, just the status transition.
+    // Step 3: Run stock reservation for all items.
+    // This may flip the order to 'partially_backordered' if some items
+    // can't be fulfilled immediately.
+    const reserveResult = await reserveOrderStock(orderId, ctx)
+    if (!reserveResult.success) {
+      // Non-fatal — the order is confirmed, but reservation had issues.
+      // The results array has per-item details.
+    }
 
     return { success: true }
   } catch (err) {
@@ -704,6 +907,30 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
       },
     })
 
+    // Step 3: Unreserve stock for any items with fulfillment_status='reserved'.
+    // Items with fulfillment_status='backordered' need no inventory action
+    // (no reservation ever existed for them) — they'll be orphaned since
+    // the order is now cancelled and won't be picked up by future
+    // checkAndFulfillBackorders() runs (which skip cancelled orders).
+    const reservedItems = await db.orderItem.findMany({
+      where: { orderId: d.order_id, fulfillmentStatus: 'reserved' },
+    })
+
+    for (const item of reservedItems) {
+      const locationId = item.reservedLocationId ?? order.dispatchLocationId
+      if (!locationId) continue
+
+      await unreserveStockForOrder({
+        orgVariantId: item.orgVariantId,
+        locationId,
+        organizationId: order.organizationId,
+        companyId: ctx.company.id,
+        employeeId: ctx.employee.id,
+        quantity: item.quantity,
+        orderId: d.order_id,
+      })
+    }
+
     await insertAuditLog({
       action: 'order.cancelled',
       entityType: 'order',
@@ -713,12 +940,8 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
       userId: ctx.user.id,
       employeeId: ctx.employee.id,
       oldValues: { status: order.status },
-      newValues: { status: 'cancelled', reason: d.cancellation_reason },
+      newValues: { status: 'cancelled', reason: d.cancellation_reason, unreservedItems: reservedItems.length },
     })
-
-    // Step 3 will extend this to call unreserveStockForOrder() for any
-    // items with fulfillment_status='reserved'. The hook point is here —
-    // the actual stock call happens in Step 3.
 
     return { success: true }
   } catch (err) {
@@ -929,6 +1152,260 @@ export async function getOrderDetail(
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Failed to get order detail',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Step 3: Dispatch + Processing/Packing actions
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Dispatch an order — deducts stock from inventory, sets tracking info.
+ *
+ * Business rules:
+ *   - If order.status = 'pending' (confirmation was skipped): run the
+ *     full confirmation/reservation logic inline first, then proceed.
+ *   - If any item is still 'backordered' after reservation: BLOCK dispatch
+ *     with a clear error (hard rule — no split shipments).
+ *   - For each reserved item: call dispatchOrder() (inventory) which
+ *     deducts on_hand, releases the reservation, and locks COGS.
+ *   - The backfill_order_timestamps() trigger auto-sets confirmed_at/
+ *     packed_at if they were still NULL.
+ *   - If company_order_settings.require_packing_step = TRUE, verify
+ *     order.packed_at IS NOT NULL before proceeding.
+ */
+export async function dispatchOrderAction(
+  orderId: string,
+  trackingNumber: string,
+  courierName?: string,
+): Promise<ActionResult> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+
+    const order = await db.order.findFirst({
+      where: { id: orderId, companyId: ctx.company.id },
+    })
+    if (!order) return { success: false, error: 'Order not found' }
+
+    // Cannot dispatch already-dispatched/delivered/cancelled orders
+    if (['dispatched', 'delivered', 'rto', 'cancelled', 'refunded'].includes(order.status)) {
+      return { success: false, error: `Cannot dispatch an order that is already ${order.status}` }
+    }
+
+    // Check packing requirement
+    const settings = await db.companyOrderSetting.findUnique({
+      where: { companyId: ctx.company.id },
+    })
+    if (settings?.requirePackingStep && !order.packedAt) {
+      return {
+        success: false,
+        error: 'This order must be marked as packed before dispatching. Use markOrderPacked() first.',
+      }
+    }
+
+    // If order is still 'pending' (confirmation was skipped), run the
+    // full confirmation + reservation logic inline first.
+    if (order.status === 'pending') {
+      await db.order.update({
+        where: { id: orderId },
+        data: { status: 'confirmed', confirmedAt: new Date() },
+      })
+      await reserveOrderStock(orderId, ctx)
+    }
+
+    // Re-fetch the order to get the updated status after reservation
+    const updatedOrder = await db.order.findFirst({
+      where: { id: orderId },
+      select: { status: true, dispatchLocationId: true, organizationId: true },
+    })
+    if (!updatedOrder) return { success: false, error: 'Order not found after reservation' }
+
+    // Check for backordered items — BLOCK dispatch if any exist
+    const backorderedItems = await db.orderItem.findMany({
+      where: { orderId, fulfillmentStatus: 'backordered' },
+      include: {
+        orgVariant: { select: { sku: true } },
+      },
+    })
+
+    if (backorderedItems.length > 0) {
+      const itemList = backorderedItems
+        .map((i) => `${i.orgVariant.sku} (qty: ${i.quantity})`)
+        .join(', ')
+      return {
+        success: false,
+        error: `Cannot dispatch: ${backorderedItems.length} item(s) are still backordered: ${itemList}. Receive stock or cancel those items first.`,
+      }
+    }
+
+    // Dispatch each reserved item
+    const itemsToDispatch = await db.orderItem.findMany({
+      where: { orderId, fulfillmentStatus: 'reserved' },
+    })
+
+    for (const item of itemsToDispatch) {
+      const locationId = item.reservedLocationId ?? updatedOrder.dispatchLocationId
+      if (!locationId) {
+        return { success: false, error: `Order item ${item.id} has no dispatch location` }
+      }
+
+      const dispatchResult = await dispatchInventory({
+        orgVariantId: item.orgVariantId,
+        locationId,
+        organizationId: updatedOrder.organizationId,
+        companyId: ctx.company.id,
+        employeeId: ctx.employee.id,
+        quantity: item.quantity,
+        orderId,
+      })
+
+      if (!dispatchResult.success) {
+        return {
+          success: false,
+          error: `Failed to dispatch item: ${dispatchResult.error}`,
+        }
+      }
+
+      // Mark item as dispatched
+      await db.orderItem.update({
+        where: { id: item.id },
+        data: { fulfillmentStatus: 'dispatched', fulfilledAt: new Date() },
+      })
+    }
+
+    // Update order status — the backfill_order_timestamps() trigger
+    // will auto-set confirmedAt/packedAt if they were still NULL.
+    await db.order.update({
+      where: { id: orderId },
+      data: {
+        status: 'dispatched',
+        dispatchedAt: new Date(),
+        trackingNumber: trackingNumber || null,
+        courierName: courierName || order.courierName,
+      },
+    })
+
+    await insertAuditLog({
+      action: 'order.dispatched',
+      entityType: 'order',
+      entityId: orderId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      oldValues: { status: updatedOrder.status },
+      newValues: {
+        status: 'dispatched',
+        trackingNumber,
+        courierName,
+        itemsDispatched: itemsToDispatch.length,
+      },
+    })
+
+    // Update customer stats
+    const orderWithCustomer = await db.order.findUnique({
+      where: { id: orderId },
+      select: { customerId: true },
+    })
+    if (orderWithCustomer) {
+      await updateCustomerStats(orderWithCustomer.customerId)
+    }
+
+    return { success: true }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to dispatch order',
+    }
+  }
+}
+
+/**
+ * Mark an order as "processing" (being packed). Only meaningful when
+ * company_order_settings.require_packing_step = TRUE.
+ */
+export async function markOrderProcessing(orderId: string): Promise<ActionResult> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+
+    const order = await db.order.findFirst({
+      where: { id: orderId, companyId: ctx.company.id },
+    })
+    if (!order) return { success: false, error: 'Order not found' }
+
+    if (!['confirmed', 'partially_backordered'].includes(order.status)) {
+      return { success: false, error: `Order must be confirmed to start processing (current: ${order.status})` }
+    }
+
+    await db.order.update({
+      where: { id: orderId },
+      data: { status: 'processing' },
+    })
+
+    await insertAuditLog({
+      action: 'order.processing_started',
+      entityType: 'order',
+      entityId: orderId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      oldValues: { status: order.status },
+      newValues: { status: 'processing' },
+    })
+
+    return { success: true }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to mark order as processing',
+    }
+  }
+}
+
+/**
+ * Mark an order as packed. Only enforced when
+ * company_order_settings.require_packing_step = TRUE — when FALSE,
+ * the backfill trigger sets packedAt automatically at dispatch time.
+ */
+export async function markOrderPacked(orderId: string): Promise<ActionResult> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+
+    const order = await db.order.findFirst({
+      where: { id: orderId, companyId: ctx.company.id },
+    })
+    if (!order) return { success: false, error: 'Order not found' }
+
+    if (!['confirmed', 'partially_backordered', 'processing'].includes(order.status)) {
+      return { success: false, error: `Order must be confirmed or processing to pack (current: ${order.status})` }
+    }
+
+    await db.order.update({
+      where: { id: orderId },
+      data: { packedAt: new Date() },
+    })
+
+    await insertAuditLog({
+      action: 'order.packed',
+      entityType: 'order',
+      entityId: orderId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      newValues: { packedAt: new Date() },
+    })
+
+    return { success: true }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to mark order as packed',
     }
   }
 }

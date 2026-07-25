@@ -653,3 +653,130 @@ export async function releaseQuarantine(
     data: { reserved: newReserved },
   })
 }
+
+// ──────────────────────────────────────────────────────────────
+// OMS hooks — reservation / unreservation / dispatch
+// ──────────────────────────────────────────────────────────────
+// These are thin wrappers around processInventoryTransaction() that
+// the Order Management System calls at specific lifecycle points.
+// They were stubbed in the original Inventory design and are now
+// implemented for OMS Step 3.
+
+/**
+ * Reserve stock for an order item. Increments inventory_pools.reserved
+ * (does NOT touch on_hand — that happens at dispatch time). Records
+ * an order_reserved transaction in the ledger.
+ *
+ * @returns { success, error? } — fails if insufficient available stock.
+ */
+export async function reserveStockForOrder(input: {
+  orgVariantId: string
+  locationId: string
+  organizationId: string
+  companyId: string
+  employeeId?: string | null
+  quantity: number
+  orderId?: string
+}): Promise<{ success: boolean; error?: string }> {
+  // Check available stock first (available = onHand - reserved)
+  const pool = await db.inventoryPool.findUnique({
+    where: {
+      orgVariantId_locationId: {
+        orgVariantId: input.orgVariantId,
+        locationId: input.locationId,
+      },
+    },
+  })
+  if (!pool) {
+    return { success: false, error: 'No inventory pool exists for this variant+location.' }
+  }
+  const available = pool.onHand - pool.reserved
+  if (available < input.quantity) {
+    return {
+      success: false,
+      error: `Insufficient available stock. Available: ${available}, required: ${input.quantity}.`,
+    }
+  }
+
+  const result = await processInventoryTransaction({
+    orgVariantId: input.orgVariantId,
+    locationId: input.locationId,
+    organizationId: input.organizationId,
+    companyId: input.companyId,
+    employeeId: input.employeeId,
+    transactionType: 'order_reserved',
+    quantity: input.quantity,
+    referenceType: 'order',
+    referenceId: input.orderId,
+  })
+
+  if (!result.success) {
+    return { success: false, error: result.error }
+  }
+  return { success: true }
+}
+
+/**
+ * Unreserve stock for an order item (e.g. on order cancellation).
+ * Decrements inventory_pools.reserved. Records an order_unreserved
+ * transaction. Does NOT touch on_hand.
+ */
+export async function unreserveStockForOrder(input: {
+  orgVariantId: string
+  locationId: string
+  organizationId: string
+  companyId: string
+  employeeId?: string | null
+  quantity: number
+  orderId?: string
+}): Promise<{ success: boolean; error?: string }> {
+  const result = await processInventoryTransaction({
+    orgVariantId: input.orgVariantId,
+    locationId: input.locationId,
+    organizationId: input.organizationId,
+    companyId: input.companyId,
+    employeeId: input.employeeId,
+    transactionType: 'order_unreserved',
+    quantity: input.quantity,
+    referenceType: 'order',
+    referenceId: input.orderId,
+  })
+
+  if (!result.success) {
+    return { success: false, error: result.error }
+  }
+  return { success: true }
+}
+
+/**
+ * Dispatch stock for an order item — deducts on_hand AND releases
+ * the reservation. Records a sale_dispatched transaction. COGS is
+ * locked at the pool's current avg_cost.
+ */
+export async function dispatchOrder(input: {
+  orgVariantId: string
+  locationId: string
+  organizationId: string
+  companyId: string
+  employeeId?: string | null
+  quantity: number
+  orderId?: string
+}): Promise<{ success: boolean; error?: string }> {
+  const result = await processInventoryTransaction({
+    orgVariantId: input.orgVariantId,
+    locationId: input.locationId,
+    organizationId: input.organizationId,
+    companyId: input.companyId,
+    employeeId: input.employeeId,
+    transactionType: 'sale_dispatched',
+    quantity: input.quantity,
+    costPerUnit: null, // uses current avg_cost (locked at dispatch time)
+    referenceType: 'order',
+    referenceId: input.orderId,
+  })
+
+  if (!result.success) {
+    return { success: false, error: result.error }
+  }
+  return { success: true }
+}
