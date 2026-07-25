@@ -9,6 +9,7 @@
 import { db } from '@/lib/db'
 import { getWorkspace, requirePermission, isElevated, ApiError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { updateCompanyOrderSettingsSchema, type UpdateCompanyOrderSettingsInput } from '@/lib/validations/order.schemas'
 
 // ──────────────────────────────────────────────────────────────
@@ -144,6 +145,14 @@ export async function updateCompanyOrderSettings(
       },
       newValues: updateData,
     })
+
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'company_order_settings',
+      entityId: existing.id,
+      metricKey: 'company_order_settings.updated',
+      numericValue: 1,
+    }).catch(() => {})
 
     return { success: true }
   } catch (err) {

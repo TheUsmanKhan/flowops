@@ -14,6 +14,7 @@
 import { db } from '@/lib/db'
 import { reserveStockForOrder } from '@/lib/inventory'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 
 interface BackorderFulfillmentResult {
   success: boolean
@@ -129,6 +130,18 @@ export async function checkAndFulfillBackorders(
             locationId,
           },
         })
+
+        const daysWaited = item.backorderedAt
+          ? Math.round((Date.now() - new Date(item.backorderedAt).getTime()) / (1000 * 60 * 60 * 24))
+          : 0
+        await insertMetricEvent({
+          companyId: item.order.companyId,
+          entityType: 'product',
+          entityId: orgVariantId,
+          metricKey: 'order.backorder_fulfilled',
+          numericValue: item.quantity,
+          dimensions: { order_id: item.order.id, days_waited: daysWaited },
+        }).catch(() => {})
 
         // Recompute the parent order's status
         await db.$queryRaw`SELECT recompute_order_status(${item.order.id}::TEXT)`

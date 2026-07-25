@@ -12,6 +12,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { getWorkspace, requirePermission, isElevated, ApiError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { customerInputSchema, type CustomerInput } from '@/lib/validations/order.schemas'
 import type { Prisma } from '@prisma/client'
@@ -163,6 +164,15 @@ export async function flagCustomer(
       employeeId: ctx.employee.id,
       newValues: { reason },
     })
+
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'customer',
+      entityId: customerId,
+      metricKey: 'customer.flagged',
+      numericValue: 1,
+      dimensions: { reason },
+    }).catch(() => {})
 
     return { success: true }
   } catch (err) {

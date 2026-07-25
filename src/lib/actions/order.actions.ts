@@ -5,15 +5,16 @@
  * payment conversion).
  * Step 3: Wired to the REAL Inventory system — reservation at confirmation,
  * dispatch deduction, cancellation unreservation, backorder auto-fulfillment.
+ * Step 4: Comprehensive metric_events coverage on every mutation.
  *
- * Every mutation calls insertAuditLog(). Metric events (insertMetricEvent)
- * are NOT yet added — they'll be added deliberately in a later step.
+ * Every mutation calls insertAuditLog() AND insertMetricEvent().
  */
 
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { getWorkspace, requirePermission, isElevated, ApiError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import {
   reserveStockForOrder,
@@ -111,7 +112,7 @@ async function reserveOrderStock(
     where: { orderId },
     include: {
       orgVariant: {
-        select: { id: true, fulfillmentType: true, inventoryPolicy: true },
+        select: { id: true, fulfillmentType: true, inventoryPolicy: true, stitchingCharges: true },
       },
     },
   })
@@ -172,6 +173,14 @@ async function reserveOrderStock(
           where: { id: item.id },
           data: { fulfillmentStatus: 'backordered', backorderedAt: new Date() },
         })
+        await insertMetricEvent({
+          companyId: order.companyId,
+          entityType: 'product',
+          entityId: item.orgVariantId,
+          metricKey: 'order.backordered',
+          numericValue: item.quantity,
+          dimensions: { order_id: orderId },
+        }).catch(() => {})
         hasBackordered = true
         results.push({
           orderItemId: item.id,
@@ -216,6 +225,14 @@ async function reserveOrderStock(
               reservedLocationId: mtoResult.locationId,
             },
           })
+          await insertMetricEvent({
+            companyId: order.companyId,
+            entityType: 'product',
+            entityId: item.orgVariantId,
+            metricKey: 'order.made_to_order_from_returned_stock',
+            numericValue: 1,
+            dimensions: { order_id: orderId, stitching_cost_saved: Number(item.orgVariant.stitchingCharges) || 0 },
+          }).catch(() => {})
           results.push({ orderItemId: item.id, outcome: 'reserved' })
         } else {
           results.push({ orderItemId: item.id, outcome: 'failed', reason: reserveResult.error })
@@ -234,6 +251,14 @@ async function reserveOrderStock(
           where: { id: mtoResult.productionOrderId },
           data: { orderItemId: item.id },
         })
+        await insertMetricEvent({
+          companyId: order.companyId,
+          entityType: 'product',
+          entityId: item.orgVariantId,
+          metricKey: 'order.made_to_order_production_triggered',
+          numericValue: 1,
+          dimensions: { order_id: orderId, production_order_id: mtoResult.productionOrderId },
+        }).catch(() => {})
         results.push({ orderItemId: item.id, outcome: 'reserved' })
       } else {
         // Error (no fabric source, insufficient fabric, etc.)
@@ -489,6 +514,15 @@ export async function createManualOrder(
       await reserveOrderStock(order.id, ctx)
     }
 
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: order.id,
+      metricKey: 'order.created',
+      numericValue: Number(totalOrderValue),
+      dimensions: { order_source: 'manual', payment_type: d.payment_type, company_id: ctx.company.id },
+    }).catch(() => {})
+
     return {
       success: true,
       data: { orderId: order.id, flowopsOrderNumber, orderItems: createdItems },
@@ -673,6 +707,15 @@ export async function createOrderFromShopifyWebhook(
 
     await updateCustomerStats(customer.id)
 
+    await insertMetricEvent({
+      companyId,
+      entityType: 'order',
+      entityId: order.id,
+      metricKey: 'order.created',
+      numericValue: Number(totalOrderValue),
+      dimensions: { order_source: 'shopify', payment_type: paymentType, company_id: companyId },
+    }).catch(() => {})
+
     return { success: true, data: { orderId: order.id, flowopsOrderNumber } }
   } catch (err) {
     return {
@@ -724,6 +767,15 @@ export async function confirmOrder(orderId: string): Promise<ActionResult> {
       // Non-fatal — the order is confirmed, but reservation had issues.
       // The results array has per-item details.
     }
+
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: orderId,
+      metricKey: 'order.confirmed',
+      numericValue: Number(order.totalOrderValue),
+      dimensions: { confirmation_method: 'manual' },
+    }).catch(() => {})
 
     return { success: true }
   } catch (err) {
@@ -807,6 +859,15 @@ export async function convertPaymentStatus(
       },
     })
 
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: d.order_id,
+      metricKey: 'order.payment_converted',
+      numericValue: d.advance_amount ?? 0,
+      dimensions: { converted_by: ctx.employee.id, method: d.advance_payment_method || 'unknown' },
+    }).catch(() => {})
+
     return { success: true }
   } catch (err) {
     return {
@@ -860,6 +921,14 @@ export async function markCodCollected(
       employeeId: ctx.employee.id,
       newValues: { collectedAmount: d.collected_amount },
     })
+
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: d.order_id,
+      metricKey: 'order.cod_collected',
+      numericValue: d.collected_amount,
+    }).catch(() => {})
 
     return { success: true }
   } catch (err) {
@@ -942,6 +1011,15 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
       oldValues: { status: order.status },
       newValues: { status: 'cancelled', reason: d.cancellation_reason, unreservedItems: reservedItems.length },
     })
+
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: d.order_id,
+      metricKey: 'order.cancelled',
+      numericValue: Number(order.totalOrderValue),
+      dimensions: { cancellation_reason: d.cancellation_reason, had_reserved_items: reservedItems.length > 0 },
+    }).catch(() => {})
 
     return { success: true }
   } catch (err) {
@@ -1304,6 +1382,24 @@ export async function dispatchOrderAction(
       },
     })
 
+    const timeToDispatchHours = order.createdAt
+      ? Math.round((new Date().getTime() - new Date(order.createdAt).getTime()) / (1000 * 60 * 60))
+      : 0
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: orderId,
+      metricKey: 'order.dispatched',
+      numericValue: Number(order.totalOrderValue),
+      dimensions: {
+        courier_name: courierName || order.courierName,
+        employee_id: ctx.employee.id,
+        skipped_confirmation: updatedOrder.status === 'pending',
+        skipped_packing: !order.packedAt,
+        time_to_dispatch_hours: timeToDispatchHours,
+      },
+    }).catch(() => {})
+
     // Update customer stats
     const orderWithCustomer = await db.order.findUnique({
       where: { id: orderId },
@@ -1357,6 +1453,14 @@ export async function markOrderProcessing(orderId: string): Promise<ActionResult
       newValues: { status: 'processing' },
     })
 
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: orderId,
+      metricKey: 'order.processing_started',
+      numericValue: 1,
+    }).catch(() => {})
+
     return { success: true }
   } catch (err) {
     return {
@@ -1401,11 +1505,79 @@ export async function markOrderPacked(orderId: string): Promise<ActionResult> {
       newValues: { packedAt: new Date() },
     })
 
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: orderId,
+      metricKey: 'order.packed',
+      numericValue: 1,
+    }).catch(() => {})
+
     return { success: true }
   } catch (err) {
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Failed to mark order as packed',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Step 4: markOrderDelivered
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Mark a dispatched order as delivered.
+ */
+export async function markOrderDelivered(orderId: string): Promise<ActionResult> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+
+    const order = await db.order.findFirst({
+      where: { id: orderId, companyId: ctx.company.id },
+    })
+    if (!order) return { success: false, error: 'Order not found' }
+    if (order.status !== 'dispatched') {
+      return { success: false, error: `Order must be dispatched to mark as delivered (current: ${order.status})` }
+    }
+
+    await db.order.update({
+      where: { id: orderId },
+      data: { status: 'delivered', deliveredAt: new Date() },
+    })
+
+    await insertAuditLog({
+      action: 'order.delivered',
+      entityType: 'order',
+      entityId: orderId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      oldValues: { status: 'dispatched' },
+      newValues: { status: 'delivered' },
+    })
+
+    // Metric: order.delivered
+    const deliveryDays = order.dispatchedAt
+      ? Math.round((Date.now() - new Date(order.dispatchedAt).getTime()) / (1000 * 60 * 60 * 24))
+      : 0
+
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: orderId,
+      metricKey: 'order.delivered',
+      numericValue: Number(order.totalOrderValue),
+      dimensions: { delivery_days: deliveryDays },
+    }).catch(() => {})
+
+    return { success: true }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to mark order as delivered',
     }
   }
 }
