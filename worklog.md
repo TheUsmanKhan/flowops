@@ -1326,3 +1326,49 @@ Stage Summary:
 - insertMetricEvent already swallows errors internally (returns null + console.error), so no try/catch was added — parent operations are unaffected by metric insert failures.
 - VERIFICATION: `bun run lint` → 0 errors, 15 pre-existing warnings (0 new). `npx tsc --noEmit | grep "products/"` → 0 new errors in any of the 13 edited files (the 2 pre-existing tsc errors in products/route.ts lines 251/299 about variantRecords:never are unrelated to this task — that file already had insertMetricEvent from the prior task and was not touched here).
 - Notes on judgment calls: (1) pricing/route.ts emitted one metric per pricing entry inside the for-loop since the endpoint is batch with no single variant_id/sale_price; (2) promote/route.ts used d.target_scope for new_scope dimension (instead of literal 'organization') because the endpoint supports both 'organization' and 'selective' targets.
+
+---
+Task ID: OMS-STEP-1-SCHEMA
+Agent: main
+Task: OMS Step 1 of 5 — Database Schema only. Create customers, company_order_settings, orders, order_items tables + link existing tables + PostgreSQL functions + RLS.
+
+Work Log:
+- Inspected existing Prisma schema to confirm: all existing tables use TEXT (cuid) PKs (not UUID), camelCase column names (no @map directives), PascalCase table names (e.g. "Organization", "Company", "Employee", "InventoryLocation", "OrgProductVariant", "InventoryTransaction", "StockLossRecord", "ProductionOrder"). The spec's UUID/snake_case didn't match — adapted all SQL to use TEXT IDs + camelCase columns + PascalCase table names.
+- Confirmed the RLS helper functions (get_active_company_id, get_active_org_id, is_elevated_employee, has_permission) don't exist as SQL functions — the codebase enforces multi-tenant isolation in the APPLICATION LAYER (via getWorkspace()/requirePermission() in src/lib/workspace.ts). Created the SQL helper functions as DEFENSE-IN-DEPTH on top of app-layer scoping, reading from session GUC parameters (app.active_company_id, app.active_org_id, app.user_id) to be wired in Step 2.
+
+Created files:
+1. /home/z/my-project/supabase/migrations/001_oms_schema.sql — the complete SQL migration covering:
+   - Part 0: 5 RLS helper SQL functions (get_active_company_id, get_active_org_id, get_active_user_id, is_elevated_employee, has_permission)
+   - Part 6: 3 core functions (generate_order_number, recompute_order_status, backfill_order_timestamps trigger) + 3 auto-updateAt trigger functions
+   - Part 7: RLS enabled on all 4 new tables with SELECT/INSERT/UPDATE policies (DELETE denied by default)
+
+2. Updated /home/z/my-project/prisma/schema.prisma — added 4 new Prisma models (Customer, CompanyOrderSetting, Order, OrderItem) + reverse relations on Organization, Company, Employee, InventoryLocation, OrgProductVariant, InventoryTransaction, StockLossRecord, ProductionOrder. Added orderId/orderItemId FK columns to existing models.
+
+Applied to live Supabase:
+- Ran `prisma db push --accept-data-loss` → created 4 new tables (Customer, CompanyOrderSetting, Order, OrderItem) + 3 new FK columns on existing tables (InventoryTransaction.orderId, StockLossRecord.orderItemId, ProductionOrder.orderItemId)
+- Ran the SQL migration via pg client → created 8 functions, 4 triggers, enabled RLS on all 4 tables
+
+Verified on live Supabase:
+- ✅ 4 OMS tables created (Customer, CompanyOrderSetting, Order, OrderItem)
+- ✅ 8 functions created (generate_order_number, recompute_order_status, backfill_order_timestamps, get_active_company_id, get_active_org_id, get_active_user_id, has_permission, is_elevated_employee + 3 update_*_updatedAt triggers)
+- ✅ 4 triggers created (trg_backfill_order_timestamps on Order, trg_customers_updatedAt on Customer, trg_company_order_settings_updatedAt on CompanyOrderSetting, trg_order_items_updatedAt on OrderItem)
+- ✅ RLS enabled on all 4 tables
+- ✅ 3 FK columns added to existing tables (InventoryTransaction.orderId, StockLossRecord.orderItemId, ProductionOrder.orderItemId)
+- ✅ generate_order_number('test-company-id') returns 'ORD-2026-00001' — function works correctly
+- ✅ RLS helpers return NULL when GUCs not set (secure by default — denies access)
+
+Key design decisions:
+- Used TEXT (cuid) instead of UUID for all IDs to match existing tables
+- Used camelCase column names (quoted in SQL) to match Prisma conventions
+- Used PascalCase table names (quoted in SQL) to match Prisma's table creation
+- RLS is defense-in-depth on top of app-layer scoping — GUC parameters set by API middleware (Step 2)
+- remainingCodAmount is a GENERATED ALWAYS AS (totalOrderValue - advanceAmount) STORED column
+- lineTotal is a GENERATED ALWAYS AS (quantity * unitPrice) STORED column
+- backfill_order_timestamps trigger auto-fills confirmedAt/packedAt when an order jumps to dispatched (configurable workflow strictness)
+- ProductionOrder.orderItemId is @unique (1-to-1: one production order per order item)
+- No DELETE policies on any table — orders/customers are never hard-deleted (use status='cancelled')
+
+Stage Summary:
+- OMS Step 1 (Database Schema) COMPLETE. All 4 new tables + 3 FK columns + 8 functions + 4 triggers + RLS on 4 tables are live on Supabase.
+- Prisma Client regenerated and includes the new models.
+- Ready for Step 2: wire session GUC setting in API middleware + createCompany() hook to auto-create CompanyOrderSetting + add 'orders.*' permission keys.

@@ -86,6 +86,11 @@ model Organization {
   cycleCounts          CycleCount[]
   cycleCountItems      CycleCountItem[]
   productionOrders     ProductionOrder[]
+
+  // OMS back-relations
+  customers            Customer[]
+  orders               Order[]
+  orderItems           OrderItem[]
   attributeValueRules  AttributeValueRule[]
 }
 
@@ -144,6 +149,10 @@ model Company {
   stockLossRecords        StockLossRecord[]
   cycleCounts             CycleCount[]
   productionOrders        ProductionOrder[]
+
+  // OMS back-relations
+  orderSettings           CompanyOrderSetting?
+  orders                  Order[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -250,6 +259,11 @@ model Employee {
   cycleCountApprover     CycleCount[] @relation("CycleCountApprover")
   cycleCountCounter      CycleCountItem[] @relation("CycleCountCounter")
   productionOrderCreator ProductionOrder[] @relation("ProductionOrderCreator")
+
+  // OMS back-relations
+  orderSettingsUpdater   CompanyOrderSetting[] @relation("CompanyOrderSettingsUpdater")
+  orderCreator           Order[] @relation("OrderCreator")
+  orderConverter         Order[] @relation("OrderConverter")
 
   @@unique([companyId, userId])
 }
@@ -574,6 +588,9 @@ model OrgProductVariant {
   purchaseOrderItems PurchaseOrderItem[]
   purchaseOrderReceiptItems PurchaseOrderReceiptItem[]
 
+  // OMS back-relations
+  orderItems       OrderItem[]
+
   @@index([productId])
   @@index([organizationId, fulfillmentType])
 }
@@ -805,6 +822,11 @@ model InventoryLocation {
   cycleCounts          CycleCount[]
   productionOrders     ProductionOrder[]
 
+  // OMS back-relations
+  companyOrderSettingsDefault CompanyOrderSetting[] @relation("CompanyOrderSettingsDefaultLocation")
+  orderDispatchLocations      Order[] @relation("OrderDispatchLocation")
+  orderItemReservedLocations  OrderItem[] @relation("OrderItemReservedLocation")
+
   @@index([organizationId])
   @@index([companyId])
 }
@@ -897,6 +919,10 @@ model InventoryTransaction {
 
   referenceType  String?  // order | purchase_order | transfer | cycle_count | stock_loss | manual | opening | production_order | supplier_return
   referenceId    String?
+
+  // OMS: links to the originating order (for dispatchOrder/reserveStockForOrder calls)
+  orderId        String?
+  order          Order?   @relation(fields: [orderId], references: [id])
 
   notes          String?
   metadata       String   @default("{}")
@@ -1154,6 +1180,11 @@ model StockLossRecord {
   inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
   orderReferenceId String? // for transit_loss: references the dispatched order (future)
 
+  // OMS: proper FK to order_items (replaces the generic orderReferenceId above;
+  // keep the old field for backward compatibility)
+  orderItemId    String?
+  orderItem      OrderItem? @relation(fields: [orderItemId], references: [id])
+
   // ONLY set when loss_type = 'supplier_dispute' — links to originating rejected return
   supplierReturnId String? @unique
   supplierReturn   SupplierReturn? @relation("SupplierReturnLossLink", fields: [supplierReturnId], references: [id])
@@ -1265,6 +1296,11 @@ model ProductionOrder {
   referenceType  String   @default("order")
   referenceId    String?  // will link to orders table in future sprint
 
+  // OMS: proper FK to order_items (keep the old generic referenceType/referenceId
+  // fields for backward compatibility)
+  orderItemId    String? @unique
+  orderItem      OrderItem? @relation("OrderItemProduction", fields: [orderItemId], references: [id])
+
   fabricTxnId    String?
   fabricTxn      InventoryTransaction? @relation(fields: [fabricTxnId], references: [id])
 
@@ -1277,4 +1313,190 @@ model ProductionOrder {
 
   @@index([companyId, status])
   @@index([stitchedVariantId])
+}
+
+// ============================================================================
+// OMS — Order Management System (Step 1: Schema)
+// ============================================================================
+
+/// Lightweight customer record (NOT a full CRM). Tracks order history stats
+/// and RTO flag for return-fraud detection. One customer per phone per org.
+model Customer {
+  id                String   @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name              String
+  phone             String
+  alternatePhone    String?
+  email             String?
+
+  // JSONB: [{ label, address, city, province, is_default }]
+  addresses         String   @default("[]")
+
+  // Cached order history stats (denormalized for fast list views)
+  totalOrdersCount  Int      @default(0)
+  totalOrderValue   Decimal  @default(0) @db.Decimal(14, 2)
+  totalRtoCount     Int      @default(0)
+
+  // RTO flagging for return-fraud detection
+  isFlagged         Boolean  @default(false)
+  flaggedReason     String?
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  orders            Order[]
+
+  @@unique([organizationId, phone])
+  @@index([organizationId, phone])
+  @@index([organizationId, isFlagged])
+}
+
+/// Per-company configurable order workflow strictness. When
+/// requireOrderConfirmation or requirePackingStep are FALSE, orders can
+/// jump straight to 'dispatched' and the DB trigger auto-backfills the
+/// skipped timestamps. A default row should be auto-created on company creation.
+model CompanyOrderSetting {
+  id                          String   @id @default(cuid())
+  companyId                   String   @unique
+  company                     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  requireOrderConfirmation    Boolean  @default(false)
+  requirePackingStep          Boolean  @default(false)
+  defaultCourier              String?
+  defaultDispatchLocationId   String?
+  defaultDispatchLocation     InventoryLocation? @relation("CompanyOrderSettingsDefaultLocation", fields: [defaultDispatchLocationId], references: [id])
+
+  updatedBy                   String?
+  updatedByEmployee           Employee? @relation("CompanyOrderSettingsUpdater", fields: [updatedBy], references: [id])
+  updatedAt                   DateTime @updatedAt
+
+  @@index([companyId])
+}
+
+/// The central order record. flowopsOrderNumber is unique per company
+/// (ORD-{year}-{seq}). externalOrderReference/externalOrderId track the
+/// source platform's identifiers (nullable for manual orders).
+model Order {
+  id                          String   @id @default(cuid())
+  organizationId              String
+  organization                Organization @relation(fields: [organizationId], references: [id])
+  companyId                   String
+  company                     Company  @relation(fields: [companyId], references: [id])
+
+  flowopsOrderNumber          String
+
+  orderSource                 String   @default("manual") // shopify | manual | daraz | instagram
+  externalOrderReference      String?
+  externalOrderId             String?
+
+  customerId                  String
+  customer                    Customer @relation(fields: [customerId], references: [id])
+
+  status                      String   @default("pending") // pending | confirmed | partially_backordered | processing | dispatched | delivered | rto | cancelled | refunded
+
+  // Payment system: supports partial advance + COD remaining
+  paymentType                 String   @default("full_cod") // full_cod | partial_advance | fully_prepaid
+  paymentStatus               String   @default("cod_pending") // cod_pending | advance_paid | fully_prepaid | cod_collected
+  paymentSource               String   @default("cod_native") // shopify_gateway | manual_conversion | cod_native
+
+  subtotal                    Decimal  @default(0) @db.Decimal(14, 2)
+  discountAmount              Decimal? @db.Decimal(14, 2)
+  discountReason              String?
+  courierCharges              Decimal? @db.Decimal(14, 2)
+  totalOrderValue             Decimal  @default(0) @db.Decimal(14, 2)
+
+  advanceAmount               Decimal? @db.Decimal(14, 2)
+  advancePaymentMethod        String?
+  advancePaymentReference     String?
+  advancePaymentScreenshotUrl String?
+  advancePaidAt               DateTime?
+
+  // remainingCodAmount is a GENERATED column (totalOrderValue - advanceAmount)
+  // — represented here as a regular field; the DB generates it.
+  remainingCodAmount          Decimal? @db.Decimal(14, 2)
+  codCollected                Boolean  @default(false)
+  codCollectedAmount          Decimal? @db.Decimal(14, 2)
+  codCollectedAt              DateTime?
+
+  convertedBy                 String?
+  convertedByEmployee         Employee? @relation("OrderConverter", fields: [convertedBy], references: [id])
+  convertedAt                 DateTime?
+
+  deliveryAddress             String?  // JSONB
+  deliveryCity                String?
+  courierName                 String?
+  trackingNumber              String?
+  dispatchLocationId          String?
+  dispatchLocation            InventoryLocation? @relation("OrderDispatchLocation", fields: [dispatchLocationId], references: [id])
+  notesForCourier             String?
+
+  skippedConfirmation         Boolean  @default(false)
+  skippedPacking              Boolean  @default(false)
+
+  confirmedAt                 DateTime?
+  packedAt                    DateTime?
+  dispatchedAt                DateTime?
+  deliveredAt                 DateTime?
+  cancelledAt                 DateTime?
+  cancellationReason          String?
+  returnedAt                  DateTime?
+
+  createdBy                   String?
+  createdByEmployee           Employee? @relation("OrderCreator", fields: [createdBy], references: [id])
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+
+  items                       OrderItem[]
+  inventoryTransactions       InventoryTransaction[]
+
+  @@unique([companyId, flowopsOrderNumber])
+  @@index([companyId, status])
+  @@index([companyId, createdAt])
+  @@index([externalOrderId])
+  @@index([customerId])
+}
+
+/// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
+/// the variant's fulfillmentType — a stock_based item can be 'backordered'
+/// while a made_to_order item can be 'reserved' or 'dispatched'.
+/// fulfillmentTypeSnapshot captures the variant's type AT ORDER TIME.
+model OrderItem {
+  id                          String   @id @default(cuid())
+  orderId                     String
+  order                       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orgVariantId                String
+  orgVariant                  OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  organizationId              String
+  organization                Organization @relation(fields: [organizationId], references: [id])
+
+  quantity                    Int
+  unitPrice                   Decimal  @db.Decimal(12, 2)
+  // lineTotal is GENERATED ALWAYS AS (quantity * unitPrice) STORED in the DB
+  lineTotal                   Decimal  @db.Decimal(14, 2)
+
+  fulfillmentStatus           String   @default("reserved") // reserved | backordered | dispatched
+  fulfillmentTypeSnapshot     String   // stock_based | made_to_order
+
+  backorderedAt               DateTime?
+  fulfilledAt                 DateTime?
+
+  productionOrderId           String?
+  productionOrder             ProductionOrder? @relation("OrderItemProduction")
+  returnedStitchedUsed        Boolean  @default(false)
+
+  autoProcessedAsPerfect      Boolean  @default(false)
+  needsReview                 Boolean  @default(false)
+
+  reservedLocationId          String?
+  reservedLocation            InventoryLocation? @relation("OrderItemReservedLocation", fields: [reservedLocationId], references: [id])
+
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+
+  stockLossRecords            StockLossRecord[]
+
+  @@index([orderId])
+  @@index([orgVariantId, fulfillmentStatus])
 }
