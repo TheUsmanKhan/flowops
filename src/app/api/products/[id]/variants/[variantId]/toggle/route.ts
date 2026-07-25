@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 
@@ -71,6 +72,14 @@ export async function POST(
       employeeId: caller.id,
       oldValues,
       newValues: { isActive: is_active },
+    })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: is_active ? 'product.variant_activated' : 'product.variant_deactivated',
+      numericValue: 1,
+      dimensions: { variant_id: variantId, sku: variant.sku },
     })
 
     return Response.json({ id: updated.id, isActive: updated.isActive })

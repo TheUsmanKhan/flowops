@@ -1,6 +1,7 @@
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 import { adjustStockSchema } from '@/lib/validations/inventory'
@@ -50,6 +51,18 @@ export async function POST(req: Request) {
     const isPositive = d.quantity > 0
     const absQty = Math.abs(d.quantity)
 
+    // Fetch the pool's current avg_cost to value the metric event (use 0 if no pool yet)
+    const pool = await db.inventoryPool.findUnique({
+      where: {
+        orgVariantId_locationId: {
+          orgVariantId: d.org_variant_id,
+          locationId: d.location_id,
+        },
+      },
+      select: { avgCost: true },
+    })
+    const avgCostForMetric = pool ? Number(pool.avgCost) : 0
+
     if (isPositive) {
       // Adding stock — use cycle_count_adjust (sets on_hand)
       const txnResult = await processInventoryTransaction({
@@ -76,6 +89,20 @@ export async function POST(req: Request) {
         userId: user.id,
         employeeId: caller.id,
         newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id },
+      })
+
+      // Metric event (CRITICAL — powers stock adjustment KPI)
+      await insertMetricEvent({
+        companyId: company.id,
+        entityType: 'product',
+        entityId: d.org_variant_id,
+        metricKey: 'inventory.stock_adjusted',
+        numericValue: absQty * avgCostForMetric,
+        dimensions: {
+          location_id: d.location_id,
+          direction: 'increase',
+          reason: d.reason,
+        },
       })
 
       return Response.json({ success: true, transaction_id: txnResult.transactionId })
@@ -105,6 +132,20 @@ export async function POST(req: Request) {
         userId: user.id,
         employeeId: caller.id,
         newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id },
+      })
+
+      // Metric event (CRITICAL — powers stock adjustment KPI)
+      await insertMetricEvent({
+        companyId: company.id,
+        entityType: 'product',
+        entityId: d.org_variant_id,
+        metricKey: 'inventory.stock_adjusted',
+        numericValue: absQty * avgCostForMetric,
+        dimensions: {
+          location_id: d.location_id,
+          direction: 'decrease',
+          reason: d.reason,
+        },
       })
 
       return Response.json({ success: true, transaction_id: txnResult.transactionId })

@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { generatePoNumber } from '@/lib/inventory'
 import { z } from 'zod'
@@ -188,6 +189,23 @@ export async function POST(req: Request) {
       userId: user.id,
       employeeId: caller.id,
       newValues: { poNumber, status: d.status, itemCount: d.items.length },
+    })
+
+    const totalPoValue = d.items.reduce(
+      (sum, item) => sum + item.ordered_quantity * item.cost_per_unit,
+      0,
+    )
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'purchase_order',
+      entityId: po.id,
+      metricKey: 'purchase_order.created',
+      numericValue: totalPoValue,
+      dimensions: {
+        supplier_id: d.supplier_id,
+        item_count: d.items.length,
+        location_id: d.delivery_location_id,
+      },
     })
 
     return Response.json({ id: po.id, poNumber })

@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 import { NextRequest } from 'next/server'
@@ -330,6 +331,19 @@ export async function PATCH(
         organizationId: orgId,
         userId: user.id,
         employeeId: caller.id,
+      })
+
+      await insertMetricEvent({
+        companyId: company.id,
+        entityType: 'location',
+        entityId: count.locationId,
+        metricKey: 'inventory.cycle_count_variance',
+        numericValue: Math.abs(Number(count.totalVarianceValue)),
+        dimensions: {
+          total_discrepancies: count.totalDiscrepancies,
+          count_id: id,
+          count_name: count.countName,
+        },
       })
 
       return Response.json({ success: true, status: 'approved' })

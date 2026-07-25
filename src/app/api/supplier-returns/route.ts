@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 import { z } from 'zod'
@@ -137,6 +138,20 @@ export async function POST(req: Request) {
       userId: user.id,
       employeeId: caller.id,
       newValues: { quantity: d.quantity, reason: d.reason, totalValue: d.quantity * d.cost_per_unit },
+    })
+
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'supplier',
+      entityId: d.supplier_id,
+      metricKey: 'supplier_return.created',
+      numericValue: d.quantity * d.cost_per_unit,
+      dimensions: {
+        reason: d.reason,
+        org_variant_id: d.org_variant_id,
+        purchase_order_id: d.purchase_order_id || null,
+        location_id: d.location_id,
+      },
     })
 
     return Response.json({ id: record.id, transactionId: txnResult.transactionId })

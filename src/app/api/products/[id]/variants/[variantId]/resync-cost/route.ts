@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { determineParentAttribute } from '@/lib/utils/variant-grouping'
 import { NextRequest } from 'next/server'
@@ -91,6 +92,14 @@ export async function POST(
       userId: user.id,
       employeeId: caller.id,
       newValues: { costPrice: newCost, synced: true },
+    })
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'variant.cost_resynced',
+      numericValue: 1,
+      dimensions: { variant_id: variantId },
     })
 
     return Response.json({ success: true, cost_price: newCost })

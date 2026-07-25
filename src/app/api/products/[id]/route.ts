@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { updateProductSchema } from '@/lib/validations/product'
 import { NextRequest } from 'next/server'
@@ -188,6 +189,15 @@ export async function PATCH(
       newValues: d,
     })
 
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: id,
+      metricKey: 'product.updated',
+      numericValue: 1,
+      dimensions: { fields_changed: Object.keys(d) },
+    })
+
     return Response.json({ id: updated.id })
   } catch (err) {
     return handleError(err)
@@ -239,6 +249,14 @@ export async function DELETE(
       employeeId: caller.id,
       oldValues,
       newValues: { productScope: 'archived', isActive: false },
+    })
+
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: id,
+      metricKey: 'product.archived',
+      numericValue: 1,
     })
 
     return Response.json({ success: true })

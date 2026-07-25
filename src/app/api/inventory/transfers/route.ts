@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 
@@ -138,6 +139,21 @@ export async function POST(req: Request) {
         logisticsCost: body.logistics_cost || 0,
         fromLocation: body.from_location_id,
         toLocation: body.to_location_id,
+      },
+    })
+
+    // ── Metric event (CRITICAL — powers stock movement / turnover KPIs) ──
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'product',
+      entityId: body.org_variant_id,
+      metricKey: 'inventory.stock_transferred',
+      numericValue: body.quantity * costPerUnitAtTransfer,
+      dimensions: {
+        from_location_id: body.from_location_id,
+        to_location_id: body.to_location_id,
+        logistics_cost: body.logistics_cost ?? 0,
+        quantity: body.quantity,
       },
     })
 

@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
@@ -93,6 +94,14 @@ export async function POST(req: Request) {
       userId: user.id,
       employeeId: caller.id,
       newValues: { name: attribute.name, valueCount: attribute.values.length },
+    })
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'catalog',
+      entityId: attribute.id,
+      metricKey: 'attribute.created_inline',
+      numericValue: 1,
+      dimensions: { type: 'attribute', name: attribute.name },
     })
 
     return Response.json({

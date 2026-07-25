@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction, releaseQuarantine } from '@/lib/inventory'
 import { resolveTheftOrMissingLossSchema, resolveTransitLossSchema } from '@/lib/validations/stock-loss'
@@ -106,6 +107,19 @@ export async function POST(req: Request) {
         newValues: { resolution: d.resolution, investigationStatus: 'closed' },
       })
 
+      await insertMetricEvent({
+        companyId: company.id,
+        entityType: 'product',
+        entityId: record.orgVariantId,
+        metricKey: 'inventory.loss_resolved',
+        numericValue: Number(record.costPerUnit) * record.quantity,
+        dimensions: {
+          resolution: d.resolution,
+          loss_type: record.lossType,
+          quantity: record.quantity,
+        },
+      })
+
       return Response.json({ success: true, resolution: d.resolution, transaction_id: txnId })
     }
 
@@ -143,6 +157,19 @@ export async function POST(req: Request) {
         userId: user.id,
         employeeId: caller.id,
         newValues: { resolution: d.resolution, courierRecovered: d.courier_recovered ?? 0 },
+      })
+
+      await insertMetricEvent({
+        companyId: company.id,
+        entityType: 'product',
+        entityId: record.orgVariantId,
+        metricKey: 'inventory.loss_resolved',
+        numericValue: Number(record.costPerUnit) * record.quantity,
+        dimensions: {
+          resolution: d.resolution,
+          loss_type: record.lossType,
+          quantity: record.quantity,
+        },
       })
 
       return Response.json({ success: true, resolution: d.resolution })

@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { reportTransitLossSchema } from '@/lib/validations/stock-loss'
 
@@ -78,6 +79,20 @@ export async function POST(req: Request) {
       userId: user.id,
       employeeId: caller.id,
       newValues: { quantity: d.quantity, orderRef: d.order_reference_id, claimRef: d.courier_claim_ref },
+    })
+
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'product',
+      entityId: d.org_variant_id,
+      metricKey: 'inventory.transit_loss',
+      numericValue: d.quantity * avgCost,
+      dimensions: {
+        location_id: d.location_id,
+        order_reference_id: d.order_reference_id,
+        courier_claim_ref: d.courier_claim_ref || null,
+        quantity: d.quantity,
+      },
     })
 
     return Response.json({ success: true, loss_record_id: lossRecord.id })

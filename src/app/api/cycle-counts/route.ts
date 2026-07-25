@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { z } from 'zod'
 
@@ -109,6 +110,18 @@ export async function POST(req: Request) {
       userId: user.id,
       employeeId: caller.id,
       newValues: { countName: count.countName, countType: count.countType },
+    })
+
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'location',
+      entityId: d.location_id,
+      metricKey: 'inventory.cycle_count_created',
+      numericValue: 1,
+      dimensions: {
+        count_type: d.count_type,
+        count_name: d.count_name,
+      },
     })
 
     return Response.json({ id: count.id })

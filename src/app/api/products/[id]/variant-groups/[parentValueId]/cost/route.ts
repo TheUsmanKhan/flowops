@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 
@@ -71,6 +72,14 @@ export async function POST(
       userId: user.id,
       employeeId: caller.id,
       newValues: { parentValue: body.parent_value, costPrice: body.cost_price, affectedCount: result.count },
+    })
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'variant.parent_cost_updated',
+      numericValue: result.count,
+      dimensions: { parent_value: body.parent_value },
     })
 
     return Response.json({ success: true, updated_count: result.count })

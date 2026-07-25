@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 import { openingStockSchema } from '@/lib/validations/inventory'
@@ -155,6 +156,22 @@ export async function POST(req: Request) {
         locationName: location.name,
         sku: variant.sku,
         productTitle: variant.product.title,
+      },
+    })
+
+    // ── Metric event (CRITICAL — powers stock value KPI; same key as
+    //     /api/inventory/receive so opening stock doesn't double-count) ──
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'product',
+      entityId: d.org_variant_id,
+      metricKey: 'inventory.stock_received',
+      numericValue: d.quantity * d.cost_per_unit,
+      dimensions: {
+        location_id: d.location_id,
+        quantity: d.quantity,
+        cost_per_unit: d.cost_per_unit,
+        source: 'opening_stock',
       },
     })
 

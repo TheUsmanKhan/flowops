@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { variantSchema, type VariantInput } from '@/lib/validations/product'
 import { syncInventoryPolicy } from '@/lib/constants/fulfillment-types'
@@ -149,6 +150,14 @@ export async function POST(
       userId: user.id,
       employeeId: caller.id,
       newValues: { variantCount: createdIds.length, variantIds: createdIds },
+    })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'product.variant_created',
+      numericValue: createdIds.length,
+      dimensions: { variant_count: createdIds.length },
     })
 
     return Response.json({ success: true, variant_ids: createdIds })

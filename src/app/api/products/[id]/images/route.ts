@@ -1,6 +1,7 @@
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { db } from '@/lib/db'
 import { promises as fs } from 'fs'
@@ -105,6 +106,13 @@ export async function POST(
       employeeId: caller.id,
       newValues: { productId, isPrimary, variantId },
     })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'product.image_uploaded',
+      numericValue: 1,
+    })
 
     return Response.json({ success: true, image_id: image.id, public_url: publicUrl, is_primary: isPrimary })
   } catch (err) {
@@ -188,6 +196,13 @@ export async function DELETE(
       userId: user.id,
       employeeId: caller.id,
       oldValues: { wasPrimary: image.isPrimary },
+    })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'product.image_deleted',
+      numericValue: 1,
     })
 
     return Response.json({ success: true })

@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 
@@ -117,6 +118,20 @@ export async function PATCH(
       employeeId: caller.id,
       oldValues,
       newValues: body,
+    })
+
+    const totalValue = Number(record.costPerUnit) * record.quantity
+    const resolutionValue =
+      body.resolution_amount !== undefined ? body.resolution_amount : totalValue
+    await insertMetricEvent({
+      companyId,
+      entityType: 'supplier',
+      entityId: record.supplierId,
+      metricKey: 'supplier_return.resolved',
+      numericValue: resolutionValue,
+      dimensions: {
+        resolution_type: body.resolution_type ?? record.resolutionType ?? null,
+      },
     })
 
     return Response.json({ id: updated.id, status: updated.status })

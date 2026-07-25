@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 
@@ -56,6 +57,14 @@ export async function POST(
       userId: user.id,
       employeeId: caller.id,
       newValues: { costPrice: body.cost_price, synced: false },
+    })
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'variant.cost_overridden',
+      numericValue: 1,
+      dimensions: { variant_id: variantId, field: 'cost' },
     })
 
     return Response.json({ success: true })

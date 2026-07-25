@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { demoteProductSchema } from '@/lib/validations/product'
 import { NextRequest } from 'next/server'
 
@@ -111,6 +112,14 @@ export async function POST(
         reason: d.reason,
         affectedCompanies: affectedCompanyIds,
       },
+    })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'product.demoted',
+      numericValue: 1,
+      dimensions: { previous_scope: oldValues.productScope, new_scope: d.new_scope },
     })
 
     return Response.json({

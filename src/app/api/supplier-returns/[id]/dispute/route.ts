@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 
@@ -61,6 +62,15 @@ export async function POST(
       userId: user.id,
       employeeId: caller.id,
       newValues: { status: 'disputed', notes: body.notes },
+    })
+
+    await insertMetricEvent({
+      companyId,
+      entityType: 'supplier',
+      entityId: record.supplierId,
+      metricKey: 'supplier_return.disputed',
+      numericValue: Number(record.costPerUnit) * record.quantity,
+      dimensions: { became_loss: true },
     })
 
     return Response.json({ success: true, status: 'disputed' })

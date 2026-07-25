@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 import { receiveStockSchema } from '@/lib/validations/inventory'
@@ -91,6 +92,26 @@ export async function POST(req: Request) {
         newValues: { quantity: item.quantity, costPerUnit: item.cost_per_unit, locationId: d.location_id },
       })
     }
+
+    // ── Metric event (CRITICAL — powers stock value / procurement KPIs) ──
+    const totalValue = d.items.reduce(
+      (sum, item) => sum + item.quantity * item.cost_per_unit,
+      0,
+    )
+    const totalQuantity = d.items.reduce((sum, item) => sum + item.quantity, 0)
+    const firstVariantId = d.items[0]?.org_variant_id ?? d.location_id
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'product',
+      entityId: firstVariantId,
+      metricKey: 'inventory.stock_received',
+      numericValue: totalValue,
+      dimensions: {
+        item_count: d.items.length,
+        location_id: d.location_id,
+        total_quantity: totalQuantity,
+      },
+    })
 
     return Response.json({ success: true, transaction_ids: transactionIds, preMadeStitchedStockAdded })
   } catch (err) {

@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { setCompanyPricingSchema } from '@/lib/validations/product'
 import { NextRequest } from 'next/server'
@@ -63,6 +64,14 @@ export async function POST(
           salePrice: p.sale_price,
           comparePrice: p.compare_price ?? null,
         },
+      })
+      await insertMetricEvent({
+        companyId,
+        entityType: 'product',
+        entityId: productId,
+        metricKey: 'product.pricing_set',
+        numericValue: p.sale_price,
+        dimensions: { company_id: companyId, variant_id: p.org_variant_id },
       })
     }
 

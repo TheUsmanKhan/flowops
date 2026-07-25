@@ -1225,3 +1225,104 @@ Stage Summary:
 - Theft/unknown shortages trigger the quarantine + missing-stock investigation path on approval — verified working: reserved increased by 3, on_hand set to counted, stock_loss_record created with status=open.
 - The detail panel shows the reason + status + adjustment outcome per item, so the approver has full context before approving and can see the result after.
 - Lint: 0 errors. TypeScript: 0 new errors (1 pre-existing isDefault error in CreateCountDialog, unrelated).
+
+---
+Task ID: METRIC-DOMAIN-2
+Agent: metric-catalog
+Task: Add insertMetricEvent to 8 Catalog domain routes
+
+Work Log:
+- src/app/api/catalog/attributes/route.ts (POST) — added import + `attribute.created` metric (entityType: catalog, entityId: attribute.id, dimensions: {type:'attribute', name})
+- src/app/api/catalog/attributes/[id]/route.ts (PATCH + DELETE) — added import + `attribute.updated` and `attribute.deleted` metrics (entityId: id, dimensions: {type:'attribute'})
+- src/app/api/catalog/attributes/[id]/values/route.ts (POST) — added import + `attribute_value.created` metric (entityId: value.id, dimensions: {type:'attribute_value', attribute_id: attributeId}). NOTE: route destructures `const { id: attributeId } = await params`, so the dimension value uses the in-scope `attributeId` variable.
+- src/app/api/catalog/attribute-values/[id]/route.ts (PATCH + DELETE) — added import + `attribute_value.updated` and `attribute_value.deleted` metrics (entityId: id, dimensions: {type:'attribute_value'})
+- src/app/api/catalog/brands/[id]/route.ts (PATCH + DELETE) — added import + `brand.updated` and `brand.deleted` metrics (entityId: id, dimensions: {type:'brand'})
+- src/app/api/catalog/categories/[id]/route.ts (PATCH + DELETE) — added import + `category.updated` and `category.deleted` metrics (entityId: id, dimensions: {type:'category'})
+- src/app/api/catalog/inline-attribute/route.ts (POST) — added import + `attribute.created_inline` metric (entityId: attribute.id, dimensions: {type:'attribute', name})
+- src/app/api/catalog/inline-value/route.ts (POST) — added import + `attribute_value.created_inline` metric (entityId: value.id, dimensions: {type:'attribute_value'})
+
+Stage Summary:
+- All 8 catalog-domain API routes now emit metric events via insertMetricEvent(), placed immediately after the existing insertAuditLog() call and before the return Response.json(...) — matching the reference pattern in src/app/api/products/route.ts.
+- Every metric uses entityType: 'catalog' and companyId sourced from the active company (`company.id`, where `company = settings?.activeCompany`). All routes already had `company` in scope, so no orgId fallback was needed.
+- Purely additive: no business logic, validation, permission checks, or response shapes were modified. insertMetricEvent already swallows internal errors (returns null + console.error), so no extra try/catch was added.
+- 11 metric events added across 8 files (3 files got 2 events each for PATCH+DELETE; 5 files got 1 event each for POST).
+- Verification: `bun run lint` → 0 errors (15 pre-existing warnings, all React Compiler / eslint-disable housekeeping unrelated to catalog). `npx tsc --noEmit | grep catalog/` → no output (0 TypeScript errors in any catalog file).
+
+---
+Task ID: METRIC-DOMAINS-4-7
+Agent: metric-pos-returns-loss-cyclecounts
+Task: Add insertMetricEvent to 13 routes across POs, Supplier Returns, Stock Loss, Cycle Counts
+
+Work Log:
+- src/app/api/purchase-orders/route.ts → metricKey: purchase_order.created (numericValue = SUM(ordered_quantity × cost_per_unit); dimensions: supplier_id, item_count, location_id)
+- src/app/api/purchase-orders/[id]/confirm/route.ts → metricKey: purchase_order.confirmed (numericValue: 1; dimensions: supplier_id)
+- src/app/api/purchase-orders/[id]/receive/route.ts → metricKey: purchase_order.received (numericValue = SUM(received_quantity × actual_cost_per_unit); dimensions: supplier_id, is_partial, item_count)
+- src/app/api/purchase-orders/[id]/cancel/route.ts → metricKey: purchase_order.cancelled (numericValue: 1; dimensions: { reason: 'cancelled' })
+- src/app/api/supplier-returns/route.ts → metricKey: supplier_return.created (entityType: supplier; numericValue = quantity × cost_per_unit; dimensions: reason, org_variant_id, purchase_order_id, location_id)
+- src/app/api/supplier-returns/[id]/route.ts → metricKey: supplier_return.resolved (entityType: supplier; numericValue = resolution_amount || quantity × cost_per_unit; dimensions: resolution_type)
+- src/app/api/supplier-returns/[id]/dispute/route.ts → metricKey: supplier_return.disputed (entityType: supplier; numericValue = quantity × cost_per_unit; dimensions: { became_loss: true })
+- src/app/api/stock-loss/report-damaged/route.ts → metricKey: inventory.damage_loss (entityType: product; numericValue = quantity × avgCost; dimensions: damage_type, responsible_party, location_id, quantity)
+- src/app/api/stock-loss/report-theft/route.ts → metricKey: inventory.theft_loss (entityType: product; numericValue = quantity × avgCost; dimensions: loss_type, sub_type, location_id, investigation_status, quantity)
+- src/app/api/stock-loss/report-transit/route.ts → metricKey: inventory.transit_loss (entityType: product; numericValue = quantity × avgCost; dimensions: location_id, order_reference_id, courier_claim_ref, quantity)
+- src/app/api/stock-loss/resolve/route.ts → metricKey: inventory.loss_resolved (entityType: product; numericValue = quantity × cost_per_unit from record; dimensions: resolution, loss_type, quantity) — added to BOTH resolution paths (theft/missing + transit_loss)
+- src/app/api/cycle-counts/route.ts → metricKey: inventory.cycle_count_created (entityType: location; numericValue: 1; dimensions: count_type, count_name)
+- src/app/api/cycle-counts/[id]/route.ts → metricKey: inventory.cycle_count_variance (entityType: location; numericValue = abs(totalVarianceValue); dimensions: total_discrepancies, count_id, count_name) — added to the approve action ONLY (start/submit_counts/cancel skipped per spec)
+
+Stage Summary:
+- All 13 API routes across Domains 4–7 now emit metric events via insertMetricEvent(), placed immediately after the existing insertAuditLog() call and before the return Response.json(...) — matching the reference pattern in src/app/api/products/route.ts.
+- Purely additive: no business logic, validation, permission checks, or response shapes were modified. insertMetricEvent already swallows internal errors (returns null + console.error), so no extra try/catch was added.
+- Numeric values reflect real business impact: PO created/received = order/receipt total value, supplier returns = return total value, stock loss = loss total value (computed from pool avgCost where available, else record.costPerUnit), cycle count variance = abs(totalVarianceValue). Count-style events (PO confirmed/cancelled, cycle count created) use numericValue: 1.
+- Dimensions include IDs required for downstream KPI slicing (supplier_id, location_id, org_variant_id, purchase_order_id, count_id) plus operational context (reason, resolution_type, damage_type, sub_type, is_partial, investigation_status, etc.).
+- entityId was chosen per the spec: supplier_returns use the supplier_id (entityType: 'supplier'), stock_loss + cycle_count_variance use the org_variant_id / location_id respectively (entityType: 'product' / 'location'), POs use po.id (entityType: 'purchase_order').
+- Verification: `bun run lint` → 0 errors (15 pre-existing warnings, all React Compiler / eslint-disable housekeeping unrelated to this task). `npx tsc --noEmit | grep purchase-orders|supplier-returns|stock-loss|cycle-counts` → 3 pre-existing errors that exist on the unmodified main branch (stock-loss/resolve route.ts:43 body typing, supplier-returns/[id]/route.ts:77 linkedLossRecord property, inventory/cycle-counts-view.tsx:1209 isDefault property) — none introduced by these changes (confirmed via git stash).
+
+---
+Task ID: METRIC-DOMAIN-3
+Agent: metric-inventory
+Task: Add insertMetricEvent to 5 Inventory domain routes (CRITICAL for KPIs)
+
+Work Log:
+- src/app/api/inventory/receive/route.ts → metricKey: inventory.stock_received (entityType: product; numericValue = SUM(quantity × cost_per_unit) across ALL items in the batch; dimensions: item_count, location_id, total_quantity). Placed AFTER the per-item loop completes (loop processes each item + writes its own audit log), before the success Response.json. entityId = first item's org_variant_id (falls back to location_id if items array somehow empty, though schema enforces min 1).
+- src/app/api/inventory/opening-stock/route.ts → metricKey: inventory.stock_received (SAME key as /receive — opening stock IS a stock receive; dimensions.source='opening_stock' distinguishes it to avoid double-counting when rolling up). entityType: product; numericValue = d.quantity × d.cost_per_unit; dimensions: location_id, quantity, cost_per_unit, source. Placed after insertAuditLog + before return.
+- src/app/api/inventory/adjust/route.ts → metricKey: inventory.stock_adjusted (entityType: product; numericValue = Math.abs(d.quantity) × avgCostForMetric). Metric added in BOTH branches (positive cycle_count_adjust + negative damage_writeoff). dimensions.direction = 'increase' | 'decrease' based on sign of d.quantity. avgCostForMetric is fetched from the inventory_pools row before the processInventoryTransaction call (single fetch shared by both branches); falls back to 0 when pool doesn't yet exist (e.g. first positive adjustment on a brand-new variant).
+- src/app/api/inventory/transfers/route.ts → metricKey: inventory.stock_transferred (entityType: product; numericValue = body.quantity × costPerUnitAtTransfer — the sending location's WAC avg_cost, NOT logistics_cost). dimensions: from_location_id, to_location_id, logistics_cost (body.logistics_cost ?? 0), quantity. Placed after the single transfer audit log + before return. Note: this route uses inline-typed body (not Zod), so dimensions pull from `body.*` (not `d.*`).
+- src/app/api/inventory/receive-returned-stitched/route.ts → metricKey: inventory.returned_stitched_received (entityType: product; numericValue = d.quantity × costPerUnit where costPerUnit = d.total_cost / d.quantity, computed earlier in the route). dimensions: location_id, quantity, fabric_variant_id. Placed after the SECOND insertAuditLog (non-damaged branch only — the damaged branch creates a stock_loss_record and returns early, so no metric event there per spec). Note: fabric_variant_id is not part of receiveReturnedStitchedSchema (Zod strips unknown keys), so the field is accessed via `(d as Record<string, unknown>).fabric_variant_id` — will be undefined at runtime unless the schema is later extended; the dimension key is still emitted so downstream KPIs can be sliced once the field becomes available.
+
+Stage Summary:
+- All 5 inventory-domain API routes now emit metric events via insertMetricEvent(), placed immediately after the existing insertAuditLog() call(s) and before the success Response.json(...) — matching the reference pattern in src/app/api/products/route.ts.
+- Purely additive: no business logic, validation, permission checks, or response shapes were modified. The only non-metric code added is a single read-only inventoryPool.findUnique in the adjust route (needed to value the adjustment at the variant's current avg_cost, per spec).
+- insertMetricEvent already swallows internal errors (returns null + console.error), so no extra try/catch was added. The metric event fires AFTER the DB write + audit log succeed, so a metric failure does NOT roll back the business transaction.
+- Numeric values reflect real business impact: stock_received = total purchase value (qty × cost_per_unit summed across all items OR opening stock single value), stock_adjusted = absolute value of adjustment at current avg_cost, stock_transferred = qty × sending-location WAC (logistics_cost excluded from WAC per the existing business rule), returned_stitched_received = qty × per-unit cost derived from total_cost.
+- entityId was chosen per the spec: all 5 use entityType: 'product' with the relevant org_variant_id (first item's variant for the batch /receive route; the stitched variant for receive-returned-stitched).
+- Verification: `bun run lint 2>&1 | grep -c "error"` → 6 (all false positives — 4 are `formState: { errors }` destructuring in unrelated components, 2 are the summary line "0 errors". Actual lint error count = 0; 15 pre-existing warnings only). `npx tsc --noEmit 2>&1 | grep "inventory/" | head -10` → 1 line, but it's the pre-existing `src/components/inventory/cycle-counts-view.tsx(1209,63): isDefault` error noted in the prior worklog (NOT in any of the 5 modified API routes). Targeted `grep -E "api/inventory/(receive|opening-stock|adjust|transfers|receive-returned-stitched)/route"` → 0 errors. No new TypeScript errors introduced by these changes.
+
+---
+Task ID: METRIC-DOMAIN-1
+Agent: metric-products
+Task: Add insertMetricEvent to 13 Product domain routes
+
+Work Log:
+- src/app/api/products/[id]/variants/route.ts (POST) → product.variant_created (numericValue: createdIds.length, dimensions: { variant_count })
+- src/app/api/products/[id]/variants/[variantId]/route.ts (PATCH) → product.variant_updated (entityType: product, entityId: productId)
+- src/app/api/products/[id]/variants/[variantId]/toggle/route.ts (POST) → product.variant_activated | product.variant_deactivated (dimensions: { variant_id, sku })
+- src/app/api/products/[id]/variants/[variantId]/override-cost/route.ts (POST) → variant.cost_overridden (dimensions: { variant_id, field: 'cost' })
+- src/app/api/products/[id]/variants/[variantId]/override-price/route.ts (POST) → variant.price_overridden (dimensions: { variant_id, field: 'price' })
+- src/app/api/products/[id]/variants/[variantId]/resync-cost/route.ts (POST) → variant.cost_resynced (dimensions: { variant_id })
+- src/app/api/products/[id]/variants/[variantId]/resync-price/route.ts (POST) → variant.price_resynced (dimensions: { variant_id })
+- src/app/api/products/[id]/variant-groups/[parentValueId]/cost/route.ts (POST) → variant.parent_cost_updated (numericValue: result.count, dimensions: { parent_value: body.parent_value })
+- src/app/api/products/[id]/variant-groups/[parentValueId]/sale-price/route.ts (POST) → variant.parent_sale_price_updated (numericValue: updatedCount, dimensions: { parent_value: body.parent_value })
+- src/app/api/products/[id]/pricing/route.ts (POST) → product.pricing_set (per-entry inside the for-loop; numericValue: p.sale_price, dimensions: { company_id, variant_id: p.org_variant_id }). NOTE: endpoint is a batch operation over d.pricing[] with no single variant_id/sale_price in scope after the loop, so the metric is emitted per pricing entry inside the loop (one event per variant priced). The audit log still fires once per request.
+- src/app/api/products/[id]/promote/route.ts (POST) → product.promoted (dimensions: { previous_scope: oldValues.productScope, new_scope: d.target_scope }). NOTE: task mapping said new_scope: 'organization' but promote endpoint supports target_scope of 'organization' OR 'selective', so used the in-scope variable d.target_scope for accuracy.
+- src/app/api/products/[id]/demote/route.ts (POST) → product.demoted (dimensions: { previous_scope: oldValues.productScope, new_scope: d.new_scope })
+- src/app/api/products/[id]/subscribe/route.ts (POST) → product.subscribed (dimensions: { company_id: companyId })
+- src/app/api/products/[id]/selective-access/route.ts (POST → product.selective_access_granted, DELETE → product.selective_access_revoked; dimensions: { company_id: targetCompanyId | parsed.data.company_id })
+- src/app/api/products/[id]/images/route.ts (POST → product.image_uploaded, DELETE → product.image_deleted)
+
+Each file: added `import { insertMetricEvent } from '@/lib/metrics'` next to the existing `insertAuditLog` import, then placed the `await insertMetricEvent({...})` call immediately after the existing `await insertAuditLog({...})` call (before `return Response.json(...)`). No business logic, validation, permission checks, or response shapes were changed.
+
+Stage Summary:
+- 13 files updated (15 routes total — selective-access and images each have POST+DELETE).
+- 17 new insertMetricEvent calls added across the 13 files.
+- insertMetricEvent already swallows errors internally (returns null + console.error), so no try/catch was added — parent operations are unaffected by metric insert failures.
+- VERIFICATION: `bun run lint` → 0 errors, 15 pre-existing warnings (0 new). `npx tsc --noEmit | grep "products/"` → 0 new errors in any of the 13 edited files (the 2 pre-existing tsc errors in products/route.ts lines 251/299 about variantRecords:never are unrelated to this task — that file already had insertMetricEvent from the prior task and was not touched here).
+- Notes on judgment calls: (1) pricing/route.ts emitted one metric per pricing entry inside the for-loop since the endpoint is batch with no single variant_id/sale_price; (2) promote/route.ts used d.target_scope for new_scope dimension (instead of literal 'organization') because the endpoint supports both 'organization' and 'selective' targets.

@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { quarantineStock } from '@/lib/inventory'
 import { reportTheftLossSchema } from '@/lib/validations/stock-loss'
@@ -85,6 +86,21 @@ export async function POST(req: Request) {
       userId: user.id,
       employeeId: caller.id,
       newValues: { quantity: d.quantity, subType: d.sub_type, quarantined: true },
+    })
+
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'product',
+      entityId: d.org_variant_id,
+      metricKey: 'inventory.theft_loss',
+      numericValue: d.quantity * avgCost,
+      dimensions: {
+        loss_type: 'theft',
+        sub_type: d.sub_type,
+        location_id: d.location_id,
+        investigation_status: 'open',
+        quantity: d.quantity,
+      },
     })
 
     return Response.json({ success: true, loss_record_id: lossRecord.id })

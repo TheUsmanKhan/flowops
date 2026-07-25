@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { incrementIncomingStock } from '@/lib/inventory'
 import { NextRequest } from 'next/server'
@@ -73,6 +74,15 @@ export async function POST(
       userId: user.id,
       employeeId: caller.id,
       newValues: { status: 'ordered', itemCount: po.items.length },
+    })
+
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'purchase_order',
+      entityId: poId,
+      metricKey: 'purchase_order.confirmed',
+      numericValue: 1,
+      dimensions: { supplier_id: po.supplierId },
     })
 
     return Response.json({ success: true, status: 'ordered' })

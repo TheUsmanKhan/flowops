@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 import { z } from 'zod'
@@ -179,6 +180,23 @@ export async function POST(
       userId: user.id,
       employeeId: caller.id,
       newValues: { receiptId: receipt.id, status: newStatus, itemCount: d.items.length },
+    })
+
+    const receivedValue = d.items.reduce(
+      (sum, ri) => sum + ri.received_quantity * ri.actual_cost_per_unit,
+      0,
+    )
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'purchase_order',
+      entityId: poId,
+      metricKey: 'purchase_order.received',
+      numericValue: receivedValue,
+      dimensions: {
+        supplier_id: po.supplierId,
+        is_partial: !allFullyReceived,
+        item_count: d.items.length,
+      },
     })
 
     return Response.json({

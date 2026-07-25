@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { promoteProductSchema } from '@/lib/validations/product'
 import { NextRequest } from 'next/server'
 
@@ -105,6 +106,14 @@ export async function POST(
       employeeId: caller.id,
       oldValues,
       newValues: { productScope: d.target_scope, selectedCompanies: d.selected_company_ids },
+    })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'product.promoted',
+      numericValue: 1,
+      dimensions: { previous_scope: oldValues.productScope, new_scope: d.target_scope },
     })
 
     return Response.json({ success: true })

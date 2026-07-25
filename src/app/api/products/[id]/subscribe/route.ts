@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 
@@ -89,6 +90,14 @@ export async function POST(
       userId: user.id,
       employeeId: caller.id,
       newValues: { subscriptionId: subscription.id, isActive: false },
+    })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'product.subscribed',
+      numericValue: 1,
+      dimensions: { company_id: companyId },
     })
 
     return Response.json({ success: true, product_id: productId, subscription_id: subscription.id })

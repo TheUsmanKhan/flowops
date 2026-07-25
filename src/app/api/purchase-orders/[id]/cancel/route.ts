@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { decrementIncomingStock } from '@/lib/inventory'
 import { NextRequest } from 'next/server'
@@ -79,6 +80,15 @@ export async function POST(
       userId: user.id,
       employeeId: caller.id,
       newValues: { reason },
+    })
+
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'purchase_order',
+      entityId: poId,
+      metricKey: 'purchase_order.cancelled',
+      numericValue: 1,
+      dimensions: { reason: 'cancelled' },
     })
 
     return Response.json({ success: true, status: 'cancelled' })

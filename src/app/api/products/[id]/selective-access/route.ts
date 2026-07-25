@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { selectiveAccessSchema } from '@/lib/validations/product'
 import { NextRequest } from 'next/server'
 
@@ -67,6 +68,14 @@ export async function POST(
       employeeId: caller.id,
       newValues: { grantedTo: parsed.data.company_id },
     })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'product.selective_access_granted',
+      numericValue: 1,
+      dimensions: { company_id: parsed.data.company_id },
+    })
 
     return Response.json({ success: true })
   } catch (err) {
@@ -125,6 +134,14 @@ export async function DELETE(
       userId: user.id,
       employeeId: caller.id,
       oldValues: { revokedFrom: targetCompanyId },
+    })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'product.selective_access_revoked',
+      numericValue: 1,
+      dimensions: { company_id: targetCompanyId },
     })
 
     return Response.json({ success: true })

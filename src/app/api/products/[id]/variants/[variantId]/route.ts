@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { z } from 'zod'
 import { NextRequest } from 'next/server'
@@ -116,6 +117,13 @@ export async function PATCH(
       employeeId: caller.id,
       oldValues,
       newValues: d,
+    })
+    await insertMetricEvent({
+      companyId,
+      entityType: 'product',
+      entityId: productId,
+      metricKey: 'product.variant_updated',
+      numericValue: 1,
     })
 
     return Response.json({

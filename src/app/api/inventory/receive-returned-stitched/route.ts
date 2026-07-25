@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 import { receiveReturnedStitchedSchema } from '@/lib/validations/inventory'
@@ -125,6 +126,20 @@ export async function POST(req: Request) {
       userId: user.id,
       employeeId: caller.id,
       newValues: { condition: d.condition, quantity: d.quantity, totalCost: d.total_cost, locationId: d.location_id },
+    })
+
+    // ── Metric event (CRITICAL — powers stitched-return / reverse-logistics KPIs) ──
+    await insertMetricEvent({
+      companyId: company.id,
+      entityType: 'product',
+      entityId: d.org_variant_id,
+      metricKey: 'inventory.returned_stitched_received',
+      numericValue: d.quantity * costPerUnit,
+      dimensions: {
+        location_id: d.location_id,
+        quantity: d.quantity,
+        fabric_variant_id: (d as Record<string, unknown>).fabric_variant_id,
+      },
     })
 
     return Response.json({
