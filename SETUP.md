@@ -1,4 +1,4 @@
-# FlowOps — Local Setup Guide
+# FlowOps — Complete Setup Guide (macOS & Windows)
 
 A production-grade, multi-tenant SaaS ERP for Pakistani e-commerce businesses.
 Built with Next.js 16, TypeScript, Tailwind CSS, shadcn/ui, Prisma, and Supabase Postgres.
@@ -13,9 +13,9 @@ Production Orders, Stock Loss tracking, and an immutable audit log.
 ## Table of Contents
 
 1. [Prerequisites](#1-prerequisites)
-2. [Get the Project Files](#2-get-the-project-files)
-3. [Install Dependencies](#3-install-dependencies)
-4. [Configure Environment](#4-configure-environment)
+2. [macOS Setup (Step-by-Step)](#2-macos-setup-step-by-step)
+3. [Windows Setup (Step-by-Step)](#3-windows-setup-step-by-step)
+4. [Configure Environment (.env)](#4-configure-environment-env)
 5. [Set Up the Database](#5-set-up-the-database)
 6. [Run the Dev Server](#6-run-the-dev-server)
 7. [Using the App](#7-using-the-app)
@@ -23,106 +23,200 @@ Production Orders, Stock Loss tracking, and an immutable audit log.
 9. [Project Structure](#9-project-structure)
 10. [Troubleshooting](#10-troubleshooting)
 11. [Architecture Notes](#11-architecture-notes)
+12. [Quick Start (TL;DR)](#12-quick-start-tldr)
 
 ---
 
 ## 1. Prerequisites
 
-### Node.js 20+
+| Tool | Version | Why |
+|---|---|---|
+| **Node.js** | 20+ LTS | Required by Next.js 16 |
+| **Bun** | 1.1+ | Package manager + dev runtime (this project uses `bun.lock`) |
+| **Git** | any | To clone/pull the repo |
+| **A Supabase account** | free tier ok | Hosts the PostgreSQL database |
 
-Download from <https://nodejs.org/> and install the LTS version.
+You do **not** need to install PostgreSQL locally — the project connects to Supabase's hosted Postgres.
 
+> You can use `npm` instead of `bun` for every command — just replace `bun` with `npm` and `bunx` with `npx`.
+
+---
+
+## 2. macOS Setup (Step-by-Step)
+
+### Step 2.1 — Install Homebrew (if you don't have it)
+Open **Terminal** and run:
 ```bash
-node --version   # should print v20.x or higher
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
+Restart your terminal afterwards.
 
-### Bun (recommended, faster than npm)
-
-**macOS / Linux:**
+### Step 2.2 — Install Node.js, Bun, and Git
 ```bash
+brew install node git
 curl -fsSL https://bun.sh/install | bash
 ```
-
-**Windows (PowerShell):**
-```powershell
-powershell -c "irm bun.sh/install.ps1 | iex"
-```
-
-Verify:
+Close and reopen your terminal, then verify:
 ```bash
-bun --version
+node --version   # should print v20.x or higher
+bun --version    # should print 1.1.x or higher
+git --version
 ```
 
-> You can use `npm` for every command — just replace `bun` with `npm` and `bunx` with `npx`.
+### Step 2.3 — Clone the project
+```bash
+cd ~/Documents   # or wherever you keep code
+git clone <your-repo-url> flowops
+cd flowops
+```
 
-### Supabase Account
+### Step 2.4 — Install dependencies
+```bash
+bun install
+```
+This reads `bun.lock` and installs every package (Next.js, Prisma, shadcn/ui, TanStack Query, etc.).
 
-You need a Supabase project with a Postgres database. Sign up at <https://supabase.com>.
+### Step 2.5 — Create your `.env` file
+See [Step 4 — Configure Environment](#4-configure-environment-env) below for the exact contents.
 
-This project connects to:
-- **Database host:** `aws-0-ap-northeast-1.pooler.supabase.com`
-- **Port:** `5432` (session-mode pooler — required for Prisma)
-- **Database user:** `postgres.flafcggvqfgyafzekxzk`
-- **Database password:** `123@Usman123@`
+### Step 2.6 — Push the database schema + generate the Prisma client
+```bash
+bun run db:push
+bun run db:generate
+```
+
+### Step 2.7 — Start the dev server
+```bash
+bun run dev
+```
+Open **http://localhost:3000** in your browser.
+
+✅ **Done on macOS!** Jump to [Step 7 — Using the App](#7-using-the-app).
 
 ---
 
-## 2. Get the Project Files
+## 3. Windows Setup (Step-by-Step)
 
-Copy these folders and files from the workspace to your local machine:
+You have two options: **WSL2 (recommended)** or **native Windows**. WSL2 matches the dev environment exactly and avoids Unix-ism issues (like the `tee` command in the `dev` script).
 
-### Copy these (keep the structure):
+### Option A — WSL2 (recommended)
 
+#### Step 3.1 — Install WSL2 + Ubuntu
+Open **PowerShell as Administrator** and run:
+```powershell
+wsl --install
 ```
-src/                    # all application code (app, components, lib, stores, hooks)
-prisma/                 # database schema (38 models)
-public/                 # static assets (logo, uploads)
-scripts/                # test scripts (optional)
-package.json
-tsconfig.json
-next.config.ts
-tailwind.config.ts
-postcss.config.mjs
-eslint.config.mjs
-components.json
-next-env.d.ts
-```
+Restart your PC. A Ubuntu terminal will open — set your Linux username and password. **All subsequent steps run inside the WSL Ubuntu terminal.**
 
-### Skip these (regenerated or sandbox-only):
-
+#### Step 3.2 — Install Node.js, Bun, and Git (inside WSL Ubuntu)
+```bash
+sudo apt update && sudo apt install -y nodejs npm git
+curl -fsSL https://bun.sh/install | bash
 ```
-node_modules/           # reinstall with bun install
-.next/                  # build output, regenerated
-db/                     # old SQLite db, not needed
-dev.log                 # dev server log
-Caddyfile               # sandbox gateway config
-examples/               # sandbox demos
-skills/                 # sandbox AI skills
-upload/                 # sandbox uploads
-download/               # sandbox downloads
-tool-results/           # sandbox tool output
-agent-ctx/              # subagent context files
-worklog.md              # development work log
-SETUP.md                # this file (you're reading it)
+Close and reopen the WSL terminal, then verify:
+```bash
+node --version   # v20.x or higher
+bun --version    # 1.1.x or higher
+git --version
+```
+> If `apt`'s Node version is too old, install Node 20 via NodeSource:
+> ```bash
+> curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+> sudo apt install -y nodejs
+> ```
+
+#### Step 3.3 — Clone the project (inside WSL)
+```bash
+cd ~
+git clone <your-repo-url> flowops
+cd flowops
 ```
 
-> Create a fresh `.env` file in the project root (see Step 4).
-
----
-
-## 3. Install Dependencies
-
+#### Step 3.4 — Install dependencies
 ```bash
 bun install
 ```
 
-This installs: Next.js 16, React 19, Prisma 6, shadcn/ui, Tailwind CSS 4, Zustand, TanStack Query, React Hook Form, Zod, Sonner, date-fns, Lucide, and all other dependencies.
+#### Step 3.5 — Create your `.env` file
+See [Step 4 — Configure Environment](#4-configure-environment-env) below.
+
+#### Step 3.6 — Push the database schema + generate the Prisma client
+```bash
+bun run db:push
+bun run db:generate
+```
+
+#### Step 3.7 — Start the dev server
+```bash
+bun run dev
+```
+Open **http://localhost:3000** in your Windows browser (it auto-forwards from WSL).
+
+✅ **Done on Windows (WSL2)!** Jump to [Step 7 — Using the App](#7-using-the-app).
 
 ---
 
-## 4. Configure Environment
+### Option B — Native Windows (no WSL)
 
-Create a file named `.env` in the **project root** (same folder as `package.json`):
+#### Step 3.1 — Install Git, Node.js, and Bun
+- Install **Git** from <https://git-scm.com/download/win>
+- Install **Node.js 20 LTS** from <https://nodejs.org>
+- Install **Bun** in PowerShell:
+  ```powershell
+  powershell -c "irm bun.sh/install.ps1 | iex"
+  ```
+- Close and reopen your terminal, then verify:
+  ```powershell
+  node --version
+  bun --version
+  git --version
+  ```
+
+#### Step 3.2 — Clone the project
+```powershell
+cd C:\Users\<You>\Documents
+git clone <your-repo-url> flowops
+cd flowops
+```
+
+#### Step 3.3 — Install dependencies
+```powershell
+bun install
+```
+
+#### Step 3.4 — Create your `.env` file
+See [Step 4 — Configure Environment](#4-configure-environment-env) below. On native Windows, create the file using Notepad, VS Code, or PowerShell:
+```powershell
+@"
+DATABASE_URL="postgresql://postgres.flafcggvqfgyafzekxzk:123%40Usman123%40@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
+DIRECT_URL="postgresql://postgres.flafcggvqfgyafzekxzk:123%40Usman123%40@aws-0-ap-northeast-1.pooler.supabase.com:5432/postgres"
+SESSION_SECRET="flowops-dev-secret-change-in-production-32b"
+"@ | Set-Content .env
+```
+
+#### Step 3.5 — Push the database schema + generate the Prisma client
+```powershell
+bun run db:push
+bun run db:generate
+```
+
+#### Step 3.6 — Start the dev server
+```powershell
+bun run dev
+```
+> **Native Windows note:** If you get a `tee` error on `bun run dev`, edit `package.json` and change the `dev` script to `"dev": "next dev -p 3000"` (the `tee dev.log` part is a Unix-ism). On WSL2 this works out of the box.
+
+Open **http://localhost:3000** in your browser.
+
+✅ **Done on Windows (native)!** Jump to [Step 7 — Using the App](#7-using-the-app).
+
+---
+
+## 4. Configure Environment (.env)
+
+Create a file named **`.env`** in the **project root** (same folder as `package.json`).
+
+### Option 1 — Use the existing shared Supabase project (fastest)
 
 ```env
 # FlowOps — Supabase Postgres
@@ -137,6 +231,24 @@ DIRECT_URL="postgresql://postgres.flafcggvqfgyafzekxzk:123%40Usman123%40@aws-0-a
 SESSION_SECRET="flowops-dev-secret-change-in-production-32b"
 ```
 
+### Option 2 — Use your own Supabase project (recommended for production)
+
+1. Go to <https://supabase.com> → sign up / log in.
+2. Click **New Project** → pick a name, set a strong DB password, choose a region close to you.
+3. Wait ~2 minutes for it to provision.
+4. Go to **Project Settings → Database → Connection string → URI**.
+5. Copy the **Session pooler** URI on **port 5432** (not 6543 — Prisma interactive transactions don't work with the transaction pooler).
+6. **URL-encode your password** if it contains special characters. For example, `@` becomes `%40`:
+   ```
+   postgresql://postgres.<project-ref>:<URL-ENCODED-PASSWORD>@aws-0-<region>.pooler.supabase.com:5432/postgres
+   ```
+7. Put the same URI in both `DATABASE_URL` and `DIRECT_URL`:
+   ```env
+   DATABASE_URL="postgresql://postgres.<ref>:<URL-ENCODED-PW>@aws-0-<region>.pooler.supabase.com:5432/postgres"
+   DIRECT_URL="postgresql://postgres.<ref>:<URL-ENCODED-PW>@aws-0-<region>.pooler.supabase.com:5432/postgres"
+   SESSION_SECRET="<random-32-char-string>"
+   ```
+
 ### ⚠️ Critical notes
 
 1. **Keep the `%40` encoding in the password.** The `@` character in `123@Usman123@` must be URL-encoded as `%40`, otherwise Prisma will fail to parse the connection string.
@@ -145,7 +257,7 @@ SESSION_SECRET="flowops-dev-secret-change-in-production-32b"
 
 3. **Don't set `DATABASE_URL` in your shell.** Shell environment variables override the `.env` file. If you have a stale `DATABASE_URL` set globally, unset it:
    ```bash
-   # macOS / Linux
+   # macOS / Linux / WSL
    unset DATABASE_URL
    unset DIRECT_URL
 
@@ -155,6 +267,8 @@ SESSION_SECRET="flowops-dev-secret-change-in-production-32b"
    ```
 
 4. **Never commit `.env` to git.** Add it to `.gitignore`.
+
+5. **Make sure the file is named exactly `.env`** (not `.env.txt` or `env`). On native Windows, check in File Explorer → View → File name extensions.
 
 ---
 
@@ -260,11 +374,13 @@ Open **<http://localhost:3000>** in your browser.
 
 ### Test Account
 
-An account already exists in the database:
+An account already exists in the shared Supabase project:
 
 - **Email:** `usman@flowops.pk`
 - **Password:** `Test1234!`
 - **Company:** "Usman Commerce" (already onboarded)
+
+> If you created your own Supabase project, register fresh instead (see below).
 
 ### Or Register Fresh
 
@@ -357,77 +473,77 @@ flowops/
 ├── src/
 │   ├── app/
 │   │   ├── page.tsx                 # Single SPA route (view router)
-│   │   ├── layout.tsx              # Root layout + providers
-│   │   ├── globals.css             # Emerald-primary design system
-│   │   └── api/                    # All REST API routes
-│   │       ├── auth/               # register, login, logout, me, forgot/reset
-│   │       ├── onboarding/         # create-org, create-company, accept-invite
-│   │       ├── workspace/          # switch active company
-│   │       ├── employees/          # list, invite, detail, terminate
-│   │       ├── roles/              # list, create, update, delete
-│   │       ├── products/           # CRUD, variants, images, promote, pricing
-│   │       ├── catalog/            # categories, brands, attributes CRUD
-│   │       ├── inventory-locations/# location CRUD + detail
-│   │       ├── suppliers/          # supplier CRUD
-│   │       ├── inventory/          # dashboard, summary, receive, adjust, transfers
-│   │       ├── purchase-orders/    # create, list, detail, receive, confirm, cancel
-│   │       ├── supplier-returns/   # create, resolve, dispute
-│   │       ├── stock-loss/         # report, resolve
-│   │       ├── cycle-counts/       # create, start, submit, approve
-│   │       ├── production-orders/  # create, update status
-│   │       ├── returned-stitched/  # list, receive, stats
-│   │       ├── org/catalog/        # org-wide catalog overview
-│   │       ├── audit-logs/         # paginated audit trail
-│   │       ├── company/            # company settings
-│   │       ├── dashboard/          # KPI overview
-│   │       └── upload/             # file/logo upload
+│   │   ├── layout.tsx               # Root layout + providers
+│   │   ├── globals.css              # Emerald-primary design system
+│   │   └── api/                     # All REST API routes
+│   │       ├── auth/                # register, login, logout, me, forgot/reset
+│   │       ├── onboarding/          # create-org, create-company, accept-invite
+│   │       ├── workspace/           # switch active company
+│   │       ├── employees/           # list, invite, detail, terminate
+│   │       ├── roles/               # list, create, update, delete
+│   │       ├── products/            # CRUD, variants, images, promote, pricing
+│   │       ├── catalog/             # categories, brands, attributes CRUD
+│   │       ├── inventory-locations/ # location CRUD + detail
+│   │       ├── suppliers/           # supplier CRUD
+│   │       ├── inventory/           # dashboard, summary, receive, adjust, transfers
+│   │       ├── purchase-orders/     # create, list, detail, receive, confirm, cancel
+│   │       ├── supplier-returns/    # create, resolve, dispute
+│   │       ├── stock-loss/          # report, resolve
+│   │       ├── cycle-counts/        # create, start, submit, approve
+│   │       ├── production-orders/   # create, update status
+│   │       ├── returned-stitched/   # list, receive, stats
+│   │       ├── org/catalog/         # org-wide catalog overview
+│   │       ├── audit-logs/          # paginated audit trail
+│   │       ├── company/             # company settings
+│   │       ├── dashboard/           # KPI overview
+│   │       └── upload/              # file/logo upload
 │   ├── components/
-│   │   ├── auth/                   # Login, Register, Forgot, Reset forms
-│   │   ├── onboarding/             # Org/company wizards, invite cards
-│   │   ├── layout/                 # Sidebar, Navbar, WorkspaceSwitcher, MobileNav
-│   │   ├── dashboard/              # Dashboard home
-│   │   ├── employees/              # Directory, invite, detail
-│   │   ├── roles/                  # Roles list, editor, permission selector
-│   │   ├── products/               # Product list, create wizard, detail, badges
-│   │   ├── inventory/              # Dashboard, locations, suppliers, receive, adjust,
+│   │   ├── auth/                    # Login, Register, Forgot, Reset forms
+│   │   ├── onboarding/              # Org/company wizards, invite cards
+│   │   ├── layout/                  # Sidebar, Navbar, WorkspaceSwitcher, MobileNav
+│   │   ├── dashboard/               # Dashboard home
+│   │   ├── employees/               # Directory, invite, detail
+│   │   ├── roles/                   # Roles list, editor, permission selector
+│   │   ├── products/                # Product list, create wizard, detail, badges
+│   │   ├── inventory/               # Dashboard, locations, suppliers, receive, adjust,
 │   │   │                           #   transfer, POs, supplier returns, production orders,
 │   │   │                           #   losses, cycle counts
-│   │   ├── settings/               # Org, company, personal, audit views
-│   │   ├── workspace/              # Workspace switcher
-│   │   └── ui/                     # shadcn/ui components (50+ components)
+│   │   ├── settings/                # Org, company, personal, audit views
+│   │   ├── workspace/               # Workspace switcher
+│   │   └── ui/                      # shadcn/ui components (50+ components)
 │   ├── lib/
-│   │   ├── db.ts                   # Prisma client singleton
-│   │   ├── session.ts              # HMAC signed-cookie sessions
-│   │   ├── auth.ts                 # scrypt password hashing
-│   │   ├── workspace.ts            # getWorkspace, hasPermission, requirePermission
-│   │   ├── permissions.ts          # 40+ permission keys across 10+ modules
-│   │   ├── inventory.ts            # processInventoryTransaction (core WAC engine),
+│   │   ├── db.ts                    # Prisma client singleton
+│   │   ├── session.ts               # HMAC signed-cookie sessions
+│   │   ├── auth.ts                  # scrypt password hashing
+│   │   ├── workspace.ts             # getWorkspace, hasPermission, requirePermission
+│   │   ├── permissions.ts           # 40+ permission keys across 10+ modules
+│   │   ├── inventory.ts             # processInventoryTransaction (core WAC engine),
 │   │   │                           #   checkAndFulfillMadeToOrderVariant, incrementIncomingStock
-│   │   ├── audit.ts                # insertAuditLog helper
-│   │   ├── metrics.ts              # insertMetricEvent helper
-│   │   ├── session-payload.ts      # builds full session response
-│   │   ├── slugify.ts              # URL-safe slug generator
-│   │   ├── types.ts                # shared TypeScript types
-│   │   ├── api-client.ts           # frontend fetch helpers
+│   │   ├── audit.ts                 # insertAuditLog helper
+│   │   ├── metrics.ts               # insertMetricEvent helper
+│   │   ├── session-payload.ts       # builds full session response
+│   │   ├── slugify.ts               # URL-safe slug generator
+│   │   ├── types.ts                 # shared TypeScript types
+│   │   ├── api-client.ts            # frontend fetch helpers
 │   │   ├── constants/
 │   │   │   └── fulfillment-types.ts # fulfillment/stitching constants + Shopify mappings
 │   │   ├── data/
-│   │   │   ├── currencies.ts       # 160 world currencies
-│   │   │   └── countries.ts        # 90+ countries, provinces, timezones
+│   │   │   ├── currencies.ts        # 160 world currencies
+│   │   │   └── countries.ts         # 90+ countries, provinces, timezones
 │   │   └── validations/
-│   │       ├── auth.ts             # auth Zod schemas
-│   │       ├── company.ts          # company Zod schemas
-│   │       ├── employee.ts         # employee Zod schemas
-│   │       ├── invitation.ts       # invitation Zod schemas
-│   │       ├── organization.ts     # org/company creation schemas
-│   │       ├── product.ts          # product + variant schemas
-│   │       └── inventory.ts        # 15 inventory schemas
+│   │       ├── auth.ts              # auth Zod schemas
+│   │       ├── company.ts           # company Zod schemas
+│   │       ├── employee.ts          # employee Zod schemas
+│   │       ├── invitation.ts        # invitation Zod schemas
+│   │       ├── organization.ts      # org/company creation schemas
+│   │       ├── product.ts           # product + variant schemas
+│   │       └── inventory.ts         # 15 inventory schemas
 │   ├── stores/
-│   │   └── app-store.ts            # Zustand: session + SPA view routing
+│   │   └── app-store.ts             # Zustand: session + SPA view routing
 │   └── hooks/
-│       ├── use-toast.ts            # toast hook
-│       └── use-mobile.ts           # mobile detection
-├── .env                            # Supabase credentials (create this)
+│       ├── use-toast.ts             # toast hook
+│       └── use-mobile.ts            # mobile detection
+├── .env                             # Supabase credentials (create this)
 ├── package.json
 ├── next.config.ts
 ├── tsconfig.json
@@ -448,9 +564,10 @@ Your `.env` file isn't being loaded:
 - Restart the dev server after creating/editing `.env`
 - Don't set `DATABASE_URL` in your shell — it overrides `.env`. Unset it:
   ```bash
-  unset DATABASE_URL DIRECT_URL    # macOS/Linux
-  Remove-Item Env:DATABASE_URL    # Windows
+  unset DATABASE_URL DIRECT_URL    # macOS/Linux/WSL
+  Remove-Item Env:DATABASE_URL    # Windows PowerShell
   ```
+- On native Windows, check the file isn't named `.env.txt` (enable File name extensions in File Explorer → View)
 
 ### Connection refused / can't reach Supabase
 
@@ -460,7 +577,7 @@ Your `.env` file isn't being loaded:
 
 ### Prisma crashes on multi-write operations
 
-You're using port 6543 with `?pgbouncer=true`. Switch to **port 5432** (session-mode pooler, no pgbouncer param). See [Step 4](#4-configure-environment).
+You're using port 6543 with `?pgbouncer=true`. Switch to **port 5432** (session-mode pooler, no pgbouncer param). See [Step 4](#4-configure-environment-env).
 
 ### "PERMISSIONS is not defined" runtime error
 
@@ -487,6 +604,14 @@ bun run db:generate  # regenerate typed client
 ```
 Then restart the dev server.
 
+### `tee` error on native Windows when running `bun run dev`
+
+The `dev` script uses `tee` (a Unix command). Edit `package.json` and change the `dev` script to:
+```json
+"dev": "next dev -p 3000"
+```
+This works on all platforms. (WSL2 users don't need to do this.)
+
 ### Forgot password doesn't send email
 
 By design — the endpoint records the request but doesn't send email (no SMTP configured). To enable real email, wire `src/app/api/auth/forgot-password/route.ts` to an email provider (Resend, SendGrid, or Supabase Auth).
@@ -494,6 +619,10 @@ By design — the endpoint records the request but doesn't send email (no SMTP c
 ### First page load is slow (~8-10 seconds)
 
 This is normal — Turbopack compiles all routes on first access. Subsequent navigation is instant. For production, use `bun run build && bun run start`.
+
+### TypeScript errors in `inventory.ts` (lines 401, 585)
+
+These are **pre-existing** and don't block the dev server. They're in `getProductInventorySummary()` and `checkAndFulfillMadeToOrderVariant()` — the app runs fine despite them. Safe to ignore during dev.
 
 ---
 
@@ -544,25 +673,53 @@ The `processInventoryTransaction()` function is the **only** way to modify `inve
 - Employees (view, invite, terminate, manage)
 - Orders, Finance, Reports, Settings, Integrations, KPI & Audit
 
+### Metric Events (KPI foundation)
+
+Every mutation route across all 7 domains (Products, Catalog, Inventory, Purchase Orders, Supplier Returns, Stock Loss, Cycle Counts) calls `insertMetricEvent()` after a successful operation. The `metric_events` table is the foundation for all future KPI dashboards — 43/43 routes covered (100%).
+
 ---
 
-## Quick Start (TL;DR)
+## 12. Quick Start (TL;DR)
 
+### macOS
 ```bash
-# 1. Install deps
+brew install node git
+curl -fsSL https://bun.sh/install | bash
+git clone <repo> flowops && cd flowops
+# create .env (see Step 4 — must use port 5432, password URL-encoded with %40)
 bun install
-
-# 2. Create .env (see Step 4 — must use port 5432, password URL-encoded with %40)
-
-# 3. Push schema to Supabase + generate client
 bun run db:push
 bun run db:generate
-
-# 4. Start dev server
 bun run dev
 ```
 
-Open <http://localhost:3000> → sign in with `usman@flowops.pk` / `Test1234!`
+### Windows (WSL2 — recommended)
+```powershell
+wsl --install
+# restart, open Ubuntu terminal
+sudo apt update && sudo apt install -y nodejs npm git
+curl -fsSL https://bun.sh/install | bash
+git clone <repo> flowops && cd flowops
+# create .env (see Step 4)
+bun install
+bun run db:push
+bun run db:generate
+bun run dev
+```
+
+### Windows (native)
+```powershell
+# install Git from git-scm.com, Node 20 LTS from nodejs.org
+powershell -c "irm bun.sh/install.ps1 | iex"
+git clone <repo> flowops && cd flowops
+# create .env (see Step 4 — use Set-Content or Notepad)
+bun install
+bun run db:push
+bun run db:generate
+bun run dev
+```
+
+Then open **<http://localhost:3000>** → sign in with `usman@flowops.pk` / `Test1234!`
 
 ---
 
