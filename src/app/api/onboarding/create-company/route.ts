@@ -163,6 +163,14 @@ export async function POST(req: Request) {
       newValues: { role: 'Owner', status: 'active' },
     })
 
+    // 7b. Auto-create company_order_settings (OMS — both flags default FALSE)
+    try {
+      const { ensureCompanyOrderSettings } = await import('@/lib/actions/order-settings.actions')
+      await ensureCompanyOrderSettings(company.id)
+    } catch (e) {
+      console.error('[order-settings] Failed to auto-create (non-blocking):', e)
+    }
+
     // 8. Return the fresh session payload.
     const payload = await buildSessionPayload(user.id)
     return Response.json(payload)

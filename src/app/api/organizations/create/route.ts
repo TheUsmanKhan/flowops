@@ -171,6 +171,14 @@ export async function POST(req: Request) {
       console.error('[attribute-seeding] Failed (non-blocking):', e)
     }
 
+    // 8. Auto-create company_order_settings (OMS — both flags default FALSE)
+    try {
+      const { ensureCompanyOrderSettings } = await import('@/lib/actions/order-settings.actions')
+      await ensureCompanyOrderSettings(company.id)
+    } catch (e) {
+      console.error('[order-settings] Failed to auto-create (non-blocking):', e)
+    }
+
     return Response.json(await buildSessionPayload(user.id))
   } catch (err) {
     // Roll back partial creates.

@@ -1372,3 +1372,69 @@ Stage Summary:
 - OMS Step 1 (Database Schema) COMPLETE. All 4 new tables + 3 FK columns + 8 functions + 4 triggers + RLS on 4 tables are live on Supabase.
 - Prisma Client regenerated and includes the new models.
 - Ready for Step 2: wire session GUC setting in API middleware + createCompany() hook to auto-create CompanyOrderSetting + add 'orders.*' permission keys.
+
+---
+Task ID: OMS-STEP-2-CREATION-LIFECYCLE
+Agent: main
+Task: OMS Step 2 of 5 — Order creation + basic lifecycle transitions (confirm, cancel, payment conversion). No inventory reservation/dispatch (Step 3) or returns (Step 4).
+
+Work Log:
+
+PART 1 — Validation Schemas (/lib/validations/order.schemas.ts):
+- customerInputSchema: name, phone (loose Pakistani format), alternate_phone, email, addresses (array with at least one entry)
+- orderItemInputSchema: org_variant_id, quantity (positive int), unit_price (optional — auto-filled from company pricing but overridable)
+- createManualOrderSchema: customer OR customer_id, items (min 1), payment_type, advance fields, delivery address, discount. Refinements: advance_amount required for partial_advance; either customer or customer_id required
+- convertPaymentSchema: order_id, new_payment_type, advance fields, screenshot URL
+- markCodCollectedSchema: order_id, collected_amount
+- cancelOrderSchema: order_id, cancellation_reason
+- updateCompanyOrderSettingsSchema: require_order_confirmation, require_packing_step, default_courier, default_dispatch_location_id
+- shopifyOrderWebhookSchema: structured payload for future Shopify webhook integration
+
+PART 2 — Customer Actions (/lib/actions/customer.actions.ts):
+- findOrCreateCustomer: searches by org + phone, silently updates name/email/address if different, creates new if not found. Returns { customerId, isNewCustomer }
+- updateCustomerStats: recomputes totalOrdersCount, totalOrderValue, totalRtoCount from orders table. Internal helper called after order status changes
+- flagCustomer / unflagCustomer: sets isFlagged + flaggedReason. GUARD: orders.manage permission
+- listCustomers: search by name/phone/email, filter by isFlagged, paginated
+- getCustomerDetail: full customer info + recent 20 orders
+
+PART 3 — Order Creation (/lib/actions/order.actions.ts):
+- createManualOrder: validates input → finds/creates customer → fetches variants + pricing → computes subtotal + total_order_value → determines payment_status based on payment_type → determines initial order status (payment = auto-confirm; COD = check company_order_settings) → generates flowops_order_number via DB function → creates order + order_items (fulfillment_status = 'reserved' PLACEHOLDER) → audit log → updates customer stats. Returns { orderId, flowopsOrderNumber, orderItems } so Step 3 can iterate items for stock reservation
+- createOrderFromShopifyWebhook: STUB — fully structured and unit-testable with mock payload, maps financial_status → payment_status, resolves variants by SKU, not yet wired to a real webhook endpoint
+
+PART 4 — Order Lifecycle Transitions (/lib/actions/order.actions.ts):
+- confirmOrder: GUARD orders.manage, verifies status='pending', sets status='confirmed' + confirmedAt. Step 3 will extend to trigger stock reservation
+- convertPaymentStatus: validates input, verifies payment_status='cod_pending', updates payment_type/status/source + advance fields, sets converted_by/at. If order was 'pending', also auto-confirms (payment = confirmation signal)
+- markCodCollected: verifies status='dispatched' or 'delivered', sets codCollected + amount + timestamp
+- cancelOrder: GUARD orders.cancel, verifies status NOT in [dispatched, delivered, rto, cancelled, refunded], sets status='cancelled' + cancelledAt + reason. Step 3 will extend to call unreserveStockForOrder()
+- listOrders: filters by status, paymentType, orderSource, customerId, date range, search (flowops_order_number, external_order_reference, customer name/phone). Paginated
+- getOrderDetail: full order + customer + items joined with variant details (sku, productTitle, attributeValues)
+
+PART 5 — Company Order Settings (/lib/actions/order-settings.actions.ts):
+- getCompanyOrderSettings: returns settings for the active company, auto-creates default row if missing
+- updateCompanyOrderSettings: GUARD elevated only, updates flags + defaults
+- ensureCompanyOrderSettings: internal helper, called by createCompany() hooks
+- Wired createCompany() hook in all 3 company-creation routes:
+  * src/app/api/organizations/create/route.ts
+  * src/app/api/companies/create/route.ts
+  * src/app/api/onboarding/create-company/route.ts
+  Each now calls ensureCompanyOrderSettings(company.id) after the company is created (non-blocking — wrapped in try/catch)
+
+Also added ORDERS_MANAGE permission key to src/lib/permissions.ts ('orders.manage') with catalog entry "Manage orders — Confirm orders, convert payments, manage customers".
+
+VERIFICATION:
+- bun run lint: 0 errors, 15 pre-existing warnings (0 new)
+- npx tsc --noEmit: 0 errors in any new/modified file
+- Smoke test (via temporary API route):
+  * Create COD order → ✅ ORD-2026-00001, order item created with fulfillment_status='reserved'
+  * Confirm COD order → correctly returned "already confirmed" (company has requireOrderConfirmation=false, so COD auto-confirms on creation)
+  * Cancel order → ✅ status='cancelled', cancelledAt set
+  * Create prepaid order → ✅ ORD-2026-00002, auto-confirmed (payment = confirmation signal)
+- Order number sequence works: ORD-2026-00001, ORD-2026-00002 (per company, resets each year)
+- Removed 'use server' directive from all 3 action files — these functions use cookies() from next/headers which requires a request scope; they're called from API route handlers, not directly from client components
+
+Stage Summary:
+- OMS Step 2 (Order Creation + Lifecycle) COMPLETE.
+- All 5 parts implemented: validation schemas, customer actions, order creation (manual + Shopify stub), lifecycle transitions (confirm, convert payment, mark COD collected, cancel), company order settings + createCompany() hook.
+- No inventory stock movements in this step — order items are created with fulfillment_status='reserved' as a PLACEHOLDER for Step 3.
+- Every mutation calls insertAuditLog(). Metric events NOT yet added (per spec — will be added deliberately in a later step).
+- Payment logic follows the business rules: payment received/converted = confirmation signal that bypasses require_order_confirmation.

@@ -38,6 +38,7 @@ export const PERMISSIONS = {
   ORDERS_CREATE: 'orders.create',
   ORDERS_FULFILL: 'orders.fulfill',
   ORDERS_CANCEL: 'orders.cancel',
+  ORDERS_MANAGE: 'orders.manage',
 
   // Employees
   EMPLOYEES_VIEW: 'employees.view',
@@ -96,6 +97,7 @@ export const PERMISSION_GROUPS: {
       { key: PERMISSIONS.ORDERS_CREATE, label: 'Create orders', description: 'Manually create orders' },
       { key: PERMISSIONS.ORDERS_FULFILL, label: 'Fulfill orders', description: 'Mark orders as dispatched / delivered' },
       { key: PERMISSIONS.ORDERS_CANCEL, label: 'Cancel orders', description: 'Cancel and refund orders' },
+      { key: PERMISSIONS.ORDERS_MANAGE, label: 'Manage orders', description: 'Confirm orders, convert payments, manage customers' },
     ],
   },
   {
