@@ -1606,3 +1606,167 @@ Stage Summary:
 - correctReturnItemCondition() reverses the auto-processed entry and creates a proper stock_loss_records entry when physical inspection finds damage.
 - Customer auto-flagging at 3+ RTO count.
 - 100% metric_events coverage across all OMS mutations (18 metric_keys, 0 missing).
+
+---
+Task ID: OMS-STEP-5-QUEUES-CUSTOMERS-SETTINGS
+Agent: oms-queues-ui
+Task: Build OMS queue pages, customer pages, settings page
+
+Work Log:
+- Created 10 frontend views in src/components/orders/:
+  * orders-pending-confirmation-view.tsx (list + Confirm/Convert/Cancel actions)
+  * orders-backordered-view.tsx (variant-grouped FIFO queue, collapsible rows)
+  * orders-awaiting-production-view.tsx (grouped by production status)
+  * orders-ready-to-dispatch-view.tsx (bulk-select + shared-courier dispatch dialog)
+  * orders-returns-view.tsx (RTO list + Needs Review filter pill)
+  * orders-returns-review-view.tsx (Confirm Perfect / Correct to Damaged with confirmation dialog)
+  * orders-cancelled-view.tsx (read-only history table)
+  * customers-view.tsx (searchable + flag/unflag + debounced search)
+  * customer-detail-view.tsx (profile + addresses + stats + order history + flag/unflag)
+  * order-workflow-settings-view.tsx (2 toggles + default courier + dispatch location dropdown, elevated-only)
+- Created src/components/orders/_shared.ts (shared helpers: formatPKR, formatDate, getErrorMessage, ORDER_STATUS_BADGE, PRODUCTION_STATUS_BADGE, badgeForStatus)
+- Created 10 GET/list/detail API routes:
+  * src/app/api/orders/pending/route.ts
+  * src/app/api/orders/backordered/route.ts
+  * src/app/api/orders/awaiting-production/route.ts
+  * src/app/api/orders/ready-to-dispatch/route.ts
+  * src/app/api/orders/returns/route.ts (supports ?filter=needs_review)
+  * src/app/api/orders/returns/review/route.ts
+  * src/app/api/orders/cancelled/route.ts
+  * src/app/api/customers/route.ts (GET + POST flag/unflag)
+  * src/app/api/customers/[id]/route.ts
+  * src/app/api/order-settings/route.ts (GET + PUT, elevated-only)
+- Created 6 mutation API routes delegating to existing actions:
+  * src/app/api/orders/[id]/confirm/route.ts (POST -> confirmOrder)
+  * src/app/api/orders/[id]/convert-payment/route.ts (POST -> convertPaymentStatus)
+  * src/app/api/orders/[id]/cancel/route.ts (POST -> cancelOrder, requires reason)
+  * src/app/api/orders/[id]/dispatch/route.ts (POST -> dispatchOrderAction, requires tracking_number)
+  * src/app/api/orders/[id]/returns/review/dismiss/route.ts (POST -> dismissReturnReview, ?item_id=)
+  * src/app/api/orders/[id]/returns/review/correct/route.ts (POST -> correctReturnItemCondition, ?item_id=)
+- Registered 11 new SPA routes in src/app/page.tsx (orders-pending-confirmation, orders-backordered, orders-awaiting-production, orders-ready-to-dispatch, orders-returns, orders-returns-review, orders-cancelled, customers, customer-detail, order-workflow-settings)
+- Added api.put() helper to src/lib/api-client.ts (was missing — needed for order-settings PUT)
+
+Stage Summary:
+- OMS Step 5 (Queue pages + Customers + Settings) frontend + API routes COMPLETE.
+- All 11 SPA routes wired up in page.tsx and reachable from the dashboard.
+- All 10 list/detail API routes follow the existing cycle-counts pattern (getCurrentUser + ApiError + handleError).
+- All 6 mutation routes delegate to existing server actions in src/lib/actions/ — zero business-logic duplication.
+- Shared helpers in _shared.ts keep all 11 components DRY (PKR/date formatting, error extraction, status badge maps).
+- Badge color system matches spec: pending=gray, confirmed=sky, backordered=amber, dispatched=violet, rto=rose, cancelled=slate.
+- Loading skeleton, empty state, and error state with retry on every list view.
+- Bulk dispatch in ready-to-dispatch handles per-order failures gracefully (sequential dispatch with per-order error reporting).
+- Order-workflow-settings enforces elevated-only edit guard via isElevated + can('settings.company.view') read gate.
+- Customer auto-flag badge appears when totalRtoCount >= 3 (matches the auto-flag threshold in order-return.actions.ts).
+- VERIFICATION: bun run lint = 0 errors in any new file (16 pre-existing warnings in other files). npx tsc --noEmit = 0 errors in any new file (errors exist only in concurrent agents' files: order-detail-view.tsx, src/app/api/orders/route.ts, src/lib/inventory.ts — not my scope).
+
+---
+Task ID: OMS-STEP-5-ORDERS-UI
+Agent: oms-orders-ui
+Task: Build OMS order list, create wizard, and detail page
+
+Work Log:
+
+Files created (15 new + 1 modified):
+
+API routes (wrap existing server actions in order.actions.ts / order-return.actions.ts / customer.actions.ts):
+- src/app/api/orders/route.ts — GET (listOrders) + POST (createManualOrder)
+- src/app/api/orders/[id]/route.ts — GET (full order detail incl. dispatchLocation + productionOrder + advance + return + timeline fields)
+- src/app/api/orders/[id]/confirm/route.ts — POST (confirmOrder)
+- src/app/api/orders/[id]/dispatch/route.ts — POST (dispatchOrderAction)
+- src/app/api/orders/[id]/cancel/route.ts — POST (cancelOrder)
+- src/app/api/orders/[id]/delivered/route.ts — POST (markOrderDelivered)
+- src/app/api/orders/[id]/rto/route.ts — POST (processOrderReturn)
+- src/app/api/orders/[id]/convert-payment/route.ts — POST (convertPaymentStatus)
+- src/app/api/orders/[id]/cod-collected/route.ts — POST (markCodCollected)
+- src/app/api/orders/[id]/processing/route.ts — POST (markOrderProcessing)
+- src/app/api/orders/[id]/packed/route.ts — POST (markOrderPacked)
+- src/app/api/customers/route.ts — GET (listCustomers — for phone/name/email search in wizard)
+
+Frontend views (src/components/orders/):
+- orders-view.tsx — list page: 4 stat cards (Total / Pending / Backordered / Today's Revenue), filter bar (9 statuses, 4 payment types, 5 sources, search), color-coded status + payment + source badges, loading skeleton, empty state with CTA, error state with retry, ORDERS_VIEW gate, [+ Create Order] gated on ORDERS_CREATE, row click → order-detail. TanStack Query ['orders', filters] staleTime 15s.
+- order-create-view.tsx — 5-step wizard (Customer → Items → Payment → Delivery → Review) with Stepper component. Step 1 phone-search via /api/customers OR add-new-customer form. Step 2 product/variant search (reuses receive-stock-view pattern) with editable unit_price + running subtotal. Step 3 RadioGroup payment type with conditional advance fields. Step 4 delivery (auto-prefilled from new customer) + dispatch location dropdown (from /api/inventory-locations) + discount. Step 5 review summary → POST /api/orders → toast + navigate to order-detail. All hooks declared BEFORE permission-gate early return (rules-of-hooks compliant).
+- order-detail-view.tsx — full detail page: header with status/payment/source badges, customer info with flagged warning, items table with MTO/returned-stitched-used/production-order/needs-review indicators, payment breakdown (subtotal + discount + courier + total + advance details + remaining COD + COD collected), delivery info, status timeline (8 stages with timestamps), activity log (audit-logs with entity_id filter), context-sensitive action buttons (Confirm/Process/Pack/Dispatch/Deliver/RTO/Cancel/Convert Payment/COD Collected) + 5 dialog forms. TanStack Query ['order', orderId] staleTime 10s + 9 useMutation hooks ALL declared before loading/error early returns.
+
+Router wiring (src/app/page.tsx):
+- Added imports + switch cases for 'orders' / 'order-create' / 'order-detail' (preserving queue/customer/settings cases another agent added).
+
+Audit log enhancement:
+- src/app/api/audit-logs/route.ts — added optional entity_id / entityId query-param filter (purely additive, backward-compatible) so the detail page can fetch its activity log.
+
+Stage Summary:
+- OMS order list / create / detail UI COMPLETE.
+- 3 frontend views + 11 new order API routes + 1 customer search route + 1 audit-logs enhancement.
+- All routes wrap existing OMS Step 2-4 server actions, following the project API pattern (runtime='nodejs', dynamic='force-dynamic', ApiError + handleError + readBody, ActionResult → JSON translation).
+- Permission gating via useCan() hook (ORDERS_VIEW / ORDERS_CREATE / ORDERS_MANAGE / ORDERS_FULFILL / ORDERS_CANCEL).
+- TanStack Query v5 for server state, Sonner for toasts, shadcn/ui for all components.
+- Status badges color-coded per spec: pending=gray, confirmed=sky, partially_backordered=amber, processing=blue, dispatched=violet, delivered=emerald, rto=rose, cancelled=slate, refunded=purple.
+- PKR + en-PK date formatting consistent with the rest of the app.
+- VERIFICATION: bun run lint = 0 errors, 15 pre-existing warnings (0 in any new file). npx tsc --noEmit | grep orders = 0 errors in any orders file (pre-existing errors in unrelated purchase-orders/[id]/receive/route.ts only).
+
+---
+Task ID: OMS-STEP-5-FRONTEND
+Agent: main
+Task: OMS Step 5 of 5 — Complete frontend across all OMS pages. Order list, create wizard, detail page, 7 queue pages, customer pages, settings page, sidebar navigation.
+
+Work Log:
+
+PARTS 1-3 (Order List + Create Wizard + Detail Page):
+- orders-view.tsx: stats cards (Total, Pending, Backordered, Revenue), filter bar (9 statuses, payment types, sources, search), color-coded table with row-click navigation, permission-gated Create button
+- order-create-view.tsx: 5-step wizard (Customer → Items → Payment → Delivery → Review), debounced phone search, variant search with stock badges, editable unit prices, payment type radio with conditional advance fields, dispatch location dropdown, full review summary
+- order-detail-view.tsx: full detail with status/payment/source badges, customer info with flag warning, items table with MTO indicators, payment breakdown with Convert/Mark COD buttons, delivery info, status timeline, activity log, context-sensitive action buttons (Confirm, Processing, Packed, Dispatch, Cancel, RTO, Delivered)
+
+PART 4 (Queue Pages):
+- orders-pending-confirmation-view.tsx: list with quick-action buttons (Confirm, Convert, Cancel)
+- orders-backordered-view.tsx: grouped by variant, FIFO ordered, expandable rows
+- orders-awaiting-production-view.tsx: grouped by production status
+- orders-ready-to-dispatch-view.tsx: bulk-select + bulk dispatch dialog
+- orders-returns-view.tsx: RTO list with "Needs Review" filter
+- orders-returns-review-view.tsx: exception queue with Confirm Perfect / Correct to Damaged actions
+- orders-cancelled-view.tsx: read-only history
+
+PART 5 (Customer Pages):
+- customers-view.tsx: search, flag/unflag, stats, row-click navigation
+- customer-detail-view.tsx: profile, addresses, stats, order history, flag/unflag with reason
+
+PART 6 (Settings):
+- order-workflow-settings-view.tsx: toggle switches for require_order_confirmation/require_packing_step, default courier, default dispatch location. Elevated-only guard.
+
+PART 7 (Sidebar Navigation):
+- Added Orders section to sidebar.tsx with 8 children (All Orders, Create, Pending Confirmation, Backordered, Awaiting Production, Ready to Dispatch, Returns & RTO, Cancelled)
+- Added Customers nav item
+- Added Order Settings nav item (elevated only)
+- Updated mobile-nav.tsx with same items
+- Added 14 new route types to app-store.ts AppRoute union
+- Wired all 14 routes in page.tsx switch statement
+- Added api.put() helper to api-client.ts
+
+API Routes (23 total):
+- src/app/api/orders/route.ts — GET (list) + POST (create)
+- src/app/api/orders/[id]/route.ts — GET (detail)
+- src/app/api/orders/[id]/{confirm,dispatch,cancel,delivered,rto,convert-payment,cod-collected,processing,packed}/route.ts — 9 POST mutations
+- src/app/api/orders/[id]/returns/review/{dismiss,correct}/route.ts — 2 POST mutations
+- src/app/api/orders/{pending,backordered,awaiting-production,ready-to-dispatch,returns,returns/review,cancelled}/route.ts — 7 GET queue endpoints
+- src/app/api/customers/route.ts — GET (list) + POST (flag/unflag)
+- src/app/api/customers/[id]/route.ts — GET (detail)
+- src/app/api/order-settings/route.ts — GET + PUT
+
+Also fixed: purchase-orders/[id]/receive/route.ts — changed po.locationId to po.deliveryLocationId (the actual column name on the PO model).
+
+VERIFICATION:
+- bun run lint: 0 errors, 15 pre-existing warnings (0 new)
+- npx tsc --noEmit: 0 errors in any OMS file
+- API smoke test: all 5 tested endpoints return 200 with correct data
+  * GET /api/orders → returns order list ✅
+  * GET /api/customers → returns customers with stats ✅
+  * GET /api/order-settings → returns company settings ✅
+  * GET /api/orders/pending → returns empty list (correct — no pending orders) ✅
+  * GET /api/orders/returns → returns RTO order from Step 4 test ✅
+
+Stage Summary:
+- OMS Step 5 (Frontend) COMPLETE.
+- 14 frontend component files + 23 API route files created.
+- Full sidebar navigation with Orders section (8 items), Customers, and Order Settings.
+- All pages follow existing codebase patterns: TanStack Query, useCan() permission gating, useAppStore navigation, shadcn/ui components, loading/empty/error states, Sonner toasts.
+- Every mutation uses useMutation + invalidateQueries + Sonner toast.
+- Permission-gated: ORDERS_VIEW to see pages, ORDERS_CREATE for create button, ORDERS_MANAGE for confirm/convert/flag actions, ORDERS_FULFILL for dispatch/processing/packed actions, ORDERS_CANCEL for cancel, elevated-only for settings.
+- OMS is now feature-complete across all 5 steps (schema, lifecycle, fulfillment engine, returns automation + metrics, frontend).

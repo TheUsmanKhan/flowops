@@ -43,6 +43,7 @@ interface NavItem {
   icon: typeof LayoutDashboard
   permission?: string
   matchPrefixes?: string[]
+  elevatedOnly?: boolean
 }
 
 const NAV: NavItem[] = [
@@ -61,6 +62,9 @@ const NAV: NavItem[] = [
   { route: { name: 'inventory-production-orders' }, label: 'Production Orders', icon: Factory, matchPrefixes: ['inventory-production'] },
   { route: { name: 'inventory-losses' }, label: 'Losses', icon: AlertTriangle, matchPrefixes: ['inventory-loss'] },
   { route: { name: 'inventory-cycle-counts' }, label: 'Cycle Counts', icon: ClipboardCheck, matchPrefixes: ['inventory-cycle'] },
+  { route: { name: 'orders' }, label: 'Orders', icon: ShoppingCart, permission: PERMISSIONS.ORDERS_VIEW, matchPrefixes: ['order'] },
+  { route: { name: 'customers' }, label: 'Customers', icon: Users, permission: PERMISSIONS.ORDERS_VIEW, matchPrefixes: ['customers'] },
+  { route: { name: 'order-workflow-settings' }, label: 'Order Settings', icon: SlidersHorizontal, elevatedOnly: true, matchPrefixes: ['order-workflow'] },
   { route: { name: 'org-catalog' }, label: 'Org Catalog', icon: Globe, matchPrefixes: ['org-catalog'] },
   { route: { name: 'employees' }, label: 'Employees', icon: Users, permission: PERMISSIONS.EMPLOYEES_VIEW, matchPrefixes: ['employees'] },
   { route: { name: 'roles' }, label: 'Roles & Permissions', icon: ShieldCheck, permission: PERMISSIONS.SETTINGS_ROLES_MANAGE, matchPrefixes: ['roles'] },

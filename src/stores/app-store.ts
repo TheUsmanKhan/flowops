@@ -52,6 +52,20 @@ export type AppRoute =
   | { name: 'inventory-loss-detail'; id: string }
   | { name: 'inventory-production-orders' }
   | { name: 'inventory-cycle-counts' }
+  // OMS
+  | { name: 'orders' }
+  | { name: 'order-create' }
+  | { name: 'order-detail'; id: string }
+  | { name: 'orders-pending-confirmation' }
+  | { name: 'orders-backordered' }
+  | { name: 'orders-awaiting-production' }
+  | { name: 'orders-ready-to-dispatch' }
+  | { name: 'orders-returns' }
+  | { name: 'orders-returns-review' }
+  | { name: 'orders-cancelled' }
+  | { name: 'customers' }
+  | { name: 'customer-detail'; id: string }
+  | { name: 'order-workflow-settings' }
 
 interface AppState {
   // session

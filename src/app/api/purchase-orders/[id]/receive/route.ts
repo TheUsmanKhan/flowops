@@ -206,10 +206,10 @@ export async function POST(
       const { checkAndFulfillBackorders } = await import('@/lib/actions/backorder.actions')
       const processedVariants = new Set<string>()
       for (const item of d.items) {
-        const key = `${item.org_variant_id}|${po.locationId}`
+        const key = `${item.org_variant_id}|${po.deliveryLocationId}`
         if (!processedVariants.has(key)) {
           processedVariants.add(key)
-          await checkAndFulfillBackorders(item.org_variant_id, po.locationId)
+          await checkAndFulfillBackorders(item.org_variant_id, po.deliveryLocationId)
         }
       }
     } catch (e) {

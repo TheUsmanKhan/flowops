@@ -47,6 +47,19 @@ import { ProductionOrdersView } from '@/components/inventory/production-orders-v
 import { LossesView } from '@/components/inventory/losses-view'
 import { LossDetailView } from '@/components/inventory/loss-detail-view'
 import { CycleCountsView } from '@/components/inventory/cycle-counts-view'
+import { OrdersView } from '@/components/orders/orders-view'
+import { OrderCreateView } from '@/components/orders/order-create-view'
+import { OrderDetailView } from '@/components/orders/order-detail-view'
+import { OrdersPendingConfirmationView } from '@/components/orders/orders-pending-confirmation-view'
+import { OrdersBackorderedView } from '@/components/orders/orders-backordered-view'
+import { OrdersAwaitingProductionView } from '@/components/orders/orders-awaiting-production-view'
+import { OrdersReadyToDispatchView } from '@/components/orders/orders-ready-to-dispatch-view'
+import { OrdersReturnsView } from '@/components/orders/orders-returns-view'
+import { OrdersReturnsReviewView } from '@/components/orders/orders-returns-review-view'
+import { OrdersCancelledView } from '@/components/orders/orders-cancelled-view'
+import { CustomersView } from '@/components/orders/customers-view'
+import { CustomerDetailView } from '@/components/orders/customer-detail-view'
+import { OrderWorkflowSettingsView } from '@/components/orders/order-workflow-settings-view'
 import { Card, CardContent } from '@/components/ui/card'
 
 export default function Page() {
@@ -233,6 +246,32 @@ function renderRoute(
       return <LossDetailView lossId={route.id} />
     case 'inventory-cycle-counts':
       return <CycleCountsView />
+    case 'orders':
+      return <OrdersView />
+    case 'order-create':
+      return <OrderCreateView />
+    case 'order-detail':
+      return <OrderDetailView orderId={route.id} />
+    case 'orders-pending-confirmation':
+      return <OrdersPendingConfirmationView />
+    case 'orders-backordered':
+      return <OrdersBackorderedView />
+    case 'orders-awaiting-production':
+      return <OrdersAwaitingProductionView />
+    case 'orders-ready-to-dispatch':
+      return <OrdersReadyToDispatchView />
+    case 'orders-returns':
+      return <OrdersReturnsView />
+    case 'orders-returns-review':
+      return <OrdersReturnsReviewView />
+    case 'orders-cancelled':
+      return <OrdersCancelledView />
+    case 'customers':
+      return <CustomersView />
+    case 'customer-detail':
+      return <CustomerDetailView customerId={route.id} />
+    case 'order-workflow-settings':
+      return <OrderWorkflowSettingsView />
     default:
       return <DashboardHome />
   }

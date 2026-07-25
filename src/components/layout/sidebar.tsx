@@ -27,6 +27,8 @@ import {
   ClipboardCheck,
   PackagePlus,
   SlidersHorizontal,
+  Clock,
+  XCircle,
   type LucideIcon,
 } from 'lucide-react'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -76,6 +78,25 @@ const NAV: NavItem[] = [
       { route: { name: 'inventory-cycle-counts' }, label: 'Cycle Counts', icon: ClipboardCheck, matchPrefixes: ['inventory-cycle'] },
     ],
   },
+  {
+    route: { name: 'orders' },
+    label: 'Orders',
+    icon: ShoppingCart,
+    permission: PERMISSIONS.ORDERS_VIEW,
+    matchPrefixes: ['order'],
+    children: [
+      { route: { name: 'orders' }, label: 'All Orders', icon: ShoppingCart, matchPrefixes: ['orders', 'order-detail', 'order-create'] },
+      { route: { name: 'order-create' }, label: 'Create Order', icon: Plus, matchPrefixes: ['order-create'] },
+      { route: { name: 'orders-pending-confirmation' }, label: 'Pending Confirmation', icon: Clock, matchPrefixes: ['orders-pending'] },
+      { route: { name: 'orders-backordered' }, label: 'Backordered', icon: AlertTriangle, matchPrefixes: ['orders-backordered'] },
+      { route: { name: 'orders-awaiting-production' }, label: 'Awaiting Production', icon: Factory, matchPrefixes: ['orders-awaiting'] },
+      { route: { name: 'orders-ready-to-dispatch' }, label: 'Ready to Dispatch', icon: Truck, matchPrefixes: ['orders-ready'] },
+      { route: { name: 'orders-returns' }, label: 'Returns & RTO', icon: Undo2, matchPrefixes: ['orders-returns'] },
+      { route: { name: 'orders-cancelled' }, label: 'Cancelled', icon: XCircle, matchPrefixes: ['orders-cancelled'] },
+    ],
+  },
+  { route: { name: 'customers' }, label: 'Customers', icon: Users, permission: PERMISSIONS.ORDERS_VIEW, matchPrefixes: ['customers', 'customer-detail'] },
+  { route: { name: 'order-workflow-settings' }, label: 'Order Settings', icon: SlidersHorizontal, elevatedOnly: true, matchPrefixes: ['order-workflow'] },
   { route: { name: 'employees' }, label: 'Employees', icon: Users, permission: PERMISSIONS.EMPLOYEES_VIEW, matchPrefixes: ['employees'] },
   { route: { name: 'roles' }, label: 'Roles & Permissions', icon: ShieldCheck, permission: PERMISSIONS.SETTINGS_ROLES_MANAGE, matchPrefixes: ['roles'] },
   { route: { name: 'org-catalog' }, label: 'Org Catalog', icon: Globe, elevatedOnly: true, matchPrefixes: ['org-catalog'] },
@@ -91,7 +112,7 @@ export function Sidebar() {
   const can = useCan()
   const activeCompany = useAppStore((s) => s.activeCompany)
   const employee = useAppStore((s) => s.employee)
-  const [expanded, setExpanded] = useState<Set<string>>(new Set(['Products', 'Inventory']))
+  const [expanded, setExpanded] = useState<Set<string>>(new Set(['Products', 'Inventory', 'Orders']))
 
   const isElevated = employee?.isElevated ?? false
 

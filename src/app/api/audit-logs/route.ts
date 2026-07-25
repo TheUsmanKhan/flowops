@@ -37,11 +37,13 @@ export async function GET(req: Request) {
     const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get('pageSize') ?? '25')))
     const action = url.searchParams.get('action') ?? ''
     const entityType = url.searchParams.get('entityType') ?? ''
+    const entityId = url.searchParams.get('entity_id') ?? url.searchParams.get('entityId') ?? ''
 
     const where = {
       companyId: company.id,
       ...(action ? { action: { contains: action } } : {}),
       ...(entityType ? { entityType } : {}),
+      ...(entityId ? { entityId } : {}),
     }
     const [total, rows] = await Promise.all([
       db.auditLog.count({ where }),
