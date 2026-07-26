@@ -1,0 +1,1677 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import { api, FetchError } from '@/lib/api-client'
+     7→import { useAppStore, useCan } from '@/stores/app-store'
+     8→import { PERMISSIONS } from '@/lib/permissions'
+     9→import { PageHeader } from '@/components/layout/dashboard-shell'
+    10→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+    11→import { Button } from '@/components/ui/button'
+    12→import { Input } from '@/components/ui/input'
+    13→import { Label } from '@/components/ui/label'
+    14→import { Textarea } from '@/components/ui/textarea'
+    15→import { Badge } from '@/components/ui/badge'
+    16→import { Skeleton } from '@/components/ui/skeleton'
+    17→import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+    18→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+    19→import {
+    20→  Select,
+    21→  SelectContent,
+    22→  SelectItem,
+    23→  SelectTrigger,
+    24→  SelectValue,
+    25→} from '@/components/ui/select'
+    26→import {
+    27→  Table,
+    28→  TableBody,
+    29→  TableCell,
+    30→  TableHead,
+    31→  TableHeader,
+    32→  TableRow,
+    33→} from '@/components/ui/table'
+    34→import {
+    35→  ArrowLeft,
+    36→  ArrowRight,
+    37→  Plus,
+    38→  Trash2,
+    39→  Search,
+    40→  AlertCircle,
+    41→  Loader2,
+    42→  User,
+    43→  Phone,
+    44→  MapPin,
+    45→  Package,
+    46→  CreditCard,
+    47→  Truck,
+    48→  CheckCircle2,
+    49→  Check,
+    50→} from 'lucide-react'
+    51→import { cn } from '@/lib/utils'
+    52→
+    53→// ─────────────────────────────────────────────────────────────────────────────
+    54→// Types
+    55→// ─────────────────────────────────────────────────────────────────────────────
+    56→
+    57→interface InventoryLocation {
+    58→  id: string
+    59→  name: string
+    60→  locationType: string
+    61→  city: string
+    62→  isOrgLevel: boolean
+    63→  isDefault: boolean
+    64→}
+    65→
+    66→interface LocationsResponse {
+    67→  locations: InventoryLocation[]
+    68→}
+    69→
+    70→interface CustomerRow {
+    71→  id: string
+    72→  name: string
+    73→  phone: string
+    74→  email: string | null
+    75→  totalOrdersCount: number
+    76→  totalRtoCount: number
+    77→  isFlagged: boolean
+    78→}
+    79→
+    80→interface CustomersSearchResponse {
+    81→  customers: CustomerRow[]
+    82→  total: number
+    83→}
+    84→
+    85→interface VariantOption {
+    86→  variantId: string
+    87→  sku: string
+    88→  productTitle: string
+    89→  costPrice: number
+    90→  salePrice: number | null
+    91→  fulfillmentType: string
+    92→}
+    93→
+    94→interface ProductsResponse {
+    95→  products: Array<{
+    96→    id: string
+    97→    title: string
+    98→    variants: Array<{
+    99→      id: string
+   100→      sku: string
+   101→      costPrice: number
+   102→      salePrice: number | null
+   103→      fulfillmentType: string
+   104→    }>
+   105→  }>
+   106→}
+   107→
+   108→interface CartItem {
+   109→  variantId: string
+   110→  sku: string
+   111→  productTitle: string
+   112→  unitPrice: number
+   113→  quantity: number
+   114→  fulfillmentType: string
+   115→}
+   116→
+   117→interface CreateOrderResponse {
+   118→  orderId: string
+   119→  flowopsOrderNumber: string
+   120→  orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
+   121→}
+   122→
+   123→type PaymentType = 'full_cod' | 'partial_advance' | 'fully_prepaid'
+   124→
+   125→// ─────────────────────────────────────────────────────────────────────────────
+   126→// Helpers
+   127→// ─────────────────────────────────────────────────────────────────────────────
+   128→
+   129→const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
+   130→
+   131→function formatPKR(n: number): string {
+   132→  return `Rs. ${PKR.format(n)}`
+   133→}
+   134→
+   135→function getErrorMessage(err: unknown): string {
+   136→  if (err instanceof FetchError) return err.message
+   137→  if (err instanceof Error) return err.message
+   138→  return 'Something went wrong. Please try again.'
+   139→}
+   140→
+   141→function parseQty(v: string): number {
+   142→  if (v === '') return 0
+   143→  const n = Number(v)
+   144→  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
+   145→}
+   146→
+   147→function parsePrice(v: string): number {
+   148→  if (v === '') return 0
+   149→  const n = Number(v)
+   150→  return Number.isFinite(n) && n >= 0 ? n : 0
+   151→}
+   152→
+   153→const PAYMENT_METHODS = [
+   154→  { value: 'bank_transfer', label: 'Bank Transfer' },
+   155→  { value: 'easy_paisa', label: 'EasyPaisa' },
+   156→  { value: 'jazz_cash', label: 'JazzCash' },
+   157→  { value: 'cash', label: 'Cash' },
+   158→  { value: 'card', label: 'Card' },
+   159→  { value: 'other', label: 'Other' },
+   160→]
+   161→
+   162→const STEPS = [
+   163→  { num: 1, label: 'Customer', icon: User },
+   164→  { num: 2, label: 'Items', icon: Package },
+   165→  { num: 3, label: 'Payment', icon: CreditCard },
+   166→  { num: 4, label: 'Delivery', icon: Truck },
+   167→  { num: 5, label: 'Review', icon: CheckCircle2 },
+   168→] as const
+   169→
+   170→// ─────────────────────────────────────────────────────────────────────────────
+   171→// Main view
+   172→// ─────────────────────────────────────────────────────────────────────────────
+   173→
+   174→export function OrderCreateView() {
+   175→  const navigate = useAppStore((s) => s.navigate)
+   176→  const can = useCan()
+   177→  const queryClient = useQueryClient()
+   178→  const canCreate = can(PERMISSIONS.ORDERS_CREATE)
+   179→
+   180→  const [step, setStep] = useState(1)
+   181→
+   182→  // ── Form state ────────────────────────────────────────────────────────────
+   183→  // Customer
+   184→  const [customerMode, setCustomerMode] = useState<'existing' | 'new'>('existing')
+   185→  const [phoneSearch, setPhoneSearch] = useState('')
+   186→  const [selectedCustomer, setSelectedCustomer] = useState<CustomerRow | null>(null)
+   187→  const [newCustomer, setNewCustomer] = useState({
+   188→    name: '',
+   189→    phone: '',
+   190→    alternate_phone: '',
+   191→    email: '',
+   192→    address: '',
+   193→    city: '',
+   194→  })
+   195→
+   196→  // Items
+   197→  const [cart, setCart] = useState<CartItem[]>([])
+   198→  const [variantSearch, setVariantSearch] = useState('')
+   199→
+   200→  // Payment
+   201→  const [paymentType, setPaymentType] = useState<PaymentType>('full_cod')
+   202→  const [advanceAmount, setAdvanceAmount] = useState('')
+   203→  const [advancePaymentMethod, setAdvancePaymentMethod] = useState('')
+   204→  const [advancePaymentReference, setAdvancePaymentReference] = useState('')
+   205→  const [advancePaymentScreenshotUrl, setAdvancePaymentScreenshotUrl] = useState('')
+   206→
+   207→  // Delivery
+   208→  const [deliveryAddress, setDeliveryAddress] = useState('')
+   209→  const [deliveryCity, setDeliveryCity] = useState('')
+   210→  const [courierName, setCourierName] = useState('')
+   211→  const [dispatchLocationId, setDispatchLocationId] = useState('')
+   212→  const [notesForCourier, setNotesForCourier] = useState('')
+   213→  const [discountAmount, setDiscountAmount] = useState('')
+   214→  const [discountReason, setDiscountReason] = useState('')
+   215→
+   216→  // ── Data queries ──────────────────────────────────────────────────────────
+   217→  const locationsQuery = useQuery<LocationsResponse>({
+   218→    queryKey: ['locations'],
+   219→    queryFn: () => api.get<LocationsResponse>('/api/inventory-locations'),
+   220→    staleTime: 30_000,
+   221→  })
+   222→
+   223→  const productsQuery = useQuery<ProductsResponse>({
+   224→    queryKey: ['products', 'for-order-create'],
+   225→    queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100'),
+   226→    staleTime: 60_000,
+   227→  })
+   228→
+   229→  // Customer phone search — debounced via staleTime + query key
+   230→  const trimmedPhone = phoneSearch.trim()
+   231→  const customersQuery = useQuery<CustomersSearchResponse>({
+   232→    queryKey: ['customers', 'search', trimmedPhone],
+   233→    queryFn: () =>
+   234→      api.get<CustomersSearchResponse>(
+   235→        `/api/customers?search=${encodeURIComponent(trimmedPhone)}&limit=10`,
+   236→      ),
+   237→    enabled: trimmedPhone.length >= 4,
+   238→    staleTime: 10_000,
+   239→  })
+   240→
+   241→  // ── Variant options (flatten products → variants) ─────────────────────────
+   242→  const variantOptions: VariantOption[] = useMemo(() => {
+   243→    const list: VariantOption[] = []
+   244→    for (const p of productsQuery.data?.products ?? []) {
+   245→      for (const v of p.variants) {
+   246→        list.push({
+   247→          variantId: v.id,
+   248→          sku: v.sku,
+   249→          productTitle: p.title,
+   250→          costPrice: v.costPrice,
+   251→          salePrice: v.salePrice,
+   252→          fulfillmentType: v.fulfillmentType,
+   253→        })
+   254→      }
+   255→    }
+   256→    return list
+   257→  }, [productsQuery.data])
+   258→
+   259→  const variantSearchResults = useMemo(() => {
+   260→    if (!variantSearch.trim()) return []
+   261→    const q = variantSearch.toLowerCase()
+   262→    return variantOptions
+   263→      .filter(
+   264→        (v) => v.sku.toLowerCase().includes(q) || v.productTitle.toLowerCase().includes(q),
+   265→      )
+   266→      .slice(0, 8)
+   267→  }, [variantOptions, variantSearch])
+   268→
+   269→  // ── Computed totals ───────────────────────────────────────────────────────
+   270→  const subtotal = useMemo(
+   271→    () => cart.reduce((s, i) => s + i.unitPrice * i.quantity, 0),
+   272→    [cart],
+   273→  )
+   274→  const discount = parsePrice(discountAmount)
+   275→  const total = Math.max(0, subtotal - discount)
+   276→
+   277→  // ── Auto-fill delivery from customer ──────────────────────────────────────
+   278→  useEffect(() => {
+   279→    if (customerMode === 'existing' && selectedCustomer) {
+   280→      // No addresses returned by customer search — let user type.
+   281→    }
+   282→  }, [customerMode, selectedCustomer])
+   283→
+   284→  // When switching to "new" customer, pre-fill delivery fields from their input.
+   285→  useEffect(() => {
+   286→    if (customerMode === 'new') {
+   287→      if (newCustomer.address && !deliveryAddress) {
+   288→        setDeliveryAddress(newCustomer.address)
+   289→      }
+   290→      if (newCustomer.city && !deliveryCity) {
+   291→        setDeliveryCity(newCustomer.city)
+   292→      }
+   293→      if (newCustomer.phone && !courierName) {
+   294→        // leave courier blank — not derivable
+   295→      }
+   296→    }
+   297→  }, [customerMode, newCustomer.address, newCustomer.city, newCustomer.phone, courierName, deliveryAddress, deliveryCity])
+   298→
+   299→  // ── Auto-select default dispatch location ─────────────────────────────────
+   300→  useEffect(() => {
+   301→    if (!dispatchLocationId && locationsQuery.data?.locations.length) {
+   302→      const def = locationsQuery.data.locations.find((l) => l.isDefault)
+   303→      setDispatchLocationId(def?.id ?? locationsQuery.data.locations[0].id)
+   304→    }
+   305→  }, [dispatchLocationId, locationsQuery.data])
+   306→
+   307→  // ── Item manipulation ─────────────────────────────────────────────────────
+   308→  const addVariant = (v: VariantOption) => {
+   309→    setCart((prev) => {
+   310→      if (prev.some((i) => i.variantId === v.variantId)) {
+   311→        toast.info('That variant is already in the cart.')
+   312→        return prev
+   313→      }
+   314→      const unitPrice = v.salePrice ?? v.costPrice
+   315→      return [
+   316→        ...prev,
+   317→        {
+   318→          variantId: v.variantId,
+   319→          sku: v.sku,
+   320→          productTitle: v.productTitle,
+   321→          unitPrice,
+   322→          quantity: 1,
+   323→          fulfillmentType: v.fulfillmentType,
+   324→        },
+   325→      ]
+   326→    })
+   327→    setVariantSearch('')
+   328→  }
+   329→
+   330→  const removeItem = (variantId: string) => {
+   331→    setCart((prev) => prev.filter((i) => i.variantId !== variantId))
+   332→  }
+   333→
+   334→  const updateItem = (variantId: string, patch: Partial<CartItem>) => {
+   335→    setCart((prev) =>
+   336→      prev.map((i) => (i.variantId === variantId ? { ...i, ...patch } : i)),
+   337→    )
+   338→  }
+   339→
+   340→  // ── Step validation ───────────────────────────────────────────────────────
+   341→  const customerStepValid =
+   342→    customerMode === 'existing'
+   343→      ? !!selectedCustomer
+   344→      : newCustomer.name.trim().length >= 2 &&
+   345→        newCustomer.phone.trim().length >= 7 &&
+   346→        newCustomer.address.trim().length >= 2 &&
+   347→        newCustomer.city.trim().length >= 2
+   348→
+   349→  const itemsStepValid = cart.length > 0 && cart.every((i) => i.quantity > 0 && i.unitPrice >= 0)
+   350→
+   351→  const paymentStepValid =
+   352→    paymentType === 'full_cod' ||
+   353→    (paymentType === 'partial_advance' && parsePrice(advanceAmount) > 0) ||
+   354→    paymentType === 'fully_prepaid'
+   355→
+   356→  const deliveryStepValid =
+   357→    deliveryAddress.trim().length >= 2 &&
+   358→    deliveryCity.trim().length >= 2 &&
+   359→    !!dispatchLocationId
+   360→
+   361→  const canGoNext = (): boolean => {
+   362→    if (step === 1) return customerStepValid
+   363→    if (step === 2) return itemsStepValid
+   364→    if (step === 3) return paymentStepValid
+   365→    if (step === 4) return deliveryStepValid
+   366→    return true
+   367→  }
+   368→
+   369→  // ── Mutation: create order ────────────────────────────────────────────────
+   370→  const createMutation = useMutation({
+   371→    mutationFn: async (payload: unknown) =>
+   372→      api.post<CreateOrderResponse>('/api/orders', payload),
+   373→    onSuccess: (data) => {
+   374→      toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
+   375→      void queryClient.invalidateQueries({ queryKey: ['orders'] })
+   376→      navigate({ name: 'order-detail', id: data.orderId })
+   377→    },
+   378→    onError: (err) => toast.error(getErrorMessage(err)),
+   379→  })
+   380→
+   381→  // ── Permission gate (after all hooks) ─────────────────────────────────────
+   382→  if (!canCreate) {
+   383→    return (
+   384→      <div className="space-y-6">
+   385→        <PageHeader
+   386→          title="Create Order"
+   387→          description="Manually create a customer order"
+   388→          actions={
+   389→            <Button variant="outline" size="sm" onClick={() => navigate({ name: 'orders' })}>
+   390→              <ArrowLeft className="h-4 w-4" /> Back to Orders
+   391→            </Button>
+   392→          }
+   393→        />
+   394→        <Card>
+   395→          <CardContent className="p-10 text-center">
+   396→            <AlertCircle className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
+   397→            <p className="text-sm text-muted-foreground">
+   398→              You don&apos;t have permission to create orders.
+   399→            </p>
+   400→          </CardContent>
+   401→        </Card>
+   402→      </div>
+   403→    )
+   404→  }
+   405→
+   406→  // ── Build payload + submit ────────────────────────────────────────────────
+   407→  const handleSubmit = () => {
+   408→    if (!customerStepValid || !itemsStepValid || !paymentStepValid || !deliveryStepValid) {
+   409→      toast.error('Please complete all required fields before creating the order.')
+   410→      return
+   411→    }
+   412→
+   413→    const payload: Record<string, unknown> = {
+   414→      items: cart.map((i) => ({
+   415→        org_variant_id: i.variantId,
+   416→        quantity: i.quantity,
+   417→        unit_price: i.unitPrice,
+   418→      })),
+   419→      payment_type: paymentType,
+   420→      delivery_address: deliveryAddress.trim(),
+   421→      delivery_city: deliveryCity.trim(),
+   422→      courier_name: courierName.trim() || undefined,
+   423→      dispatch_location_id: dispatchLocationId,
+   424→      notes_for_courier: notesForCourier.trim() || undefined,
+   425→      discount_amount: discount > 0 ? discount : undefined,
+   426→      discount_reason: discountReason.trim() || undefined,
+   427→    }
+   428→
+   429→    if (paymentType === 'partial_advance' || paymentType === 'fully_prepaid') {
+   430→      payload.advance_amount =
+   431→        paymentType === 'fully_prepaid' ? total : parsePrice(advanceAmount)
+   432→      payload.advance_payment_method = advancePaymentMethod || undefined
+   433→      payload.advance_payment_reference = advancePaymentReference.trim() || undefined
+   434→      payload.advance_payment_screenshot_url = advancePaymentScreenshotUrl.trim() || undefined
+   435→    }
+   436→
+   437→    if (customerMode === 'existing' && selectedCustomer) {
+   438→      payload.customer_id = selectedCustomer.id
+   439→    } else {
+   440→      payload.customer = {
+   441→        name: newCustomer.name.trim(),
+   442→        phone: newCustomer.phone.trim(),
+   443→        alternate_phone: newCustomer.alternate_phone.trim() || undefined,
+   444→        email: newCustomer.email.trim() || undefined,
+   445→        addresses: [
+   446→          {
+   447→            label: 'Home',
+   448→            address: newCustomer.address.trim(),
+   449→            city: newCustomer.city.trim(),
+   450→            is_default: true,
+   451→          },
+   452→        ],
+   453→      }
+   454→    }
+   455→
+   456→    createMutation.mutate(payload)
+   457→  }
+   458→
+   459→  return (
+   460→    <div className="space-y-6">
+   461→      <PageHeader
+   462→        title="Create Order"
+   463→        description="Manually create a customer order"
+   464→        actions={
+   465→          <Button variant="outline" size="sm" onClick={() => navigate({ name: 'orders' })}>
+   466→            <ArrowLeft className="h-4 w-4" /> Back to Orders
+   467→          </Button>
+   468→        }
+   469→      />
+   470→
+   471→      {/* ── Stepper ─────────────────────────────────────────────────────────── */}
+   472→      <Stepper currentStep={step} />
+   473→
+   474→      {/* ── Step content ────────────────────────────────────────────────────── */}
+   475→      {step === 1 && (
+   476→        <CustomerStep
+   477→          customerMode={customerMode}
+   478→          setCustomerMode={setCustomerMode}
+   479→          phoneSearch={phoneSearch}
+   480→          setPhoneSearch={setPhoneSearch}
+   481→          selectedCustomer={selectedCustomer}
+   482→          setSelectedCustomer={setSelectedCustomer}
+   483→          newCustomer={newCustomer}
+   484→          setNewCustomer={setNewCustomer}
+   485→          customers={customersQuery.data?.customers ?? []}
+   486→          isSearching={customersQuery.isFetching}
+   487→        />
+   488→      )}
+   489→
+   490→      {step === 2 && (
+   491→        <ItemsStep
+   492→          cart={cart}
+   493→          variantSearch={variantSearch}
+   494→          setVariantSearch={setVariantSearch}
+   495→          variantSearchResults={variantSearchResults}
+   496→          addVariant={addVariant}
+   497→          removeItem={removeItem}
+   498→          updateItem={updateItem}
+   499→          isLoadingProducts={productsQuery.isLoading}
+   500→          subtotal={subtotal}
+   501→        />
+   502→      )}
+   503→
+   504→      {step === 3 && (
+   505→        <PaymentStep
+   506→          paymentType={paymentType}
+   507→          setPaymentType={setPaymentType}
+   508→          advanceAmount={advanceAmount}
+   509→          setAdvanceAmount={setAdvanceAmount}
+   510→          advancePaymentMethod={advancePaymentMethod}
+   511→          setAdvancePaymentMethod={setAdvancePaymentMethod}
+   512→          advancePaymentReference={advancePaymentReference}
+   513→          setAdvancePaymentReference={setAdvancePaymentReference}
+   514→          advancePaymentScreenshotUrl={advancePaymentScreenshotUrl}
+   515→          setAdvancePaymentScreenshotUrl={setAdvancePaymentScreenshotUrl}
+   516→          subtotal={subtotal}
+   517→          total={total}
+   518→          discount={discount}
+   519→        />
+   520→      )}
+   521→
+   522→      {step === 4 && (
+   523→        <DeliveryStep
+   524→          deliveryAddress={deliveryAddress}
+   525→          setDeliveryAddress={setDeliveryAddress}
+   526→          deliveryCity={deliveryCity}
+   527→          setDeliveryCity={setDeliveryCity}
+   528→          courierName={courierName}
+   529→          setCourierName={setCourierName}
+   530→          dispatchLocationId={dispatchLocationId}
+   531→          setDispatchLocationId={setDispatchLocationId}
+   532→          notesForCourier={notesForCourier}
+   533→          setNotesForCourier={setNotesForCourier}
+   534→          discountAmount={discountAmount}
+   535→          setDiscountAmount={setDiscountAmount}
+   536→          discountReason={discountReason}
+   537→          setDiscountReason={setDiscountReason}
+   538→          locations={locationsQuery.data?.locations ?? []}
+   539→          isLoadingLocations={locationsQuery.isLoading}
+   540→          subtotal={subtotal}
+   541→          discount={discount}
+   542→          total={total}
+   543→        />
+   544→      )}
+   545→
+   546→      {step === 5 && (
+   547→        <ReviewStep
+   548→          customerMode={customerMode}
+   549→          selectedCustomer={selectedCustomer}
+   550→          newCustomer={newCustomer}
+   551→          cart={cart}
+   552→          paymentType={paymentType}
+   553→          advanceAmount={advanceAmount}
+   554→          advancePaymentMethod={advancePaymentMethod}
+   555→          advancePaymentReference={advancePaymentReference}
+   556→          deliveryAddress={deliveryAddress}
+   557→          deliveryCity={deliveryCity}
+   558→          courierName={courierName}
+   559→          dispatchLocationId={dispatchLocationId}
+   560→          locations={locationsQuery.data?.locations ?? []}
+   561→          notesForCourier={notesForCourier}
+   562→          discountAmount={discountAmount}
+   563→          discountReason={discountReason}
+   564→          subtotal={subtotal}
+   565→          discount={discount}
+   566→          total={total}
+   567→        />
+   568→      )}
+   569→
+   570→      {/* ── Step navigation ─────────────────────────────────────────────────── */}
+   571→      <div className="flex items-center justify-between gap-3">
+   572→        <Button
+   573→          variant="outline"
+   574→          onClick={() => (step === 1 ? navigate({ name: 'orders' }) : setStep(step - 1))}
+   575→          disabled={createMutation.isPending}
+   576→        >
+   577→          <ArrowLeft className="h-4 w-4" />
+   578→          {step === 1 ? 'Cancel' : 'Back'}
+   579→        </Button>
+   580→
+   581→        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+   582→          Step {step} of {STEPS.length}
+   583→        </div>
+   584→
+   585→        {step < 5 ? (
+   586→          <Button onClick={() => setStep(step + 1)} disabled={!canGoNext()}>
+   587→            Continue
+   588→            <ArrowRight className="h-4 w-4" />
+   589→          </Button>
+   590→        ) : (
+   591→          <Button
+   592→            onClick={handleSubmit}
+   593→            disabled={
+   594→              createMutation.isPending ||
+   595→              !customerStepValid ||
+   596→              !itemsStepValid ||
+   597→              !paymentStepValid ||
+   598→              !deliveryStepValid
+   599→            }
+   600→          >
+   601→            {createMutation.isPending ? (
+   602→              <>
+   603→                <Loader2 className="h-4 w-4 animate-spin" /> Creating…
+   604→              </>
+   605→            ) : (
+   606→              <>
+   607→                <CheckCircle2 className="h-4 w-4" /> Create Order
+   608→              </>
+   609→            )}
+   610→          </Button>
+   611→        )}
+   612→      </div>
+   613→    </div>
+   614→  )
+   615→}
+   616→
+   617→// ─────────────────────────────────────────────────────────────────────────────
+   618→// Stepper
+   619→// ─────────────────────────────────────────────────────────────────────────────
+   620→
+   621→function Stepper({ currentStep }: { currentStep: number }) {
+   622→  return (
+   623→    <Card>
+   624→      <CardContent className="p-4">
+   625→        <ol className="flex items-center justify-between gap-2">
+   626→          {STEPS.map((s, idx) => {
+   627→            const Icon = s.icon
+   628→            const isComplete = currentStep > s.num
+   629→            const isCurrent = currentStep === s.num
+   630→            return (
+   631→              <li key={s.num} className="flex items-center flex-1 last:flex-none">
+   632→                <div className="flex items-center gap-2">
+   633→                  <div
+   634→                    className={cn(
+   635→                      'flex h-8 w-8 items-center justify-center rounded-full border-2 transition-colors',
+   636→                      isComplete && 'bg-primary border-primary text-primary-foreground',
+   637→                      isCurrent && 'border-primary text-primary',
+   638→                      !isComplete && !isCurrent && 'border-muted text-muted-foreground',
+   639→                    )}
+   640→                  >
+   641→                    {isComplete ? <Check className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
+   642→                  </div>
+   643→                  <span
+   644→                    className={cn(
+   645→                      'text-sm font-medium hidden sm:inline',
+   646→                      isCurrent ? 'text-foreground' : 'text-muted-foreground',
+   647→                    )}
+   648→                  >
+   649→                    {s.label}
+   650→                  </span>
+   651→                </div>
+   652→                {idx < STEPS.length - 1 && (
+   653→                  <div
+   654→                    className={cn(
+   655→                      'h-0.5 flex-1 mx-2 rounded-full transition-colors',
+   656→                      isComplete ? 'bg-primary' : 'bg-muted',
+   657→                    )}
+   658→                  />
+   659→                )}
+   660→              </li>
+   661→            )
+   662→          })}
+   663→        </ol>
+   664→      </CardContent>
+   665→    </Card>
+   666→  )
+   667→}
+   668→
+   669→// ─────────────────────────────────────────────────────────────────────────────
+   670→// Step 1: Customer
+   671→// ─────────────────────────────────────────────────────────────────────────────
+   672→
+   673→function CustomerStep({
+   674→  customerMode,
+   675→  setCustomerMode,
+   676→  phoneSearch,
+   677→  setPhoneSearch,
+   678→  selectedCustomer,
+   679→  setSelectedCustomer,
+   680→  newCustomer,
+   681→  setNewCustomer,
+   682→  customers,
+   683→  isSearching,
+   684→}: {
+   685→  customerMode: 'existing' | 'new'
+   686→  setCustomerMode: (m: 'existing' | 'new') => void
+   687→  phoneSearch: string
+   688→  setPhoneSearch: (v: string) => void
+   689→  selectedCustomer: CustomerRow | null
+   690→  setSelectedCustomer: (c: CustomerRow | null) => void
+   691→  newCustomer: {
+   692→    name: string
+   693→    phone: string
+   694→    alternate_phone: string
+   695→    email: string
+   696→    address: string
+   697→    city: string
+   698→  }
+   699→  setNewCustomer: React.Dispatch<
+   700→    React.SetStateAction<{
+   701→      name: string
+   702→      phone: string
+   703→      alternate_phone: string
+   704→      email: string
+   705→      address: string
+   706→      city: string
+   707→    }>
+   708→  >
+   709→  customers: CustomerRow[]
+   710→  isSearching: boolean
+   711→}) {
+   712→  return (
+   713→    <Card>
+   714→      <CardHeader>
+   715→        <CardTitle className="text-base">Customer</CardTitle>
+   716→      </CardHeader>
+   717→      <CardContent className="space-y-4">
+   718→        <RadioGroup
+   719→          value={customerMode}
+   720→          onValueChange={(v) => {
+   721→            setCustomerMode(v as 'existing' | 'new')
+   722→            setSelectedCustomer(null)
+   723→          }}
+   724→          className="grid sm:grid-cols-2 gap-3"
+   725→        >
+   726→          <label
+   727→            htmlFor="mode-existing"
+   728→            className={cn(
+   729→              'flex items-start gap-3 rounded-lg border p-4 cursor-pointer transition-colors',
+   730→              customerMode === 'existing'
+   731→                ? 'border-primary bg-primary/5'
+   732→                : 'border-border hover:bg-muted/40',
+   733→            )}
+   734→          >
+   735→            <RadioGroupItem value="existing" id="mode-existing" className="mt-1" />
+   736→            <div>
+   737→              <p className="text-sm font-medium">Existing customer</p>
+   738→              <p className="text-xs text-muted-foreground">
+   739→                Search by phone, name, or email
+   740→              </p>
+   741→            </div>
+   742→          </label>
+   743→          <label
+   744→            htmlFor="mode-new"
+   745→            className={cn(
+   746→              'flex items-start gap-3 rounded-lg border p-4 cursor-pointer transition-colors',
+   747→              customerMode === 'new'
+   748→                ? 'border-primary bg-primary/5'
+   749→                : 'border-border hover:bg-muted/40',
+   750→            )}
+   751→          >
+   752→            <RadioGroupItem value="new" id="mode-new" className="mt-1" />
+   753→            <div>
+   754→              <p className="text-sm font-medium">Add new customer</p>
+   755→              <p className="text-xs text-muted-foreground">
+   756→                Create a new customer record
+   757→              </p>
+   758→            </div>
+   759→          </label>
+   760→        </RadioGroup>
+   761→
+   762→        {customerMode === 'existing' ? (
+   763→          <div className="space-y-3">
+   764→            <div className="space-y-1.5">
+   765→              <Label htmlFor="phone-search">
+   766→                <span className="flex items-center gap-1.5">
+   767→                  <Phone className="h-3.5 w-3.5" /> Search by phone, name, or email
+   768→                </span>
+   769→              </Label>
+   770→              <div className="relative">
+   771→                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+   772→                <Input
+   773→                  id="phone-search"
+   774→                  placeholder="e.g. 03001234567"
+   775→                  className="pl-9"
+   776→                  value={phoneSearch}
+   777→                  onChange={(e) => {
+   778→                    setPhoneSearch(e.target.value)
+   779→                    setSelectedCustomer(null)
+   780→                  }}
+   781→                />
+   782→                {isSearching && (
+   783→                  <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+   784→                )}
+   785→              </div>
+   786→              <p className="text-xs text-muted-foreground">
+   787→                Type at least 4 characters to search.
+   788→              </p>
+   789→            </div>
+   790→
+   791→            {phoneSearch.trim().length >= 4 && !selectedCustomer && (
+   792→              <div className="rounded-md border bg-popover shadow-sm max-h-72 overflow-y-auto scrollbar-thin">
+   793→                {customers.length === 0 ? (
+   794→                  <div className="p-3 text-sm text-muted-foreground">
+   795→                    {isSearching
+   796→                      ? 'Searching…'
+   797→                      : 'No matching customers. Switch to "Add new customer".'}
+   798→                  </div>
+   799→                ) : (
+   800→                  <ul className="divide-y">
+   801→                    {customers.map((c) => (
+   802→                      <li key={c.id}>
+   803→                        <button
+   804→                          type="button"
+   805→                          onClick={() => setSelectedCustomer(c)}
+   806→                          className="w-full text-left px-3 py-2 hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
+   807→                        >
+   808→                          <div className="min-w-0">
+   809→                            <p className="text-sm font-medium truncate">{c.name}</p>
+   810→                            <p className="text-xs text-muted-foreground font-mono">{c.phone}</p>
+   811→                          </div>
+   812→                          <div className="flex items-center gap-2 shrink-0">
+   813→                            {c.isFlagged && (
+   814→                              <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
+   815→                                Flagged
+   816→                              </Badge>
+   817→                            )}
+   818→                            <span className="text-xs text-muted-foreground">
+   819→                              {c.totalOrdersCount} orders
+   820→                            </span>
+   821→                          </div>
+   822→                        </button>
+   823→                      </li>
+   824→                    ))}
+   825→                  </ul>
+   826→                )}
+   827→              </div>
+   828→            )}
+   829→
+   830→            {selectedCustomer && (
+   831→              <Alert>
+   832→                <User className="h-4 w-4" />
+   833→                <AlertTitle>Selected customer</AlertTitle>
+   834→                <AlertDescription>
+   835→                  <div className="flex items-center justify-between gap-2">
+   836→                    <div>
+   837→                      <p className="text-sm font-medium">{selectedCustomer.name}</p>
+   838→                      <p className="text-xs text-muted-foreground font-mono">
+   839→                        {selectedCustomer.phone}
+   840→                      </p>
+   841→                    </div>
+   842→                    <Button
+   843→                      size="sm"
+   844→                      variant="ghost"
+   845→                      onClick={() => setSelectedCustomer(null)}
+   846→                    >
+   847→                      Change
+   848→                    </Button>
+   849→                  </div>
+   850→                </AlertDescription>
+   851→              </Alert>
+   852→            )}
+   853→          </div>
+   854→        ) : (
+   855→          <div className="grid sm:grid-cols-2 gap-4">
+   856→            <div className="space-y-1.5">
+   857→              <Label htmlFor="nc-name">Full name *</Label>
+   858→              <Input
+   859→                id="nc-name"
+   860→                placeholder="e.g. Ayesha Khan"
+   861→                value={newCustomer.name}
+   862→                onChange={(e) => setNewCustomer((p) => ({ ...p, name: e.target.value }))}
+   863→              />
+   864→            </div>
+   865→            <div className="space-y-1.5">
+   866→              <Label htmlFor="nc-phone">Phone *</Label>
+   867→              <Input
+   868→                id="nc-phone"
+   869→                placeholder="e.g. 03001234567"
+   870→                value={newCustomer.phone}
+   871→                onChange={(e) => setNewCustomer((p) => ({ ...p, phone: e.target.value }))}
+   872→              />
+   873→            </div>
+   874→            <div className="space-y-1.5">
+   875→              <Label htmlFor="nc-alt">Alternate phone</Label>
+   876→              <Input
+   877→                id="nc-alt"
+   878→                placeholder="Optional"
+   879→                value={newCustomer.alternate_phone}
+   880→                onChange={(e) =>
+   881→                  setNewCustomer((p) => ({ ...p, alternate_phone: e.target.value }))
+   882→                }
+   883→              />
+   884→            </div>
+   885→            <div className="space-y-1.5">
+   886→              <Label htmlFor="nc-email">Email</Label>
+   887→              <Input
+   888→                id="nc-email"
+   889→                type="email"
+   890→                placeholder="Optional"
+   891→                value={newCustomer.email}
+   892→                onChange={(e) => setNewCustomer((p) => ({ ...p, email: e.target.value }))}
+   893→              />
+   894→            </div>
+   895→            <div className="space-y-1.5 sm:col-span-2">
+   896→              <Label htmlFor="nc-address">Address *</Label>
+   897→              <Textarea
+   898→                id="nc-address"
+   899→                placeholder="House #, street, area"
+   900→                value={newCustomer.address}
+   901→                onChange={(e) => setNewCustomer((p) => ({ ...p, address: e.target.value }))}
+   902→              />
+   903→            </div>
+   904→            <div className="space-y-1.5">
+   905→              <Label htmlFor="nc-city">City *</Label>
+   906→              <Input
+   907→                id="nc-city"
+   908→                placeholder="e.g. Lahore"
+   909→                value={newCustomer.city}
+   910→                onChange={(e) => setNewCustomer((p) => ({ ...p, city: e.target.value }))}
+   911→              />
+   912→            </div>
+   913→          </div>
+   914→        )}
+   915→      </CardContent>
+   916→    </Card>
+   917→  )
+   918→}
+   919→
+   920→// ─────────────────────────────────────────────────────────────────────────────
+   921→// Step 2: Items
+   922→// ─────────────────────────────────────────────────────────────────────────────
+   923→
+   924→function ItemsStep({
+   925→  cart,
+   926→  variantSearch,
+   927→  setVariantSearch,
+   928→  variantSearchResults,
+   929→  addVariant,
+   930→  removeItem,
+   931→  updateItem,
+   932→  isLoadingProducts,
+   933→  subtotal,
+   934→}: {
+   935→  cart: CartItem[]
+   936→  variantSearch: string
+   937→  setVariantSearch: (v: string) => void
+   938→  variantSearchResults: VariantOption[]
+   939→  addVariant: (v: VariantOption) => void
+   940→  removeItem: (id: string) => void
+   941→  updateItem: (id: string, patch: Partial<CartItem>) => void
+   942→  isLoadingProducts: boolean
+   943→  subtotal: number
+   944→}) {
+   945→  return (
+   946→    <Card>
+   947→      <CardHeader>
+   948→        <CardTitle className="text-base">Items</CardTitle>
+   949→      </CardHeader>
+   950→      <CardContent className="space-y-4">
+   951→        <div className="space-y-1.5">
+   952→          <Label htmlFor="variant-search">Add products</Label>
+   953→          <div className="relative">
+   954→            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+   955→            <Input
+   956→              id="variant-search"
+   957→              placeholder="Search by SKU or product title…"
+   958→              className="pl-9"
+   959→              value={variantSearch}
+   960→              onChange={(e) => setVariantSearch(e.target.value)}
+   961→              disabled={isLoadingProducts}
+   962→            />
+   963→            {isLoadingProducts && (
+   964→              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+   965→            )}
+   966→          </div>
+   967→        </div>
+   968→
+   969→        {variantSearch.trim() && (
+   970→          <div className="rounded-md border bg-popover shadow-sm max-h-64 overflow-y-auto scrollbar-thin">
+   971→            {variantSearchResults.length === 0 ? (
+   972→              <div className="p-3 text-sm text-muted-foreground">
+   973→                {isLoadingProducts ? 'Loading variants…' : 'No variants match your search.'}
+   974→              </div>
+   975→            ) : (
+   976→              <ul className="divide-y">
+   977→                {variantSearchResults.map((v) => (
+   978→                  <li key={v.variantId}>
+   979→                    <button
+   980→                      type="button"
+   981→                      onClick={() => addVariant(v)}
+   982→                      className="w-full text-left px-3 py-2 hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
+   983→                    >
+   984→                      <div className="min-w-0">
+   985→                        <p className="text-sm font-medium truncate">{v.productTitle}</p>
+   986→                        <p className="text-xs text-muted-foreground font-mono">{v.sku}</p>
+   987→                      </div>
+   988→                      <div className="flex items-center gap-2 shrink-0">
+   989→                        <Badge
+   990→                          variant="outline"
+   991→                          className={cn(
+   992→                            'text-[10px]',
+   993→                            v.fulfillmentType === 'made_to_order'
+   994→                              ? 'bg-purple-50 text-purple-700 border-purple-200'
+   995→                              : 'bg-sky-50 text-sky-700 border-sky-200',
+   996→                          )}
+   997→                        >
+   998→                          {v.fulfillmentType === 'made_to_order' ? 'MTO' : 'Stock'}
+   999→                        </Badge>
+  1000→                        <span className="text-xs text-muted-foreground">
+  1001→                          {v.salePrice ? formatPKR(v.salePrice) : formatPKR(v.costPrice)}
+  1002→                        </span>
+  1003→                        <Plus className="h-3.5 w-3.5 text-primary" />
+  1004→                      </div>
+  1005→                    </button>
+  1006→                  </li>
+  1007→                ))}
+  1008→              </ul>
+  1009→            )}
+  1010→          </div>
+  1011→        )}
+  1012→
+  1013→        <div className="rounded-md border">
+  1014→          <Table>
+  1015→            <TableHeader>
+  1016→              <TableRow>
+  1017→                <TableHead>Variant</TableHead>
+  1018→                <TableHead className="w-24">Qty</TableHead>
+  1019→                <TableHead className="w-32">Unit price</TableHead>
+  1020→                <TableHead className="text-right w-28">Line total</TableHead>
+  1021→                <TableHead className="w-10" />
+  1022→              </TableRow>
+  1023→            </TableHeader>
+  1024→            <TableBody>
+  1025→              {cart.length === 0 ? (
+  1026→                <TableRow>
+  1027→                  <TableCell
+  1028→                    colSpan={5}
+  1029→                    className="text-center text-sm text-muted-foreground py-8"
+  1030→                  >
+  1031→                    No items added yet. Search above to add variants.
+  1032→                  </TableCell>
+  1033→                </TableRow>
+  1034→              ) : (
+  1035→                cart.map((item) => (
+  1036→                  <TableRow key={item.variantId}>
+  1037→                    <TableCell>
+  1038→                      <div className="flex flex-col">
+  1039→                        <span className="text-sm font-medium">{item.productTitle}</span>
+  1040→                        <span className="text-xs text-muted-foreground font-mono">
+  1041→                          {item.sku}
+  1042→                        </span>
+  1043→                        <Badge
+  1044→                          variant="outline"
+  1045→                          className={cn(
+  1046→                            'text-[10px] w-fit mt-1',
+  1047→                            item.fulfillmentType === 'made_to_order'
+  1048→                              ? 'bg-purple-50 text-purple-700 border-purple-200'
+  1049→                              : 'bg-sky-50 text-sky-700 border-sky-200',
+  1050→                          )}
+  1051→                        >
+  1052→                          {item.fulfillmentType === 'made_to_order' ? 'MTO' : 'Stock'}
+  1053→                        </Badge>
+  1054→                      </div>
+  1055→                    </TableCell>
+  1056→                    <TableCell>
+  1057→                      <Input
+  1058→                        type="number"
+  1059→                        min="1"
+  1060→                        step="1"
+  1061→                        className="h-8 tabular-nums"
+  1062→                        value={item.quantity}
+  1063→                        onChange={(e) =>
+  1064→                          updateItem(item.variantId, { quantity: parseQty(e.target.value) })
+  1065→                        }
+  1066→                      />
+  1067→                    </TableCell>
+  1068→                    <TableCell>
+  1069→                      <Input
+  1070→                        type="number"
+  1071→                        min="0"
+  1072→                        step="0.01"
+  1073→                        className="h-8 tabular-nums"
+  1074→                        value={item.unitPrice}
+  1075→                        onChange={(e) =>
+  1076→                          updateItem(item.variantId, { unitPrice: parsePrice(e.target.value) })
+  1077→                        }
+  1078→                      />
+  1079→                    </TableCell>
+  1080→                    <TableCell className="text-right tabular-nums font-medium">
+  1081→                      {formatPKR(item.quantity * item.unitPrice)}
+  1082→                    </TableCell>
+  1083→                    <TableCell>
+  1084→                      <Button
+  1085→                        size="icon"
+  1086→                        variant="ghost"
+  1087→                        className="h-7 w-7 text-rose-600 hover:bg-rose-50"
+  1088→                        onClick={() => removeItem(item.variantId)}
+  1089→                        aria-label={`Remove ${item.sku}`}
+  1090→                      >
+  1091→                        <Trash2 className="h-3.5 w-3.5" />
+  1092→                      </Button>
+  1093→                    </TableCell>
+  1094→                  </TableRow>
+  1095→                ))
+  1096→              )}
+  1097→            </TableBody>
+  1098→          </Table>
+  1099→        </div>
+  1100→
+  1101→        <div className="flex items-center justify-end gap-3">
+  1102→          <span className="text-sm text-muted-foreground">Subtotal</span>
+  1103→          <span className="text-lg font-semibold tabular-nums">{formatPKR(subtotal)}</span>
+  1104→        </div>
+  1105→      </CardContent>
+  1106→    </Card>
+  1107→  )
+  1108→}
+  1109→
+  1110→// ─────────────────────────────────────────────────────────────────────────────
+  1111→// Step 3: Payment
+  1112→// ─────────────────────────────────────────────────────────────────────────────
+  1113→
+  1114→function PaymentStep({
+  1115→  paymentType,
+  1116→  setPaymentType,
+  1117→  advanceAmount,
+  1118→  setAdvanceAmount,
+  1119→  advancePaymentMethod,
+  1120→  setAdvancePaymentMethod,
+  1121→  advancePaymentReference,
+  1122→  setAdvancePaymentReference,
+  1123→  advancePaymentScreenshotUrl,
+  1124→  setAdvancePaymentScreenshotUrl,
+  1125→  subtotal,
+  1126→  total,
+  1127→  discount,
+  1128→}: {
+  1129→  paymentType: PaymentType
+  1130→  setPaymentType: (p: PaymentType) => void
+  1131→  advanceAmount: string
+  1132→  setAdvanceAmount: (v: string) => void
+  1133→  advancePaymentMethod: string
+  1134→  setAdvancePaymentMethod: (v: string) => void
+  1135→  advancePaymentReference: string
+  1136→  setAdvancePaymentReference: (v: string) => void
+  1137→  advancePaymentScreenshotUrl: string
+  1138→  setAdvancePaymentScreenshotUrl: (v: string) => void
+  1139→  subtotal: number
+  1140→  total: number
+  1141→  discount: number
+  1142→}) {
+  1143→  return (
+  1144→    <Card>
+  1145→      <CardHeader>
+  1146→        <CardTitle className="text-base">Payment</CardTitle>
+  1147→      </CardHeader>
+  1148→      <CardContent className="space-y-4">
+  1149→        <RadioGroup
+  1150→          value={paymentType}
+  1151→          onValueChange={(v) => setPaymentType(v as PaymentType)}
+  1152→          className="grid gap-3"
+  1153→        >
+  1154→          <PaymentOption
+  1155→            value="full_cod"
+  1156→            title="Full COD"
+  1157→            description="Customer pays the full amount in cash on delivery."
+  1158→            current={paymentType}
+  1159→          />
+  1160→          <PaymentOption
+  1161→            value="partial_advance"
+  1162→            title="Partial Advance"
+  1163→            description="Customer pays a portion upfront; the rest is collected on delivery."
+  1164→            current={paymentType}
+  1165→          />
+  1166→          <PaymentOption
+  1167→            value="fully_prepaid"
+  1168→            title="Fully Prepaid"
+  1169→            description="Customer has paid the full amount before dispatch."
+  1170→            current={paymentType}
+  1171→          />
+  1172→        </RadioGroup>
+  1173→
+  1174→        {paymentType !== 'full_cod' && (
+  1175→          <div className="grid sm:grid-cols-2 gap-4 rounded-lg border bg-muted/30 p-4">
+  1176→            <div className="space-y-1.5">
+  1177→              <Label htmlFor="advance-amount">
+  1178→                {paymentType === 'fully_prepaid'
+  1179→                  ? 'Total paid (auto-calculated)'
+  1180→                  : 'Advance amount *'}
+  1181→              </Label>
+  1182→              <Input
+  1183→                id="advance-amount"
+  1184→                type="number"
+  1185→                min="0"
+  1186→                step="0.01"
+  1187→                placeholder={paymentType === 'fully_prepaid' ? formatPKR(total) : 'e.g. 500'}
+  1188→                value={paymentType === 'fully_prepaid' ? String(total) : advanceAmount}
+  1189→                onChange={(e) => setAdvanceAmount(e.target.value)}
+  1190→                disabled={paymentType === 'fully_prepaid'}
+  1191→              />
+  1192→              {paymentType === 'partial_advance' && (
+  1193→                <p className="text-xs text-muted-foreground">
+  1194→                  Remaining COD: {formatPKR(Math.max(0, total - parsePrice(advanceAmount)))}
+  1195→                </p>
+  1196→              )}
+  1197→            </div>
+  1198→            <div className="space-y-1.5">
+  1199→              <Label htmlFor="advance-method">Payment method</Label>
+  1200→              <Select value={advancePaymentMethod} onValueChange={setAdvancePaymentMethod}>
+  1201→                <SelectTrigger id="advance-method">
+  1202→                  <SelectValue placeholder="Select method" />
+  1203→                </SelectTrigger>
+  1204→                <SelectContent>
+  1205→                  {PAYMENT_METHODS.map((m) => (
+  1206→                    <SelectItem key={m.value} value={m.value}>
+  1207→                      {m.label}
+  1208→                    </SelectItem>
+  1209→                  ))}
+  1210→                </SelectContent>
+  1211→              </Select>
+  1212→            </div>
+  1213→            <div className="space-y-1.5 sm:col-span-2">
+  1214→              <Label htmlFor="advance-ref">Reference (transaction ID, etc.)</Label>
+  1215→              <Input
+  1216→                id="advance-ref"
+  1217→                placeholder="Optional"
+  1218→                value={advancePaymentReference}
+  1219→                onChange={(e) => setAdvancePaymentReference(e.target.value)}
+  1220→              />
+  1221→            </div>
+  1222→            <div className="space-y-1.5 sm:col-span-2">
+  1223→              <Label htmlFor="advance-shot">Screenshot URL</Label>
+  1224→              <Input
+  1225→                id="advance-shot"
+  1226→                type="url"
+  1227→                placeholder="https://…"
+  1228→                value={advancePaymentScreenshotUrl}
+  1229→                onChange={(e) => setAdvancePaymentScreenshotUrl(e.target.value)}
+  1230→              />
+  1231→            </div>
+  1232→          </div>
+  1233→        )}
+  1234→
+  1235→        <div className="rounded-md bg-muted/40 p-3 space-y-1 text-sm">
+  1236→          <div className="flex items-center justify-between">
+  1237→            <span className="text-muted-foreground">Subtotal</span>
+  1238→            <span className="tabular-nums">{formatPKR(subtotal)}</span>
+  1239→          </div>
+  1240→          {discount > 0 && (
+  1241→            <div className="flex items-center justify-between text-rose-600">
+  1242→              <span>Discount</span>
+  1243→              <span className="tabular-nums">−{formatPKR(discount)}</span>
+  1244→            </div>
+  1245→          )}
+  1246→          <div className="flex items-center justify-between font-medium pt-1 border-t">
+  1247→            <span>Total</span>
+  1248→            <span className="tabular-nums">{formatPKR(total)}</span>
+  1249→          </div>
+  1250→        </div>
+  1251→      </CardContent>
+  1252→    </Card>
+  1253→  )
+  1254→}
+  1255→
+  1256→function PaymentOption({
+  1257→  value,
+  1258→  title,
+  1259→  description,
+  1260→  current,
+  1261→}: {
+  1262→  value: string
+  1263→  title: string
+  1264→  description: string
+  1265→  current: string
+  1266→}) {
+  1267→  return (
+  1268→    <label
+  1269→      htmlFor={`pay-${value}`}
+  1270→      className={cn(
+  1271→        'flex items-start gap-3 rounded-lg border p-4 cursor-pointer transition-colors',
+  1272→        current === value ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted/40',
+  1273→      )}
+  1274→    >
+  1275→      <RadioGroupItem value={value} id={`pay-${value}`} className="mt-1" />
+  1276→      <div>
+  1277→        <p className="text-sm font-medium">{title}</p>
+  1278→        <p className="text-xs text-muted-foreground">{description}</p>
+  1279→      </div>
+  1280→    </label>
+  1281→  )
+  1282→}
+  1283→
+  1284→// ─────────────────────────────────────────────────────────────────────────────
+  1285→// Step 4: Delivery
+  1286→// ─────────────────────────────────────────────────────────────────────────────
+  1287→
+  1288→function DeliveryStep({
+  1289→  deliveryAddress,
+  1290→  setDeliveryAddress,
+  1291→  deliveryCity,
+  1292→  setDeliveryCity,
+  1293→  courierName,
+  1294→  setCourierName,
+  1295→  dispatchLocationId,
+  1296→  setDispatchLocationId,
+  1297→  notesForCourier,
+  1298→  setNotesForCourier,
+  1299→  discountAmount,
+  1300→  setDiscountAmount,
+  1301→  discountReason,
+  1302→  setDiscountReason,
+  1303→  locations,
+  1304→  isLoadingLocations,
+  1305→  subtotal,
+  1306→  discount,
+  1307→  total,
+  1308→}: {
+  1309→  deliveryAddress: string
+  1310→  setDeliveryAddress: (v: string) => void
+  1311→  deliveryCity: string
+  1312→  setDeliveryCity: (v: string) => void
+  1313→  courierName: string
+  1314→  setCourierName: (v: string) => void
+  1315→  dispatchLocationId: string
+  1316→  setDispatchLocationId: (v: string) => void
+  1317→  notesForCourier: string
+  1318→  setNotesForCourier: (v: string) => void
+  1319→  discountAmount: string
+  1320→  setDiscountAmount: (v: string) => void
+  1321→  discountReason: string
+  1322→  setDiscountReason: (v: string) => void
+  1323→  locations: InventoryLocation[]
+  1324→  isLoadingLocations: boolean
+  1325→  subtotal: number
+  1326→  discount: number
+  1327→  total: number
+  1328→}) {
+  1329→  return (
+  1330→    <Card>
+  1331→      <CardHeader>
+  1332→        <CardTitle className="text-base">Delivery & Discount</CardTitle>
+  1333→      </CardHeader>
+  1334→      <CardContent className="space-y-4">
+  1335→        <div className="grid sm:grid-cols-2 gap-4">
+  1336→          <div className="space-y-1.5 sm:col-span-2">
+  1337→            <Label htmlFor="del-address">
+  1338→              <span className="flex items-center gap-1.5">
+  1339→                <MapPin className="h-3.5 w-3.5" /> Delivery address *
+  1340→              </span>
+  1341→            </Label>
+  1342→            <Textarea
+  1343→              id="del-address"
+  1344→              placeholder="House #, street, area"
+  1345→              value={deliveryAddress}
+  1346→              onChange={(e) => setDeliveryAddress(e.target.value)}
+  1347→            />
+  1348→          </div>
+  1349→          <div className="space-y-1.5">
+  1350→            <Label htmlFor="del-city">City *</Label>
+  1351→            <Input
+  1352→              id="del-city"
+  1353→              placeholder="e.g. Lahore"
+  1354→              value={deliveryCity}
+  1355→              onChange={(e) => setDeliveryCity(e.target.value)}
+  1356→            />
+  1357→          </div>
+  1358→          <div className="space-y-1.5">
+  1359→            <Label htmlFor="del-courier">Courier name</Label>
+  1360→            <Input
+  1361→              id="del-courier"
+  1362→              placeholder="e.g. TCS, Leopards"
+  1363→              value={courierName}
+  1364→              onChange={(e) => setCourierName(e.target.value)}
+  1365→            />
+  1366→          </div>
+  1367→          <div className="space-y-1.5 sm:col-span-2">
+  1368→            <Label htmlFor="del-loc">
+  1369→              <span className="flex items-center gap-1.5">
+  1370→                <Truck className="h-3.5 w-3.5" /> Dispatch location *
+  1371→              </span>
+  1372→            </Label>
+  1373→            {isLoadingLocations ? (
+  1374→              <Skeleton className="h-9" />
+  1375→            ) : (
+  1376→              <Select value={dispatchLocationId} onValueChange={setDispatchLocationId}>
+  1377→                <SelectTrigger id="del-loc">
+  1378→                  <SelectValue placeholder="Select dispatch location" />
+  1379→                </SelectTrigger>
+  1380→                <SelectContent>
+  1381→                  {locations.map((l) => (
+  1382→                    <SelectItem key={l.id} value={l.id}>
+  1383→                      {l.name} {l.isDefault && '(default)'}
+  1384→                    </SelectItem>
+  1385→                  ))}
+  1386→                </SelectContent>
+  1387→              </Select>
+  1388→            )}
+  1389→            <p className="text-xs text-muted-foreground">
+  1390→              Stock will be reserved from this location.
+  1391→            </p>
+  1392→          </div>
+  1393→          <div className="space-y-1.5 sm:col-span-2">
+  1394→            <Label htmlFor="del-notes">Notes for courier</Label>
+  1395→            <Textarea
+  1396→              id="del-notes"
+  1397→              placeholder="Optional delivery instructions"
+  1398→              value={notesForCourier}
+  1399→              onChange={(e) => setNotesForCourier(e.target.value)}
+  1400→            />
+  1401→          </div>
+  1402→        </div>
+  1403→
+  1404→        <div className="rounded-lg border p-4 space-y-4">
+  1405→          <p className="text-sm font-medium">Discount (optional)</p>
+  1406→          <div className="grid sm:grid-cols-2 gap-4">
+  1407→            <div className="space-y-1.5">
+  1408→              <Label htmlFor="disc-amt">Discount amount</Label>
+  1409→              <Input
+  1410→                id="disc-amt"
+  1411→                type="number"
+  1412→                min="0"
+  1413→                step="0.01"
+  1414→                placeholder="0"
+  1415→                value={discountAmount}
+  1416→                onChange={(e) => setDiscountAmount(e.target.value)}
+  1417→              />
+  1418→            </div>
+  1419→            <div className="space-y-1.5">
+  1420→              <Label htmlFor="disc-reason">Discount reason</Label>
+  1421→              <Input
+  1422→                id="disc-reason"
+  1423→                placeholder="e.g. repeat customer"
+  1424→                value={discountReason}
+  1425→                onChange={(e) => setDiscountReason(e.target.value)}
+  1426→              />
+  1427→            </div>
+  1428→          </div>
+  1429→        </div>
+  1430→
+  1431→        <div className="rounded-md bg-muted/40 p-3 space-y-1 text-sm">
+  1432→          <div className="flex items-center justify-between">
+  1433→            <span className="text-muted-foreground">Subtotal</span>
+  1434→            <span className="tabular-nums">{formatPKR(subtotal)}</span>
+  1435→          </div>
+  1436→          {discount > 0 && (
+  1437→            <div className="flex items-center justify-between text-rose-600">
+  1438→              <span>Discount</span>
+  1439→              <span className="tabular-nums">−{formatPKR(discount)}</span>
+  1440→            </div>
+  1441→          )}
+  1442→          <div className="flex items-center justify-between font-medium pt-1 border-t">
+  1443→            <span>Total</span>
+  1444→            <span className="tabular-nums">{formatPKR(total)}</span>
+  1445→          </div>
+  1446→        </div>
+  1447→      </CardContent>
+  1448→    </Card>
+  1449→  )
+  1450→}
+  1451→
+  1452→// ─────────────────────────────────────────────────────────────────────────────
+  1453→// Step 5: Review
+  1454→// ─────────────────────────────────────────────────────────────────────────────
+  1455→
+  1456→function ReviewStep({
+  1457→  customerMode,
+  1458→  selectedCustomer,
+  1459→  newCustomer,
+  1460→  cart,
+  1461→  paymentType,
+  1462→  advanceAmount,
+  1463→  advancePaymentMethod,
+  1464→  advancePaymentReference,
+  1465→  deliveryAddress,
+  1466→  deliveryCity,
+  1467→  courierName,
+  1468→  dispatchLocationId,
+  1469→  locations,
+  1470→  notesForCourier,
+  1471→  discountAmount,
+  1472→  discountReason,
+  1473→  subtotal,
+  1474→  discount,
+  1475→  total,
+  1476→}: {
+  1477→  customerMode: 'existing' | 'new'
+  1478→  selectedCustomer: CustomerRow | null
+  1479→  newCustomer: {
+  1480→    name: string
+  1481→    phone: string
+  1482→    alternate_phone: string
+  1483→    email: string
+  1484→    address: string
+  1485→    city: string
+  1486→  }
+  1487→  cart: CartItem[]
+  1488→  paymentType: PaymentType
+  1489→  advanceAmount: string
+  1490→  advancePaymentMethod: string
+  1491→  advancePaymentReference: string
+  1492→  deliveryAddress: string
+  1493→  deliveryCity: string
+  1494→  courierName: string
+  1495→  dispatchLocationId: string
+  1496→  locations: InventoryLocation[]
+  1497→  notesForCourier: string
+  1498→  discountAmount: string
+  1499→  discountReason: string
+  1500→  subtotal: number
+  1501→  discount: number
+  1502→  total: number
+  1503→}) {
+  1504→  const dispatchLocation = locations.find((l) => l.id === dispatchLocationId)
+  1505→  const remainingCod =
+  1506→    paymentType === 'fully_prepaid'
+  1507→      ? 0
+  1508→      : paymentType === 'partial_advance'
+  1509→        ? Math.max(0, total - parsePrice(advanceAmount))
+  1510→        : total
+  1511→
+  1512→  return (
+  1513→    <div className="space-y-4">
+  1514→      <Card>
+  1515→        <CardHeader>
+  1516→          <CardTitle className="text-base">Customer</CardTitle>
+  1517→        </CardHeader>
+  1518→        <CardContent>
+  1519→          {customerMode === 'existing' && selectedCustomer ? (
+  1520→            <div>
+  1521→              <p className="text-sm font-medium">{selectedCustomer.name}</p>
+  1522→              <p className="text-xs text-muted-foreground font-mono">{selectedCustomer.phone}</p>
+  1523→              <p className="text-xs text-muted-foreground">
+  1524→                {selectedCustomer.totalOrdersCount} previous order
+  1525→                {selectedCustomer.totalOrdersCount === 1 ? '' : 's'}
+  1526→                {selectedCustomer.isFlagged && (
+  1527→                  <Badge variant="outline" className="ml-2 bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
+  1528→                    Flagged
+  1529→                  </Badge>
+  1530→                )}
+  1531→              </p>
+  1532→            </div>
+  1533→          ) : (
+  1534→            <div>
+  1535→              <p className="text-sm font-medium">{newCustomer.name}</p>
+  1536→              <p className="text-xs text-muted-foreground font-mono">{newCustomer.phone}</p>
+  1537→              {newCustomer.email && (
+  1538→                <p className="text-xs text-muted-foreground">{newCustomer.email}</p>
+  1539→              )}
+  1540→            </div>
+  1541→          )}
+  1542→        </CardContent>
+  1543→      </Card>
+  1544→
+  1545→      <Card>
+  1546→        <CardHeader>
+  1547→          <CardTitle className="text-base">Items ({cart.length})</CardTitle>
+  1548→        </CardHeader>
+  1549→        <CardContent className="p-0">
+  1550→          <Table>
+  1551→            <TableHeader>
+  1552→              <TableRow>
+  1553→                <TableHead>Variant</TableHead>
+  1554→                <TableHead className="text-right">Qty</TableHead>
+  1555→                <TableHead className="text-right">Unit</TableHead>
+  1556→                <TableHead className="text-right">Total</TableHead>
+  1557→              </TableRow>
+  1558→            </TableHeader>
+  1559→            <TableBody>
+  1560→              {cart.map((item) => (
+  1561→                <TableRow key={item.variantId}>
+  1562→                  <TableCell>
+  1563→                    <div className="flex flex-col">
+  1564→                      <span className="text-sm font-medium">{item.productTitle}</span>
+  1565→                      <span className="text-xs text-muted-foreground font-mono">{item.sku}</span>
+  1566→                    </div>
+  1567→                  </TableCell>
+  1568→                  <TableCell className="text-right tabular-nums">{item.quantity}</TableCell>
+  1569→                  <TableCell className="text-right tabular-nums text-muted-foreground">
+  1570→                    {formatPKR(item.unitPrice)}
+  1571→                  </TableCell>
+  1572→                  <TableCell className="text-right tabular-nums font-medium">
+  1573→                    {formatPKR(item.quantity * item.unitPrice)}
+  1574→                  </TableCell>
+  1575→                </TableRow>
+  1576→              ))}
+  1577→            </TableBody>
+  1578→          </Table>
+  1579→        </CardContent>
+  1580→      </Card>
+  1581→
+  1582→      <div className="grid sm:grid-cols-2 gap-4">
+  1583→        <Card>
+  1584→          <CardHeader>
+  1585→            <CardTitle className="text-base">Payment</CardTitle>
+  1586→          </CardHeader>
+  1587→          <CardContent className="space-y-2 text-sm">
+  1588→            <ReviewRow
+  1589→              label="Type"
+  1590→              value={
+  1591→                paymentType === 'full_cod'
+  1592→                  ? 'Full COD'
+  1593→                  : paymentType === 'partial_advance'
+  1594→                    ? 'Partial Advance'
+  1595→                    : 'Fully Prepaid'
+  1596→              }
+  1597→            />
+  1598→            {paymentType !== 'full_cod' && (
+  1599→              <>
+  1600→                <ReviewRow
+  1601→                  label="Advance"
+  1602→                  value={formatPKR(
+  1603→                    paymentType === 'fully_prepaid' ? total : parsePrice(advanceAmount),
+  1604→                  )}
+  1605→                />
+  1606→                <ReviewRow
+  1607→                  label="Method"
+  1608→                  value={
+  1609→                    PAYMENT_METHODS.find((m) => m.value === advancePaymentMethod)?.label ?? '—'
+  1610→                  }
+  1611→                />
+  1612→                {advancePaymentReference && (
+  1613→                  <ReviewRow label="Reference" value={advancePaymentReference} />
+  1614→                )}
+  1615→                <ReviewRow label="Remaining COD" value={formatPKR(remainingCod)} />
+  1616→              </>
+  1617→            )}
+  1618→          </CardContent>
+  1619→        </Card>
+  1620→
+  1621→        <Card>
+  1622→          <CardHeader>
+  1623→            <CardTitle className="text-base">Delivery</CardTitle>
+  1624→          </CardHeader>
+  1625→          <CardContent className="space-y-2 text-sm">
+  1626→            <ReviewRow label="Address" value={deliveryAddress} />
+  1627→            <ReviewRow label="City" value={deliveryCity} />
+  1628→            <ReviewRow label="Courier" value={courierName || '—'} />
+  1629→            <ReviewRow label="Dispatch from" value={dispatchLocation?.name ?? '—'} />
+  1630→            {notesForCourier && <ReviewRow label="Notes" value={notesForCourier} />}
+  1631→          </CardContent>
+  1632→        </Card>
+  1633→      </div>
+  1634→
+  1635→      <Card>
+  1636→        <CardHeader>
+  1637→          <CardTitle className="text-base">Totals</CardTitle>
+  1638→        </CardHeader>
+  1639→        <CardContent className="space-y-2 text-sm">
+  1640→          <ReviewRow label="Subtotal" value={formatPKR(subtotal)} />
+  1641→          {discount > 0 && (
+  1642→            <>
+  1643→              <ReviewRow
+  1644→                label="Discount"
+  1645→                value={`−${formatPKR(discount)}`}
+  1646→                valueClassName="text-rose-600"
+  1647→              />
+  1648→              {discountReason && <ReviewRow label="Reason" value={discountReason} />}
+  1649→            </>
+  1650→          )}
+  1651→          <div className="flex items-center justify-between pt-2 border-t">
+  1652→            <span className="font-medium">Total</span>
+  1653→            <span className="text-lg font-semibold tabular-nums">{formatPKR(total)}</span>
+  1654→          </div>
+  1655→        </CardContent>
+  1656→      </Card>
+  1657→    </div>
+  1658→  )
+  1659→}
+  1660→
+  1661→function ReviewRow({
+  1662→  label,
+  1663→  value,
+  1664→  valueClassName,
+  1665→}: {
+  1666→  label: string
+  1667→  value: string
+  1668→  valueClassName?: string
+  1669→}) {
+  1670→  return (
+  1671→    <div className="flex items-start justify-between gap-3">
+  1672→      <span className="text-muted-foreground shrink-0">{label}</span>
+  1673→      <span className={cn('font-medium text-right', valueClassName)}>{value}</span>
+  1674→    </div>
+  1675→  )
+  1676→}
+  1677→

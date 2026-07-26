@@ -48,15 +48,28 @@ interface ActionResult<T = unknown> {
 }
 
 interface OrderFilters {
-  status?: string
-  paymentType?: string
-  orderSource?: string
-  customerId?: string
-  search?: string
+  // Multi-select filters (preferred — used by the OMS filter panel)
+  statuses?: string[]        // multi-select status filter
+  paymentTypes?: string[]    // multi-select payment_type filter
+  paymentStatuses?: string[] // multi-select payment_status filter
+  orderSources?: string[]    // multi-select order_source filter
+  courierNames?: string[]    // multi-select courier filter
+  // Range / scalar filters
   dateFrom?: string
   dateTo?: string
+  amountMin?: number         // total_order_value >=
+  amountMax?: number         // total_order_value <=
+  orgVariantId?: string      // filter to orders containing this variant
+  customerId?: string
+  search?: string
   limit?: number
   offset?: number
+  // Backward compat with single-value filters
+  status?: string
+  paymentType?: string
+  paymentStatus?: string
+  orderSource?: string
+  courierName?: string
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -406,6 +419,10 @@ export async function createManualOrder(
       advancePaidAt = new Date()
     }
 
+    // remainingCodAmount is NOT a GENERATED column in the DB — the application
+    // MUST compute it as totalOrderValue - (advanceAmount ?? 0).
+    const remainingCodAmount = totalOrderValue - (advanceAmount ?? 0)
+
     // 7. Determine initial order status
     let orderStatus: string = 'pending'
     let confirmedAt: Date | null = null
@@ -451,6 +468,7 @@ export async function createManualOrder(
         advancePaymentMethod,
         advancePaymentReference,
         advancePaidAt,
+        remainingCodAmount,
         deliveryAddress: d.delivery_address,
         deliveryCity: d.delivery_city,
         courierName: d.courier_name || null,
@@ -561,6 +579,8 @@ export async function createOrderFromShopifyWebhook(
     let paymentType: string
     let orderStatus: string = 'pending'
     let confirmedAt: Date | null = null
+    let advanceAmount: number | null = null
+    let advancePaidAt: Date | null = null
 
     switch (d.financial_status) {
       case 'paid':
@@ -568,12 +588,17 @@ export async function createOrderFromShopifyWebhook(
         paymentType = 'fully_prepaid'
         orderStatus = 'confirmed'
         confirmedAt = new Date()
+        advancePaidAt = new Date()
+        // advanceAmount will be set to totalOrderValue below (after total_price is parsed)
         break
       case 'partially_paid':
         paymentStatus = 'advance_paid'
         paymentType = 'partial_advance'
         orderStatus = 'confirmed'
         confirmedAt = new Date()
+        advancePaidAt = new Date()
+        // Shopify webhook does not carry the partial amount paid — leave advanceAmount null.
+        // remainingCodAmount will be computed as totalOrderValue - 0 = totalOrderValue.
         break
       default:
         paymentStatus = 'cod_pending'
@@ -651,6 +676,16 @@ export async function createOrderFromShopifyWebhook(
     }
 
     const totalOrderValue = parseFloat(d.total_price)
+
+    // For fully_prepaid Shopify orders, advanceAmount = totalOrderValue.
+    if (paymentStatus === 'fully_prepaid') {
+      advanceAmount = totalOrderValue
+    }
+
+    // remainingCodAmount is NOT a GENERATED column in the DB — the application
+    // MUST compute it as totalOrderValue - (advanceAmount ?? 0).
+    const remainingCodAmount = totalOrderValue - (advanceAmount ?? 0)
+
     const flowopsOrderNumber = await generateOrderNumber(companyId)
 
     const order = await db.order.create({
@@ -668,6 +703,9 @@ export async function createOrderFromShopifyWebhook(
         paymentSource,
         subtotal,
         totalOrderValue,
+        advanceAmount,
+        advancePaidAt,
+        remainingCodAmount,
         confirmedAt,
         deliveryAddress: d.customer.default_address?.address1 || null,
         deliveryCity: d.customer.default_address?.city || null,
@@ -819,6 +857,11 @@ export async function convertPaymentStatus(
     }
 
     const newPaymentStatus = d.new_payment_type === 'fully_prepaid' ? 'fully_prepaid' : 'advance_paid'
+
+    // remainingCodAmount is NOT a GENERATED column in the DB — recompute it
+    // whenever the advance amount changes: totalOrderValue - (advanceAmount ?? 0).
+    const newRemainingCod = Number(order.totalOrderValue) - (d.advance_amount ?? 0)
+
     const updateData: Prisma.OrderUncheckedUpdateInput = {
       paymentType: d.new_payment_type,
       paymentStatus: newPaymentStatus,
@@ -828,6 +871,7 @@ export async function convertPaymentStatus(
       advancePaymentReference: d.advance_payment_reference || null,
       advancePaymentScreenshotUrl: d.advance_payment_screenshot_url || null,
       advancePaidAt: new Date(),
+      remainingCodAmount: newRemainingCod,
       convertedBy: ctx.employee.id,
       convertedAt: new Date(),
     }
@@ -855,6 +899,7 @@ export async function convertPaymentStatus(
         paymentStatus: newPaymentStatus,
         paymentSource: 'manual_conversion',
         advanceAmount: d.advance_amount,
+        remainingCodAmount: newRemainingCod,
         status: updateData.status ?? order.status,
       },
     })
@@ -1041,14 +1086,30 @@ export async function listOrders(
     id: string
     flowopsOrderNumber: string
     externalOrderReference: string | null
+    externalOrderId: string | null
     orderSource: string
     status: string
     paymentType: string
     paymentStatus: string
+    paymentSource: string
+    subtotal: number
+    discountAmount: number | null
+    courierCharges: number | null
     totalOrderValue: number
+    advanceAmount: number | null
+    remainingCodAmount: number | null
+    codCollected: boolean
+    courierName: string | null
+    trackingNumber: string | null
+    dispatchLocationId: string | null
+    customerId: string
+    confirmedAt: Date | null
+    dispatchedAt: Date | null
+    deliveredAt: Date | null
+    createdAt: Date
     customerName: string
     customerPhone: string
-    createdAt: Date
+    itemCount: number
   }>
   total: number
 }>> {
@@ -1060,15 +1121,69 @@ export async function listOrders(
     const where: Prisma.OrderWhereInput = {
       companyId: ctx.company.id,
     }
-    if (filters.status) where.status = filters.status
-    if (filters.paymentType) where.paymentType = filters.paymentType
-    if (filters.orderSource) where.orderSource = filters.orderSource
+
+    // Status filter — prefer multi-select `statuses`, fall back to single `status`
+    if (filters.statuses && filters.statuses.length > 0) {
+      where.status = { in: filters.statuses }
+    } else if (filters.status) {
+      where.status = filters.status
+    }
+
+    // Payment type filter — prefer multi-select `paymentTypes`, fall back to single `paymentType`
+    if (filters.paymentTypes && filters.paymentTypes.length > 0) {
+      where.paymentType = { in: filters.paymentTypes }
+    } else if (filters.paymentType) {
+      where.paymentType = filters.paymentType
+    }
+
+    // Payment status filter (multi-select preferred)
+    if (filters.paymentStatuses && filters.paymentStatuses.length > 0) {
+      where.paymentStatus = { in: filters.paymentStatuses }
+    } else if (filters.paymentStatus) {
+      where.paymentStatus = filters.paymentStatus
+    }
+
+    // Order source filter — prefer multi-select `orderSources`, fall back to single `orderSource`
+    if (filters.orderSources && filters.orderSources.length > 0) {
+      where.orderSource = { in: filters.orderSources }
+    } else if (filters.orderSource) {
+      where.orderSource = filters.orderSource
+    }
+
+    // Courier filter — prefer multi-select `courierNames`, fall back to single `courierName`
+    if (filters.courierNames && filters.courierNames.length > 0) {
+      where.courierName = { in: filters.courierNames }
+    } else if (filters.courierName) {
+      where.courierName = filters.courierName
+    }
+
     if (filters.customerId) where.customerId = filters.customerId
+
     if (filters.dateFrom || filters.dateTo) {
       where.createdAt = {}
       if (filters.dateFrom) where.createdAt.gte = new Date(filters.dateFrom)
-      if (filters.dateTo) where.createdAt.lte = new Date(filters.dateTo)
+      if (filters.dateTo) {
+        // date_to is inclusive of the whole day
+        const end = new Date(filters.dateTo)
+        end.setHours(23, 59, 59, 999)
+        where.createdAt.lte = end
+      }
     }
+
+    // Amount range filter on total_order_value
+    if (filters.amountMin !== undefined || filters.amountMax !== undefined) {
+      where.totalOrderValue = {}
+      if (filters.amountMin !== undefined) where.totalOrderValue.gte = filters.amountMin
+      if (filters.amountMax !== undefined) where.totalOrderValue.lte = filters.amountMax
+    }
+
+    // Filter to orders containing a specific variant — uses Prisma's `some`
+    // relation filter which compiles to an EXISTS subquery (avoids duplicate
+    // rows that a join-based filter would introduce).
+    if (filters.orgVariantId) {
+      where.items = { some: { orgVariantId: filters.orgVariantId } }
+    }
+
     if (filters.search) {
       where.OR = [
         { flowopsOrderNumber: { contains: filters.search, mode: 'insensitive' } },
@@ -1083,6 +1198,7 @@ export async function listOrders(
         where,
         include: {
           customer: { select: { name: true, phone: true } },
+          _count: { select: { items: true } },
         },
         orderBy: { createdAt: 'desc' },
         take: limit,
@@ -1095,10 +1211,41 @@ export async function listOrders(
       success: true,
       data: {
         orders: orders.map((o) => ({
-          ...o,
+          id: o.id,
+          flowopsOrderNumber: o.flowopsOrderNumber,
+          externalOrderReference: o.externalOrderReference,
+          externalOrderId: o.externalOrderId,
+          orderSource: o.orderSource,
+          status: o.status,
+          paymentType: o.paymentType,
+          paymentStatus: o.paymentStatus,
+          paymentSource: o.paymentSource,
+          subtotal: Number(o.subtotal),
+          discountAmount: o.discountAmount ? Number(o.discountAmount) : null,
+          courierCharges: o.courierCharges ? Number(o.courierCharges) : null,
           totalOrderValue: Number(o.totalOrderValue),
+          advanceAmount: o.advanceAmount ? Number(o.advanceAmount) : null,
+          // remainingCodAmount is NOT a GENERATED column — if it wasn't
+          // persisted (legacy rows), compute it on the fly so the OMS list
+          // always shows the correct outstanding COD amount.
+          remainingCodAmount: o.remainingCodAmount
+            ? Number(o.remainingCodAmount)
+            : Math.max(
+                0,
+                Number(o.totalOrderValue) - (o.advanceAmount ? Number(o.advanceAmount) : 0),
+              ),
+          codCollected: o.codCollected,
+          courierName: o.courierName,
+          trackingNumber: o.trackingNumber,
+          dispatchLocationId: o.dispatchLocationId,
+          customerId: o.customerId,
+          confirmedAt: o.confirmedAt,
+          dispatchedAt: o.dispatchedAt,
+          deliveredAt: o.deliveredAt,
+          createdAt: o.createdAt,
           customerName: o.customer.name,
           customerPhone: o.customer.phone,
+          itemCount: o._count.items,
         })),
         total,
       },
@@ -1130,23 +1277,35 @@ export async function getOrderDetail(
     paymentSource: string
     subtotal: number
     discountAmount: number | null
+    discountReason: string | null
     courierCharges: number | null
     totalOrderValue: number
     advanceAmount: number | null
+    advancePaymentMethod: string | null
+    advancePaymentReference: string | null
+    advancePaymentScreenshotUrl: string | null
     advancePaidAt: Date | null
+    remainingCodAmount: number | null
     codCollected: boolean
     codCollectedAmount: number | null
     codCollectedAt: Date | null
+    convertedBy: string | null
+    convertedAt: Date | null
     deliveryAddress: string | null
     deliveryCity: string | null
     courierName: string | null
     trackingNumber: string | null
+    dispatchLocationId: string | null
+    notesForCourier: string | null
+    skippedConfirmation: boolean
+    skippedPacking: boolean
     confirmedAt: Date | null
     packedAt: Date | null
     dispatchedAt: Date | null
     deliveredAt: Date | null
     cancelledAt: Date | null
     cancellationReason: string | null
+    returnedAt: Date | null
     createdAt: Date
   }
   customer: {
@@ -1206,6 +1365,7 @@ export async function getOrderDetail(
           courierCharges: order.courierCharges ? Number(order.courierCharges) : null,
           totalOrderValue: Number(order.totalOrderValue),
           advanceAmount: order.advanceAmount ? Number(order.advanceAmount) : null,
+          remainingCodAmount: order.remainingCodAmount ? Number(order.remainingCodAmount) : null,
           codCollectedAmount: order.codCollectedAmount ? Number(order.codCollectedAmount) : null,
           deliveryAddress: order.deliveryAddress,
         },

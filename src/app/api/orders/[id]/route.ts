@@ -105,6 +105,7 @@ export async function GET(
         skippedConfirmation: order.skippedConfirmation,
         skippedPacking: order.skippedPacking,
 
+        convertedBy: order.convertedBy,
         confirmedAt: order.confirmedAt?.toISOString() ?? null,
         packedAt: order.packedAt?.toISOString() ?? null,
         dispatchedAt: order.dispatchedAt?.toISOString() ?? null,

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
@@ -14,7 +14,7 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Separator } from '@/components/ui/separator'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import {
   Select,
@@ -47,6 +47,11 @@ import {
   Truck,
   CheckCircle2,
   Check,
+  Upload,
+  X,
+  ShoppingBag,
+  History,
+  PackageCheck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -167,6 +172,28 @@ const STEPS = [
   { num: 5, label: 'Review', icon: CheckCircle2 },
 ] as const
 
+/** Stock badge for a variant based on fulfillmentType. */
+function stockBadgeFor(
+  fulfillmentType: string,
+): { label: string; className: string } {
+  if (fulfillmentType === 'made_to_order') {
+    return {
+      label: 'Made to Order',
+      className: 'bg-purple-50 text-purple-700 border-purple-200',
+    }
+  }
+  if (fulfillmentType === 'backorder') {
+    return {
+      label: 'Backorder Available',
+      className: 'bg-orange-50 text-orange-700 border-orange-200',
+    }
+  }
+  return {
+    label: 'In Stock',
+    className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main view
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,11 +205,16 @@ export function OrderCreateView() {
   const canCreate = can(PERMISSIONS.ORDERS_CREATE)
 
   const [step, setStep] = useState(1)
+  // Tracks the furthest step the user has reached — used to gate the
+  // stepper's "click to go back" behaviour so users can only jump to
+  // previously-visited (or current) steps.
+  const [maxStep, setMaxStep] = useState(1)
 
   // ── Form state ────────────────────────────────────────────────────────────
   // Customer
   const [customerMode, setCustomerMode] = useState<'existing' | 'new'>('existing')
   const [phoneSearch, setPhoneSearch] = useState('')
+  const [debouncedPhone, setDebouncedPhone] = useState('')
   const [selectedCustomer, setSelectedCustomer] = useState<CustomerRow | null>(null)
   const [newCustomer, setNewCustomer] = useState({
     name: '',
@@ -213,6 +245,12 @@ export function OrderCreateView() {
   const [discountAmount, setDiscountAmount] = useState('')
   const [discountReason, setDiscountReason] = useState('')
 
+  // ── Debounce phone search ────────────────────────────────────────────────
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedPhone(phoneSearch.trim()), 350)
+    return () => clearTimeout(t)
+  }, [phoneSearch])
+
   // ── Data queries ──────────────────────────────────────────────────────────
   const locationsQuery = useQuery<LocationsResponse>({
     queryKey: ['locations'],
@@ -226,8 +264,7 @@ export function OrderCreateView() {
     staleTime: 60_000,
   })
 
-  // Customer phone search — debounced via staleTime + query key
-  const trimmedPhone = phoneSearch.trim()
+  const trimmedPhone = debouncedPhone
   const customersQuery = useQuery<CustomersSearchResponse>({
     queryKey: ['customers', 'search', trimmedPhone],
     queryFn: () =>
@@ -274,14 +311,7 @@ export function OrderCreateView() {
   const discount = parsePrice(discountAmount)
   const total = Math.max(0, subtotal - discount)
 
-  // ── Auto-fill delivery from customer ──────────────────────────────────────
-  useEffect(() => {
-    if (customerMode === 'existing' && selectedCustomer) {
-      // No addresses returned by customer search — let user type.
-    }
-  }, [customerMode, selectedCustomer])
-
-  // When switching to "new" customer, pre-fill delivery fields from their input.
+  // ── When switching to "new" customer, pre-fill delivery fields ────────────
   useEffect(() => {
     if (customerMode === 'new') {
       if (newCustomer.address && !deliveryAddress) {
@@ -290,11 +320,8 @@ export function OrderCreateView() {
       if (newCustomer.city && !deliveryCity) {
         setDeliveryCity(newCustomer.city)
       }
-      if (newCustomer.phone && !courierName) {
-        // leave courier blank — not derivable
-      }
     }
-  }, [customerMode, newCustomer.address, newCustomer.city, newCustomer.phone, courierName, deliveryAddress, deliveryCity])
+  }, [customerMode])
 
   // ── Auto-select default dispatch location ─────────────────────────────────
   useEffect(() => {
@@ -364,6 +391,19 @@ export function OrderCreateView() {
     if (step === 3) return paymentStepValid
     if (step === 4) return deliveryStepValid
     return true
+  }
+
+  const goToStep = (target: number) => {
+    if (target < 1 || target > STEPS.length) return
+    // Only allow jumping to a previously-visited (or current) step.
+    if (target <= maxStep) setStep(target)
+  }
+
+  const goNext = () => {
+    if (!canGoNext()) return
+    const next = step + 1
+    setStep(next)
+    setMaxStep((m) => Math.max(m, next))
   }
 
   // ── Mutation: create order ────────────────────────────────────────────────
@@ -460,7 +500,7 @@ export function OrderCreateView() {
     <div className="space-y-6">
       <PageHeader
         title="Create Order"
-        description="Manually create a customer order"
+        description="Manually create a customer order in 5 quick steps"
         actions={
           <Button variant="outline" size="sm" onClick={() => navigate({ name: 'orders' })}>
             <ArrowLeft className="h-4 w-4" /> Back to Orders
@@ -469,21 +509,25 @@ export function OrderCreateView() {
       />
 
       {/* ── Stepper ─────────────────────────────────────────────────────────── */}
-      <Stepper currentStep={step} />
+      <Stepper currentStep={step} maxStep={maxStep} onStepClick={goToStep} />
 
       {/* ── Step content ────────────────────────────────────────────────────── */}
       {step === 1 && (
         <CustomerStep
           customerMode={customerMode}
-          setCustomerMode={setCustomerMode}
+          setCustomerMode={(m) => {
+            setCustomerMode(m)
+            setSelectedCustomer(null)
+          }}
           phoneSearch={phoneSearch}
           setPhoneSearch={setPhoneSearch}
+          isSearching={customersQuery.isFetching && trimmedPhone.length >= 4}
           selectedCustomer={selectedCustomer}
           setSelectedCustomer={setSelectedCustomer}
           newCustomer={newCustomer}
           setNewCustomer={setNewCustomer}
           customers={customersQuery.data?.customers ?? []}
-          isSearching={customersQuery.isFetching}
+          hasSearched={trimmedPhone.length >= 4}
         />
       )}
 
@@ -553,6 +597,7 @@ export function OrderCreateView() {
           advanceAmount={advanceAmount}
           advancePaymentMethod={advancePaymentMethod}
           advancePaymentReference={advancePaymentReference}
+          advancePaymentScreenshotUrl={advancePaymentScreenshotUrl}
           deliveryAddress={deliveryAddress}
           deliveryCity={deliveryCity}
           courierName={courierName}
@@ -583,12 +628,13 @@ export function OrderCreateView() {
         </div>
 
         {step < 5 ? (
-          <Button onClick={() => setStep(step + 1)} disabled={!canGoNext()}>
+          <Button onClick={goNext} disabled={!canGoNext()}>
             Continue
             <ArrowRight className="h-4 w-4" />
           </Button>
         ) : (
           <Button
+            size="lg"
             onClick={handleSubmit}
             disabled={
               createMutation.isPending ||
@@ -615,26 +661,43 @@ export function OrderCreateView() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Stepper
+// Stepper — horizontal, clickable to revisit previous steps
 // ─────────────────────────────────────────────────────────────────────────────
 
-function Stepper({ currentStep }: { currentStep: number }) {
+function Stepper({
+  currentStep,
+  maxStep,
+  onStepClick,
+}: {
+  currentStep: number
+  maxStep: number
+  onStepClick: (step: number) => void
+}) {
   return (
     <Card>
       <CardContent className="p-4">
-        <ol className="flex items-center justify-between gap-2">
+        <ol className="flex items-center justify-between gap-1 sm:gap-2">
           {STEPS.map((s, idx) => {
             const Icon = s.icon
             const isComplete = currentStep > s.num
             const isCurrent = currentStep === s.num
+            const isReachable = s.num <= maxStep
             return (
               <li key={s.num} className="flex items-center flex-1 last:flex-none">
-                <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={!isReachable}
+                  onClick={() => isReachable && onStepClick(s.num)}
+                  className={cn(
+                    'flex items-center gap-2 rounded-md transition-colors',
+                    isReachable ? 'cursor-pointer hover:bg-muted/40 px-1.5 py-1' : 'cursor-not-allowed',
+                  )}
+                >
                   <div
                     className={cn(
-                      'flex h-8 w-8 items-center justify-center rounded-full border-2 transition-colors',
+                      'flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-full border-2 transition-colors',
                       isComplete && 'bg-primary border-primary text-primary-foreground',
-                      isCurrent && 'border-primary text-primary',
+                      isCurrent && 'border-primary text-primary bg-primary/10',
                       !isComplete && !isCurrent && 'border-muted text-muted-foreground',
                     )}
                   >
@@ -642,17 +705,17 @@ function Stepper({ currentStep }: { currentStep: number }) {
                   </div>
                   <span
                     className={cn(
-                      'text-sm font-medium hidden sm:inline',
+                      'text-xs sm:text-sm font-medium hidden sm:inline',
                       isCurrent ? 'text-foreground' : 'text-muted-foreground',
                     )}
                   >
                     {s.label}
                   </span>
-                </div>
+                </button>
                 {idx < STEPS.length - 1 && (
                   <div
                     className={cn(
-                      'h-0.5 flex-1 mx-2 rounded-full transition-colors',
+                      'h-0.5 flex-1 mx-1 sm:mx-2 rounded-full transition-colors',
                       isComplete ? 'bg-primary' : 'bg-muted',
                     )}
                   />
@@ -675,17 +738,19 @@ function CustomerStep({
   setCustomerMode,
   phoneSearch,
   setPhoneSearch,
+  isSearching,
   selectedCustomer,
   setSelectedCustomer,
   newCustomer,
   setNewCustomer,
   customers,
-  isSearching,
+  hasSearched,
 }: {
   customerMode: 'existing' | 'new'
   setCustomerMode: (m: 'existing' | 'new') => void
   phoneSearch: string
   setPhoneSearch: (v: string) => void
+  isSearching: boolean
   selectedCustomer: CustomerRow | null
   setSelectedCustomer: (c: CustomerRow | null) => void
   newCustomer: {
@@ -707,57 +772,33 @@ function CustomerStep({
     }>
   >
   customers: CustomerRow[]
-  isSearching: boolean
+  hasSearched: boolean
 }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Customer</CardTitle>
+        <CardTitle className="text-base flex items-center gap-2">
+          <User className="h-4 w-4" /> Customer
+        </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <RadioGroup
-          value={customerMode}
-          onValueChange={(v) => {
-            setCustomerMode(v as 'existing' | 'new')
-            setSelectedCustomer(null)
-          }}
-          className="grid sm:grid-cols-2 gap-3"
-        >
-          <label
-            htmlFor="mode-existing"
-            className={cn(
-              'flex items-start gap-3 rounded-lg border p-4 cursor-pointer transition-colors',
-              customerMode === 'existing'
-                ? 'border-primary bg-primary/5'
-                : 'border-border hover:bg-muted/40',
-            )}
-          >
-            <RadioGroupItem value="existing" id="mode-existing" className="mt-1" />
-            <div>
-              <p className="text-sm font-medium">Existing customer</p>
-              <p className="text-xs text-muted-foreground">
-                Search by phone, name, or email
-              </p>
-            </div>
-          </label>
-          <label
-            htmlFor="mode-new"
-            className={cn(
-              'flex items-start gap-3 rounded-lg border p-4 cursor-pointer transition-colors',
-              customerMode === 'new'
-                ? 'border-primary bg-primary/5'
-                : 'border-border hover:bg-muted/40',
-            )}
-          >
-            <RadioGroupItem value="new" id="mode-new" className="mt-1" />
-            <div>
-              <p className="text-sm font-medium">Add new customer</p>
-              <p className="text-xs text-muted-foreground">
-                Create a new customer record
-              </p>
-            </div>
-          </label>
-        </RadioGroup>
+      <CardContent className="space-y-5">
+        {/* Mode toggle cards */}
+        <div className="grid sm:grid-cols-2 gap-3">
+          <ModeCard
+            active={customerMode === 'existing'}
+            onClick={() => setCustomerMode('existing')}
+            title="Existing Customer"
+            description="Search by phone, name, or email"
+            icon={<Search className="h-4 w-4" />}
+          />
+          <ModeCard
+            active={customerMode === 'new'}
+            onClick={() => setCustomerMode('new')}
+            title="Add New Customer"
+            description="Create a new customer record"
+            icon={<Plus className="h-4 w-4" />}
+          />
+        </div>
 
         {customerMode === 'existing' ? (
           <div className="space-y-3">
@@ -771,7 +812,7 @@ function CustomerStep({
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                 <Input
                   id="phone-search"
-                  placeholder="e.g. 03001234567"
+                  placeholder="e.g. 03001234567 or Ayesha"
                   className="pl-9"
                   value={phoneSearch}
                   onChange={(e) => {
@@ -784,17 +825,31 @@ function CustomerStep({
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
-                Type at least 4 characters to search.
+                Type at least 4 characters to search. Search is debounced.
               </p>
             </div>
 
-            {phoneSearch.trim().length >= 4 && !selectedCustomer && (
-              <div className="rounded-md border bg-popover shadow-sm max-h-72 overflow-y-auto scrollbar-thin">
+            {/* Search results */}
+            {hasSearched && !selectedCustomer && (
+              <div className="rounded-md border bg-popover shadow-sm max-h-72 overflow-y-auto">
                 {customers.length === 0 ? (
-                  <div className="p-3 text-sm text-muted-foreground">
-                    {isSearching
-                      ? 'Searching…'
-                      : 'No matching customers. Switch to "Add new customer".'}
+                  <div className="p-4 text-sm text-muted-foreground text-center">
+                    {isSearching ? (
+                      <span className="flex items-center justify-center gap-2">
+                        <Loader2 className="h-4 w-4 animate-spin" /> Searching…
+                      </span>
+                    ) : (
+                      <>
+                        No matching customers.{' '}
+                        <button
+                          type="button"
+                          className="text-primary underline underline-offset-2"
+                          onClick={() => setCustomerMode('new')}
+                        >
+                          Add a new customer
+                        </button>
+                      </>
+                    )}
                   </div>
                 ) : (
                   <ul className="divide-y">
@@ -803,7 +858,7 @@ function CustomerStep({
                         <button
                           type="button"
                           onClick={() => setSelectedCustomer(c)}
-                          className="w-full text-left px-3 py-2 hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
+                          className="w-full text-left px-3 py-2.5 hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
                         >
                           <div className="min-w-0">
                             <p className="text-sm font-medium truncate">{c.name}</p>
@@ -811,12 +866,15 @@ function CustomerStep({
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
                             {c.isFlagged && (
-                              <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
+                              <Badge
+                                variant="outline"
+                                className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]"
+                              >
                                 Flagged
                               </Badge>
                             )}
                             <span className="text-xs text-muted-foreground">
-                              {c.totalOrdersCount} orders
+                              {c.totalOrdersCount} order{c.totalOrdersCount === 1 ? '' : 's'}
                             </span>
                           </div>
                         </button>
@@ -827,28 +885,67 @@ function CustomerStep({
               </div>
             )}
 
+            {/* Selected customer card with history summary */}
             {selectedCustomer && (
-              <Alert>
-                <User className="h-4 w-4" />
-                <AlertTitle>Selected customer</AlertTitle>
-                <AlertDescription>
-                  <div className="flex items-center justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-medium">{selectedCustomer.name}</p>
+              <div className="rounded-lg border-2 border-primary/40 bg-primary/5 p-4 space-y-3">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-3 min-w-0">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
+                      <User className="h-5 w-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-semibold truncate">{selectedCustomer.name}</p>
+                        {selectedCustomer.isFlagged && (
+                          <Badge
+                            variant="outline"
+                            className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]"
+                          >
+                            Flagged
+                          </Badge>
+                        )}
+                      </div>
                       <p className="text-xs text-muted-foreground font-mono">
                         {selectedCustomer.phone}
                       </p>
+                      {selectedCustomer.email && (
+                        <p className="text-xs text-muted-foreground">{selectedCustomer.email}</p>
+                      )}
                     </div>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setSelectedCustomer(null)}
-                    >
-                      Change
-                    </Button>
                   </div>
-                </AlertDescription>
-              </Alert>
+                  <Button size="sm" variant="ghost" onClick={() => setSelectedCustomer(null)}>
+                    Change
+                  </Button>
+                </div>
+                <Separator />
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-md bg-background p-2.5">
+                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Previous Orders
+                    </p>
+                    <p className="text-lg font-semibold">{selectedCustomer.totalOrdersCount}</p>
+                  </div>
+                  <div className="rounded-md bg-background p-2.5">
+                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                      Total RTOs
+                    </p>
+                    <p
+                      className={cn(
+                        'text-lg font-semibold',
+                        selectedCustomer.totalRtoCount > 0 ? 'text-rose-600' : '',
+                      )}
+                    >
+                      {selectedCustomer.totalRtoCount}
+                    </p>
+                  </div>
+                </div>
+                {selectedCustomer.totalOrdersCount > 0 && (
+                  <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                    <History className="h-3 w-3" />
+                    Returning customer — verify address before dispatch.
+                  </p>
+                )}
+              </div>
             )}
           </div>
         ) : (
@@ -917,8 +1014,46 @@ function CustomerStep({
   )
 }
 
+function ModeCard({
+  active,
+  onClick,
+  title,
+  description,
+  icon,
+}: {
+  active: boolean
+  onClick: () => void
+  title: string
+  description: string
+  icon: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        'flex items-start gap-3 rounded-lg border p-4 text-left transition-colors',
+        active ? 'border-primary bg-primary/5 ring-1 ring-primary/30' : 'border-border hover:bg-muted/40',
+      )}
+    >
+      <div
+        className={cn(
+          'flex h-8 w-8 items-center justify-center rounded-md shrink-0',
+          active ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
+        )}
+      >
+        {icon}
+      </div>
+      <div>
+        <p className="text-sm font-medium">{title}</p>
+        <p className="text-xs text-muted-foreground">{description}</p>
+      </div>
+    </button>
+  )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 2: Items
+// Step 2: Items — search + sticky cart summary
 // ─────────────────────────────────────────────────────────────────────────────
 
 function ItemsStep({
@@ -943,172 +1078,191 @@ function ItemsStep({
   subtotal: number
 }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base">Items</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="variant-search">Add products</Label>
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-            <Input
-              id="variant-search"
-              placeholder="Search by SKU or product title…"
-              className="pl-9"
-              value={variantSearch}
-              onChange={(e) => setVariantSearch(e.target.value)}
-              disabled={isLoadingProducts}
-            />
-            {isLoadingProducts && (
-              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-            )}
-          </div>
-        </div>
+    <div className="grid gap-4 lg:grid-cols-3">
+      {/* Search + results (left, spans 2 cols on desktop) */}
+      <div className="lg:col-span-2 space-y-4">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Package className="h-4 w-4" /> Add Products
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="variant-search">Search products / variants</Label>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                <Input
+                  id="variant-search"
+                  placeholder="Search by SKU or product title…"
+                  className="pl-9"
+                  value={variantSearch}
+                  onChange={(e) => setVariantSearch(e.target.value)}
+                  disabled={isLoadingProducts}
+                />
+                {isLoadingProducts && (
+                  <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+                )}
+              </div>
+            </div>
 
-        {variantSearch.trim() && (
-          <div className="rounded-md border bg-popover shadow-sm max-h-64 overflow-y-auto scrollbar-thin">
-            {variantSearchResults.length === 0 ? (
-              <div className="p-3 text-sm text-muted-foreground">
-                {isLoadingProducts ? 'Loading variants…' : 'No variants match your search.'}
+            {/* Search results as cards */}
+            {variantSearch.trim() ? (
+              <div className="space-y-2 max-h-80 overflow-y-auto">
+                {isLoadingProducts ? (
+                  Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-16" />)
+                ) : variantSearchResults.length === 0 ? (
+                  <div className="rounded-md border-2 border-dashed p-6 text-center text-sm text-muted-foreground">
+                    No variants match &ldquo;{variantSearch}&rdquo;.
+                  </div>
+                ) : (
+                  variantSearchResults.map((v) => {
+                    const badge = stockBadgeFor(v.fulfillmentType)
+                    return (
+                      <button
+                        key={v.variantId}
+                        type="button"
+                        onClick={() => addVariant(v)}
+                        className="w-full text-left rounded-lg border p-3 hover:border-primary/40 hover:bg-muted/40 transition-colors flex items-center justify-between gap-3"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-medium truncate">{v.productTitle}</p>
+                          <p className="text-xs text-muted-foreground font-mono">{v.sku}</p>
+                          <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
+                            {badge.label}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="text-sm font-medium tabular-nums">
+                            {v.salePrice ? formatPKR(v.salePrice) : formatPKR(v.costPrice)}
+                          </span>
+                          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
+                            <Plus className="h-4 w-4" />
+                          </div>
+                        </div>
+                      </button>
+                    )
+                  })
+                )}
               </div>
             ) : (
-              <ul className="divide-y">
-                {variantSearchResults.map((v) => (
-                  <li key={v.variantId}>
-                    <button
-                      type="button"
-                      onClick={() => addVariant(v)}
-                      className="w-full text-left px-3 py-2 hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
-                    >
-                      <div className="min-w-0">
-                        <p className="text-sm font-medium truncate">{v.productTitle}</p>
-                        <p className="text-xs text-muted-foreground font-mono">{v.sku}</p>
-                      </div>
-                      <div className="flex items-center gap-2 shrink-0">
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            'text-[10px]',
-                            v.fulfillmentType === 'made_to_order'
-                              ? 'bg-purple-50 text-purple-700 border-purple-200'
-                              : 'bg-sky-50 text-sky-700 border-sky-200',
-                          )}
-                        >
-                          {v.fulfillmentType === 'made_to_order' ? 'MTO' : 'Stock'}
-                        </Badge>
-                        <span className="text-xs text-muted-foreground">
-                          {v.salePrice ? formatPKR(v.salePrice) : formatPKR(v.costPrice)}
-                        </span>
-                        <Plus className="h-3.5 w-3.5 text-primary" />
-                      </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <div className="rounded-md border-2 border-dashed p-6 text-center">
+                <Package className="h-8 w-8 mx-auto text-muted-foreground/40 mb-2" />
+                <p className="text-sm font-medium">Search to add products</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Type a product title or SKU above to see available variants.
+                </p>
+              </div>
             )}
-          </div>
-        )}
+          </CardContent>
+        </Card>
+      </div>
 
-        <div className="rounded-md border">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Variant</TableHead>
-                <TableHead className="w-24">Qty</TableHead>
-                <TableHead className="w-32">Unit price</TableHead>
-                <TableHead className="text-right w-28">Line total</TableHead>
-                <TableHead className="w-10" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
+      {/* Cart summary (right, sticky on desktop) */}
+      <div className="lg:col-span-1">
+        <div className="lg:sticky lg:top-4 space-y-3">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center justify-between">
+                <span className="flex items-center gap-2">
+                  <ShoppingBag className="h-4 w-4" /> Cart
+                </span>
+                <Badge variant="secondary" className="text-[10px]">
+                  {cart.length} item{cart.length === 1 ? '' : 's'}
+                </Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
               {cart.length === 0 ? (
-                <TableRow>
-                  <TableCell
-                    colSpan={5}
-                    className="text-center text-sm text-muted-foreground py-8"
-                  >
-                    No items added yet. Search above to add variants.
-                  </TableCell>
-                </TableRow>
+                <div className="rounded-md border-2 border-dashed p-6 text-center">
+                  <ShoppingBag className="h-7 w-7 mx-auto text-muted-foreground/40 mb-2" />
+                  <p className="text-sm font-medium">Cart is empty</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Add variants from the search results.
+                  </p>
+                </div>
               ) : (
-                cart.map((item) => (
-                  <TableRow key={item.variantId}>
-                    <TableCell>
-                      <div className="flex flex-col">
-                        <span className="text-sm font-medium">{item.productTitle}</span>
-                        <span className="text-xs text-muted-foreground font-mono">
-                          {item.sku}
-                        </span>
-                        <Badge
-                          variant="outline"
-                          className={cn(
-                            'text-[10px] w-fit mt-1',
-                            item.fulfillmentType === 'made_to_order'
-                              ? 'bg-purple-50 text-purple-700 border-purple-200'
-                              : 'bg-sky-50 text-sky-700 border-sky-200',
-                          )}
-                        >
-                          {item.fulfillmentType === 'made_to_order' ? 'MTO' : 'Stock'}
-                        </Badge>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        type="number"
-                        min="1"
-                        step="1"
-                        className="h-8 tabular-nums"
-                        value={item.quantity}
-                        onChange={(e) =>
-                          updateItem(item.variantId, { quantity: parseQty(e.target.value) })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        className="h-8 tabular-nums"
-                        value={item.unitPrice}
-                        onChange={(e) =>
-                          updateItem(item.variantId, { unitPrice: parsePrice(e.target.value) })
-                        }
-                      />
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums font-medium">
-                      {formatPKR(item.quantity * item.unitPrice)}
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        size="icon"
-                        variant="ghost"
-                        className="h-7 w-7 text-rose-600 hover:bg-rose-50"
-                        onClick={() => removeItem(item.variantId)}
-                        aria-label={`Remove ${item.sku}`}
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))
+                <>
+                  <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                    {cart.map((item) => {
+                      const badge = stockBadgeFor(item.fulfillmentType)
+                      return (
+                        <div key={item.variantId} className="rounded-md border p-2.5 space-y-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium truncate">{item.productTitle}</p>
+                              <p className="text-xs text-muted-foreground font-mono">{item.sku}</p>
+                            </div>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-6 w-6 text-rose-600 hover:bg-rose-50 shrink-0"
+                              onClick={() => removeItem(item.variantId)}
+                              aria-label={`Remove ${item.sku}`}
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          </div>
+                          <Badge variant="outline" className={cn('text-[10px]', badge.className)}>
+                            {badge.label}
+                          </Badge>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <Label className="text-[10px] text-muted-foreground">Qty</Label>
+                              <Input
+                                type="number"
+                                min="1"
+                                step="1"
+                                className="h-8 text-sm tabular-nums"
+                                value={item.quantity}
+                                onChange={(e) =>
+                                  updateItem(item.variantId, { quantity: parseQty(e.target.value) })
+                                }
+                              />
+                            </div>
+                            <div>
+                              <Label className="text-[10px] text-muted-foreground">Unit Price</Label>
+                              <Input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                className="h-8 text-sm tabular-nums"
+                                value={item.unitPrice}
+                                onChange={(e) =>
+                                  updateItem(item.variantId, {
+                                    unitPrice: parsePrice(e.target.value),
+                                  })
+                                }
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-between text-xs">
+                            <span className="text-muted-foreground">Line total</span>
+                            <span className="font-medium tabular-nums">
+                              {formatPKR(item.quantity * item.unitPrice)}
+                            </span>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <Separator />
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium">Subtotal</span>
+                    <span className="text-lg font-bold tabular-nums">{formatPKR(subtotal)}</span>
+                  </div>
+                </>
               )}
-            </TableBody>
-          </Table>
+            </CardContent>
+          </Card>
         </div>
-
-        <div className="flex items-center justify-end gap-3">
-          <span className="text-sm text-muted-foreground">Subtotal</span>
-          <span className="text-lg font-semibold tabular-nums">{formatPKR(subtotal)}</span>
-        </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 3: Payment
+// Step 3: Payment — selectable cards + screenshot upload
 // ─────────────────────────────────────────────────────────────────────────────
 
 function PaymentStep({
@@ -1140,98 +1294,110 @@ function PaymentStep({
   total: number
   discount: number
 }) {
+  const remainingCod =
+    paymentType === 'fully_prepaid'
+      ? 0
+      : paymentType === 'partial_advance'
+        ? Math.max(0, total - parsePrice(advanceAmount))
+        : total
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Payment</CardTitle>
+        <CardTitle className="text-base flex items-center gap-2">
+          <CreditCard className="h-4 w-4" /> Payment
+        </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <RadioGroup
-          value={paymentType}
-          onValueChange={(v) => setPaymentType(v as PaymentType)}
-          className="grid gap-3"
-        >
-          <PaymentOption
-            value="full_cod"
+      <CardContent className="space-y-5">
+        {/* Selectable payment type cards */}
+        <div className="grid gap-3">
+          <PaymentTypeCard
+            active={paymentType === 'full_cod'}
+            onClick={() => setPaymentType('full_cod')}
             title="Full COD"
             description="Customer pays the full amount in cash on delivery."
-            current={paymentType}
+            badge="Cash on Delivery"
+            tone="amber"
           />
-          <PaymentOption
-            value="partial_advance"
+          <PaymentTypeCard
+            active={paymentType === 'partial_advance'}
+            onClick={() => setPaymentType('partial_advance')}
             title="Partial Advance"
             description="Customer pays a portion upfront; the rest is collected on delivery."
-            current={paymentType}
+            badge="Advance + COD"
+            tone="sky"
           />
-          <PaymentOption
-            value="fully_prepaid"
+          <PaymentTypeCard
+            active={paymentType === 'fully_prepaid'}
+            onClick={() => setPaymentType('fully_prepaid')}
             title="Fully Prepaid"
             description="Customer has paid the full amount before dispatch."
-            current={paymentType}
+            badge="Prepaid"
+            tone="emerald"
           />
-        </RadioGroup>
+        </div>
 
+        {/* Expanded fields for advance / prepaid */}
         {paymentType !== 'full_cod' && (
-          <div className="grid sm:grid-cols-2 gap-4 rounded-lg border bg-muted/30 p-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="advance-amount">
-                {paymentType === 'fully_prepaid'
-                  ? 'Total paid (auto-calculated)'
-                  : 'Advance amount *'}
-              </Label>
-              <Input
-                id="advance-amount"
-                type="number"
-                min="0"
-                step="0.01"
-                placeholder={paymentType === 'fully_prepaid' ? formatPKR(total) : 'e.g. 500'}
-                value={paymentType === 'fully_prepaid' ? String(total) : advanceAmount}
-                onChange={(e) => setAdvanceAmount(e.target.value)}
-                disabled={paymentType === 'fully_prepaid'}
-              />
-              {paymentType === 'partial_advance' && (
-                <p className="text-xs text-muted-foreground">
-                  Remaining COD: {formatPKR(Math.max(0, total - parsePrice(advanceAmount)))}
-                </p>
-              )}
+          <div className="rounded-lg border bg-muted/30 p-4 space-y-4">
+            <div className="grid sm:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="advance-amount">
+                  {paymentType === 'fully_prepaid'
+                    ? 'Total paid (auto-calculated)'
+                    : 'Advance amount *'}
+                </Label>
+                <Input
+                  id="advance-amount"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder={paymentType === 'fully_prepaid' ? formatPKR(total) : 'e.g. 500'}
+                  value={paymentType === 'fully_prepaid' ? String(total) : advanceAmount}
+                  onChange={(e) => setAdvanceAmount(e.target.value)}
+                  disabled={paymentType === 'fully_prepaid'}
+                />
+                {paymentType === 'partial_advance' && (
+                  <p className="text-xs text-muted-foreground">
+                    Remaining COD:{' '}
+                    <span className="font-medium tabular-nums">{formatPKR(remainingCod)}</span>
+                  </p>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="advance-method">Payment method</Label>
+                <Select value={advancePaymentMethod} onValueChange={setAdvancePaymentMethod}>
+                  <SelectTrigger id="advance-method">
+                    <SelectValue placeholder="Select method" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {PAYMENT_METHODS.map((m) => (
+                      <SelectItem key={m.value} value={m.value}>
+                        {m.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5 sm:col-span-2">
+                <Label htmlFor="advance-ref">Reference (transaction ID, etc.)</Label>
+                <Input
+                  id="advance-ref"
+                  placeholder="Optional"
+                  value={advancePaymentReference}
+                  onChange={(e) => setAdvancePaymentReference(e.target.value)}
+                />
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="advance-method">Payment method</Label>
-              <Select value={advancePaymentMethod} onValueChange={setAdvancePaymentMethod}>
-                <SelectTrigger id="advance-method">
-                  <SelectValue placeholder="Select method" />
-                </SelectTrigger>
-                <SelectContent>
-                  {PAYMENT_METHODS.map((m) => (
-                    <SelectItem key={m.value} value={m.value}>
-                      {m.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="advance-ref">Reference (transaction ID, etc.)</Label>
-              <Input
-                id="advance-ref"
-                placeholder="Optional"
-                value={advancePaymentReference}
-                onChange={(e) => setAdvancePaymentReference(e.target.value)}
-              />
-            </div>
-            <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="advance-shot">Screenshot URL</Label>
-              <Input
-                id="advance-shot"
-                type="url"
-                placeholder="https://…"
-                value={advancePaymentScreenshotUrl}
-                onChange={(e) => setAdvancePaymentScreenshotUrl(e.target.value)}
-              />
-            </div>
+
+            <ScreenshotUpload
+              url={advancePaymentScreenshotUrl}
+              onChange={setAdvancePaymentScreenshotUrl}
+            />
           </div>
         )}
 
+        {/* Live total summary */}
         <div className="rounded-md bg-muted/40 p-3 space-y-1 text-sm">
           <div className="flex items-center justify-between">
             <span className="text-muted-foreground">Subtotal</span>
@@ -1247,37 +1413,196 @@ function PaymentStep({
             <span>Total</span>
             <span className="tabular-nums">{formatPKR(total)}</span>
           </div>
+          {paymentType !== 'full_cod' && (
+            <div className="flex items-center justify-between pt-1 text-amber-700">
+              <span className="text-xs">Remaining COD to collect</span>
+              <span className="text-xs font-medium tabular-nums">{formatPKR(remainingCod)}</span>
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>
   )
 }
 
-function PaymentOption({
-  value,
+function PaymentTypeCard({
+  active,
+  onClick,
   title,
   description,
-  current,
+  badge,
+  tone,
 }: {
-  value: string
+  active: boolean
+  onClick: () => void
   title: string
   description: string
-  current: string
+  badge: string
+  tone: 'amber' | 'sky' | 'emerald'
 }) {
+  const toneClasses = {
+    amber: 'bg-amber-50 text-amber-700 border-amber-200',
+    sky: 'bg-sky-50 text-sky-700 border-sky-200',
+    emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  } as const
+
   return (
-    <label
-      htmlFor={`pay-${value}`}
+    <button
+      type="button"
+      onClick={onClick}
       className={cn(
-        'flex items-start gap-3 rounded-lg border p-4 cursor-pointer transition-colors',
-        current === value ? 'border-primary bg-primary/5' : 'border-border hover:bg-muted/40',
+        'flex items-start gap-3 rounded-lg border p-4 text-left transition-all',
+        active
+          ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
+          : 'border-border hover:bg-muted/40',
       )}
     >
-      <RadioGroupItem value={value} id={`pay-${value}`} className="mt-1" />
-      <div>
-        <p className="text-sm font-medium">{title}</p>
-        <p className="text-xs text-muted-foreground">{description}</p>
+      <div
+        className={cn(
+          'flex h-5 w-5 items-center justify-center rounded-full border-2 mt-0.5 shrink-0',
+          active ? 'border-primary bg-primary' : 'border-muted-foreground/40',
+        )}
+      >
+        {active && <Check className="h-3 w-3 text-primary-foreground" />}
       </div>
-    </label>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <p className="text-sm font-medium">{title}</p>
+          <Badge variant="outline" className={cn('text-[10px]', toneClasses[tone])}>
+            {badge}
+          </Badge>
+        </div>
+        <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+      </div>
+    </button>
+  )
+}
+
+/**
+ * Screenshot upload — uploads to /api/upload?type=order_screenshot on file
+ * select and stores the returned URL. Follows the logo-upload pattern.
+ */
+function ScreenshotUpload({
+  url,
+  onChange,
+}: {
+  url: string
+  onChange: (url: string) => void
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleFile(file: File) {
+    setError(null)
+    if (file.size > 5 * 1024 * 1024) {
+      setError('File too large. Maximum 5 MB.')
+      return
+    }
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setError('Only JPG, PNG, and WebP images are allowed.')
+      return
+    }
+    setUploading(true)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      const res = await fetch('/api/upload?type=order_screenshot', {
+        method: 'POST',
+        body: fd,
+      })
+      const text = await res.text()
+      let body: unknown = null
+      if (text) {
+        try {
+          body = JSON.parse(text)
+        } catch {
+          body = text
+        }
+      }
+      if (!res.ok) {
+        const message =
+          body && typeof body === 'object' && 'error' in body
+            ? String((body as { error: unknown }).error)
+            : typeof body === 'string'
+              ? body
+              : `Upload failed (HTTP ${res.status})`
+        throw new Error(message)
+      }
+      const { url: uploadedUrl } = body as { url: string }
+      onChange(uploadedUrl)
+      toast.success('Screenshot uploaded.')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Network error during upload')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <Label>Payment screenshot (optional)</Label>
+      <div className="flex items-center gap-3">
+        {url ? (
+          <div className="relative group">
+            <button
+              type="button"
+              onClick={() => inputRef.current?.click()}
+              className="block rounded-md border overflow-hidden"
+            >
+              <img
+                src={url}
+                alt="Payment screenshot"
+                className="h-20 w-20 object-cover"
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setError(null)
+                onChange('')
+              }}
+              className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center shadow-sm hover:scale-110 transition-transform"
+              aria-label="Remove screenshot"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            disabled={uploading}
+            className={cn(
+              'flex h-20 w-20 items-center justify-center rounded-md border-2 border-dashed text-muted-foreground hover:border-primary/50 hover:text-primary transition-colors',
+              uploading && 'opacity-60 cursor-not-allowed',
+            )}
+          >
+            {uploading ? (
+              <Loader2 className="h-5 w-5 animate-spin" />
+            ) : (
+              <Upload className="h-5 w-5" />
+            )}
+          </button>
+        )}
+        <div className="text-xs text-muted-foreground">
+          <p>{url ? 'Click image to replace' : 'Click to upload'}</p>
+          <p>JPG, PNG, WebP — max 5 MB</p>
+          {error && <p className="text-destructive mt-1">{error}</p>}
+        </div>
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            if (f) handleFile(f)
+            e.target.value = ''
+          }}
+        />
+      </div>
+    </div>
   )
 }
 
@@ -1329,9 +1654,11 @@ function DeliveryStep({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Delivery & Discount</CardTitle>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Truck className="h-4 w-4" /> Delivery & Discount
+        </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-5">
         <div className="grid sm:grid-cols-2 gap-4">
           <div className="space-y-1.5 sm:col-span-2">
             <Label htmlFor="del-address">
@@ -1462,6 +1789,7 @@ function ReviewStep({
   advanceAmount,
   advancePaymentMethod,
   advancePaymentReference,
+  advancePaymentScreenshotUrl,
   deliveryAddress,
   deliveryCity,
   courierName,
@@ -1489,6 +1817,7 @@ function ReviewStep({
   advanceAmount: string
   advancePaymentMethod: string
   advancePaymentReference: string
+  advancePaymentScreenshotUrl: string
   deliveryAddress: string
   deliveryCity: string
   courierName: string
@@ -1508,43 +1837,71 @@ function ReviewStep({
       : paymentType === 'partial_advance'
         ? Math.max(0, total - parsePrice(advanceAmount))
         : total
+  const advanceValue =
+    paymentType === 'fully_prepaid' ? total : parsePrice(advanceAmount)
 
   return (
     <div className="space-y-4">
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Customer</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {customerMode === 'existing' && selectedCustomer ? (
-            <div>
-              <p className="text-sm font-medium">{selectedCustomer.name}</p>
-              <p className="text-xs text-muted-foreground font-mono">{selectedCustomer.phone}</p>
-              <p className="text-xs text-muted-foreground">
-                {selectedCustomer.totalOrdersCount} previous order
-                {selectedCustomer.totalOrdersCount === 1 ? '' : 's'}
-                {selectedCustomer.isFlagged && (
-                  <Badge variant="outline" className="ml-2 bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
-                    Flagged
-                  </Badge>
+      {/* Customer + Delivery summary cards */}
+      <div className="grid sm:grid-cols-2 gap-4">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <User className="h-4 w-4" /> Customer
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm space-y-1">
+            {customerMode === 'existing' && selectedCustomer ? (
+              <>
+                <p className="font-medium">{selectedCustomer.name}</p>
+                <p className="text-xs text-muted-foreground font-mono">{selectedCustomer.phone}</p>
+                <p className="text-xs text-muted-foreground">
+                  {selectedCustomer.totalOrdersCount} previous order
+                  {selectedCustomer.totalOrdersCount === 1 ? '' : 's'}
+                  {selectedCustomer.isFlagged && (
+                    <Badge
+                      variant="outline"
+                      className="ml-2 bg-rose-50 text-rose-700 border-rose-200 text-[10px]"
+                    >
+                      Flagged
+                    </Badge>
+                  )}
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="font-medium">{newCustomer.name}</p>
+                <p className="text-xs text-muted-foreground font-mono">{newCustomer.phone}</p>
+                {newCustomer.email && (
+                  <p className="text-xs text-muted-foreground">{newCustomer.email}</p>
                 )}
-              </p>
-            </div>
-          ) : (
-            <div>
-              <p className="text-sm font-medium">{newCustomer.name}</p>
-              <p className="text-xs text-muted-foreground font-mono">{newCustomer.phone}</p>
-              {newCustomer.email && (
-                <p className="text-xs text-muted-foreground">{newCustomer.email}</p>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+              </>
+            )}
+          </CardContent>
+        </Card>
 
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Truck className="h-4 w-4" /> Delivery
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="text-sm space-y-1.5">
+            <ReviewRow label="Address" value={deliveryAddress} />
+            <ReviewRow label="City" value={deliveryCity} />
+            <ReviewRow label="Courier" value={courierName || '—'} />
+            <ReviewRow label="Dispatch from" value={dispatchLocation?.name ?? '—'} />
+            {notesForCourier && <ReviewRow label="Notes" value={notesForCourier} />}
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Items table */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Items ({cart.length})</CardTitle>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Package className="h-4 w-4" /> Items ({cart.length})
+          </CardTitle>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
@@ -1579,62 +1936,58 @@ function ReviewStep({
         </CardContent>
       </Card>
 
-      <div className="grid sm:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Payment</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm">
-            <ReviewRow
-              label="Type"
-              value={
-                paymentType === 'full_cod'
-                  ? 'Full COD'
-                  : paymentType === 'partial_advance'
-                    ? 'Partial Advance'
-                    : 'Fully Prepaid'
-              }
-            />
-            {paymentType !== 'full_cod' && (
-              <>
-                <ReviewRow
-                  label="Advance"
-                  value={formatPKR(
-                    paymentType === 'fully_prepaid' ? total : parsePrice(advanceAmount),
-                  )}
-                />
-                <ReviewRow
-                  label="Method"
-                  value={
-                    PAYMENT_METHODS.find((m) => m.value === advancePaymentMethod)?.label ?? '—'
-                  }
-                />
-                {advancePaymentReference && (
-                  <ReviewRow label="Reference" value={advancePaymentReference} />
-                )}
-                <ReviewRow label="Remaining COD" value={formatPKR(remainingCod)} />
-              </>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Delivery</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm">
-            <ReviewRow label="Address" value={deliveryAddress} />
-            <ReviewRow label="City" value={deliveryCity} />
-            <ReviewRow label="Courier" value={courierName || '—'} />
-            <ReviewRow label="Dispatch from" value={dispatchLocation?.name ?? '—'} />
-            {notesForCourier && <ReviewRow label="Notes" value={notesForCourier} />}
-          </CardContent>
-        </Card>
-      </div>
-
+      {/* Payment breakdown */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Totals</CardTitle>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <CreditCard className="h-4 w-4" /> Payment
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm">
+          <ReviewRow
+            label="Type"
+            value={
+              paymentType === 'full_cod'
+                ? 'Full COD'
+                : paymentType === 'partial_advance'
+                  ? 'Partial Advance'
+                  : 'Fully Prepaid'
+            }
+          />
+          {paymentType !== 'full_cod' && (
+            <>
+              <ReviewRow label="Advance" value={formatPKR(advanceValue)} />
+              <ReviewRow
+                label="Method"
+                value={
+                  PAYMENT_METHODS.find((m) => m.value === advancePaymentMethod)?.label ?? '—'
+                }
+              />
+              {advancePaymentReference && (
+                <ReviewRow label="Reference" value={advancePaymentReference} />
+              )}
+              {advancePaymentScreenshotUrl && (
+                <div className="pt-1">
+                  <p className="text-xs text-muted-foreground mb-1">Screenshot</p>
+                  <img
+                    src={advancePaymentScreenshotUrl}
+                    alt="Payment screenshot"
+                    className="h-16 w-16 rounded border object-cover"
+                  />
+                </div>
+              )}
+              <ReviewRow label="Remaining COD" value={formatPKR(remainingCod)} />
+            </>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Totals */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <PackageCheck className="h-4 w-4" /> Totals
+          </CardTitle>
         </CardHeader>
         <CardContent className="space-y-2 text-sm">
           <ReviewRow label="Subtotal" value={formatPKR(subtotal)} />
@@ -1654,6 +2007,15 @@ function ReviewStep({
           </div>
         </CardContent>
       </Card>
+
+      <Alert>
+        <CheckCircle2 className="h-4 w-4" />
+        <AlertTitle>Ready to create</AlertTitle>
+        <AlertDescription>
+          Review the details above and click <strong>Create Order</strong> below to submit.
+          You&apos;ll be taken to the new order&apos;s detail page.
+        </AlertDescription>
+      </Alert>
     </div>
   )
 }

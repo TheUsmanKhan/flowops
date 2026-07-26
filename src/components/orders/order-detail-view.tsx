@@ -303,6 +303,7 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
   const [rtoDialogOpen, setRtoDialogOpen] = useState(false)
   const [convertDialogOpen, setConvertDialogOpen] = useState(false)
   const [codDialogOpen, setCodDialogOpen] = useState(false)
+  const [proofDialogOpen, setProofDialogOpen] = useState(false)
 
   // ── Invalidate helper ─────────────────────────────────────────────────────
   const invalidateAll = () => {
@@ -531,6 +532,27 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
         }
       />
 
+      {/* ── External reference + source badge band ─────────────────────── */}
+      {(order.externalOrderReference || order.orderSource !== 'manual') && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-4 py-2.5">
+          {order.externalOrderReference && (
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground shrink-0">
+                External Ref
+              </span>
+              <span className="text-sm font-semibold font-mono truncate">
+                {order.externalOrderReference}
+              </span>
+            </div>
+          )}
+          {order.orderSource !== 'manual' && (
+            <Badge variant="outline" className={sourceBadge.className}>
+              {sourceBadge.label}
+            </Badge>
+          )}
+        </div>
+      )}
+
       {/* ── Status badge row ─────────────────────────────────────────────── */}
       <div className="flex flex-wrap items-center gap-2">
         <Badge variant="outline" className={statusBadge.className}>
@@ -538,9 +560,6 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
         </Badge>
         <Badge variant="outline" className={paymentBadge.className}>
           {paymentBadge.label}
-        </Badge>
-        <Badge variant="outline" className={sourceBadge.className}>
-          {sourceBadge.label}
         </Badge>
         {order.paymentType === 'partial_advance' && (
           <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">
@@ -782,10 +801,14 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
 
           {/* ── Payment breakdown ─────────────────────────────────────────── */}
           <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Payment</CardTitle>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0">
+              <CardTitle className="text-base">Payment Breakdown</CardTitle>
+              <Badge variant="outline" className={paymentBadge.className}>
+                {paymentBadge.label}
+              </Badge>
             </CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent className="space-y-4">
+              {/* ── Order value summary ─────────────────────────────────────── */}
               <div className="space-y-2 text-sm">
                 <PaymentRow label="Subtotal" value={formatPKR(order.subtotal)} />
                 {order.discountAmount !== null && order.discountAmount > 0 && (
@@ -804,68 +827,178 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                   <PaymentRow label="Courier charges" value={formatPKR(order.courierCharges)} />
                 )}
                 <Separator />
-                <PaymentRow
-                  label="Total"
-                  value={formatPKR(order.totalOrderValue)}
-                  valueClassName="font-semibold"
-                />
+                <div className="flex items-center justify-between pt-1">
+                  <span className="text-sm font-medium">Total Order Value</span>
+                  <span className="text-lg font-bold tabular-nums">
+                    {formatPKR(order.totalOrderValue)}
+                  </span>
+                </div>
               </div>
 
-              {(order.advanceAmount !== null || order.paymentType !== 'full_cod') && (
-                <div className="rounded-md bg-muted/40 p-3 space-y-1.5 text-sm">
-                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-                    Advance details
-                  </p>
-                  <PaymentRow
-                    label="Advance paid"
-                    value={order.advanceAmount ? formatPKR(order.advanceAmount) : '—'}
-                  />
-                  {order.advancePaymentMethod && (
-                    <PaymentRow
-                      label="Method"
-                      value={
-                        PAYMENT_METHODS.find((m) => m.value === order.advancePaymentMethod)
-                          ?.label ?? order.advancePaymentMethod
-                      }
-                      muted
-                    />
-                  )}
-                  {order.advancePaymentReference && (
-                    <PaymentRow label="Reference" value={order.advancePaymentReference} muted />
-                  )}
-                  {order.advancePaidAt && (
-                    <PaymentRow label="Paid at" value={formatDateTime(order.advancePaidAt)} muted />
-                  )}
-                  <PaymentRow
-                    label="Remaining COD"
-                    value={formatPKR(remainingCod)}
-                    valueClassName="font-medium"
-                  />
+              {/* ── Fully prepaid: just confirm full payment ───────────────── */}
+              {order.paymentType === 'fully_prepaid' ? (
+                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 flex items-start gap-2.5 text-sm">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600 mt-0.5 shrink-0" />
+                  <div>
+                    <p className="font-medium text-emerald-700">Fully Paid</p>
+                    <p className="text-xs text-emerald-600">
+                      The entire order value was received before dispatch. No COD collection
+                      required.
+                    </p>
+                  </div>
                 </div>
-              )}
+              ) : (
+                <>
+                  {/* ── Advance Received block (if any) ────────────────────── */}
+                  {(order.advanceAmount ?? 0) > 0 && (
+                    <div className="rounded-lg border bg-sky-50/50 p-3 space-y-2 text-sm">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-sky-700 flex items-center gap-1.5">
+                        <CreditCard className="h-3.5 w-3.5" /> Advance Received
+                      </p>
+                      <div className="flex items-center justify-between">
+                        <span className="text-muted-foreground">Amount</span>
+                        <span className="font-semibold tabular-nums">
+                          {formatPKR(order.advanceAmount ?? 0)}
+                        </span>
+                      </div>
+                      {order.advancePaymentMethod && (
+                        <PaymentRow
+                          label="Method"
+                          value={
+                            PAYMENT_METHODS.find(
+                              (m) => m.value === order.advancePaymentMethod,
+                            )?.label ?? order.advancePaymentMethod
+                          }
+                          muted
+                        />
+                      )}
+                      {order.advancePaymentReference && (
+                        <PaymentRow
+                          label="Reference"
+                          value={order.advancePaymentReference}
+                          muted
+                        />
+                      )}
+                      {order.advancePaidAt && (
+                        <PaymentRow
+                          label="Paid at"
+                          value={formatDateTime(order.advancePaidAt)}
+                          muted
+                        />
+                      )}
+                      {order.paymentSource && order.paymentSource !== 'manual' && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-muted-foreground">Source</span>
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] bg-gray-100 text-gray-700 border-gray-200"
+                          >
+                            {order.paymentSource}
+                          </Badge>
+                        </div>
+                      )}
+                      {order.advancePaymentScreenshotUrl && (
+                        <div className="pt-1">
+                          <p className="text-xs text-muted-foreground mb-1">Payment Proof</p>
+                          <button
+                            type="button"
+                            onClick={() => setProofDialogOpen(true)}
+                            className="block rounded-md border overflow-hidden hover:ring-2 hover:ring-primary/40 transition-shadow"
+                            aria-label="View payment proof full size"
+                          >
+                            <img
+                              src={order.advancePaymentScreenshotUrl}
+                              alt="Payment proof"
+                              className="h-24 w-24 object-cover"
+                            />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
-              {order.codCollected && (
-                <div className="rounded-md bg-emerald-50 border border-emerald-200 p-3 space-y-1.5 text-sm">
-                  <p className="text-xs font-medium text-emerald-700 uppercase tracking-wide flex items-center gap-1">
-                    <CheckCircle2 className="h-3.5 w-3.5" /> COD Collected
-                  </p>
-                  <PaymentRow
-                    label="Collected"
-                    value={
-                      order.codCollectedAmount ? formatPKR(order.codCollectedAmount) : '—'
-                    }
-                  />
-                  {order.codCollectedAt && (
-                    <PaymentRow
-                      label="At"
-                      value={formatDateTime(order.codCollectedAt)}
-                      muted
-                    />
-                  )}
-                </div>
+                  {/* ── Remaining COD to Collect block ─────────────────────── */}
+                  <div
+                    className={cn(
+                      'rounded-lg border p-3 space-y-2 text-sm',
+                      order.codCollected
+                        ? 'border-emerald-200 bg-emerald-50'
+                        : 'border-amber-200 bg-amber-50/60',
+                    )}
+                  >
+                    <p
+                      className={cn(
+                        'text-xs font-semibold uppercase tracking-wide flex items-center gap-1.5',
+                        order.codCollected ? 'text-emerald-700' : 'text-amber-700',
+                      )}
+                    >
+                      <Banknote className="h-3.5 w-3.5" />
+                      Remaining (COD to Collect)
+                    </p>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">To Collect</span>
+                      <span className="font-semibold tabular-nums">
+                        {formatPKR(remainingCod)}
+                      </span>
+                    </div>
+
+                    {order.codCollected ? (
+                      <div className="flex items-center gap-2 rounded-md bg-emerald-100/60 px-2.5 py-1.5 text-xs text-emerald-700">
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                        <span>
+                          Collected:{' '}
+                          <strong>
+                            {order.codCollectedAmount
+                              ? formatPKR(order.codCollectedAmount)
+                              : '—'}
+                          </strong>
+                          {order.codCollectedAt && (
+                            <> on {formatDateTime(order.codCollectedAt)}</>
+                          )}
+                        </span>
+                      </div>
+                    ) : (order.status === 'dispatched' || order.status === 'delivered') ? (
+                      <div className="flex items-center justify-between gap-2 pt-1">
+                        <span className="inline-flex items-center gap-1.5 text-xs text-amber-700">
+                          <Clock className="h-3.5 w-3.5" />
+                          Pending Collection
+                        </span>
+                        {canManage && (
+                          <Button size="sm" variant="outline" onClick={() => setCodDialogOpen(true)}>
+                            <Banknote className="h-3.5 w-3.5" />
+                            Mark COD Collected
+                          </Button>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground pt-1">
+                        COD will be collected on delivery.
+                      </p>
+                    )}
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>
+
+          {/* ── Payment proof enlarge dialog ────────────────────────────────── */}
+          <Dialog open={proofDialogOpen} onOpenChange={setProofDialogOpen}>
+            <DialogContent className="sm:max-w-2xl">
+              <DialogHeader>
+                <DialogTitle>Payment Proof</DialogTitle>
+                <DialogDescription>
+                  Advance payment screenshot for {order.flowopsOrderNumber}.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="flex items-center justify-center">
+                <img
+                  src={order.advancePaymentScreenshotUrl ?? ''}
+                  alt="Payment proof"
+                  className="max-h-[70vh] w-auto rounded-md border"
+                />
+              </div>
+            </DialogContent>
+          </Dialog>
 
           {/* ── Delivery info ─────────────────────────────────────────────── */}
           <Card>
