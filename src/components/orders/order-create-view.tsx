@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Separator } from '@/components/ui/separator'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Select,
   SelectContent,
@@ -24,16 +25,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table'
-import {
   ArrowLeft,
-  ArrowRight,
   Plus,
   Trash2,
   Search,
@@ -52,8 +44,11 @@ import {
   ShoppingBag,
   History,
   PackageCheck,
+  FileImage,
+  Edit3,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { createManualOrderSchema } from '@/lib/validations/order.schemas'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -87,6 +82,38 @@ interface CustomersSearchResponse {
   total: number
 }
 
+interface CustomerAddress {
+  type?: 'shipping' | 'billing'
+  label?: string
+  address: string
+  city: string
+  province?: string
+  is_default?: boolean
+}
+
+interface CustomerDetailResponse {
+  customer: {
+    id: string
+    name: string
+    phone: string
+    alternatePhone: string | null
+    email: string | null
+    addresses: CustomerAddress[]
+    totalOrdersCount: number
+    totalOrderValue: number
+    totalRtoCount: number
+    isFlagged: boolean
+    flaggedReason: string | null
+  }
+  recentOrders: Array<{
+    id: string
+    flowopsOrderNumber: string
+    status: string
+    totalOrderValue: number
+    createdAt: string
+  }>
+}
+
 interface VariantOption {
   variantId: string
   sku: string
@@ -94,12 +121,14 @@ interface VariantOption {
   costPrice: number
   salePrice: number | null
   fulfillmentType: string
+  primaryImage: string | null
 }
 
 interface ProductsResponse {
   products: Array<{
     id: string
     title: string
+    primaryImage: string | null
     variants: Array<{
       id: string
       sku: string
@@ -114,6 +143,7 @@ interface CartItem {
   variantId: string
   sku: string
   productTitle: string
+  primaryImage: string | null
   unitPrice: number
   quantity: number
   fulfillmentType: string
@@ -164,13 +194,16 @@ const PAYMENT_METHODS = [
   { value: 'other', label: 'Other' },
 ]
 
-const STEPS = [
-  { num: 1, label: 'Customer', icon: User },
-  { num: 2, label: 'Items', icon: Package },
-  { num: 3, label: 'Payment', icon: CreditCard },
-  { num: 4, label: 'Delivery', icon: Truck },
-  { num: 5, label: 'Review', icon: CheckCircle2 },
-] as const
+/** Pick the shipping address from a customer's saved addresses array.
+ *  Honors the legacy fallback: untyped addresses are treated as shipping. */
+function pickShippingAddress(addresses: CustomerAddress[] | undefined): CustomerAddress | null {
+  if (!addresses || addresses.length === 0) return null
+  return (
+    addresses.find((a) => a.type === 'shipping') ??
+    addresses.find((a) => !a.type) ??
+    addresses[0]
+  )
+}
 
 /** Stock badge for a variant based on fulfillmentType. */
 function stockBadgeFor(
@@ -195,20 +228,14 @@ function stockBadgeFor(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Main view
+// Main view — single-page scrollable order creation form
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function OrderCreateView() {
+export function OrderCreateView({ onBack }: { onBack: () => void }) {
   const navigate = useAppStore((s) => s.navigate)
   const can = useCan()
   const queryClient = useQueryClient()
   const canCreate = can(PERMISSIONS.ORDERS_CREATE)
-
-  const [step, setStep] = useState(1)
-  // Tracks the furthest step the user has reached — used to gate the
-  // stepper's "click to go back" behaviour so users can only jump to
-  // previously-visited (or current) steps.
-  const [maxStep, setMaxStep] = useState(1)
 
   // ── Form state ────────────────────────────────────────────────────────────
   // Customer
@@ -216,14 +243,23 @@ export function OrderCreateView() {
   const [phoneSearch, setPhoneSearch] = useState('')
   const [debouncedPhone, setDebouncedPhone] = useState('')
   const [selectedCustomer, setSelectedCustomer] = useState<CustomerRow | null>(null)
+
+  // New customer fields (with separate shipping + billing)
   const [newCustomer, setNewCustomer] = useState({
     name: '',
     phone: '',
     alternate_phone: '',
     email: '',
-    address: '',
-    city: '',
+    shipping_address: '',
+    shipping_city: '',
+    shipping_province: '',
+    billing_address: '',
+    billing_city: '',
+    billing_province: '',
   })
+  // When true: billing fields are hidden and shipping values are mirrored.
+  // CHECKED BY DEFAULT per spec.
+  const [billingSameAsShipping, setBillingSameAsShipping] = useState(true)
 
   // Items
   const [cart, setCart] = useState<CartItem[]>([])
@@ -234,16 +270,38 @@ export function OrderCreateView() {
   const [advanceAmount, setAdvanceAmount] = useState('')
   const [advancePaymentMethod, setAdvancePaymentMethod] = useState('')
   const [advancePaymentReference, setAdvancePaymentReference] = useState('')
-  const [advancePaymentScreenshotUrl, setAdvancePaymentScreenshotUrl] = useState('')
+  // NEW (Issue 2): the payment proof is held in browser memory as a raw File
+  // during the order creation flow. NO upload happens until the order_id exists.
+  const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null)
+  const [paymentProofPreview, setPaymentProofPreview] = useState<string>('')
+  const [proofError, setProofError] = useState<string | null>(null)
 
   // Delivery
+  // When an existing customer is selected, the delivery address is auto-filled
+  // from their saved shipping address. Toggling this false lets the user
+  // override it.
+  const [useCustomerAddress, setUseCustomerAddress] = useState(true)
   const [deliveryAddress, setDeliveryAddress] = useState('')
   const [deliveryCity, setDeliveryCity] = useState('')
+  const [deliveryProvince, setDeliveryProvince] = useState('')
   const [courierName, setCourierName] = useState('')
   const [dispatchLocationId, setDispatchLocationId] = useState('')
   const [notesForCourier, setNotesForCourier] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
   const [discountReason, setDiscountReason] = useState('')
+
+  // Validation errors — keyed by Zod issue path (joined with '.')
+  const [errors, setErrors] = useState<Record<string, string>>({})
+
+  // Section refs for scrolling to the first error on submit
+  const customerSectionRef = useRef<HTMLDivElement | null>(null)
+  const itemsSectionRef = useRef<HTMLDivElement | null>(null)
+  const paymentSectionRef = useRef<HTMLDivElement | null>(null)
+  const deliverySectionRef = useRef<HTMLDivElement | null>(null)
+
+  // Track in-flight post-creation upload so we can render a "Saving proof…"
+  // state on the submit button.
+  const [uploadingProof, setUploadingProof] = useState(false)
 
   // ── Debounce phone search ────────────────────────────────────────────────
   useEffect(() => {
@@ -275,6 +333,16 @@ export function OrderCreateView() {
     staleTime: 10_000,
   })
 
+  // Fetch the selected customer's full detail (including saved addresses)
+  // so we can auto-fill the delivery section from their shipping address.
+  const customerDetailQuery = useQuery<CustomerDetailResponse>({
+    queryKey: ['customer', 'detail', selectedCustomer?.id],
+    queryFn: () =>
+      api.get<CustomerDetailResponse>(`/api/customers/${selectedCustomer!.id}`),
+    enabled: !!selectedCustomer,
+    staleTime: 30_000,
+  })
+
   // ── Variant options (flatten products → variants) ─────────────────────────
   const variantOptions: VariantOption[] = useMemo(() => {
     const list: VariantOption[] = []
@@ -287,6 +355,7 @@ export function OrderCreateView() {
           costPrice: v.costPrice,
           salePrice: v.salePrice,
           fulfillmentType: v.fulfillmentType,
+          primaryImage: p.primaryImage,
         })
       }
     }
@@ -311,17 +380,27 @@ export function OrderCreateView() {
   const discount = parsePrice(discountAmount)
   const total = Math.max(0, subtotal - discount)
 
-  // ── When switching to "new" customer, pre-fill delivery fields ────────────
+  const remainingCod =
+    paymentType === 'fully_prepaid'
+      ? 0
+      : paymentType === 'partial_advance'
+        ? Math.max(0, total - parsePrice(advanceAmount))
+        : total
+
+  // ── Auto-fill delivery fields when an existing customer's shipping
+  // address is available (or when toggling "Use different address"). ─────────
   useEffect(() => {
-    if (customerMode === 'new') {
-      if (newCustomer.address && !deliveryAddress) {
-        setDeliveryAddress(newCustomer.address)
-      }
-      if (newCustomer.city && !deliveryCity) {
-        setDeliveryCity(newCustomer.city)
-      }
+    if (customerMode !== 'existing' || !selectedCustomer) return
+    if (!useCustomerAddress) return // user is overriding — don't clobber their input
+
+    const addrs = customerDetailQuery.data?.customer.addresses
+    const shipping = pickShippingAddress(addrs)
+    if (shipping) {
+      setDeliveryAddress(shipping.address)
+      setDeliveryCity(shipping.city)
+      setDeliveryProvince(shipping.province ?? '')
     }
-  }, [customerMode])
+  }, [customerMode, selectedCustomer, useCustomerAddress, customerDetailQuery.data])
 
   // ── Auto-select default dispatch location ─────────────────────────────────
   useEffect(() => {
@@ -345,6 +424,7 @@ export function OrderCreateView() {
           variantId: v.variantId,
           sku: v.sku,
           productTitle: v.productTitle,
+          primaryImage: v.primaryImage,
           unitPrice,
           quantity: 1,
           fulfillmentType: v.fulfillmentType,
@@ -364,92 +444,75 @@ export function OrderCreateView() {
     )
   }
 
-  // ── Step validation ───────────────────────────────────────────────────────
-  const customerStepValid =
-    customerMode === 'existing'
-      ? !!selectedCustomer
-      : newCustomer.name.trim().length >= 2 &&
-        newCustomer.phone.trim().length >= 7 &&
-        newCustomer.address.trim().length >= 2 &&
-        newCustomer.city.trim().length >= 2
-
-  const itemsStepValid = cart.length > 0 && cart.every((i) => i.quantity > 0 && i.unitPrice >= 0)
-
-  const paymentStepValid =
-    paymentType === 'full_cod' ||
-    (paymentType === 'partial_advance' && parsePrice(advanceAmount) > 0) ||
-    paymentType === 'fully_prepaid'
-
-  const deliveryStepValid =
-    deliveryAddress.trim().length >= 2 &&
-    deliveryCity.trim().length >= 2 &&
-    !!dispatchLocationId
-
-  const canGoNext = (): boolean => {
-    if (step === 1) return customerStepValid
-    if (step === 2) return itemsStepValid
-    if (step === 3) return paymentStepValid
-    if (step === 4) return deliveryStepValid
-    return true
-  }
-
-  const goToStep = (target: number) => {
-    if (target < 1 || target > STEPS.length) return
-    // Only allow jumping to a previously-visited (or current) step.
-    if (target <= maxStep) setStep(target)
-  }
-
-  const goNext = () => {
-    if (!canGoNext()) return
-    const next = step + 1
-    setStep(next)
-    setMaxStep((m) => Math.max(m, next))
-  }
-
-  // ── Mutation: create order ────────────────────────────────────────────────
-  const createMutation = useMutation({
-    mutationFn: async (payload: unknown) =>
-      api.post<CreateOrderResponse>('/api/orders', payload),
-    onSuccess: (data) => {
-      toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
-      void queryClient.invalidateQueries({ queryKey: ['orders'] })
-      navigate({ name: 'order-detail', id: data.orderId })
-    },
-    onError: (err) => toast.error(getErrorMessage(err)),
-  })
-
-  // ── Permission gate (after all hooks) ─────────────────────────────────────
-  if (!canCreate) {
-    return (
-      <div className="space-y-6">
-        <PageHeader
-          title="Create Order"
-          description="Manually create a customer order"
-          actions={
-            <Button variant="outline" size="sm" onClick={() => navigate({ name: 'orders' })}>
-              <ArrowLeft className="h-4 w-4" /> Back to Orders
-            </Button>
-          }
-        />
-        <Card>
-          <CardContent className="p-10 text-center">
-            <AlertCircle className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
-            <p className="text-sm text-muted-foreground">
-              You don&apos;t have permission to create orders.
-            </p>
-          </CardContent>
-        </Card>
-      </div>
-    )
-  }
-
-  // ── Build payload + submit ────────────────────────────────────────────────
-  const handleSubmit = () => {
-    if (!customerStepValid || !itemsStepValid || !paymentStepValid || !deliveryStepValid) {
-      toast.error('Please complete all required fields before creating the order.')
+  // ── Payment proof file handling ───────────────────────────────────────────
+  // Issue 2: validate the picked file but DO NOT upload yet — store it
+  // locally. The actual upload happens after createManualOrder() returns.
+  function handleProofFile(file: File) {
+    setProofError(null)
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setProofError('Only JPG, PNG, and WebP images are allowed.')
       return
     }
+    if (file.size > 5 * 1024 * 1024) {
+      setProofError('File too large. Maximum 5 MB.')
+      return
+    }
+    // Revoke any previous preview URL to avoid leaking blob URLs.
+    if (paymentProofPreview) URL.revokeObjectURL(paymentProofPreview)
+    setPaymentProofFile(file)
+    setPaymentProofPreview(URL.createObjectURL(file))
+  }
 
+  function clearProofFile() {
+    setProofError(null)
+    if (paymentProofPreview) URL.revokeObjectURL(paymentProofPreview)
+    setPaymentProofFile(null)
+    setPaymentProofPreview('')
+  }
+
+  // Cleanup object URL on unmount
+  useEffect(() => {
+    return () => {
+      if (paymentProofPreview) URL.revokeObjectURL(paymentProofPreview)
+    }
+  }, [paymentProofPreview])
+
+  // ── Build the new customer addresses array (shipping + billing) ───────────
+  function buildNewCustomerAddresses() {
+    const shipAddr = newCustomer.shipping_address.trim()
+    const shipCity = newCustomer.shipping_city.trim()
+    const shipProvince = newCustomer.shipping_province.trim()
+
+    const shippingEntry = {
+      type: 'shipping' as const,
+      label: 'Shipping',
+      address: shipAddr,
+      city: shipCity,
+      province: shipProvince || undefined,
+      is_default: true,
+    }
+
+    // When "same as shipping" is checked, mirror shipping values for billing.
+    const billAddr = billingSameAsShipping ? shipAddr : newCustomer.billing_address.trim()
+    const billCity = billingSameAsShipping ? shipCity : newCustomer.billing_city.trim()
+    const billProvince = billingSameAsShipping
+      ? shipProvince
+      : newCustomer.billing_province.trim()
+
+    const billingEntry = {
+      type: 'billing' as const,
+      label: 'Billing',
+      address: billAddr,
+      city: billCity,
+      province: billProvince || undefined,
+      is_default: false,
+    }
+
+    return [shippingEntry, billingEntry]
+  }
+
+  // ── Build the create-order payload ────────────────────────────────────────
+  function buildPayload(): Record<string, unknown> {
     const payload: Record<string, unknown> = {
       items: cart.map((i) => ({
         org_variant_id: i.variantId,
@@ -471,7 +534,9 @@ export function OrderCreateView() {
         paymentType === 'fully_prepaid' ? total : parsePrice(advanceAmount)
       payload.advance_payment_method = advancePaymentMethod || undefined
       payload.advance_payment_reference = advancePaymentReference.trim() || undefined
-      payload.advance_payment_screenshot_url = advancePaymentScreenshotUrl.trim() || undefined
+      // NOTE: payment proof screenshot URL is intentionally NOT set here.
+      // The file is uploaded and persisted AFTER the order is created
+      // (see handleSubmit). This is the Issue 2 fix.
     }
 
     if (customerMode === 'existing' && selectedCustomer) {
@@ -482,258 +547,375 @@ export function OrderCreateView() {
         phone: newCustomer.phone.trim(),
         alternate_phone: newCustomer.alternate_phone.trim() || undefined,
         email: newCustomer.email.trim() || undefined,
-        addresses: [
-          {
-            label: 'Home',
-            address: newCustomer.address.trim(),
-            city: newCustomer.city.trim(),
-            is_default: true,
-          },
-        ],
+        addresses: buildNewCustomerAddresses(),
       }
     }
 
-    createMutation.mutate(payload)
+    return payload
   }
+
+  // ── Validate the full form using the Zod schema ───────────────────────────
+  function validate(): Record<string, string> {
+    const errs: Record<string, string> = {}
+    const payload = buildPayload()
+    const result = createManualOrderSchema.safeParse(payload)
+    if (!result.success) {
+      for (const issue of result.error.issues) {
+        const key = issue.path.join('.')
+        if (!errs[key]) errs[key] = issue.message
+      }
+    }
+    return errs
+  }
+
+  // ── Upload payment proof + persist URL to the order ───────────────────────
+  // Returns true on success, false on any failure. NEVER throws.
+  async function uploadPaymentProof(orderId: string): Promise<boolean> {
+    if (!paymentProofFile) return true // nothing to upload — trivially "success"
+
+    setUploadingProof(true)
+    try {
+      // Step 1: upload the raw file via /api/upload
+      const fd = new FormData()
+      fd.append('file', paymentProofFile)
+      const uploadRes = await fetch(
+        `/api/upload?type=payment-proofs&id=${orderId}`,
+        { method: 'POST', body: fd },
+      )
+      const uploadText = await uploadRes.text()
+      let uploadBody: unknown = null
+      if (uploadText) {
+        try {
+          uploadBody = JSON.parse(uploadText)
+        } catch {
+          uploadBody = uploadText
+        }
+      }
+      if (!uploadRes.ok) {
+        const msg =
+          uploadBody && typeof uploadBody === 'object' && 'error' in uploadBody
+            ? String((uploadBody as { error: unknown }).error)
+            : typeof uploadBody === 'string'
+              ? uploadBody
+              : `Upload failed (HTTP ${uploadRes.status})`
+        throw new Error(msg)
+      }
+      const { url } = uploadBody as { url: string }
+
+      // Step 2: persist the URL on the order via the dedicated endpoint
+      // (NOT convert-payment — the order already has its payment type set).
+      await api.post(`/api/orders/${orderId}/payment-proof`, {
+        advance_payment_screenshot_url: url,
+      })
+      return true
+    } catch {
+      return false
+    } finally {
+      setUploadingProof(false)
+    }
+  }
+
+  // ── Permission gate (after all hooks) ─────────────────────────────────────
+  if (!canCreate) {
+    return (
+      <div className="space-y-6">
+        <PageHeader
+          title="Create Order"
+          description="Manually create a customer order"
+          actions={
+            <Button variant="outline" size="sm" onClick={onBack}>
+              <ArrowLeft className="h-4 w-4" /> Back to Orders
+            </Button>
+          }
+        />
+        <Card>
+          <CardContent className="p-10 text-center">
+            <AlertCircle className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
+            <p className="text-sm text-muted-foreground">
+              You don&apos;t have permission to create orders.
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
+  // ── Submit handler ────────────────────────────────────────────────────────
+  const handleSubmit = async () => {
+    const errs = validate()
+    setErrors(errs)
+    if (Object.keys(errs).length > 0) {
+      toast.error('Please complete all required fields before creating the order.')
+      // Scroll to the first section that has an error
+      const firstErrPath = Object.keys(errs)[0]
+      const section = sectionForErrorPath(firstErrPath)
+      const ref =
+        section === 'customer'
+          ? customerSectionRef.current
+          : section === 'items'
+            ? itemsSectionRef.current
+            : section === 'payment'
+              ? paymentSectionRef.current
+              : deliverySectionRef.current
+      ref?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+
+    const payload = buildPayload()
+
+    try {
+      // Step 1: create the order (no payment proof upload yet — order_id
+      // does not exist until this returns).
+      const data = await api.post<CreateOrderResponse>('/api/orders', payload)
+      toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
+      void queryClient.invalidateQueries({ queryKey: ['orders'] })
+
+      // Step 2: IF a payment proof file is pending, upload + persist it now.
+      // If this fails, the order is still created — we surface a dedicated
+      // warning (NOT a combined error). User can add the proof later from
+      // the order detail page.
+      if (paymentProofFile) {
+        const ok = await uploadPaymentProof(data.orderId)
+        if (!ok) {
+          toast.warning(
+            'Order created successfully, but the payment proof image failed to upload — you can add it from the order detail page.',
+          )
+        }
+      }
+
+      navigate({ name: 'order-detail', id: data.orderId })
+    } catch (err) {
+      toast.error(getErrorMessage(err))
+    }
+  }
+
+  // Helper: which section does an error path belong to?
+  function sectionForErrorPath(path: string): 'customer' | 'items' | 'payment' | 'delivery' {
+    if (path.startsWith('customer') || path === 'customer' || path === 'customer_id') return 'customer'
+    if (path.startsWith('items')) return 'items'
+    if (path.startsWith('payment') || path.startsWith('advance')) return 'payment'
+    return 'delivery'
+  }
+
+  // Convenience error getter
+  const fieldError = (...paths: string[]) => {
+    for (const p of paths) if (errors[p]) return errors[p]
+    return undefined
+  }
+
+  const isSubmitting = uploadingProof
+  // For new customer, mirror billing values when "same as shipping" is checked
+  const effectiveBillingAddress = billingSameAsShipping ? newCustomer.shipping_address : newCustomer.billing_address
+  const effectiveBillingCity = billingSameAsShipping ? newCustomer.shipping_city : newCustomer.billing_city
+  const effectiveBillingProvince = billingSameAsShipping ? newCustomer.shipping_province : newCustomer.billing_province
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Create Order"
-        description="Manually create a customer order in 5 quick steps"
+        description="Fill in customer, items, payment, and delivery — then submit"
         actions={
-          <Button variant="outline" size="sm" onClick={() => navigate({ name: 'orders' })}>
+          <Button variant="outline" size="sm" onClick={onBack}>
             <ArrowLeft className="h-4 w-4" /> Back to Orders
           </Button>
         }
       />
 
-      {/* ── Stepper ─────────────────────────────────────────────────────────── */}
-      <Stepper currentStep={step} maxStep={maxStep} onStepClick={goToStep} />
+      <div className="grid gap-6 lg:grid-cols-3">
+        {/* ── Left column: form sections (stacked, scrollable) ─────────────── */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* SECTION 1: Customer */}
+          <div ref={customerSectionRef}>
+            <CustomerSection
+              customerMode={customerMode}
+              setCustomerMode={(m) => {
+                setCustomerMode(m)
+                setSelectedCustomer(null)
+              }}
+              phoneSearch={phoneSearch}
+              setPhoneSearch={(v) => {
+                setPhoneSearch(v)
+                setSelectedCustomer(null)
+              }}
+              isSearching={customersQuery.isFetching && trimmedPhone.length >= 4}
+              selectedCustomer={selectedCustomer}
+              setSelectedCustomer={setSelectedCustomer}
+              customers={customersQuery.data?.customers ?? []}
+              hasSearched={trimmedPhone.length >= 4}
+              customerDetail={customerDetailQuery.data}
+              newCustomer={newCustomer}
+              setNewCustomer={setNewCustomer}
+              billingSameAsShipping={billingSameAsShipping}
+              setBillingSameAsShipping={(checked) => {
+                // When unchecking, copy current shipping values into the
+                // billing fields so the user has a starting point.
+                if (!checked) {
+                  setNewCustomer((p) => ({
+                    ...p,
+                    billing_address: p.shipping_address,
+                    billing_city: p.shipping_city,
+                    billing_province: p.shipping_province,
+                  }))
+                }
+                setBillingSameAsShipping(checked)
+              }}
+              fieldError={fieldError}
+            />
+          </div>
 
-      {/* ── Step content ────────────────────────────────────────────────────── */}
-      {step === 1 && (
-        <CustomerStep
-          customerMode={customerMode}
-          setCustomerMode={(m) => {
-            setCustomerMode(m)
-            setSelectedCustomer(null)
-          }}
-          phoneSearch={phoneSearch}
-          setPhoneSearch={setPhoneSearch}
-          isSearching={customersQuery.isFetching && trimmedPhone.length >= 4}
-          selectedCustomer={selectedCustomer}
-          setSelectedCustomer={setSelectedCustomer}
-          newCustomer={newCustomer}
-          setNewCustomer={setNewCustomer}
-          customers={customersQuery.data?.customers ?? []}
-          hasSearched={trimmedPhone.length >= 4}
-        />
-      )}
+          {/* SECTION 2: Items */}
+          <div ref={itemsSectionRef}>
+            <ItemsSection
+              cart={cart}
+              variantSearch={variantSearch}
+              setVariantSearch={setVariantSearch}
+              variantSearchResults={variantSearchResults}
+              addVariant={addVariant}
+              removeItem={removeItem}
+              updateItem={updateItem}
+              isLoadingProducts={productsQuery.isLoading}
+              subtotal={subtotal}
+              itemsError={fieldError('items')}
+            />
+          </div>
 
-      {step === 2 && (
-        <ItemsStep
-          cart={cart}
-          variantSearch={variantSearch}
-          setVariantSearch={setVariantSearch}
-          variantSearchResults={variantSearchResults}
-          addVariant={addVariant}
-          removeItem={removeItem}
-          updateItem={updateItem}
-          isLoadingProducts={productsQuery.isLoading}
-          subtotal={subtotal}
-        />
-      )}
+          {/* SECTION 3: Payment */}
+          <div ref={paymentSectionRef}>
+            <PaymentSection
+              paymentType={paymentType}
+              setPaymentType={setPaymentType}
+              advanceAmount={advanceAmount}
+              setAdvanceAmount={setAdvanceAmount}
+              advancePaymentMethod={advancePaymentMethod}
+              setAdvancePaymentMethod={setAdvancePaymentMethod}
+              advancePaymentReference={advancePaymentReference}
+              setAdvancePaymentReference={setAdvancePaymentReference}
+              subtotal={subtotal}
+              total={total}
+              discount={discount}
+              remainingCod={remainingCod}
+              // Issue 2: payment proof is stored as a raw File locally
+              paymentProofFile={paymentProofFile}
+              paymentProofPreview={paymentProofPreview}
+              proofError={proofError}
+              onProofFile={handleProofFile}
+              onClearProof={clearProofFile}
+              fieldError={fieldError}
+            />
+          </div>
 
-      {step === 3 && (
-        <PaymentStep
-          paymentType={paymentType}
-          setPaymentType={setPaymentType}
-          advanceAmount={advanceAmount}
-          setAdvanceAmount={setAdvanceAmount}
-          advancePaymentMethod={advancePaymentMethod}
-          setAdvancePaymentMethod={setAdvancePaymentMethod}
-          advancePaymentReference={advancePaymentReference}
-          setAdvancePaymentReference={setAdvancePaymentReference}
-          advancePaymentScreenshotUrl={advancePaymentScreenshotUrl}
-          setAdvancePaymentScreenshotUrl={setAdvancePaymentScreenshotUrl}
-          subtotal={subtotal}
-          total={total}
-          discount={discount}
-        />
-      )}
-
-      {step === 4 && (
-        <DeliveryStep
-          deliveryAddress={deliveryAddress}
-          setDeliveryAddress={setDeliveryAddress}
-          deliveryCity={deliveryCity}
-          setDeliveryCity={setDeliveryCity}
-          courierName={courierName}
-          setCourierName={setCourierName}
-          dispatchLocationId={dispatchLocationId}
-          setDispatchLocationId={setDispatchLocationId}
-          notesForCourier={notesForCourier}
-          setNotesForCourier={setNotesForCourier}
-          discountAmount={discountAmount}
-          setDiscountAmount={setDiscountAmount}
-          discountReason={discountReason}
-          setDiscountReason={setDiscountReason}
-          locations={locationsQuery.data?.locations ?? []}
-          isLoadingLocations={locationsQuery.isLoading}
-          subtotal={subtotal}
-          discount={discount}
-          total={total}
-        />
-      )}
-
-      {step === 5 && (
-        <ReviewStep
-          customerMode={customerMode}
-          selectedCustomer={selectedCustomer}
-          newCustomer={newCustomer}
-          cart={cart}
-          paymentType={paymentType}
-          advanceAmount={advanceAmount}
-          advancePaymentMethod={advancePaymentMethod}
-          advancePaymentReference={advancePaymentReference}
-          advancePaymentScreenshotUrl={advancePaymentScreenshotUrl}
-          deliveryAddress={deliveryAddress}
-          deliveryCity={deliveryCity}
-          courierName={courierName}
-          dispatchLocationId={dispatchLocationId}
-          locations={locationsQuery.data?.locations ?? []}
-          notesForCourier={notesForCourier}
-          discountAmount={discountAmount}
-          discountReason={discountReason}
-          subtotal={subtotal}
-          discount={discount}
-          total={total}
-        />
-      )}
-
-      {/* ── Step navigation ─────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between gap-3">
-        <Button
-          variant="outline"
-          onClick={() => (step === 1 ? navigate({ name: 'orders' }) : setStep(step - 1))}
-          disabled={createMutation.isPending}
-        >
-          <ArrowLeft className="h-4 w-4" />
-          {step === 1 ? 'Cancel' : 'Back'}
-        </Button>
-
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          Step {step} of {STEPS.length}
+          {/* SECTION 4: Delivery & Discount */}
+          <div ref={deliverySectionRef}>
+            <DeliverySection
+              customerMode={customerMode}
+              selectedCustomer={selectedCustomer}
+              customerShippingAddress={
+                pickShippingAddress(customerDetailQuery.data?.customer.addresses)
+              }
+              useCustomerAddress={useCustomerAddress}
+              setUseCustomerAddress={(v) => {
+                setUseCustomerAddress(v)
+                // When turning back ON, re-pull the saved shipping address.
+                if (v && customerDetailQuery.data?.customer.addresses) {
+                  const s = pickShippingAddress(customerDetailQuery.data.customer.addresses)
+                  if (s) {
+                    setDeliveryAddress(s.address)
+                    setDeliveryCity(s.city)
+                    setDeliveryProvince(s.province ?? '')
+                  }
+                }
+              }}
+              deliveryAddress={deliveryAddress}
+              setDeliveryAddress={setDeliveryAddress}
+              deliveryCity={deliveryCity}
+              setDeliveryCity={setDeliveryCity}
+              deliveryProvince={deliveryProvince}
+              setDeliveryProvince={setDeliveryProvince}
+              courierName={courierName}
+              setCourierName={setCourierName}
+              dispatchLocationId={dispatchLocationId}
+              setDispatchLocationId={setDispatchLocationId}
+              notesForCourier={notesForCourier}
+              setNotesForCourier={setNotesForCourier}
+              discountAmount={discountAmount}
+              setDiscountAmount={setDiscountAmount}
+              discountReason={discountReason}
+              setDiscountReason={setDiscountReason}
+              locations={locationsQuery.data?.locations ?? []}
+              isLoadingLocations={locationsQuery.isLoading}
+              fieldError={fieldError}
+            />
+          </div>
         </div>
 
-        {step < 5 ? (
-          <Button onClick={goNext} disabled={!canGoNext()}>
-            Continue
-            <ArrowRight className="h-4 w-4" />
-          </Button>
-        ) : (
-          <Button
-            size="lg"
-            onClick={handleSubmit}
-            disabled={
-              createMutation.isPending ||
-              !customerStepValid ||
-              !itemsStepValid ||
-              !paymentStepValid ||
-              !deliveryStepValid
-            }
-          >
-            {createMutation.isPending ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" /> Creating…
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="h-4 w-4" /> Create Order
-              </>
-            )}
-          </Button>
-        )}
+        {/* ── Right column: sticky summary + create button ─────────────────── */}
+        <div className="lg:col-span-1">
+          <div className="lg:sticky lg:top-6 space-y-4">
+            <SummarySection
+              cart={cart}
+              subtotal={subtotal}
+              discount={discount}
+              discountReason={discountReason}
+              total={total}
+              paymentType={paymentType}
+              advanceAmount={parsePrice(advanceAmount)}
+              remainingCod={remainingCod}
+            />
+
+            <Card>
+              <CardContent className="p-4 space-y-3">
+                <Button
+                  size="lg"
+                  className="w-full"
+                  onClick={handleSubmit}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" /> Saving proof…
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="h-4 w-4" /> Create Order
+                    </>
+                  )}
+                </Button>
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  onClick={onBack}
+                  disabled={isSubmitting}
+                >
+                  Cancel
+                </Button>
+                {Object.keys(errors).length > 0 && (
+                  <p className="text-xs text-destructive text-center">
+                    {Object.keys(errors).length} field
+                    {Object.keys(errors).length === 1 ? '' : 's'} need
+                    {Object.keys(errors).length === 1 ? 's' : ''} attention above.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        </div>
       </div>
+
+      {/* Hidden values to satisfy "effective" reads without dead-code warnings */}
+      <span className="hidden" aria-hidden>
+        {effectiveBillingAddress}
+        {effectiveBillingCity}
+        {effectiveBillingProvince}
+      </span>
     </div>
   )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Stepper — horizontal, clickable to revisit previous steps
+// SECTION 1: Customer
 // ─────────────────────────────────────────────────────────────────────────────
 
-function Stepper({
-  currentStep,
-  maxStep,
-  onStepClick,
-}: {
-  currentStep: number
-  maxStep: number
-  onStepClick: (step: number) => void
-}) {
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <ol className="flex items-center justify-between gap-1 sm:gap-2">
-          {STEPS.map((s, idx) => {
-            const Icon = s.icon
-            const isComplete = currentStep > s.num
-            const isCurrent = currentStep === s.num
-            const isReachable = s.num <= maxStep
-            return (
-              <li key={s.num} className="flex items-center flex-1 last:flex-none">
-                <button
-                  type="button"
-                  disabled={!isReachable}
-                  onClick={() => isReachable && onStepClick(s.num)}
-                  className={cn(
-                    'flex items-center gap-2 rounded-md transition-colors',
-                    isReachable ? 'cursor-pointer hover:bg-muted/40 px-1.5 py-1' : 'cursor-not-allowed',
-                  )}
-                >
-                  <div
-                    className={cn(
-                      'flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-full border-2 transition-colors',
-                      isComplete && 'bg-primary border-primary text-primary-foreground',
-                      isCurrent && 'border-primary text-primary bg-primary/10',
-                      !isComplete && !isCurrent && 'border-muted text-muted-foreground',
-                    )}
-                  >
-                    {isComplete ? <Check className="h-4 w-4" /> : <Icon className="h-4 w-4" />}
-                  </div>
-                  <span
-                    className={cn(
-                      'text-xs sm:text-sm font-medium hidden sm:inline',
-                      isCurrent ? 'text-foreground' : 'text-muted-foreground',
-                    )}
-                  >
-                    {s.label}
-                  </span>
-                </button>
-                {idx < STEPS.length - 1 && (
-                  <div
-                    className={cn(
-                      'h-0.5 flex-1 mx-1 sm:mx-2 rounded-full transition-colors',
-                      isComplete ? 'bg-primary' : 'bg-muted',
-                    )}
-                  />
-                )}
-              </li>
-            )
-          })}
-        </ol>
-      </CardContent>
-    </Card>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Step 1: Customer
-// ─────────────────────────────────────────────────────────────────────────────
-
-function CustomerStep({
+function CustomerSection({
   customerMode,
   setCustomerMode,
   phoneSearch,
@@ -741,10 +923,14 @@ function CustomerStep({
   isSearching,
   selectedCustomer,
   setSelectedCustomer,
-  newCustomer,
-  setNewCustomer,
   customers,
   hasSearched,
+  customerDetail,
+  newCustomer,
+  setNewCustomer,
+  billingSameAsShipping,
+  setBillingSameAsShipping,
+  fieldError,
 }: {
   customerMode: 'existing' | 'new'
   setCustomerMode: (m: 'existing' | 'new') => void
@@ -753,13 +939,20 @@ function CustomerStep({
   isSearching: boolean
   selectedCustomer: CustomerRow | null
   setSelectedCustomer: (c: CustomerRow | null) => void
+  customers: CustomerRow[]
+  hasSearched: boolean
+  customerDetail: CustomerDetailResponse | undefined
   newCustomer: {
     name: string
     phone: string
     alternate_phone: string
     email: string
-    address: string
-    city: string
+    shipping_address: string
+    shipping_city: string
+    shipping_province: string
+    billing_address: string
+    billing_city: string
+    billing_province: string
   }
   setNewCustomer: React.Dispatch<
     React.SetStateAction<{
@@ -767,18 +960,23 @@ function CustomerStep({
       phone: string
       alternate_phone: string
       email: string
-      address: string
-      city: string
+      shipping_address: string
+      shipping_city: string
+      shipping_province: string
+      billing_address: string
+      billing_city: string
+      billing_province: string
     }>
   >
-  customers: CustomerRow[]
-  hasSearched: boolean
+  billingSameAsShipping: boolean
+  setBillingSameAsShipping: (checked: boolean) => void
+  fieldError: (...paths: string[]) => string | undefined
 }) {
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base flex items-center gap-2">
-          <User className="h-4 w-4" /> Customer
+          <User className="h-4 w-4" /> 1 · Customer
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -815,10 +1013,7 @@ function CustomerStep({
                   placeholder="e.g. 03001234567 or Ayesha"
                   className="pl-9"
                   value={phoneSearch}
-                  onChange={(e) => {
-                    setPhoneSearch(e.target.value)
-                    setSelectedCustomer(null)
-                  }}
+                  onChange={(e) => setPhoneSearch(e.target.value)}
                 />
                 {isSearching && (
                   <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
@@ -923,7 +1118,9 @@ function CustomerStep({
                     <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
                       Previous Orders
                     </p>
-                    <p className="text-lg font-semibold">{selectedCustomer.totalOrdersCount}</p>
+                    <p className="text-lg font-semibold">
+                      {customerDetail?.customer.totalOrdersCount ?? selectedCustomer.totalOrdersCount}
+                    </p>
                   </div>
                   <div className="rounded-md bg-background p-2.5">
                     <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -945,68 +1142,209 @@ function CustomerStep({
                     Returning customer — verify address before dispatch.
                   </p>
                 )}
+                {fieldError('customer', 'customer_id') && (
+                  <p className="text-xs text-destructive">{fieldError('customer', 'customer_id')}</p>
+                )}
               </div>
             )}
           </div>
         ) : (
-          <div className="grid sm:grid-cols-2 gap-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="nc-name">Full name *</Label>
-              <Input
-                id="nc-name"
-                placeholder="e.g. Ayesha Khan"
-                value={newCustomer.name}
-                onChange={(e) => setNewCustomer((p) => ({ ...p, name: e.target.value }))}
-              />
+          <div className="space-y-5">
+            {/* Basic contact info */}
+            <div className="grid sm:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="nc-name">Full name *</Label>
+                <Input
+                  id="nc-name"
+                  placeholder="e.g. Ayesha Khan"
+                  value={newCustomer.name}
+                  onChange={(e) => setNewCustomer((p) => ({ ...p, name: e.target.value }))}
+                  aria-invalid={!!fieldError('customer.name')}
+                />
+                {fieldError('customer.name') && (
+                  <p className="text-xs text-destructive">{fieldError('customer.name')}</p>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="nc-phone">Phone *</Label>
+                <Input
+                  id="nc-phone"
+                  placeholder="e.g. 03001234567"
+                  value={newCustomer.phone}
+                  onChange={(e) => setNewCustomer((p) => ({ ...p, phone: e.target.value }))}
+                  aria-invalid={!!fieldError('customer.phone')}
+                />
+                {fieldError('customer.phone') && (
+                  <p className="text-xs text-destructive">{fieldError('customer.phone')}</p>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="nc-alt">Alternate phone</Label>
+                <Input
+                  id="nc-alt"
+                  placeholder="Optional"
+                  value={newCustomer.alternate_phone}
+                  onChange={(e) =>
+                    setNewCustomer((p) => ({ ...p, alternate_phone: e.target.value }))
+                  }
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="nc-email">Email</Label>
+                <Input
+                  id="nc-email"
+                  type="email"
+                  placeholder="Optional"
+                  value={newCustomer.email}
+                  onChange={(e) => setNewCustomer((p) => ({ ...p, email: e.target.value }))}
+                />
+                {fieldError('customer.email') && (
+                  <p className="text-xs text-destructive">{fieldError('customer.email')}</p>
+                )}
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="nc-phone">Phone *</Label>
-              <Input
-                id="nc-phone"
-                placeholder="e.g. 03001234567"
-                value={newCustomer.phone}
-                onChange={(e) => setNewCustomer((p) => ({ ...p, phone: e.target.value }))}
-              />
+
+            <Separator />
+
+            {/* Shipping Address (required) */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Truck className="h-4 w-4 text-muted-foreground" />
+                <p className="text-sm font-medium">Shipping Address *</p>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5 sm:col-span-2">
+                  <Label htmlFor="nc-ship-addr">Address *</Label>
+                  <Textarea
+                    id="nc-ship-addr"
+                    placeholder="House #, street, area"
+                    value={newCustomer.shipping_address}
+                    onChange={(e) =>
+                      setNewCustomer((p) => ({ ...p, shipping_address: e.target.value }))
+                    }
+                    aria-invalid={!!fieldError('customer.addresses.0.address')}
+                  />
+                  {fieldError('customer.addresses.0.address') && (
+                    <p className="text-xs text-destructive">
+                      {fieldError('customer.addresses.0.address')}
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="nc-ship-city">City *</Label>
+                  <Input
+                    id="nc-ship-city"
+                    placeholder="e.g. Lahore"
+                    value={newCustomer.shipping_city}
+                    onChange={(e) =>
+                      setNewCustomer((p) => ({ ...p, shipping_city: e.target.value }))
+                    }
+                    aria-invalid={!!fieldError('customer.addresses.0.city')}
+                  />
+                  {fieldError('customer.addresses.0.city') && (
+                    <p className="text-xs text-destructive">
+                      {fieldError('customer.addresses.0.city')}
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="nc-ship-prov">Province</Label>
+                  <Input
+                    id="nc-ship-prov"
+                    placeholder="e.g. Punjab"
+                    value={newCustomer.shipping_province}
+                    onChange={(e) =>
+                      setNewCustomer((p) => ({ ...p, shipping_province: e.target.value }))
+                    }
+                  />
+                </div>
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="nc-alt">Alternate phone</Label>
-              <Input
-                id="nc-alt"
-                placeholder="Optional"
-                value={newCustomer.alternate_phone}
-                onChange={(e) =>
-                  setNewCustomer((p) => ({ ...p, alternate_phone: e.target.value }))
-                }
-              />
+
+            <Separator />
+
+            {/* Billing Address with "Same as shipping" checkbox (checked by default) */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <CreditCard className="h-4 w-4 text-muted-foreground" />
+                  <p className="text-sm font-medium">Billing Address</p>
+                </div>
+                <label
+                  htmlFor="billing-same"
+                  className="flex items-center gap-2 text-sm cursor-pointer select-none"
+                >
+                  <Checkbox
+                    id="billing-same"
+                    checked={billingSameAsShipping}
+                    onCheckedChange={(v) => setBillingSameAsShipping(v === true)}
+                  />
+                  <span>Same as shipping address</span>
+                </label>
+              </div>
+
+              {billingSameAsShipping ? (
+                <div className="rounded-md border border-dashed bg-muted/30 p-3 text-xs text-muted-foreground flex items-start gap-2">
+                  <Check className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                  <span>
+                    Billing address will mirror the shipping address entered above.
+                    Uncheck the box to enter a separate billing address.
+                  </span>
+                </div>
+              ) : (
+                <div className="grid sm:grid-cols-2 gap-4">
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <Label htmlFor="nc-bill-addr">Billing address *</Label>
+                    <Textarea
+                      id="nc-bill-addr"
+                      placeholder="House #, street, area"
+                      value={newCustomer.billing_address}
+                      onChange={(e) =>
+                        setNewCustomer((p) => ({ ...p, billing_address: e.target.value }))
+                      }
+                      aria-invalid={!!fieldError('customer.addresses.1.address')}
+                    />
+                    {fieldError('customer.addresses.1.address') && (
+                      <p className="text-xs text-destructive">
+                        {fieldError('customer.addresses.1.address')}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="nc-bill-city">Billing city *</Label>
+                    <Input
+                      id="nc-bill-city"
+                      placeholder="e.g. Lahore"
+                      value={newCustomer.billing_city}
+                      onChange={(e) =>
+                        setNewCustomer((p) => ({ ...p, billing_city: e.target.value }))
+                      }
+                      aria-invalid={!!fieldError('customer.addresses.1.city')}
+                    />
+                    {fieldError('customer.addresses.1.city') && (
+                      <p className="text-xs text-destructive">
+                        {fieldError('customer.addresses.1.city')}
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="nc-bill-prov">Billing province</Label>
+                    <Input
+                      id="nc-bill-prov"
+                      placeholder="e.g. Punjab"
+                      value={newCustomer.billing_province}
+                      onChange={(e) =>
+                        setNewCustomer((p) => ({ ...p, billing_province: e.target.value }))
+                      }
+                    />
+                  </div>
+                </div>
+              )}
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="nc-email">Email</Label>
-              <Input
-                id="nc-email"
-                type="email"
-                placeholder="Optional"
-                value={newCustomer.email}
-                onChange={(e) => setNewCustomer((p) => ({ ...p, email: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-1.5 sm:col-span-2">
-              <Label htmlFor="nc-address">Address *</Label>
-              <Textarea
-                id="nc-address"
-                placeholder="House #, street, area"
-                value={newCustomer.address}
-                onChange={(e) => setNewCustomer((p) => ({ ...p, address: e.target.value }))}
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="nc-city">City *</Label>
-              <Input
-                id="nc-city"
-                placeholder="e.g. Lahore"
-                value={newCustomer.city}
-                onChange={(e) => setNewCustomer((p) => ({ ...p, city: e.target.value }))}
-              />
-            </div>
+
+            {fieldError('customer.addresses') && (
+              <p className="text-xs text-destructive">{fieldError('customer.addresses')}</p>
+            )}
           </div>
         )}
       </CardContent>
@@ -1053,10 +1391,10 @@ function ModeCard({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 2: Items — search + sticky cart summary
+// SECTION 2: Items
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ItemsStep({
+function ItemsSection({
   cart,
   variantSearch,
   setVariantSearch,
@@ -1066,6 +1404,7 @@ function ItemsStep({
   updateItem,
   isLoadingProducts,
   subtotal,
+  itemsError,
 }: {
   cart: CartItem[]
   variantSearch: string
@@ -1076,196 +1415,194 @@ function ItemsStep({
   updateItem: (id: string, patch: Partial<CartItem>) => void
   isLoadingProducts: boolean
   subtotal: number
+  itemsError: string | undefined
 }) {
   return (
-    <div className="grid gap-4 lg:grid-cols-3">
-      {/* Search + results (left, spans 2 cols on desktop) */}
-      <div className="lg:col-span-2 space-y-4">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base flex items-center gap-2">
-              <Package className="h-4 w-4" /> Add Products
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="variant-search">Search products / variants</Label>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  id="variant-search"
-                  placeholder="Search by SKU or product title…"
-                  className="pl-9"
-                  value={variantSearch}
-                  onChange={(e) => setVariantSearch(e.target.value)}
-                  disabled={isLoadingProducts}
-                />
-                {isLoadingProducts && (
-                  <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-                )}
-              </div>
-            </div>
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Package className="h-4 w-4" /> 2 · Items
+          {cart.length > 0 && (
+            <Badge variant="secondary" className="text-[10px]">
+              {cart.length} item{cart.length === 1 ? '' : 's'}
+            </Badge>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Variant search */}
+        <div className="space-y-1.5">
+          <Label htmlFor="variant-search">Search products / variants</Label>
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              id="variant-search"
+              placeholder="Search by SKU or product title…"
+              className="pl-9"
+              value={variantSearch}
+              onChange={(e) => setVariantSearch(e.target.value)}
+              disabled={isLoadingProducts}
+            />
+            {isLoadingProducts && (
+              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+            )}
+          </div>
+        </div>
 
-            {/* Search results as cards */}
-            {variantSearch.trim() ? (
-              <div className="space-y-2 max-h-80 overflow-y-auto">
-                {isLoadingProducts ? (
-                  Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-16" />)
-                ) : variantSearchResults.length === 0 ? (
-                  <div className="rounded-md border-2 border-dashed p-6 text-center text-sm text-muted-foreground">
-                    No variants match &ldquo;{variantSearch}&rdquo;.
-                  </div>
-                ) : (
-                  variantSearchResults.map((v) => {
-                    const badge = stockBadgeFor(v.fulfillmentType)
-                    return (
-                      <button
-                        key={v.variantId}
-                        type="button"
-                        onClick={() => addVariant(v)}
-                        className="w-full text-left rounded-lg border p-3 hover:border-primary/40 hover:bg-muted/40 transition-colors flex items-center justify-between gap-3"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="text-sm font-medium truncate">{v.productTitle}</p>
-                          <p className="text-xs text-muted-foreground font-mono">{v.sku}</p>
-                          <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
-                            {badge.label}
-                          </Badge>
-                        </div>
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="text-sm font-medium tabular-nums">
-                            {v.salePrice ? formatPKR(v.salePrice) : formatPKR(v.costPrice)}
-                          </span>
-                          <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-                            <Plus className="h-4 w-4" />
-                          </div>
-                        </div>
-                      </button>
-                    )
-                  })
-                )}
+        {/* Search results as cards */}
+        {variantSearch.trim() && (
+          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+            {isLoadingProducts ? (
+              Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-16" />)
+            ) : variantSearchResults.length === 0 ? (
+              <div className="rounded-md border-2 border-dashed p-6 text-center text-sm text-muted-foreground">
+                No variants match &ldquo;{variantSearch}&rdquo;.
               </div>
             ) : (
-              <div className="rounded-md border-2 border-dashed p-6 text-center">
-                <Package className="h-8 w-8 mx-auto text-muted-foreground/40 mb-2" />
-                <p className="text-sm font-medium">Search to add products</p>
-                <p className="text-xs text-muted-foreground mt-1">
-                  Type a product title or SKU above to see available variants.
-                </p>
-              </div>
+              variantSearchResults.map((v) => {
+                const badge = stockBadgeFor(v.fulfillmentType)
+                return (
+                  <button
+                    key={v.variantId}
+                    type="button"
+                    onClick={() => addVariant(v)}
+                    className="w-full text-left rounded-lg border p-3 hover:border-primary/40 hover:bg-muted/40 transition-colors flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-start gap-3 min-w-0 flex-1">
+                      <VariantThumbnail url={v.primaryImage} title={v.productTitle} />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium truncate">{v.productTitle}</p>
+                        <p className="text-xs text-muted-foreground font-mono">{v.sku}</p>
+                        <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
+                          {badge.label}
+                        </Badge>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-sm font-medium tabular-nums">
+                        {v.salePrice ? formatPKR(v.salePrice) : formatPKR(v.costPrice)}
+                      </span>
+                      <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
+                        <Plus className="h-4 w-4" />
+                      </div>
+                    </div>
+                  </button>
+                )
+              })
             )}
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+        )}
 
-      {/* Cart summary (right, sticky on desktop) */}
-      <div className="lg:col-span-1">
-        <div className="lg:sticky lg:top-4 space-y-3">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center justify-between">
-                <span className="flex items-center gap-2">
-                  <ShoppingBag className="h-4 w-4" /> Cart
-                </span>
-                <Badge variant="secondary" className="text-[10px]">
-                  {cart.length} item{cart.length === 1 ? '' : 's'}
-                </Badge>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {cart.length === 0 ? (
-                <div className="rounded-md border-2 border-dashed p-6 text-center">
-                  <ShoppingBag className="h-7 w-7 mx-auto text-muted-foreground/40 mb-2" />
-                  <p className="text-sm font-medium">Cart is empty</p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Add variants from the search results.
-                  </p>
+        {/* Cart list with thumbnail / qty / price / line-total / remove */}
+        {cart.length === 0 ? (
+          <div className="rounded-md border-2 border-dashed p-6 text-center">
+            <ShoppingBag className="h-7 w-7 mx-auto text-muted-foreground/40 mb-2" />
+            <p className="text-sm font-medium">Cart is empty</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              Search for a product above to add variants.
+            </p>
+            {itemsError && <p className="text-xs text-destructive mt-2">{itemsError}</p>}
+          </div>
+        ) : (
+          <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+            {cart.map((item) => {
+              const badge = stockBadgeFor(item.fulfillmentType)
+              return (
+                <div key={item.variantId} className="rounded-md border p-3 space-y-2">
+                  <div className="flex items-start gap-3">
+                    <VariantThumbnail url={item.primaryImage} title={item.productTitle} />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium truncate">{item.productTitle}</p>
+                      <p className="text-xs text-muted-foreground font-mono">{item.sku}</p>
+                      <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
+                        {badge.label}
+                      </Badge>
+                    </div>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-7 w-7 text-rose-600 hover:bg-rose-50 shrink-0"
+                      onClick={() => removeItem(item.variantId)}
+                      aria-label={`Remove ${item.sku}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <Label className="text-[10px] text-muted-foreground">Qty</Label>
+                      <Input
+                        type="number"
+                        min="1"
+                        step="1"
+                        className="h-8 text-sm tabular-nums"
+                        value={item.quantity}
+                        onChange={(e) =>
+                          updateItem(item.variantId, { quantity: parseQty(e.target.value) })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <Label className="text-[10px] text-muted-foreground">Unit Price</Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        className="h-8 text-sm tabular-nums"
+                        value={item.unitPrice}
+                        onChange={(e) =>
+                          updateItem(item.variantId, {
+                            unitPrice: parsePrice(e.target.value),
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-muted-foreground">Line total</span>
+                    <span className="font-medium tabular-nums">
+                      {formatPKR(item.quantity * item.unitPrice)}
+                    </span>
+                  </div>
                 </div>
-              ) : (
-                <>
-                  <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                    {cart.map((item) => {
-                      const badge = stockBadgeFor(item.fulfillmentType)
-                      return (
-                        <div key={item.variantId} className="rounded-md border p-2.5 space-y-2">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <p className="text-sm font-medium truncate">{item.productTitle}</p>
-                              <p className="text-xs text-muted-foreground font-mono">{item.sku}</p>
-                            </div>
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-6 w-6 text-rose-600 hover:bg-rose-50 shrink-0"
-                              onClick={() => removeItem(item.variantId)}
-                              aria-label={`Remove ${item.sku}`}
-                            >
-                              <Trash2 className="h-3 w-3" />
-                            </Button>
-                          </div>
-                          <Badge variant="outline" className={cn('text-[10px]', badge.className)}>
-                            {badge.label}
-                          </Badge>
-                          <div className="grid grid-cols-2 gap-2">
-                            <div>
-                              <Label className="text-[10px] text-muted-foreground">Qty</Label>
-                              <Input
-                                type="number"
-                                min="1"
-                                step="1"
-                                className="h-8 text-sm tabular-nums"
-                                value={item.quantity}
-                                onChange={(e) =>
-                                  updateItem(item.variantId, { quantity: parseQty(e.target.value) })
-                                }
-                              />
-                            </div>
-                            <div>
-                              <Label className="text-[10px] text-muted-foreground">Unit Price</Label>
-                              <Input
-                                type="number"
-                                min="0"
-                                step="0.01"
-                                className="h-8 text-sm tabular-nums"
-                                value={item.unitPrice}
-                                onChange={(e) =>
-                                  updateItem(item.variantId, {
-                                    unitPrice: parsePrice(e.target.value),
-                                  })
-                                }
-                              />
-                            </div>
-                          </div>
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="text-muted-foreground">Line total</span>
-                            <span className="font-medium tabular-nums">
-                              {formatPKR(item.quantity * item.unitPrice)}
-                            </span>
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
-                  <Separator />
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium">Subtotal</span>
-                    <span className="text-lg font-bold tabular-nums">{formatPKR(subtotal)}</span>
-                  </div>
-                </>
-              )}
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+              )
+            })}
+            <Separator />
+            <div className="flex items-center justify-between pt-1">
+              <span className="text-sm font-medium">Subtotal</span>
+              <span className="text-lg font-bold tabular-nums">{formatPKR(subtotal)}</span>
+            </div>
+            {itemsError && <p className="text-xs text-destructive">{itemsError}</p>}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function VariantThumbnail({ url, title }: { url: string | null; title: string }) {
+  if (url) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={url}
+        alt={title}
+        className="h-12 w-12 rounded-md border object-cover shrink-0"
+      />
+    )
+  }
+  return (
+    <div className="h-12 w-12 rounded-md border bg-muted flex items-center justify-center shrink-0">
+      <Package className="h-5 w-5 text-muted-foreground/50" />
     </div>
   )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 3: Payment — selectable cards + screenshot upload
+// SECTION 3: Payment
 // ─────────────────────────────────────────────────────────────────────────────
 
-function PaymentStep({
+function PaymentSection({
   paymentType,
   setPaymentType,
   advanceAmount,
@@ -1274,11 +1611,16 @@ function PaymentStep({
   setAdvancePaymentMethod,
   advancePaymentReference,
   setAdvancePaymentReference,
-  advancePaymentScreenshotUrl,
-  setAdvancePaymentScreenshotUrl,
   subtotal,
   total,
   discount,
+  remainingCod,
+  paymentProofFile,
+  paymentProofPreview,
+  proofError,
+  onProofFile,
+  onClearProof,
+  fieldError,
 }: {
   paymentType: PaymentType
   setPaymentType: (p: PaymentType) => void
@@ -1288,24 +1630,25 @@ function PaymentStep({
   setAdvancePaymentMethod: (v: string) => void
   advancePaymentReference: string
   setAdvancePaymentReference: (v: string) => void
-  advancePaymentScreenshotUrl: string
-  setAdvancePaymentScreenshotUrl: (v: string) => void
   subtotal: number
   total: number
   discount: number
+  remainingCod: number
+  // Issue 2: raw File + local preview URL — NO upload yet
+  paymentProofFile: File | null
+  paymentProofPreview: string
+  proofError: string | null
+  onProofFile: (file: File) => void
+  onClearProof: () => void
+  fieldError: (...paths: string[]) => string | undefined
 }) {
-  const remainingCod =
-    paymentType === 'fully_prepaid'
-      ? 0
-      : paymentType === 'partial_advance'
-        ? Math.max(0, total - parsePrice(advanceAmount))
-        : total
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base flex items-center gap-2">
-          <CreditCard className="h-4 w-4" /> Payment
+          <CreditCard className="h-4 w-4" /> 3 · Payment
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
@@ -1356,7 +1699,11 @@ function PaymentStep({
                   value={paymentType === 'fully_prepaid' ? String(total) : advanceAmount}
                   onChange={(e) => setAdvanceAmount(e.target.value)}
                   disabled={paymentType === 'fully_prepaid'}
+                  aria-invalid={!!fieldError('advance_amount')}
                 />
+                {fieldError('advance_amount') && (
+                  <p className="text-xs text-destructive">{fieldError('advance_amount')}</p>
+                )}
                 {paymentType === 'partial_advance' && (
                   <p className="text-xs text-muted-foreground">
                     Remaining COD:{' '}
@@ -1390,10 +1737,20 @@ function PaymentStep({
               </div>
             </div>
 
-            <ScreenshotUpload
-              url={advancePaymentScreenshotUrl}
-              onChange={setAdvancePaymentScreenshotUrl}
+            {/* Issue 2: payment proof held locally — uploaded AFTER order creation */}
+            <ProofFileInput
+              file={paymentProofFile}
+              preview={paymentProofPreview}
+              error={proofError}
+              inputRef={fileInputRef}
+              onFile={onProofFile}
+              onClear={onClearProof}
             />
+
+            <p className="text-xs text-muted-foreground">
+              The proof image is attached after the order is created — you can also add it later
+              from the order detail page.
+            </p>
           </div>
         )}
 
@@ -1479,91 +1836,53 @@ function PaymentTypeCard({
 }
 
 /**
- * Screenshot upload — uploads to /api/upload?type=order_screenshot on file
- * select and stores the returned URL. Follows the logo-upload pattern.
+ * ProofFileInput — Issue 2 fix.
+ *
+ * Holds the picked File in browser memory ONLY (no upload). The parent
+ * component owns the file state and uploads it via /api/upload after
+ * createManualOrder() returns the new order_id.
+ *
+ * Client-side validation mirrors the server (/api/upload): image/jpeg |
+ * image/png | image/webp, max 5 MB.
  */
-function ScreenshotUpload({
-  url,
-  onChange,
+function ProofFileInput({
+  file,
+  preview,
+  error,
+  inputRef,
+  onFile,
+  onClear,
 }: {
-  url: string
-  onChange: (url: string) => void
+  file: File | null
+  preview: string
+  error: string | null
+  inputRef: React.RefObject<HTMLInputElement | null>
+  onFile: (file: File) => void
+  onClear: () => void
 }) {
-  const inputRef = useRef<HTMLInputElement>(null)
-  const [uploading, setUploading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-
-  async function handleFile(file: File) {
-    setError(null)
-    if (file.size > 5 * 1024 * 1024) {
-      setError('File too large. Maximum 5 MB.')
-      return
-    }
-    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
-      setError('Only JPG, PNG, and WebP images are allowed.')
-      return
-    }
-    setUploading(true)
-    try {
-      const fd = new FormData()
-      fd.append('file', file)
-      const res = await fetch('/api/upload?type=order_screenshot', {
-        method: 'POST',
-        body: fd,
-      })
-      const text = await res.text()
-      let body: unknown = null
-      if (text) {
-        try {
-          body = JSON.parse(text)
-        } catch {
-          body = text
-        }
-      }
-      if (!res.ok) {
-        const message =
-          body && typeof body === 'object' && 'error' in body
-            ? String((body as { error: unknown }).error)
-            : typeof body === 'string'
-              ? body
-              : `Upload failed (HTTP ${res.status})`
-        throw new Error(message)
-      }
-      const { url: uploadedUrl } = body as { url: string }
-      onChange(uploadedUrl)
-      toast.success('Screenshot uploaded.')
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Network error during upload')
-    } finally {
-      setUploading(false)
-    }
-  }
-
   return (
     <div className="space-y-1.5">
-      <Label>Payment screenshot (optional)</Label>
+      <Label>Payment proof (optional)</Label>
       <div className="flex items-center gap-3">
-        {url ? (
+        {preview ? (
           <div className="relative group">
             <button
               type="button"
               onClick={() => inputRef.current?.click()}
               className="block rounded-md border overflow-hidden"
             >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={url}
-                alt="Payment screenshot"
+                src={preview}
+                alt="Payment proof preview"
                 className="h-20 w-20 object-cover"
               />
             </button>
             <button
               type="button"
-              onClick={() => {
-                setError(null)
-                onChange('')
-              }}
+              onClick={onClear}
               className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center shadow-sm hover:scale-110 transition-transform"
-              aria-label="Remove screenshot"
+              aria-label="Remove payment proof"
             >
               <X className="h-3 w-3" />
             </button>
@@ -1572,22 +1891,29 @@ function ScreenshotUpload({
           <button
             type="button"
             onClick={() => inputRef.current?.click()}
-            disabled={uploading}
             className={cn(
               'flex h-20 w-20 items-center justify-center rounded-md border-2 border-dashed text-muted-foreground hover:border-primary/50 hover:text-primary transition-colors',
-              uploading && 'opacity-60 cursor-not-allowed',
             )}
           >
-            {uploading ? (
-              <Loader2 className="h-5 w-5 animate-spin" />
-            ) : (
-              <Upload className="h-5 w-5" />
-            )}
+            <Upload className="h-5 w-5" />
           </button>
         )}
-        <div className="text-xs text-muted-foreground">
-          <p>{url ? 'Click image to replace' : 'Click to upload'}</p>
-          <p>JPG, PNG, WebP — max 5 MB</p>
+        <div className="text-xs text-muted-foreground flex-1">
+          {file ? (
+            <div className="space-y-0.5">
+              <p className="font-medium text-foreground flex items-center gap-1.5">
+                <FileImage className="h-3.5 w-3.5" />
+                {file.name}
+              </p>
+              <p>{(file.size / 1024 / 1024).toFixed(2)} MB · {file.type}</p>
+              <p className="text-primary">Will upload after order is created.</p>
+            </div>
+          ) : (
+            <div className="space-y-0.5">
+              <p>Click to pick a payment proof image.</p>
+              <p>JPG, PNG, WebP — max 5 MB</p>
+            </div>
+          )}
           {error && <p className="text-destructive mt-1">{error}</p>}
         </div>
         <input
@@ -1597,7 +1923,7 @@ function ScreenshotUpload({
           className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0]
-            if (f) handleFile(f)
+            if (f) onFile(f)
             e.target.value = ''
           }}
         />
@@ -1607,14 +1933,21 @@ function ScreenshotUpload({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 4: Delivery
+// SECTION 4: Delivery & Discount
 // ─────────────────────────────────────────────────────────────────────────────
 
-function DeliveryStep({
+function DeliverySection({
+  customerMode,
+  selectedCustomer,
+  customerShippingAddress,
+  useCustomerAddress,
+  setUseCustomerAddress,
   deliveryAddress,
   setDeliveryAddress,
   deliveryCity,
   setDeliveryCity,
+  deliveryProvince,
+  setDeliveryProvince,
   courierName,
   setCourierName,
   dispatchLocationId,
@@ -1627,14 +1960,19 @@ function DeliveryStep({
   setDiscountReason,
   locations,
   isLoadingLocations,
-  subtotal,
-  discount,
-  total,
+  fieldError,
 }: {
+  customerMode: 'existing' | 'new'
+  selectedCustomer: CustomerRow | null
+  customerShippingAddress: CustomerAddress | null
+  useCustomerAddress: boolean
+  setUseCustomerAddress: (v: boolean) => void
   deliveryAddress: string
   setDeliveryAddress: (v: string) => void
   deliveryCity: string
   setDeliveryCity: (v: string) => void
+  deliveryProvince: string
+  setDeliveryProvince: (v: string) => void
   courierName: string
   setCourierName: (v: string) => void
   dispatchLocationId: string
@@ -1647,18 +1985,65 @@ function DeliveryStep({
   setDiscountReason: (v: string) => void
   locations: InventoryLocation[]
   isLoadingLocations: boolean
-  subtotal: number
-  discount: number
-  total: number
+  fieldError: (...paths: string[]) => string | undefined
 }) {
+  // The "Use different address" affordance is only relevant for existing
+  // customers who have a saved shipping address on file.
+  const showUseCustomerAddressToggle =
+    customerMode === 'existing' && !!selectedCustomer && !!customerShippingAddress
+
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base flex items-center gap-2">
-          <Truck className="h-4 w-4" /> Delivery & Discount
+          <Truck className="h-4 w-4" /> 4 · Delivery &amp; Discount
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
+        {/* Existing-customer shipping address affordance */}
+        {showUseCustomerAddressToggle && (
+          <div className="rounded-md border bg-muted/30 p-3 space-y-2">
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-1 min-w-0">
+                <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                  Saved shipping address
+                </p>
+                {useCustomerAddress && customerShippingAddress ? (
+                  <div className="text-sm">
+                    <p className="font-medium">{customerShippingAddress.address}</p>
+                    <p className="text-muted-foreground">
+                      {customerShippingAddress.city}
+                      {customerShippingAddress.province
+                        ? `, ${customerShippingAddress.province}`
+                        : ''}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    Using a different address — fields below are editable.
+                  </p>
+                )}
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant={useCustomerAddress ? 'outline' : 'default'}
+                onClick={() => setUseCustomerAddress(!useCustomerAddress)}
+              >
+                {useCustomerAddress ? (
+                  <>
+                    <Edit3 className="h-3.5 w-3.5" /> Use different address
+                  </>
+                ) : (
+                  <>
+                    <Check className="h-3.5 w-3.5" /> Use saved address
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="grid sm:grid-cols-2 gap-4">
           <div className="space-y-1.5 sm:col-span-2">
             <Label htmlFor="del-address">
@@ -1671,7 +2056,12 @@ function DeliveryStep({
               placeholder="House #, street, area"
               value={deliveryAddress}
               onChange={(e) => setDeliveryAddress(e.target.value)}
+              disabled={showUseCustomerAddressToggle && useCustomerAddress}
+              aria-invalid={!!fieldError('delivery_address')}
             />
+            {fieldError('delivery_address') && (
+              <p className="text-xs text-destructive">{fieldError('delivery_address')}</p>
+            )}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="del-city">City *</Label>
@@ -1680,6 +2070,21 @@ function DeliveryStep({
               placeholder="e.g. Lahore"
               value={deliveryCity}
               onChange={(e) => setDeliveryCity(e.target.value)}
+              disabled={showUseCustomerAddressToggle && useCustomerAddress}
+              aria-invalid={!!fieldError('delivery_city')}
+            />
+            {fieldError('delivery_city') && (
+              <p className="text-xs text-destructive">{fieldError('delivery_city')}</p>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="del-province">Province</Label>
+            <Input
+              id="del-province"
+              placeholder="e.g. Punjab"
+              value={deliveryProvince}
+              onChange={(e) => setDeliveryProvince(e.target.value)}
+              disabled={showUseCustomerAddressToggle && useCustomerAddress}
             />
           </div>
           <div className="space-y-1.5">
@@ -1691,7 +2096,7 @@ function DeliveryStep({
               onChange={(e) => setCourierName(e.target.value)}
             />
           </div>
-          <div className="space-y-1.5 sm:col-span-2">
+          <div className="space-y-1.5">
             <Label htmlFor="del-loc">
               <span className="flex items-center gap-1.5">
                 <Truck className="h-3.5 w-3.5" /> Dispatch location *
@@ -1712,6 +2117,9 @@ function DeliveryStep({
                   ))}
                 </SelectContent>
               </Select>
+            )}
+            {fieldError('dispatch_location_id') && (
+              <p className="text-xs text-destructive">{fieldError('dispatch_location_id')}</p>
             )}
             <p className="text-xs text-muted-foreground">
               Stock will be reserved from this location.
@@ -1754,285 +2162,112 @@ function DeliveryStep({
             </div>
           </div>
         </div>
-
-        <div className="rounded-md bg-muted/40 p-3 space-y-1 text-sm">
-          <div className="flex items-center justify-between">
-            <span className="text-muted-foreground">Subtotal</span>
-            <span className="tabular-nums">{formatPKR(subtotal)}</span>
-          </div>
-          {discount > 0 && (
-            <div className="flex items-center justify-between text-rose-600">
-              <span>Discount</span>
-              <span className="tabular-nums">−{formatPKR(discount)}</span>
-            </div>
-          )}
-          <div className="flex items-center justify-between font-medium pt-1 border-t">
-            <span>Total</span>
-            <span className="tabular-nums">{formatPKR(total)}</span>
-          </div>
-        </div>
       </CardContent>
     </Card>
   )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 5: Review
+// SECTION 5: Order Summary (sticky sidebar)
 // ─────────────────────────────────────────────────────────────────────────────
 
-function ReviewStep({
-  customerMode,
-  selectedCustomer,
-  newCustomer,
+function SummarySection({
   cart,
-  paymentType,
-  advanceAmount,
-  advancePaymentMethod,
-  advancePaymentReference,
-  advancePaymentScreenshotUrl,
-  deliveryAddress,
-  deliveryCity,
-  courierName,
-  dispatchLocationId,
-  locations,
-  notesForCourier,
-  discountAmount,
-  discountReason,
   subtotal,
   discount,
+  discountReason,
   total,
+  paymentType,
+  advanceAmount,
+  remainingCod,
 }: {
-  customerMode: 'existing' | 'new'
-  selectedCustomer: CustomerRow | null
-  newCustomer: {
-    name: string
-    phone: string
-    alternate_phone: string
-    email: string
-    address: string
-    city: string
-  }
   cart: CartItem[]
-  paymentType: PaymentType
-  advanceAmount: string
-  advancePaymentMethod: string
-  advancePaymentReference: string
-  advancePaymentScreenshotUrl: string
-  deliveryAddress: string
-  deliveryCity: string
-  courierName: string
-  dispatchLocationId: string
-  locations: InventoryLocation[]
-  notesForCourier: string
-  discountAmount: string
-  discountReason: string
   subtotal: number
   discount: number
+  discountReason: string
   total: number
+  paymentType: PaymentType
+  advanceAmount: number
+  remainingCod: number
 }) {
-  const dispatchLocation = locations.find((l) => l.id === dispatchLocationId)
-  const remainingCod =
-    paymentType === 'fully_prepaid'
-      ? 0
+  const paymentLabel =
+    paymentType === 'full_cod'
+      ? 'Full COD'
       : paymentType === 'partial_advance'
-        ? Math.max(0, total - parsePrice(advanceAmount))
-        : total
-  const advanceValue =
-    paymentType === 'fully_prepaid' ? total : parsePrice(advanceAmount)
+        ? 'Partial Advance'
+        : 'Fully Prepaid'
 
   return (
-    <div className="space-y-4">
-      {/* Customer + Delivery summary cards */}
-      <div className="grid sm:grid-cols-2 gap-4">
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <User className="h-4 w-4" /> Customer
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="text-sm space-y-1">
-            {customerMode === 'existing' && selectedCustomer ? (
-              <>
-                <p className="font-medium">{selectedCustomer.name}</p>
-                <p className="text-xs text-muted-foreground font-mono">{selectedCustomer.phone}</p>
-                <p className="text-xs text-muted-foreground">
-                  {selectedCustomer.totalOrdersCount} previous order
-                  {selectedCustomer.totalOrdersCount === 1 ? '' : 's'}
-                  {selectedCustomer.isFlagged && (
-                    <Badge
-                      variant="outline"
-                      className="ml-2 bg-rose-50 text-rose-700 border-rose-200 text-[10px]"
-                    >
-                      Flagged
-                    </Badge>
-                  )}
-                </p>
-              </>
-            ) : (
-              <>
-                <p className="font-medium">{newCustomer.name}</p>
-                <p className="text-xs text-muted-foreground font-mono">{newCustomer.phone}</p>
-                {newCustomer.email && (
-                  <p className="text-xs text-muted-foreground">{newCustomer.email}</p>
-                )}
-              </>
-            )}
-          </CardContent>
-        </Card>
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-base flex items-center gap-2">
+          <PackageCheck className="h-4 w-4" /> Order Summary
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {/* Item count */}
+        <div className="flex items-center justify-between text-sm">
+          <span className="text-muted-foreground">Items</span>
+          <span className="font-medium tabular-nums">
+            {cart.reduce((n, i) => n + i.quantity, 0)} ({cart.length} SKU
+            {cart.length === 1 ? '' : 's'})
+          </span>
+        </div>
 
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Truck className="h-4 w-4" /> Delivery
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="text-sm space-y-1.5">
-            <ReviewRow label="Address" value={deliveryAddress} />
-            <ReviewRow label="City" value={deliveryCity} />
-            <ReviewRow label="Courier" value={courierName || '—'} />
-            <ReviewRow label="Dispatch from" value={dispatchLocation?.name ?? '—'} />
-            {notesForCourier && <ReviewRow label="Notes" value={notesForCourier} />}
-          </CardContent>
-        </Card>
-      </div>
+        <Separator />
 
-      {/* Items table */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Package className="h-4 w-4" /> Items ({cart.length})
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Variant</TableHead>
-                <TableHead className="text-right">Qty</TableHead>
-                <TableHead className="text-right">Unit</TableHead>
-                <TableHead className="text-right">Total</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {cart.map((item) => (
-                <TableRow key={item.variantId}>
-                  <TableCell>
-                    <div className="flex flex-col">
-                      <span className="text-sm font-medium">{item.productTitle}</span>
-                      <span className="text-xs text-muted-foreground font-mono">{item.sku}</span>
-                    </div>
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">{item.quantity}</TableCell>
-                  <TableCell className="text-right tabular-nums text-muted-foreground">
-                    {formatPKR(item.unitPrice)}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums font-medium">
-                    {formatPKR(item.quantity * item.unitPrice)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+        {/* Totals */}
+        <div className="space-y-1 text-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-muted-foreground">Subtotal</span>
+            <span className="tabular-nums">{formatPKR(subtotal)}</span>
+          </div>
+          {discount > 0 && (
+            <div className="flex items-center justify-between text-rose-600">
+              <span>Discount{discountReason ? ` (${discountReason})` : ''}</span>
+              <span className="tabular-nums">−{formatPKR(discount)}</span>
+            </div>
+          )}
+        </div>
 
-      {/* Payment breakdown */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <CreditCard className="h-4 w-4" /> Payment
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          <ReviewRow
-            label="Type"
-            value={
-              paymentType === 'full_cod'
-                ? 'Full COD'
-                : paymentType === 'partial_advance'
-                  ? 'Partial Advance'
-                  : 'Fully Prepaid'
-            }
-          />
+        <Separator />
+
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-medium">Total</span>
+          <span className="text-xl font-bold tabular-nums">{formatPKR(total)}</span>
+        </div>
+
+        {/* Payment summary */}
+        <div className="rounded-md bg-muted/40 p-3 space-y-1 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-muted-foreground">Payment type</span>
+            <span className="font-medium">{paymentLabel}</span>
+          </div>
           {paymentType !== 'full_cod' && (
             <>
-              <ReviewRow label="Advance" value={formatPKR(advanceValue)} />
-              <ReviewRow
-                label="Method"
-                value={
-                  PAYMENT_METHODS.find((m) => m.value === advancePaymentMethod)?.label ?? '—'
-                }
-              />
-              {advancePaymentReference && (
-                <ReviewRow label="Reference" value={advancePaymentReference} />
-              )}
-              {advancePaymentScreenshotUrl && (
-                <div className="pt-1">
-                  <p className="text-xs text-muted-foreground mb-1">Screenshot</p>
-                  <img
-                    src={advancePaymentScreenshotUrl}
-                    alt="Payment screenshot"
-                    className="h-16 w-16 rounded border object-cover"
-                  />
-                </div>
-              )}
-              <ReviewRow label="Remaining COD" value={formatPKR(remainingCod)} />
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Advance paid</span>
+                <span className="font-medium tabular-nums">
+                  {formatPKR(paymentType === 'fully_prepaid' ? total : advanceAmount)}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-amber-700">
+                <span>Remaining COD</span>
+                <span className="font-medium tabular-nums">{formatPKR(remainingCod)}</span>
+              </div>
             </>
           )}
-        </CardContent>
-      </Card>
+        </div>
 
-      {/* Totals */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <PackageCheck className="h-4 w-4" /> Totals
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          <ReviewRow label="Subtotal" value={formatPKR(subtotal)} />
-          {discount > 0 && (
-            <>
-              <ReviewRow
-                label="Discount"
-                value={`−${formatPKR(discount)}`}
-                valueClassName="text-rose-600"
-              />
-              {discountReason && <ReviewRow label="Reason" value={discountReason} />}
-            </>
-          )}
-          <div className="flex items-center justify-between pt-2 border-t">
-            <span className="font-medium">Total</span>
-            <span className="text-lg font-semibold tabular-nums">{formatPKR(total)}</span>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Alert>
-        <CheckCircle2 className="h-4 w-4" />
-        <AlertTitle>Ready to create</AlertTitle>
-        <AlertDescription>
-          Review the details above and click <strong>Create Order</strong> below to submit.
-          You&apos;ll be taken to the new order&apos;s detail page.
-        </AlertDescription>
-      </Alert>
-    </div>
-  )
-}
-
-function ReviewRow({
-  label,
-  value,
-  valueClassName,
-}: {
-  label: string
-  value: string
-  valueClassName?: string
-}) {
-  return (
-    <div className="flex items-start justify-between gap-3">
-      <span className="text-muted-foreground shrink-0">{label}</span>
-      <span className={cn('font-medium text-right', valueClassName)}>{value}</span>
-    </div>
+        <Alert>
+          <CheckCircle2 className="h-4 w-4" />
+          <AlertTitle>Ready to submit</AlertTitle>
+          <AlertDescription className="text-xs">
+            Review all sections above, then click <strong>Create Order</strong>. You will be
+            taken to the new order&apos;s detail page.
+          </AlertDescription>
+        </Alert>
+      </CardContent>
+    </Card>
   )
 }

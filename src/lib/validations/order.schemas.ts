@@ -26,6 +26,10 @@ export const customerInputSchema = z.object({
   addresses: z
     .array(
       z.object({
+        // 'shipping' | 'billing' — optional for backward compatibility with
+        // legacy customers whose addresses were saved without a type field.
+        // Untyped addresses are treated as shipping (graceful fallback).
+        type: z.enum(['shipping', 'billing']).optional(),
         label: z.string().max(50).optional(),
         address: z.string().min(2, 'Address is required'),
         city: z.string().min(2, 'City is required'),
@@ -111,6 +115,28 @@ export const convertPaymentSchema = z.object({
   advance_payment_screenshot_url: z.string().url().optional().or(z.literal('')),
 })
 export type ConvertPaymentInput = z.infer<typeof convertPaymentSchema>
+
+// ──────────────────────────────────────────────────────────────
+// UPDATE PAYMENT SCREENSHOT
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Lightweight schema for post-creation payment proof uploads.
+ * Used when an order is created with a payment type that requires a
+ * screenshot but the file could only be uploaded AFTER the order_id existed.
+ *
+ * The URL must be either empty (clear) or a valid URL pointing to the
+ * /uploads/payment-proofs/... path returned by /api/upload.
+ */
+export const updatePaymentScreenshotSchema = z.object({
+  order_id: z.string().min(1, 'Order ID is required'),
+  advance_payment_screenshot_url: z
+    .string()
+    .url('Invalid screenshot URL')
+    .optional()
+    .or(z.literal('')),
+})
+export type UpdatePaymentScreenshotInput = z.infer<typeof updatePaymentScreenshotSchema>
 
 // ──────────────────────────────────────────────────────────────
 // MARK COD COLLECTED

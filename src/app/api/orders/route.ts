@@ -40,7 +40,7 @@ function parseArrayParam(url: URL, key: string): string[] {
  *       amount_min, amount_max (numbers — total_order_value >= / <=)
  *       date_from, date_to (ISO date strings)
  *   - Scalar:
- *       customer_id, org_variant_id, search, limit, offset
+ *       customer_id, org_variant_id, delivery_city, search, limit, offset
  */
 export async function GET(req: Request) {
   try {
@@ -63,6 +63,7 @@ export async function GET(req: Request) {
     // Scalar filters
     const customerId = url.searchParams.get('customer_id') ?? ''
     const orgVariantId = url.searchParams.get('org_variant_id') ?? ''
+    const deliveryCity = url.searchParams.get('delivery_city') ?? ''
     const search = url.searchParams.get('search') ?? ''
     const dateFrom = url.searchParams.get('date_from') ?? ''
     const dateTo = url.searchParams.get('date_to') ?? ''
@@ -96,6 +97,7 @@ export async function GET(req: Request) {
       // Scalar
       customerId: customerId || undefined,
       orgVariantId: orgVariantId || undefined,
+      deliveryCity: deliveryCity || undefined,
       search: search || undefined,
       // Range
       dateFrom: dateFrom || undefined,

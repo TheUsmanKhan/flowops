@@ -28,11 +28,13 @@ import {
   markCodCollectedSchema,
   cancelOrderSchema,
   shopifyOrderWebhookSchema,
+  updatePaymentScreenshotSchema,
   type CreateManualOrderInput,
   type ConvertPaymentInput,
   type MarkCodCollectedInput,
   type CancelOrderInput,
   type ShopifyOrderWebhook,
+  type UpdatePaymentScreenshotInput,
 } from '@/lib/validations/order.schemas'
 import { findOrCreateCustomer, updateCustomerStats } from './customer.actions'
 import type { Prisma } from '@prisma/client'
@@ -61,6 +63,7 @@ interface OrderFilters {
   amountMax?: number         // total_order_value <=
   orgVariantId?: string      // filter to orders containing this variant
   customerId?: string
+  deliveryCity?: string      // case-insensitive contains on delivery_city
   search?: string
   limit?: number
   offset?: number
@@ -923,6 +926,79 @@ export async function convertPaymentStatus(
 }
 
 // ──────────────────────────────────────────────────────────────
+// updatePaymentScreenshot
+// ──────────────────────────────────────────────────────────────
+//
+// Lightweight endpoint used to attach (or clear) a payment proof
+// screenshot URL on an EXISTING order. Used in two scenarios:
+//
+// 1. Order creation flow: file is held in browser memory during the
+//    single-page form (no order_id yet), uploaded to /api/upload
+//    immediately after createManualOrder() returns the new order_id,
+//    then this action is called to persist the resulting URL.
+//
+// 2. Order detail page: "Add payment proof" affordance when the order
+//    was created without a screenshot or the original upload failed.
+//
+// Does NOT change payment_type / payment_status / advance_amount —
+// only the screenshot URL field. If the order's payment_status is
+// 'cod_pending' (no advance yet), the convert-payment endpoint should
+// be used instead.
+//
+// Audit logged with old/new URL. No metric event (no $ change).
+
+export async function updatePaymentScreenshot(
+  input: UpdatePaymentScreenshotInput,
+): Promise<ActionResult> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+
+    const parsed = updatePaymentScreenshotSchema.safeParse(input)
+    if (!parsed.success) {
+      return { success: false, error: parsed.error.issues[0]?.message ?? 'Invalid input' }
+    }
+    const d = parsed.data
+
+    const order = await db.order.findFirst({
+      where: { id: d.order_id, companyId: ctx.company.id },
+      select: { id: true, advancePaymentScreenshotUrl: true, paymentType: true },
+    })
+    if (!order) return { success: false, error: 'Order not found' }
+
+    const oldUrl = order.advancePaymentScreenshotUrl
+    const newUrl = d.advance_payment_screenshot_url || null
+
+    // No-op if nothing changed — saves an audit entry + DB write.
+    if (oldUrl === newUrl) return { success: true }
+
+    await db.order.update({
+      where: { id: d.order_id },
+      data: { advancePaymentScreenshotUrl: newUrl },
+    })
+
+    await insertAuditLog({
+      action: 'order.payment_screenshot_updated',
+      entityType: 'order',
+      entityId: d.order_id,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      oldValues: oldUrl ? { advance_payment_screenshot_url: oldUrl } : null,
+      newValues: newUrl ? { advance_payment_screenshot_url: newUrl } : null,
+    })
+
+    return { success: true }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to update payment screenshot',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
 // markCodCollected
 // ──────────────────────────────────────────────────────────────
 
@@ -1103,6 +1179,7 @@ export async function listOrders(
     trackingNumber: string | null
     dispatchLocationId: string | null
     customerId: string
+    deliveryCity: string | null
     confirmedAt: Date | null
     dispatchedAt: Date | null
     deliveredAt: Date | null
@@ -1158,6 +1235,11 @@ export async function listOrders(
     }
 
     if (filters.customerId) where.customerId = filters.customerId
+
+    // Delivery city filter — case-insensitive contains on delivery_city
+    if (filters.deliveryCity) {
+      where.deliveryCity = { contains: filters.deliveryCity, mode: 'insensitive' }
+    }
 
     if (filters.dateFrom || filters.dateTo) {
       where.createdAt = {}
@@ -1239,6 +1321,7 @@ export async function listOrders(
           trackingNumber: o.trackingNumber,
           dispatchLocationId: o.dispatchLocationId,
           customerId: o.customerId,
+          deliveryCity: o.deliveryCity,
           confirmedAt: o.confirmedAt,
           dispatchedAt: o.dispatchedAt,
           deliveredAt: o.deliveredAt,
