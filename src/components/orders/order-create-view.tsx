@@ -16,7 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Separator } from '@/components/ui/separator'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Checkbox } from '@/components/ui/checkbox'
+
 import {
   Select,
   SelectContent,
@@ -45,7 +45,6 @@ import {
   History,
   PackageCheck,
   FileImage,
-  Edit3,
   RotateCcw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -260,10 +259,6 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
     billing_address: '',
     billing_city: '',
   })
-  // When true: billing fields are hidden and shipping values are mirrored.
-  // CHECKED BY DEFAULT per spec.
-  const [billingSameAsShipping, setBillingSameAsShipping] = useState(true)
-
   // Items
   const [cart, setCart] = useState<CartItem[]>([])
   const [variantSearch, setVariantSearch] = useState('')
@@ -285,7 +280,6 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
   // When an existing/inline customer is selected, the delivery address is
   // auto-filled from their saved shippingAddress. Toggling this false lets
   // the user override it.
-  const [useCustomerAddress, setUseCustomerAddress] = useState(true)
   const [deliveryAddress, setDeliveryAddress] = useState('')
   const [deliveryCity, setDeliveryCity] = useState('')
   const [courierName, setCourierName] = useState('')
@@ -434,18 +428,16 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
 
   // ── Auto-fill delivery fields when a customer is selected ────────────────
   // The customer's saved shippingAddress (flat { address, city }) doubles
-  // as the delivery address. Toggling useCustomerAddress off lets the user
-  // override it for this order only.
+  // as the delivery address. Fields are always editable.
   useEffect(() => {
     if (!selectedCustomer) return
-    if (!useCustomerAddress) return // user is overriding — don't clobber their input
 
     const ship = customerDetailQuery.data?.customer.shippingAddress
     if (ship) {
       setDeliveryAddress(ship.address)
       setDeliveryCity(ship.city)
     }
-  }, [selectedCustomer, useCustomerAddress, customerDetailQuery.data])
+  }, [selectedCustomer, customerDetailQuery.data])
 
   // ── Auto-select default dispatch location ─────────────────────────────────
   useEffect(() => {
@@ -522,7 +514,6 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
   // ── Deselect customer (return to search mode) ───────────────────────────
   function handleDeselectCustomer() {
     setSelectedCustomer(null)
-    setUseCustomerAddress(true)
     setDeliveryAddress('')
     setDeliveryCity('')
   }
@@ -735,62 +726,22 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
               customerDetail={customerDetailQuery.data}
               newCustomer={newCustomer}
               setNewCustomer={setNewCustomer}
-              billingSameAsShipping={billingSameAsShipping}
-              setBillingSameAsShipping={(checked) => {
-                if (!checked) {
-                  // Pre-fill billing with shipping so the user has a starting point.
-                  setNewCustomer((p) => ({
-                    ...p,
-                    billing_address: p.shipping_address,
-                    billing_city: p.shipping_city,
-                  }))
-                }
-                setBillingSameAsShipping(checked)
-              }}
               onCreateNewCustomer={(phoneOverride) => {
-                // Inline creation — fire the POST immediately.
                 const phone = (phoneOverride ?? newCustomer.phone).trim()
                 const name = newCustomer.name.trim()
                 const addr = newCustomer.shipping_address.trim()
                 const city = newCustomer.shipping_city.trim()
-                if (name.length < 2) {
-                  toast.error('Customer name must be at least 2 characters.')
-                  return
-                }
-                if (phone.length < 7) {
-                  toast.error('A valid phone number is required.')
-                  return
-                }
-                if (addr.length < 2 || city.length < 2) {
-                  toast.error('Shipping address and city are required.')
-                  return
-                }
+                if (name.length < 2) { toast.error('Customer name must be at least 2 characters.'); return }
+                if (phone.length < 7) { toast.error('A valid phone number is required.'); return }
+                if (addr.length < 2 || city.length < 2) { toast.error('Address and city are required.'); return }
                 createCustomerMutation.mutate({
                   name,
                   phone,
-                  alternate_phone: newCustomer.alternate_phone.trim() || undefined,
-                  email: newCustomer.email.trim() || undefined,
                   shipping_address: { address: addr, city },
-                  billing_address: billingSameAsShipping
-                    ? { address: addr, city }
-                    : {
-                        address: newCustomer.billing_address.trim(),
-                        city: newCustomer.billing_city.trim(),
-                      },
+                  billing_address: { address: addr, city },
                 })
               }}
               creatingCustomer={createCustomerMutation.isPending}
-              useCustomerAddress={useCustomerAddress}
-              setUseCustomerAddress={(v) => {
-                setUseCustomerAddress(v)
-                if (v) {
-                  const s = customerDetailQuery.data?.customer.shippingAddress
-                  if (s) {
-                    setDeliveryAddress(s.address)
-                    setDeliveryCity(s.city)
-                  }
-                }
-              }}
               deliveryAddress={deliveryAddress}
               setDeliveryAddress={setDeliveryAddress}
               deliveryCity={deliveryCity}
@@ -924,12 +875,8 @@ function CustomerSection({
   customerDetail,
   newCustomer,
   setNewCustomer,
-  billingSameAsShipping,
-  setBillingSameAsShipping,
   onCreateNewCustomer,
   creatingCustomer,
-  useCustomerAddress,
-  setUseCustomerAddress,
   deliveryAddress,
   setDeliveryAddress,
   deliveryCity,
@@ -979,12 +926,8 @@ function CustomerSection({
       billing_city: string
     }>
   >
-  billingSameAsShipping: boolean
-  setBillingSameAsShipping: (checked: boolean) => void
   onCreateNewCustomer: (phoneOverride?: string) => void
   creatingCustomer: boolean
-  useCustomerAddress: boolean
-  setUseCustomerAddress: (v: boolean) => void
   deliveryAddress: string
   setDeliveryAddress: (v: string) => void
   deliveryCity: string
@@ -1003,66 +946,37 @@ function CustomerSection({
   isLoadingLocations: boolean
   fieldError: (...paths: string[]) => string | undefined
 }) {
-  const crmStats = customerDetail?.crmStats
-  // Saved shipping address (flat) from the customer record.
-  const savedShipping = customerDetail?.customer.shippingAddress ?? null
-  const showUseCustomerAddressToggle = !!selectedCustomer && !!savedShipping
-  // Reference crmStats so eslint doesn't flag it as unused — the actual
-  // rendering is delegated to <CrmStatsWidget> below, but having the value
-  // in scope here keeps the props/data-flow self-documenting.
-  void crmStats
-
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base flex items-center gap-2">
-          <User className="h-4 w-4" /> 1 · Customer &amp; Delivery
+          <User className="h-4 w-4" /> 1 · Customer
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-5">
+      <CardContent className="space-y-4">
         {/* ── SEARCH MODE (no customer selected) ──────────────────────────── */}
         {!selectedCustomer && (
-          <div className="space-y-5">
-            <div className="space-y-1.5">
-              <Label htmlFor="phone-search">
-                <span className="flex items-center gap-1.5">
-                  <Phone className="h-3.5 w-3.5" /> Search by phone, name, or email
-                </span>
-              </Label>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-                <Input
-                  id="phone-search"
-                  placeholder="e.g. 03001234567 or Ayesha"
-                  className="pl-9"
-                  value={phoneSearch}
-                  onChange={(e) => setPhoneSearch(e.target.value)}
-                />
-                {isSearching && (
-                  <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-                )}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Type at least 4 characters to search. If the customer doesn&apos;t exist,
-                fill in the new-customer form below and click{' '}
-                <strong>Create New Customer</strong>.
-              </p>
+          <div className="space-y-4">
+            {/* Search bar */}
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+              <Input
+                placeholder="Search by phone or name…"
+                className="pl-9"
+                value={phoneSearch}
+                onChange={(e) => setPhoneSearch(e.target.value)}
+              />
+              {isSearching && (
+                <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+              )}
             </div>
 
             {/* Search results */}
             {hasSearched && (
-              <div className="rounded-md border bg-popover shadow-sm max-h-72 overflow-y-auto">
+              <div className="rounded-md border max-h-60 overflow-y-auto scrollbar-thin">
                 {customers.length === 0 ? (
                   <div className="p-4 text-sm text-muted-foreground text-center">
-                    {isSearching ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <Loader2 className="h-4 w-4 animate-spin" /> Searching…
-                      </span>
-                    ) : (
-                      <>
-                        No matching customers. Fill in the form below to create one.
-                      </>
-                    )}
+                    {isSearching ? 'Searching…' : 'No match found. Create a new customer below.'}
                   </div>
                 ) : (
                   <ul className="divide-y">
@@ -1079,10 +993,7 @@ function CustomerSection({
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
                             {c.isFlagged && (
-                              <Badge
-                                variant="outline"
-                                className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]"
-                              >
+                              <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
                                 Flagged
                               </Badge>
                             )}
@@ -1098,198 +1009,82 @@ function CustomerSection({
               </div>
             )}
 
+            {/* ── Inline New Customer Form (simple, 4 fields) ── */}
             <Separator />
-
-            {/* New-customer form (Shopify-like inline creation) */}
-            <div className="space-y-5">
-              <div className="flex items-center gap-2">
-                <Plus className="h-4 w-4 text-muted-foreground" />
-                <p className="text-sm font-medium">New customer</p>
-              </div>
-
-              {/* Basic contact info */}
-              <div className="grid sm:grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <Label htmlFor="nc-name">Full name *</Label>
+            <div className="space-y-3">
+              <p className="text-sm font-medium flex items-center gap-1.5">
+                <Plus className="h-4 w-4 text-muted-foreground" /> New Customer
+              </p>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-xs">Full Name *</Label>
                   <Input
-                    id="nc-name"
                     placeholder="e.g. Ayesha Khan"
                     value={newCustomer.name}
                     onChange={(e) => setNewCustomer((p) => ({ ...p, name: e.target.value }))}
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="nc-phone">Phone *</Label>
+                <div className="space-y-1">
+                  <Label className="text-xs">Phone *</Label>
                   <Input
-                    id="nc-phone"
                     placeholder="e.g. 03001234567"
                     value={newCustomer.phone || phoneSearch}
                     onChange={(e) => setNewCustomer((p) => ({ ...p, phone: e.target.value }))}
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="nc-alt">Alternate phone</Label>
+                <div className="space-y-1 sm:col-span-2">
+                  <Label className="text-xs">Address *</Label>
                   <Input
-                    id="nc-alt"
-                    placeholder="Optional"
-                    value={newCustomer.alternate_phone}
-                    onChange={(e) =>
-                      setNewCustomer((p) => ({ ...p, alternate_phone: e.target.value }))
-                    }
+                    placeholder="House #, street, area"
+                    value={newCustomer.shipping_address}
+                    onChange={(e) => setNewCustomer((p) => ({ ...p, shipping_address: e.target.value }))}
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="nc-email">Email</Label>
+                <div className="space-y-1">
+                  <Label className="text-xs">City *</Label>
                   <Input
-                    id="nc-email"
-                    type="email"
-                    placeholder="Optional"
-                    value={newCustomer.email}
-                    onChange={(e) => setNewCustomer((p) => ({ ...p, email: e.target.value }))}
+                    placeholder="e.g. Lahore"
+                    value={newCustomer.shipping_city}
+                    onChange={(e) => setNewCustomer((p) => ({ ...p, shipping_city: e.target.value }))}
                   />
                 </div>
               </div>
-
-              <Separator />
-
-              {/* Shipping Address (required) — doubles as the delivery address */}
-              <div className="space-y-3">
-                <div className="flex items-center gap-2">
-                  <Truck className="h-4 w-4 text-muted-foreground" />
-                  <p className="text-sm font-medium">Shipping Address *</p>
-                </div>
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div className="space-y-1.5 sm:col-span-2">
-                    <Label htmlFor="nc-ship-addr">Address *</Label>
-                    <Textarea
-                      id="nc-ship-addr"
-                      placeholder="House #, street, area"
-                      value={newCustomer.shipping_address}
-                      onChange={(e) =>
-                        setNewCustomer((p) => ({ ...p, shipping_address: e.target.value }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="nc-ship-city">City *</Label>
-                    <Input
-                      id="nc-ship-city"
-                      placeholder="e.g. Lahore"
-                      value={newCustomer.shipping_city}
-                      onChange={(e) =>
-                        setNewCustomer((p) => ({ ...p, shipping_city: e.target.value }))
-                      }
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <Separator />
-
-              {/* Billing Address with "Same as shipping" checkbox (checked by default) */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between gap-2 flex-wrap">
-                  <div className="flex items-center gap-2">
-                    <CreditCard className="h-4 w-4 text-muted-foreground" />
-                    <p className="text-sm font-medium">Billing Address</p>
-                  </div>
-                  <label
-                    htmlFor="billing-same"
-                    className="flex items-center gap-2 text-sm cursor-pointer select-none"
-                  >
-                    <Checkbox
-                      id="billing-same"
-                      checked={billingSameAsShipping}
-                      onCheckedChange={(v) => setBillingSameAsShipping(v === true)}
-                    />
-                    <span>Same as shipping address</span>
-                  </label>
-                </div>
-
-                {billingSameAsShipping ? (
-                  <div className="rounded-md border border-dashed bg-muted/30 p-3 text-xs text-muted-foreground flex items-start gap-2">
-                    <Check className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-                    <span>
-                      Billing address will mirror the shipping address entered above.
-                      Uncheck the box to enter a separate billing address.
-                    </span>
-                  </div>
-                ) : (
-                  <div className="grid sm:grid-cols-2 gap-4">
-                    <div className="space-y-1.5 sm:col-span-2">
-                      <Label htmlFor="nc-bill-addr">Billing address *</Label>
-                      <Textarea
-                        id="nc-bill-addr"
-                        placeholder="House #, street, area"
-                        value={newCustomer.billing_address}
-                        onChange={(e) =>
-                          setNewCustomer((p) => ({ ...p, billing_address: e.target.value }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="nc-bill-city">Billing city *</Label>
-                      <Input
-                        id="nc-bill-city"
-                        placeholder="e.g. Lahore"
-                        value={newCustomer.billing_city}
-                        onChange={(e) =>
-                          setNewCustomer((p) => ({ ...p, billing_city: e.target.value }))
-                        }
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-
               <Button
                 type="button"
                 onClick={() => onCreateNewCustomer()}
                 disabled={creatingCustomer}
-                className="w-full sm:w-auto"
+                className="w-full"
               >
                 {creatingCustomer ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" /> Creating customer…
-                  </>
+                  <><Loader2 className="h-4 w-4 animate-spin" /> Creating…</>
                 ) : (
-                  <>
-                    <Plus className="h-4 w-4" /> Create New Customer
-                  </>
+                  <><Plus className="h-4 w-4" /> Create Customer</>
                 )}
               </Button>
             </div>
           </div>
         )}
 
-        {/* ── SELECTED MODE (existing or just-created customer) ───────────── */}
+        {/* ── SELECTED MODE (customer selected) ──────────────────────────── */}
         {selectedCustomer && (
-          <div className="space-y-5">
-            {/* Customer header card */}
-            <div className="rounded-lg border-2 border-primary/40 bg-primary/5 p-4 space-y-3">
+          <div className="space-y-4">
+            {/* Customer info card */}
+            <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-3">
               <div className="flex items-start justify-between gap-2">
-                <div className="flex items-start gap-3 min-w-0">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
-                    <User className="h-5 w-5" />
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
+                    <User className="h-4 w-4" />
                   </div>
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
                       <p className="text-sm font-semibold truncate">{selectedCustomer.name}</p>
                       {selectedCustomer.isFlagged && (
-                        <Badge
-                          variant="outline"
-                          className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]"
-                        >
+                        <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
                           Flagged
                         </Badge>
                       )}
                     </div>
-                    <p className="text-xs text-muted-foreground font-mono">
-                      {selectedCustomer.phone}
-                    </p>
-                    {selectedCustomer.email && (
-                      <p className="text-xs text-muted-foreground">{selectedCustomer.email}</p>
-                    )}
+                    <p className="text-xs text-muted-foreground font-mono">{selectedCustomer.phone}</p>
                   </div>
                 </div>
                 <Button size="sm" variant="ghost" onClick={onDeselectCustomer}>
@@ -1297,123 +1092,59 @@ function CustomerSection({
                 </Button>
               </div>
 
-              {/* CRM stats widget */}
-              <Separator />
+              {/* Compact CRM stats */}
               <CrmStatsWidget customerDetail={customerDetail} selectedCustomer={selectedCustomer} />
-
-              {fieldError('customer', 'customer_id') && (
-                <p className="text-xs text-destructive">
-                  {fieldError('customer', 'customer_id')}
-                </p>
-              )}
             </div>
 
-            {/* ── DELIVERY (folded in) ──────────────────────────────────────── */}
-            <Separator />
-            <div className="space-y-4">
-              <div className="flex items-center gap-2">
-                <Truck className="h-4 w-4 text-muted-foreground" />
-                <p className="text-sm font-medium">Delivery</p>
-              </div>
-
-              {/* Existing-customer shipping address affordance */}
-              {showUseCustomerAddressToggle && (
-                <div className="rounded-md border bg-muted/30 p-3 space-y-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="space-y-1 min-w-0">
-                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                        Saved shipping address
-                      </p>
-                      {useCustomerAddress && savedShipping ? (
-                        <div className="text-sm">
-                          <p className="font-medium">{savedShipping.address}</p>
-                          <p className="text-muted-foreground">{savedShipping.city}</p>
-                        </div>
-                      ) : (
-                        <p className="text-sm text-muted-foreground">
-                          Using a different address — fields below are editable.
-                        </p>
-                      )}
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant={useCustomerAddress ? 'outline' : 'default'}
-                      onClick={() => setUseCustomerAddress(!useCustomerAddress)}
-                    >
-                      {useCustomerAddress ? (
-                        <>
-                          <Edit3 className="h-3.5 w-3.5" /> Use different address
-                        </>
-                      ) : (
-                        <>
-                          <Check className="h-3.5 w-3.5" /> Use saved address
-                        </>
-                      )}
-                    </Button>
-                  </div>
-                </div>
-              )}
-
-              <div className="grid sm:grid-cols-2 gap-4">
-                <div className="space-y-1.5 sm:col-span-2">
-                  <Label htmlFor="del-address">
-                    <span className="flex items-center gap-1.5">
-                      <MapPin className="h-3.5 w-3.5" /> Delivery address *
-                    </span>
-                  </Label>
+            {/* ── Delivery address (auto-filled, editable) ── */}
+            <div className="space-y-3">
+              <p className="text-sm font-medium flex items-center gap-1.5">
+                <MapPin className="h-4 w-4 text-muted-foreground" /> Delivery Address
+              </p>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div className="space-y-1 sm:col-span-2">
+                  <Label className="text-xs">Address *</Label>
                   <Textarea
-                    id="del-address"
                     placeholder="House #, street, area"
                     value={deliveryAddress}
                     onChange={(e) => setDeliveryAddress(e.target.value)}
-                    disabled={showUseCustomerAddressToggle && useCustomerAddress}
-                    aria-invalid={!!fieldError('delivery_address')}
+                    className="text-sm"
+                    rows={2}
                   />
                   {fieldError('delivery_address') && (
                     <p className="text-xs text-destructive">{fieldError('delivery_address')}</p>
                   )}
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="del-city">City *</Label>
+                <div className="space-y-1">
+                  <Label className="text-xs">City *</Label>
                   <Input
-                    id="del-city"
                     placeholder="e.g. Lahore"
                     value={deliveryCity}
                     onChange={(e) => setDeliveryCity(e.target.value)}
-                    disabled={showUseCustomerAddressToggle && useCustomerAddress}
-                    aria-invalid={!!fieldError('delivery_city')}
                   />
                   {fieldError('delivery_city') && (
                     <p className="text-xs text-destructive">{fieldError('delivery_city')}</p>
                   )}
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="del-courier">Courier name</Label>
+                <div className="space-y-1">
+                  <Label className="text-xs">Courier</Label>
                   <Input
-                    id="del-courier"
-                    placeholder="e.g. TCS, Leopards"
+                    placeholder="e.g. TCS"
                     value={courierName}
                     onChange={(e) => setCourierName(e.target.value)}
                   />
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="del-loc">
-                    <span className="flex items-center gap-1.5">
-                      <Truck className="h-3.5 w-3.5" /> Dispatch location *
-                    </span>
-                  </Label>
+                <div className="space-y-1">
+                  <Label className="text-xs">Dispatch Location *</Label>
                   {isLoadingLocations ? (
                     <Skeleton className="h-9" />
                   ) : (
                     <Select value={dispatchLocationId} onValueChange={setDispatchLocationId}>
-                      <SelectTrigger id="del-loc">
-                        <SelectValue placeholder="Select dispatch location" />
-                      </SelectTrigger>
+                      <SelectTrigger><SelectValue placeholder="Select location" /></SelectTrigger>
                       <SelectContent>
                         {locations.map((l) => (
                           <SelectItem key={l.id} value={l.id}>
-                            {l.name} {l.isDefault && '(default)'}
+                            {l.name}{l.isDefault ? ' (default)' : ''}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -1422,47 +1153,38 @@ function CustomerSection({
                   {fieldError('dispatch_location_id') && (
                     <p className="text-xs text-destructive">{fieldError('dispatch_location_id')}</p>
                   )}
-                  <p className="text-xs text-muted-foreground">
-                    Stock will be reserved from this location.
-                  </p>
                 </div>
-                <div className="space-y-1.5 sm:col-span-2">
-                  <Label htmlFor="del-notes">Notes for courier</Label>
-                  <Textarea
-                    id="del-notes"
-                    placeholder="Optional delivery instructions"
+                <div className="space-y-1 sm:col-span-2">
+                  <Label className="text-xs">Notes for courier</Label>
+                  <Input
+                    placeholder="Optional"
                     value={notesForCourier}
                     onChange={(e) => setNotesForCourier(e.target.value)}
                   />
                 </div>
               </div>
+            </div>
 
-              {/* Discount sub-section */}
-              <div className="rounded-lg border p-4 space-y-4">
-                <p className="text-sm font-medium">Discount (optional)</p>
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="disc-amt">Discount amount</Label>
-                    <Input
-                      id="disc-amt"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      placeholder="0"
-                      value={discountAmount}
-                      onChange={(e) => setDiscountAmount(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="disc-reason">Discount reason</Label>
-                    <Input
-                      id="disc-reason"
-                      placeholder="e.g. repeat customer"
-                      value={discountReason}
-                      onChange={(e) => setDiscountReason(e.target.value)}
-                    />
-                  </div>
-                </div>
+            {/* ── Discount (compact) ── */}
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label className="text-xs">Discount (Rs.)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="0"
+                  value={discountAmount}
+                  onChange={(e) => setDiscountAmount(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Discount reason</Label>
+                <Input
+                  placeholder="Optional"
+                  value={discountReason}
+                  onChange={(e) => setDiscountReason(e.target.value)}
+                />
               </div>
             </div>
           </div>
