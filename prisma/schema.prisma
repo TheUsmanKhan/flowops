@@ -1331,8 +1331,10 @@ model Customer {
   alternatePhone    String?
   email             String?
 
-  // JSONB: [{ label, address, city, province, is_default }]
-  addresses         String   @default("[]")
+  // Flat JSONB address fields (replaced the old addresses array).
+  // Structure: { "address": "123 Main St", "city": "Lahore" }
+  shippingAddress   String   @default("{}")
+  billingAddress    String   @default("{}")
 
   // Cached order history stats (denormalized for fast list views)
   totalOrdersCount  Int      @default(0)

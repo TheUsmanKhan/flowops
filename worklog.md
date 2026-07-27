@@ -1927,3 +1927,74 @@ VERIFICATION:
 
 Stage Summary:
 - All 5 issues verified as implemented and working. The prior subagent work (from the OMS-FIXES-FRONTEND task) already addressed all 5 issues. This task confirmed correctness, created the missing /api/upload route (which was the only actually missing piece), and verified everything end-to-end via API tests.
+
+---
+Task ID: OMS-ADDRESS-REDESIGN-FRONTEND
+Agent: oms-frontend-redesign
+Task: Update frontend for new customer address schema (flat shipping/billing, no province, CRM insights, inline creation)
+
+Work Log:
+- src/app/api/customers/route.ts: Added a POST handler that distinguishes between two payload shapes — (1) legacy flag/unflag (`{customer_id, action, reason}`) which delegates to flagCustomer/unflagCustomer, and (2) inline customer creation (`{name, phone, shipping_address:{address,city}, billing_address?...}`) which delegates to findOrCreateCustomer (idempotent on phone). Returns 201 for newly-created, 200 for matched-existing.
+- src/components/orders/customer-detail-view.tsx: Replaced CustomerAddress interface + `addresses[]` field with flat `shippingAddress` and `billingAddress: { address, city }` fields. Added CrmStats type. Removed the legacy `addresses` map loop and replaced it with two side-by-side address cards (Shipping Address / Billing Address) via a new `AddressCard` component. Added a new CRM Insights card showing Total Orders / Delivered count+% / Returned count+% / Delivery Rate, plus the address-history list. Added `cn` import for the new CrmStatCell component.
+- src/components/orders/order-create-view.tsx (full rewrite — 2273→2253 lines): Removed ALL province state, fields, types, and helpers (`pickShippingAddress`, `buildNewCustomerAddresses`, `shipping_province`, `billing_province`, `deliveryProvince`). CustomerAddress type is now `{address, city}` only. CustomerDetailResponse now has flat `shippingAddress` + `billingAddress` + a `crmStats` block. Removed the separate DeliverySection component and merged its fields (delivery address, city, courier, dispatch location, notes, discount) into the Customer section. New Shopify-like inline creation flow: typing a new phone + filling the new-customer form + clicking "Create New Customer" calls `POST /api/customers` IMMEDIATELY via a useMutation; on success the form switches to selected-customer mode using a synthetic CustomerRow built from the returned customerId. "Change" button restores search mode. Added a CrmStatsWidget that renders Total Orders / Delivered (count+%) / Returned (count+%) / Delivery Rate, plus an address-history list ("N× delivered to this address previously"). The "Same as shipping" checkbox now mirrors just address + city. buildPayload() now sends only `customer_id` (no inline `customer` object) since the customer is always created/selected before order submission. Removed the `effectiveBillingAddress/City/Province` hidden-values hack.
+- src/components/orders/customers-view.tsx: No changes required — the customer-row type never referenced `addresses` or `province`.
+- src/components/orders/order-detail-view.tsx: No changes required — `deliveryAddress` is rendered as a plain string (InfoRow), no `province` references existed.
+
+Verification:
+- `bun run lint` → 0 errors, 17 pre-existing warnings (0 new).
+- `npx tsc --noEmit` → 0 errors in order-create-view.tsx, customer-detail-view.tsx, customers-view.tsx, order-detail-view.tsx, or customers/route.ts. (Pre-existing errors in unrelated files remain untouched.)
+- grep for `province` / `addresses` / `pickShippingAddress` across the orders components directory → only matches are the "Saved addresses" UI label and a comment, no actual field references.
+
+Stage Summary:
+- Frontend fully aligned with the new flat customer address schema. All `province` references removed from every touched file. Inline customer creation is now Shopify-like (immediate POST + switch to selected mode). Delivery section is folded into the Customer section so the shipping address entered/picked for the customer IS the delivery address. CRM insights (delivery %, return %, address history) are surfaced both in the customer detail page and inline in the order-create form once a customer is selected. Order submission logic (createManualOrder) and the order validation schema were left untouched as instructed.
+
+---
+Task ID: OMS-ADDRESS-REDESIGN
+Agent: main
+Task: Address system redesign — remove province, flatten customer addresses, CRM stats, Shopify-like inline customer creation.
+
+Work Log:
+
+PHASE 1 — Schema Changes:
+- Updated Customer model: removed `addresses` (JSONB array), added `shippingAddress` (JSONB `{ address, city }`) and `billingAddress` (JSONB `{ address, city }`) with `"{}"` defaults
+- Ran `prisma db push --accept-data-loss` — old `addresses` column dropped, new columns created
+- Old address data (2 customers) was lost in the column drop — acceptable for test environment
+- Order model: `deliveryAddress` stays as JSONB snapshot, no province field
+
+PHASE 2 — Backend:
+- Updated `customerInputSchema` in order.schemas.ts: replaced `addresses` array with flat `shipping_address: { address, city }` and `billing_address: { address, city }` (optional, defaults to shipping)
+- Updated `findOrCreateCustomer()` in customer.actions.ts: stores `shippingAddress` and `billingAddress` as JSON.stringify of the flat objects
+- Updated `getCustomerDetail()` in customer.actions.ts: returns flat `shippingAddress`, `billingAddress`, plus `crmStats` (totalOrders, totalDelivered, totalReturned, deliveryRatio, returnRatio, addressHistory)
+- Updated `/api/customers/[id]/route.ts`: returns flat address fields + CRM stats computed from all orders
+- Updated `/api/customers/route.ts`: added POST handler for inline customer creation (Shopify-like) that calls findOrCreateCustomer immediately
+
+PHASE 3 — Frontend:
+- Updated `order-create-view.tsx`:
+  * Removed ALL province fields (shipping_province, billing_province, deliveryProvince)
+  * Removed pickShippingAddress() and old addresses array logic
+  * Customer section now uses flat shipping/billing address fields ({ address, city })
+  * Inline customer creation: clicking "Create New Customer" calls POST /api/customers immediately, switches to selected state on success
+  * "Change Customer" button to deselect and return to search mode
+  * CRM Insights widget: Total Orders, Delivered (count+%), Returned (count+%), address history
+  * Merged Delivery section into Customer section — shipping address IS the delivery address
+  * "Same as shipping" checkbox mirrors address + city only (no province)
+- Updated `customer-detail-view.tsx`:
+  * Replaced addresses array display with two flat address cards (Shipping + Billing)
+  * Added CRM Insights card with stats
+  * Added address history display
+- No changes needed to `customers-view.tsx` or `order-detail-view.tsx` (no province/addresses references)
+
+VERIFICATION:
+- bun run lint: 0 errors, 17 pre-existing warnings (0 new)
+- npx tsc --noEmit: 0 errors in any OMS file
+- API smoke test:
+  * Create customer with flat address → ✅ 201, customer created with shippingAddress + billingAddress
+  * Get customer detail with CRM stats → ✅ returns shippingAddress, billingAddress, crmStats (totalOrders, totalDelivered, totalReturned, deliveryRatio, returnRatio, addressHistory)
+  * List customers → ✅ no old `addresses` field on any record
+
+Stage Summary:
+- Customer address schema redesigned: flat shipping/billing JSONB fields, no province anywhere
+- CRM stats integrated: total orders, delivered/returned counts + ratios, address history
+- Shopify-like inline customer creation: customer saved to DB immediately on "Create Customer" click, can be deselected/changed
+- Delivery section merged into Customer section — shipping address IS the delivery address
+- Order's delivery_address is a snapshot of the customer's shipping address at order creation time

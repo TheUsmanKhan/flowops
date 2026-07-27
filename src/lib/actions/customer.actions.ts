@@ -66,8 +66,11 @@ export async function findOrCreateCustomer(
       if (d.alternate_phone && d.alternate_phone !== existing.alternatePhone) {
         updateData.alternatePhone = d.alternate_phone
       }
-      if (d.addresses && d.addresses.length > 0) {
-        updateData.addresses = JSON.stringify(d.addresses)
+      if (d.shipping_address) {
+        updateData.shippingAddress = JSON.stringify(d.shipping_address)
+      }
+      if (d.billing_address) {
+        updateData.billingAddress = JSON.stringify(d.billing_address)
       }
 
       if (Object.keys(updateData).length > 0) {
@@ -85,7 +88,8 @@ export async function findOrCreateCustomer(
         phone: d.phone,
         alternatePhone: d.alternate_phone || null,
         email: d.email || null,
-        addresses: JSON.stringify(d.addresses),
+        shippingAddress: JSON.stringify(d.shipping_address),
+        billingAddress: JSON.stringify(d.billing_address ?? d.shipping_address),
       },
     })
 
@@ -310,7 +314,8 @@ export async function getCustomerDetail(
     phone: string
     alternatePhone: string | null
     email: string | null
-    addresses: unknown
+    shippingAddress: { address: string; city: string }
+    billingAddress: { address: string; city: string }
     totalOrdersCount: number
     totalOrderValue: number
     totalRtoCount: number
@@ -325,6 +330,14 @@ export async function getCustomerDetail(
     totalOrderValue: number
     createdAt: Date
   }>
+  crmStats: {
+    totalOrders: number
+    totalDelivered: number
+    totalReturned: number
+    deliveryRatio: number
+    returnRatio: number
+    addressHistory: Array<{ address: string; city: string; orderCount: number }>
+  }
 }>> {
   try {
     const ctx = await getWorkspace()
@@ -342,10 +355,35 @@ export async function getCustomerDetail(
         status: true,
         totalOrderValue: true,
         createdAt: true,
+        deliveryAddress: true,
+        deliveryCity: true,
       },
       orderBy: { createdAt: 'desc' },
       take: 20,
     })
+
+    // CRM Stats
+    const allOrders = await db.order.findMany({
+      where: { customerId },
+      select: { status: true, deliveryAddress: true, deliveryCity: true },
+    })
+    const totalOrders = allOrders.length
+    const totalDelivered = allOrders.filter((o) => o.status === 'delivered').length
+    const totalReturned = allOrders.filter((o) => o.status === 'rto').length
+    const deliveryRatio = totalOrders > 0 ? (totalDelivered / totalOrders) * 100 : 0
+    const returnRatio = totalOrders > 0 ? (totalReturned / totalOrders) * 100 : 0
+
+    // Address history: group by delivery address
+    const addressMap = new Map<string, { address: string; city: string; orderCount: number }>()
+    for (const o of allOrders) {
+      const addr = o.deliveryAddress || ''
+      const city = o.deliveryCity || ''
+      const key = `${addr}|${city}`
+      if (!addressMap.has(key)) {
+        addressMap.set(key, { address: addr, city, orderCount: 0 })
+      }
+      addressMap.get(key)!.orderCount++
+    }
 
     return {
       success: true,
@@ -353,12 +391,21 @@ export async function getCustomerDetail(
         customer: {
           ...customer,
           totalOrderValue: Number(customer.totalOrderValue),
-          addresses: JSON.parse(customer.addresses),
+          shippingAddress: JSON.parse(customer.shippingAddress || '{}'),
+          billingAddress: JSON.parse(customer.billingAddress || '{}'),
         },
         recentOrders: recentOrders.map((o) => ({
           ...o,
           totalOrderValue: Number(o.totalOrderValue),
         })),
+        crmStats: {
+          totalOrders,
+          totalDelivered,
+          totalReturned,
+          deliveryRatio: Math.round(deliveryRatio * 100) / 100,
+          returnRatio: Math.round(returnRatio * 100) / 100,
+          addressHistory: Array.from(addressMap.values()).sort((a, b) => b.orderCount - a.orderCount),
+        },
       },
     }
   } catch (err) {

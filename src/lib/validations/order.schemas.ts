@@ -19,25 +19,17 @@ export const customerInputSchema = z.object({
     .string()
     .min(7, 'Phone number is required')
     .max(20)
-    // Loose Pakistani phone validation: starts with 0 or +92, digits only
     .regex(/^(?:\+92|0)?3\d{2}[-\s]?\d{7}$|^(?:\+92|0)?\d{9,11}$/, 'Invalid phone format'),
   alternate_phone: z.string().max(20).optional().or(z.literal('')),
   email: z.string().email('Invalid email').optional().or(z.literal('')),
-  addresses: z
-    .array(
-      z.object({
-        // 'shipping' | 'billing' — optional for backward compatibility with
-        // legacy customers whose addresses were saved without a type field.
-        // Untyped addresses are treated as shipping (graceful fallback).
-        type: z.enum(['shipping', 'billing']).optional(),
-        label: z.string().max(50).optional(),
-        address: z.string().min(2, 'Address is required'),
-        city: z.string().min(2, 'City is required'),
-        province: z.string().optional(),
-        is_default: z.boolean().optional(),
-      }),
-    )
-    .min(1, 'At least one address is required'),
+  shipping_address: z.object({
+    address: z.string().min(2, 'Shipping address is required'),
+    city: z.string().min(2, 'City is required'),
+  }),
+  billing_address: z.object({
+    address: z.string().min(2, 'Billing address is required'),
+    city: z.string().min(2, 'City is required'),
+  }).optional(),
 })
 export type CustomerInput = z.infer<typeof customerInputSchema>
 

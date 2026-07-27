@@ -44,6 +44,7 @@ import {
   RotateCcw,
   RefreshCw,
 } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { formatPKR, formatDate, getErrorMessage, badgeForStatus } from './_shared'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -51,11 +52,17 @@ import { formatPKR, formatDate, getErrorMessage, badgeForStatus } from './_share
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface CustomerAddress {
-  label?: string
   address: string
   city: string
-  province?: string
-  is_default?: boolean
+}
+
+interface CrmStats {
+  totalOrders: number
+  totalDelivered: number
+  totalReturned: number
+  deliveryRatio: number
+  returnRatio: number
+  addressHistory: Array<{ address: string; city: string; orderCount: number }>
 }
 
 interface CustomerDetail {
@@ -64,7 +71,8 @@ interface CustomerDetail {
   phone: string
   alternatePhone: string | null
   email: string | null
-  addresses: CustomerAddress[]
+  shippingAddress: CustomerAddress | null
+  billingAddress: CustomerAddress | null
   totalOrdersCount: number
   totalOrderValue: number
   totalRtoCount: number
@@ -84,6 +92,7 @@ interface RecentOrder {
 interface CustomerDetailResponse {
   customer: CustomerDetail
   recentOrders: RecentOrder[]
+  crmStats: CrmStats
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,6 +136,7 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
 
   const customer = query.data?.customer
   const recentOrders = query.data?.recentOrders ?? []
+  const crmStats = query.data?.crmStats
 
   const rtoRate = useMemo(() => {
     if (!customer || customer.totalOrdersCount === 0) return 0
@@ -281,36 +291,22 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
               </div>
             </div>
 
-            {/* Addresses */}
-            <div className="border-t pt-3">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground mb-2 flex items-center gap-1">
+            {/* Flat shipping + billing address cards */}
+            <div className="border-t pt-3 space-y-3">
+              <p className="text-xs uppercase tracking-wide text-muted-foreground flex items-center gap-1">
                 <MapPin className="h-3 w-3" /> Saved addresses
               </p>
-              {customer.addresses.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No addresses on file.</p>
-              ) : (
-                <ul className="space-y-2">
-                  {customer.addresses.map((a, i) => (
-                    <li
-                      key={i}
-                      className="text-sm rounded-md border p-2.5 bg-muted/30"
-                    >
-                      <div className="flex items-center justify-between">
-                        <p className="font-medium">{a.label ?? a.city}</p>
-                        {a.is_default && (
-                          <Badge variant="outline" className="text-[10px]">
-                            Default
-                          </Badge>
-                        )}
-                      </div>
-                      <p className="text-muted-foreground mt-0.5">
-                        {a.address}
-                        {a.province ? `, ${a.province}` : ''} — {a.city}
-                      </p>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <div className="grid sm:grid-cols-2 gap-3">
+                <AddressCard
+                  title="Shipping Address"
+                  address={customer.shippingAddress}
+                  defaultBadge
+                />
+                <AddressCard
+                  title="Billing Address"
+                  address={customer.billingAddress}
+                />
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -357,6 +353,66 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
           </Card>
         </div>
       </div>
+
+      {/* CRM Insights */}
+      {crmStats && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <ShoppingCart className="h-4 w-4" /> CRM Insights
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <CrmStatCell
+                label="Total Orders"
+                value={String(crmStats.totalOrders)}
+              />
+              <CrmStatCell
+                label="Delivered"
+                value={String(crmStats.totalDelivered)}
+                sub={`${crmStats.deliveryRatio.toFixed(1)}%`}
+                tone="emerald"
+              />
+              <CrmStatCell
+                label="Returned (RTO)"
+                value={String(crmStats.totalReturned)}
+                sub={`${crmStats.returnRatio.toFixed(1)}%`}
+                tone="rose"
+              />
+              <CrmStatCell
+                label="Delivery Rate"
+                value={`${crmStats.deliveryRatio.toFixed(1)}%`}
+                tone="emerald"
+              />
+            </div>
+
+            {crmStats.addressHistory.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground flex items-center gap-1">
+                  <MapPin className="h-3 w-3" /> Address history
+                </p>
+                <ul className="space-y-2">
+                  {crmStats.addressHistory.map((h, i) => (
+                    <li
+                      key={i}
+                      className="text-sm rounded-md border p-2.5 bg-muted/30 flex items-center justify-between gap-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="font-medium truncate">{h.address || '—'}</p>
+                        <p className="text-xs text-muted-foreground truncate">{h.city}</p>
+                      </div>
+                      <Badge variant="outline" className="text-[10px] shrink-0">
+                        {h.orderCount} order{h.orderCount === 1 ? '' : 's'}
+                      </Badge>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Order history */}
       <Card>
@@ -428,6 +484,73 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
           loading={flagMutation.isPending}
           onConfirm={(reason) => flagMutation.mutate({ action: 'flag', reason })}
         />
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Address card
+// ─────────────────────────────────────────────────────────────────────────────
+
+function AddressCard({
+  title,
+  address,
+  defaultBadge = false,
+}: {
+  title: string
+  address: CustomerAddress | null
+  defaultBadge?: boolean
+}) {
+  return (
+    <div className="text-sm rounded-md border p-2.5 bg-muted/30 h-full">
+      <div className="flex items-center justify-between gap-2">
+        <p className="font-medium">{title}</p>
+        {defaultBadge && (
+          <Badge variant="outline" className="text-[10px]">
+            Default
+          </Badge>
+        )}
+      </div>
+      {!address || (!address.address && !address.city) ? (
+        <p className="text-muted-foreground mt-1 text-xs italic">No address on file.</p>
+      ) : (
+        <div className="mt-1">
+          <p className="text-muted-foreground">{address.address || '—'}</p>
+          <p className="text-muted-foreground text-xs">{address.city || '—'}</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CrmStatCell({
+  label,
+  value,
+  sub,
+  tone = 'default',
+}: {
+  label: string
+  value: string
+  sub?: string
+  tone?: 'default' | 'emerald' | 'rose'
+}) {
+  const valueClass =
+    tone === 'emerald'
+      ? 'text-emerald-700'
+      : tone === 'rose'
+        ? 'text-rose-700'
+        : ''
+  return (
+    <div className="rounded-md border bg-muted/20 p-3">
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </p>
+      <p className={cn('text-lg font-semibold tabular-nums mt-1', valueClass)}>
+        {value}
+      </p>
+      {sub && (
+        <p className="text-xs text-muted-foreground mt-0.5 tabular-nums">{sub}</p>
       )}
     </div>
   )
