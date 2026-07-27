@@ -1068,8 +1068,8 @@ function CustomerSection({
         {/* ── SELECTED MODE (customer selected) ──────────────────────────── */}
         {selectedCustomer && (
           <div className="space-y-4">
-            {/* Customer info card */}
-            <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-3">
+            {/* Customer info card + CRM stats + editable address */}
+            <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-3 space-y-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-start gap-2.5 min-w-0">
                   <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
@@ -1092,40 +1092,54 @@ function CustomerSection({
                 </Button>
               </div>
 
-              {/* Compact CRM stats */}
+              {/* Compact CRM stats (informational only) */}
               <CrmStatsWidget customerDetail={customerDetail} selectedCustomer={selectedCustomer} />
+
+              <Separator />
+
+              {/* ── Editable Shipping/Delivery Address (lives HERE, not in a separate section) ── */}
+              <div className="space-y-2">
+                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                  <MapPin className="h-3 w-3" /> Shipping / Delivery Address
+                </p>
+                <div className="grid sm:grid-cols-2 gap-2">
+                  <div className="space-y-1 sm:col-span-2">
+                    <Label className="text-xs">Address *</Label>
+                    <Textarea
+                      placeholder="House #, street, area"
+                      value={deliveryAddress}
+                      onChange={(e) => setDeliveryAddress(e.target.value)}
+                      className="text-sm"
+                      rows={2}
+                    />
+                    {fieldError('delivery_address') && (
+                      <p className="text-xs text-destructive">{fieldError('delivery_address')}</p>
+                    )}
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-xs">City *</Label>
+                    <Input
+                      placeholder="e.g. Lahore"
+                      value={deliveryCity}
+                      onChange={(e) => setDeliveryCity(e.target.value)}
+                    />
+                    {fieldError('delivery_city') && (
+                      <p className="text-xs text-destructive">{fieldError('delivery_city')}</p>
+                    )}
+                  </div>
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  Pre-filled from customer&apos;s saved address. Edit for this order only — customer profile is not changed.
+                </p>
+              </div>
             </div>
 
-            {/* ── Delivery address (auto-filled, editable) ── */}
+            {/* ── Delivery Logistics (courier, dispatch, discount — NO address fields here) ── */}
             <div className="space-y-3">
               <p className="text-sm font-medium flex items-center gap-1.5">
-                <MapPin className="h-4 w-4 text-muted-foreground" /> Delivery Address
+                <Truck className="h-4 w-4 text-muted-foreground" /> Delivery Logistics
               </p>
               <div className="grid sm:grid-cols-2 gap-3">
-                <div className="space-y-1 sm:col-span-2">
-                  <Label className="text-xs">Address *</Label>
-                  <Textarea
-                    placeholder="House #, street, area"
-                    value={deliveryAddress}
-                    onChange={(e) => setDeliveryAddress(e.target.value)}
-                    className="text-sm"
-                    rows={2}
-                  />
-                  {fieldError('delivery_address') && (
-                    <p className="text-xs text-destructive">{fieldError('delivery_address')}</p>
-                  )}
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">City *</Label>
-                  <Input
-                    placeholder="e.g. Lahore"
-                    value={deliveryCity}
-                    onChange={(e) => setDeliveryCity(e.target.value)}
-                  />
-                  {fieldError('delivery_city') && (
-                    <p className="text-xs text-destructive">{fieldError('delivery_city')}</p>
-                  )}
-                </div>
                 <div className="space-y-1">
                   <Label className="text-xs">Courier</Label>
                   <Input
@@ -1163,28 +1177,28 @@ function CustomerSection({
                   />
                 </div>
               </div>
-            </div>
 
-            {/* ── Discount (compact) ── */}
-            <div className="grid sm:grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Discount (Rs.)</Label>
-                <Input
-                  type="number"
-                  min="0"
-                  step="0.01"
-                  placeholder="0"
-                  value={discountAmount}
-                  onChange={(e) => setDiscountAmount(e.target.value)}
-                />
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Discount reason</Label>
-                <Input
-                  placeholder="Optional"
-                  value={discountReason}
-                  onChange={(e) => setDiscountReason(e.target.value)}
-                />
+              {/* Discount (compact, within logistics section) */}
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-xs">Discount (Rs.)</Label>
+                  <Input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    placeholder="0"
+                    value={discountAmount}
+                    onChange={(e) => setDiscountAmount(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Discount reason</Label>
+                  <Input
+                    placeholder="Optional"
+                    value={discountReason}
+                    onChange={(e) => setDiscountReason(e.target.value)}
+                  />
+                </div>
               </div>
             </div>
           </div>
