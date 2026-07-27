@@ -622,22 +622,18 @@ export async function createOrderFromShopifyWebhook(
     })
 
     if (!customer && d.customer.first_name) {
+      const shippingAddr = d.customer.default_address
+        ? { address: d.customer.default_address.address1 || '', city: d.customer.default_address.city || '' }
+        : { address: '', city: '' }
+
       customer = await db.customer.create({
         data: {
           organizationId,
           name: `${d.customer.first_name} ${d.customer.last_name ?? ''}`.trim(),
           phone: customerPhone,
           email: d.customer.email || null,
-          addresses: JSON.stringify(
-            d.customer.default_address
-              ? [{
-                  address: d.customer.default_address.address1 || '',
-                  city: d.customer.default_address.city || '',
-                  province: d.customer.default_address.province || '',
-                  is_default: true,
-                }]
-              : [],
-          ),
+          shippingAddress: JSON.stringify(shippingAddr),
+          billingAddress: JSON.stringify(shippingAddr),
         },
       })
     }
