@@ -1998,3 +1998,64 @@ Stage Summary:
 - Shopify-like inline customer creation: customer saved to DB immediately on "Create Customer" click, can be deselected/changed
 - Delivery section merged into Customer section — shipping address IS the delivery address
 - Order's delivery_address is a snapshot of the customer's shipping address at order creation time
+
+---
+Task ID: CMS-STEP-1-SCHEMA
+Agent: main
+Task: Build standalone Customer Management System schema (Step 1 of multi-step rebuild) — schema + RLS only, no server actions or frontend. Replaces the simplified flat-address customer design from the OMS sprint with a proper multi-phone/multi-address/cross-platform-identity system.
+
+Work Log:
+
+INVESTIGATION (live Supabase instance):
+- Read /home/z/my-project/worklog.md to understand prior OMS work (flat shippingAddress/billingAddress JSONB design, no province).
+- Read existing migration 001_oms_schema.sql — found RLS helper functions (get_active_org_id, get_active_company_id, has_permission, is_elevated_employee) were defined but RLS was NEVER actually enabled on "Customer" (0 policies, relrowsecurity=false).
+- Read prisma/schema.prisma Customer + Order models — confirmed legacy columns: phone, alternatePhone, email, shippingAddress (JSONB), billingAddress (JSONB), totalOrdersCount, totalOrderValue, totalRtoCount, isFlagged, flaggedReason. All IDs are TEXT (cuid), all columns camelCase (Prisma convention).
+- Investigated live DB via Prisma $queryRawUnsafe scripts: 5 customers (all test data), 3 with non-empty shippingAddress JSON, 0 with alternatePhone, 2 with email, 92 orders referencing customers. Organization.id and Employee.id are TEXT. gen_random_uuid() available. 0 triggers on Customer.
+
+ADAPTATION DECISIONS (documented in migration header):
+- Spec said UUID PKs + lowercase tables + snake_case columns; live schema uses TEXT/cuid PKs + PascalCase "Customer"/"Order" tables + camelCase columns. Mixed conventions would break 92 existing FK references. Adapted: kept TEXT IDs (gen_random_uuid()::text DB-side default for new tables + Customer.id), used lowercase table names for the 3 NEW child tables (customer_phones, customer_addresses, customer_external_identities) per spec, used double-quoted camelCase columns everywhere to match existing Prisma convention.
+- RLS uses ENABLE (not FORCE) so postgres role (app connection) bypasses RLS — app keeps working without GUC-setting middleware; Supabase anon/authenticated roles ARE subject to policies (defense-in-depth).
+
+MIGRATION FILE: /home/z/my-project/supabase/migrations/002_customer_system_schema.sql (Parts 0-12)
+- PART 0: normalize_phone(p_raw_phone TEXT) RETURNS TEXT — IMMUTABLE plpgsql, strips non-digits, canonicalizes PK formats to +92XXXXXXXXXX. Handles 0300-1234567, +92 300 1234567, 923001234567, 3001234567, empty→null.
+- PART 1: customer_phones table — phoneRaw + phoneNormalized (E.164) + isPrimary + label. UNIQUE(organizationId, phoneNormalized) prevents dupes per org. Partial unique index customer_phones_one_primary_idx enforces one primary per customer. FK customerId→"Customer"(id) ON DELETE CASCADE.
+- PART 2: customer_addresses table — address + city (NO province), isDefault, lastUsedAt, label. Partial unique index customer_addresses_one_default_idx enforces one default per customer.
+- PART 3: customer_external_identities table — platform CHECK(shopify|daraz|instagram), externalCustomerId, matchedVia CHECK(exact_identity|phone_match|email_match|manual). UNIQUE(organizationId, platform, externalCustomerId).
+- PART 4: Added Customer.flaggedAt, flaggedBy (→Employee ON DELETE SET NULL), createdBy (→Employee). Added DB-side defaults: Customer.id DEFAULT gen_random_uuid()::text + Customer.updatedAt DEFAULT NOW() (needed because Prisma's @default(cuid())/@updatedAt are client-side only; the SQL function inserts raw).
+- PART 5-6: Backfills wrapped in DO blocks with information_schema checks — safe to re-run from any state (a first buggy splitter run had dropped legacy columns before backfill; test phone/address data was lost but is test-only; customer rows + 92 orders + cached stats intact; primary phones WERE backfilled before the drop for some customers).
+- PART 7: Order.recipientName, Order.usedCustomerAddressId (→customer_addresses ON DELETE SET NULL), Order.usedCustomerPhoneId (→customer_phones ON DELETE SET NULL).
+- PART 8: Backfilled Order.recipientName from Customer.name for all 92 existing orders.
+- PART 9: Dropped legacy Customer.phone, alternatePhone, shippingAddress, billingAddress + UNIQUE(organizationId, phone) constraint + its index.
+- PART 10: match_or_create_customer(org, platform, ext_id, phone, email, name) RETURNS TEXT — SECURITY DEFINER, SET search_path=public. Layered: (1) exact external identity lookup, (2) phone match via normalize_phone + customer_phones, (3) email match, (4) create new customer + primary phone + external identity. Race-protected via pg_advisory_xact_lock(hashtextextended(...)) + Layer 1 re-check before create.
+- PART 11: Triggers — trg_customer_addresses_updatedAt (BEFORE UPDATE sets updatedAt=NOW()), trg_customers_updatedAt (recreated from migration 001, was never applied live).
+- PART 12: RLS ENABLED on all 4 tables. SELECT: organizationId = get_active_org_id(). INSERT/UPDATE: org check + (has_permission('orders.create') OR has_permission('orders.manage')). DELETE: denied for Customer + customer_external_identities; allowed for customer_phones + customer_addresses (guarded by 'orders.manage').
+
+APPLY + VERIFY:
+- First apply attempt used a buggy JS SQL splitter that mangled statements (comment text leaked into statements) — partially applied: dropped legacy columns, created some policies, but failed to create child tables or functions. Fixed by switching to pg.Client.multi-statement query (single query() call with the whole file).
+- Second apply failed: unquoted camelCase columns (organizationId) folded to lowercase by PostgreSQL. Fixed by double-quoting ALL camelCase identifiers in new-table DDL.
+- Third apply failed: match_or_create_customer couldn't INSERT into Customer — id column had no DB default (Prisma @default(cuid()) is client-side). Added ALTER COLUMN id SET DEFAULT gen_random_uuid()::text.
+- Fourth apply failed: updatedAt NOT NULL with no DB default (Prisma @updatedAt is client-side). Added ALTER COLUMN "updatedAt" SET DEFAULT NOW().
+- Fifth apply: SUCCESS. All 30 verification checks pass: 3 new tables exist with correct indexes/constraints, Customer legacy columns dropped + new columns added, Order new columns added + 92 recipientName backfills, normalize_phone passes all 6 unit tests, match_or_create_customer passes all 3 end-to-end tests (Layer 4 create → Layer 1 exact identity → Layer 2 phone match all return same customer_id), RLS enabled on all 4 tables with correct policy sets (Customer/external_identities have no DELETE policy; phones/addresses have DELETE), both triggers present.
+
+PRISMA SCHEMA UPDATE: /home/z/my-project/prisma/schema.prisma
+- Rewrote Customer model: removed phone, alternatePhone, shippingAddress, billingAddress, @@unique([organizationId, phone]), @@index([organizationId, phone]). Added flaggedAt, flaggedBy (→Employee "CustomerFlagger"), createdBy (→Employee "CustomerCreator"), phones/addresses/externalIdentities relations. Added comment: do NOT run prisma db push (would drop partial indexes/CHECK constraints/RLS that Prisma can't represent); use prisma generate only.
+- Added 3 new models: CustomerPhone (@@map("customer_phones")), CustomerAddress (@@map("customer_addresses")), CustomerExternalIdentity (@@map("customer_external_identities")). All with @@map to lowercase table names, relations to Customer + Organization, back-relations ordersUsedIn Order[] @relation("OrderUsedPhone"/"OrderUsedAddress").
+- Added Order.recipientName, usedCustomerAddressId (→CustomerAddress "OrderUsedAddress" ON DELETE SET NULL), usedCustomerPhoneId (→CustomerPhone "OrderUsedPhone" ON DELETE SET NULL), + indexes.
+- Added Organization back-relations: customerPhones, customerAddresses, customerExternalIdentities.
+- Added Employee back-relations: flaggedCustomers ("CustomerFlagger"), createdCustomers ("CustomerCreator").
+- npx prisma validate → valid. npx prisma generate → success. Prisma smoke test: prisma.customerPhone/customerAddress/customerExternalIdentity all accessible; Customer.findFirst({ include: { phones, addresses, externalIdentities, _count: { orders } } }) returns Fatima Ahmed with 1 migrated phone (+923009876543) + 91 orders.
+
+VERIFICATION:
+- bun run lint → 0 errors, 17 pre-existing warnings (0 new — all React Hook Form watch() + unused eslint-disable, none related to customer schema).
+- Dev server: bun run dev → Ready in 696ms, GET / 200 (no fatal errors in dev.log).
+- 15 existing OMS files reference removed Customer fields (phone/shippingAddress/billingAddress/alternatePhone) — these are Step 2's responsibility (user explicitly said "DO NOT build server actions or frontend in this step"). Files: src/app/api/customers/[id]/route.ts, src/app/api/orders/{backordered,pending,returns,cancelled,ready-to-dispatch}/route.ts, src/app/api/workspace/switch/route.ts, src/lib/session-payload.ts, src/lib/actions/{customer,order}.actions.ts, src/components/orders/{order-create,customer-detail,orders,order-detail,customers}-view.tsx. They will TS-error until Step 2 migrates them to customer_phones/customer_addresses.
+
+Stage Summary:
+- Customer Management System schema fully built and live on Supabase: 3 new child tables (customer_phones, customer_addresses, customer_external_identities) with proper indexes, partial unique constraints (one primary phone / one default address per customer), CHECK constraints (platform + matchedVia enums), and cascading FKs.
+- "Customer" table reshaped: legacy phone/address columns dropped; flaggedAt/flaggedBy/createdBy added; DB-side id + updatedAt defaults added so the SQL function can insert without Prisma.
+- "Order" table extended: recipientName (backfilled for all 92 existing orders from Customer.name), usedCustomerAddressId, usedCustomerPhoneId.
+- 2 SQL functions live: normalize_phone() (IMMUTABLE E.164 canonicalizer, 6/6 unit tests pass) and match_or_create_customer() (SECURITY DEFINER, layered exact-identity→phone→email→create with advisory-lock race protection, 3/3 end-to-end tests pass).
+- RLS enabled on all 4 customer tables (Customer + 3 children): SELECT scoped by org, INSERT/UPDATE gated by orders.create OR orders.manage, DELETE denied for Customer + external_identities / allowed for phones + addresses. Uses existing get_active_org_id/has_permission helpers. postgres role bypasses (app keeps working); anon/authenticated roles enforced (defense-in-depth).
+- 2 triggers live: trg_customers_updatedAt (recreated — was missing), trg_customer_addresses_updatedAt.
+- Prisma schema updated + client regenerated with 3 new models + @@map directives; Customer/Order models reshaped; Organization/Employee back-relations added. prisma validate + generate both clean.
+- KNOWN Step 2 work: 15 OMS files reference removed Customer fields and need migration to customer_phones/customer_addresses. Also: wire app.active_org_id/app.active_company_id/app.user_id GUC setting in API middleware so RLS becomes actively enforced for non-bypass roles. Then: Shopify webhook handler calls match_or_create_customer() on every order.

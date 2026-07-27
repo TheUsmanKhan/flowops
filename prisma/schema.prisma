@@ -92,6 +92,11 @@ model Organization {
   orders               Order[]
   orderItems           OrderItem[]
   attributeValueRules  AttributeValueRule[]
+
+  // Customer Management System back-relations (migration 002)
+  customerPhones          CustomerPhone[]
+  customerAddresses       CustomerAddress[]
+  customerExternalIdentities CustomerExternalIdentity[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -264,6 +269,10 @@ model Employee {
   orderSettingsUpdater   CompanyOrderSetting[] @relation("CompanyOrderSettingsUpdater")
   orderCreator           Order[] @relation("OrderCreator")
   orderConverter         Order[] @relation("OrderConverter")
+
+  // Customer Management System back-relations (migration 002)
+  flaggedCustomers       Customer[] @relation("CustomerFlagger")
+  createdCustomers       Customer[] @relation("CustomerCreator")
 
   @@unique([companyId, userId])
 }
@@ -1319,24 +1328,29 @@ model ProductionOrder {
 // OMS — Order Management System (Step 1: Schema)
 // ============================================================================
 
-/// Lightweight customer record (NOT a full CRM). Tracks order history stats
-/// and RTO flag for return-fraud detection. One customer per phone per org.
+/// Customer record — the heart of the standalone Customer Management System.
+/// Phones and addresses live in separate child tables (CustomerPhone,
+/// CustomerAddress) so a customer can have multiple of each. Cross-platform
+/// identity mappings (Shopify/Daraz/Instagram) live in CustomerExternalIdentity.
+///
+/// NOTE: This model is managed jointly by Prisma (for ORM access) and raw SQL
+/// (migration 002). The DB-side defaults on `id` and `updatedAt` are set via
+/// SQL so the `match_or_create_customer()` SQL function can insert without
+/// Prisma. Prisma overrides both on its own writes. Do NOT run
+/// `prisma db push` against this model — it would try to drop the partial
+/// unique indexes, CHECK constraints, and RLS policies that Prisma can't
+/// represent. Use `prisma generate` only; schema changes go through
+/// /supabase/migrations/*.sql.
 model Customer {
   id                String   @id @default(cuid())
   organizationId    String
   organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
   name              String
-  phone             String
-  alternatePhone    String?
   email             String?
 
-  // Flat JSONB address fields (replaced the old addresses array).
-  // Structure: { "address": "123 Main St", "city": "Lahore" }
-  shippingAddress   String   @default("{}")
-  billingAddress    String   @default("{}")
-
-  // Cached order history stats (denormalized for fast list views)
+  // Cached order history stats (denormalized for fast list views — kept in
+  // sync by Step 2's recomputeCustomerStats server action, not live joins).
   totalOrdersCount  Int      @default(0)
   totalOrderValue   Decimal  @default(0) @db.Decimal(14, 2)
   totalRtoCount     Int      @default(0)
@@ -1344,15 +1358,99 @@ model Customer {
   // RTO flagging for return-fraud detection
   isFlagged         Boolean  @default(false)
   flaggedReason     String?
+  flaggedAt         DateTime?
+  flaggedBy         String?
+  flaggedByEmployee Employee? @relation("CustomerFlagger", fields: [flaggedBy], references: [id], onDelete: SetNull)
+
+  createdBy         String?
+  createdByEmployee Employee? @relation("CustomerCreator", fields: [createdBy], references: [id], onDelete: SetNull)
 
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   orders            Order[]
+  phones            CustomerPhone[]
+  addresses         CustomerAddress[]
+  externalIdentities CustomerExternalIdentity[]
 
-  @@unique([organizationId, phone])
-  @@index([organizationId, phone])
   @@index([organizationId, isFlagged])
+}
+
+/// A customer can have multiple phone numbers (own, spouse's, family shared
+/// line). phoneRaw is for display; phoneNormalized (E.164) is for matching.
+/// UNIQUE(organizationId, phoneNormalized) prevents duplicate customer
+/// creation. The partial unique index "one primary per customer" is enforced
+/// in SQL (customer_phones_one_primary_idx) — Prisma can't represent it.
+model CustomerPhone {
+  id                String   @id @default(cuid())
+  customerId        String
+  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id])
+
+  phoneRaw          String
+  phoneNormalized   String
+  label             String?
+  isPrimary         Boolean  @default(false)
+
+  createdAt         DateTime @default(now())
+
+  ordersUsedIn      Order[] @relation("OrderUsedPhone")
+
+  @@unique([organizationId, phoneNormalized])
+  @@index([organizationId, phoneNormalized])
+  @@index([customerId])
+  @@map("customer_phones")
+}
+
+/// A customer can have multiple delivery addresses (home, office, relative's).
+/// NO province field — per product decision, addresses are just { address, city }.
+/// The partial unique index "one default per customer" is enforced in SQL
+/// (customer_addresses_one_default_idx).
+model CustomerAddress {
+  id                String   @id @default(cuid())
+  customerId        String
+  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id])
+
+  label             String?
+  address           String
+  city              String
+  isDefault         Boolean  @default(false)
+  lastUsedAt        DateTime?
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  ordersUsedIn      Order[] @relation("OrderUsedAddress")
+
+  @@index([customerId])
+  @@index([organizationId])
+  @@map("customer_addresses")
+}
+
+/// Maps platform-specific customer IDs (Shopify, Daraz, Instagram) to internal
+/// FlowOps customer IDs. This is the fast path of the layered matching strategy
+/// in match_or_create_customer(). matchedVia records HOW each mapping was
+/// established. CHECK constraints on platform and matchedVia are enforced in SQL.
+model CustomerExternalIdentity {
+  id                String   @id @default(cuid())
+  customerId        String
+  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id])
+
+  platform          String   // 'shopify' | 'daraz' | 'instagram' (CHECK in SQL)
+  externalCustomerId String
+  matchedVia        String   @default("manual") // 'exact_identity' | 'phone_match' | 'email_match' | 'manual' (CHECK in SQL)
+
+  createdAt         DateTime @default(now())
+
+  @@unique([organizationId, platform, externalCustomerId])
+  @@index([customerId])
+  @@index([organizationId, platform, externalCustomerId])
+  @@map("customer_external_identities")
 }
 
 /// Per-company configurable order workflow strictness. When
@@ -1395,6 +1493,17 @@ model Order {
 
   customerId                  String
   customer                    Customer @relation(fields: [customerId], references: [id])
+
+  // Customer Management System integration (migration 002).
+  // recipientName may differ from customer.name (e.g. son orders, mother receives).
+  // usedCustomerAddressId/usedCustomerPhoneId track which saved child row was
+  // used for this order (for lastUsedAt tracking); nullable because a one-off
+  // address/phone might be typed without saving it permanently.
+  recipientName               String?
+  usedCustomerAddressId       String?
+  usedCustomerAddress         CustomerAddress? @relation("OrderUsedAddress", fields: [usedCustomerAddressId], references: [id], onDelete: SetNull)
+  usedCustomerPhoneId         String?
+  usedCustomerPhone           CustomerPhone? @relation("OrderUsedPhone", fields: [usedCustomerPhoneId], references: [id], onDelete: SetNull)
 
   status                      String   @default("pending") // pending | confirmed | partially_backordered | processing | dispatched | delivered | rto | cancelled | refunded
 
@@ -1458,6 +1567,8 @@ model Order {
   @@index([companyId, createdAt])
   @@index([externalOrderId])
   @@index([customerId])
+  @@index([usedCustomerAddressId])
+  @@index([usedCustomerPhoneId])
 }
 
 /// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
