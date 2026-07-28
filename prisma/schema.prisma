@@ -97,6 +97,9 @@ model Organization {
   customerPhones          CustomerPhone[]
   customerAddresses       CustomerAddress[]
   customerExternalIdentities CustomerExternalIdentity[]
+
+  // Item Exchange System back-relations (migration 003)
+  orderExchanges          OrderExchange[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -158,6 +161,9 @@ model Company {
   // OMS back-relations
   orderSettings           CompanyOrderSetting?
   orders                  Order[]
+
+  // Item Exchange System back-relations (migration 003)
+  orderExchanges          OrderExchange[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -273,6 +279,12 @@ model Employee {
   // Customer Management System back-relations (migration 002)
   flaggedCustomers       Customer[] @relation("CustomerFlagger")
   createdCustomers       Customer[] @relation("CustomerCreator")
+
+  // Item Exchange System back-relations (migration 003)
+  exchangeRequestsRequested       OrderExchange[] @relation("ExchangeRequester")
+  exchangesOldItemVerified        OrderExchange[] @relation("ExchangeOldItemVerifier")
+  exchangesCustomerShippedConfirmed OrderExchange[] @relation("ExchangeCustomerShippedConfirmer")
+  exchangePriceDiffSettled        OrderExchange[] @relation("ExchangePriceDiffSettler")
 
   @@unique([companyId, userId])
 }
@@ -599,6 +611,9 @@ model OrgProductVariant {
 
   // OMS back-relations
   orderItems       OrderItem[]
+
+  // Item Exchange System back-relations (migration 003)
+  exchangesAsNewVariant OrderExchange[] @relation("ExchangeNewVariant")
 
   @@index([productId])
   @@index([organizationId, fulfillmentType])
@@ -946,6 +961,9 @@ model InventoryTransaction {
   cycleCountItems CycleCountItem[]
   productionOrdersFabric ProductionOrder[]
 
+  // Item Exchange System back-relations (migration 003)
+  exchangeOldItemTxns OrderExchange[] @relation("ExchangeOldItemTxn")
+
   @@index([orgVariantId, recordedAt])
   @@index([companyId, transactionType, recordedAt])
   @@index([organizationId, transactionType, recordedAt])
@@ -1202,6 +1220,9 @@ model StockLossRecord {
   updatedAt      DateTime @updatedAt
   resolvedAt     DateTime?
 
+  // Item Exchange System back-relations (migration 003)
+  exchangeOldItemLosses OrderExchange[] @relation("ExchangeOldItemLoss")
+
   @@index([companyId, lossType, investigationStatus])
   @@index([companyId, createdAt])
   @@index([orgVariantId])
@@ -1453,6 +1474,108 @@ model CustomerExternalIdentity {
   @@map("customer_external_identities")
 }
 
+/// Item Exchange System — tracks a single item exchange request.
+/// An exchange can only be created against an order_item belonging to a
+/// DELIVERED order. Two exchange methods with distinct sequencing:
+///   - courier_replacement: new item dispatched first, courier collects old
+///   - customer_self_return: customer ships old item back FIRST, it's
+///     manually verified, THEN the new item is dispatched
+///
+/// newOrderId/newOrderItemId are nullable — populated only once the linked
+/// exchange order (order_source='exchange') is created, which for
+/// customer_self_return happens LATE (after old item verification).
+///
+/// priceDifference is GENERATED as newItemPrice - oldItemPrice. If positive,
+/// customer owes; if negative, refund due.
+///
+/// "Customer did not return" is a supported terminal outcome — the value of
+/// the never-returned old item becomes a recoverable amount, and Step 2's
+/// server actions will call the existing flagCustomer() with reason
+/// "Exchange item not returned".
+///
+/// NOTE: Managed jointly by Prisma (ORM access) + raw SQL (migration 003).
+/// Do NOT run `prisma db push` — it would drop the GENERATED column, CHECK
+/// constraints, and RLS policies Prisma can't represent. Use `prisma
+/// generate` only; schema changes go through /supabase/migrations/*.sql.
+model OrderExchange {
+  id                            String   @id @default(cuid())
+  organizationId                String
+  organization                  Organization @relation(fields: [organizationId], references: [id])
+  companyId                     String
+  company                       Company  @relation(fields: [companyId], references: [id])
+
+  // The OLD item being exchanged away
+  originalOrderId               String
+  originalOrder                 Order    @relation("ExchangeOriginalOrder", fields: [originalOrderId], references: [id])
+  originalOrderItemId           String
+  originalOrderItem             OrderItem @relation("ExchangeOriginalOrderItem", fields: [originalOrderItemId], references: [id])
+
+  // The NEW variant + (late-populated) new order/item
+  newOrgVariantId               String
+  newOrgVariant                 OrgProductVariant @relation("ExchangeNewVariant", fields: [newOrgVariantId], references: [id])
+  newOrderId                    String?
+  newOrder                      Order?   @relation("ExchangeNewOrder", fields: [newOrderId], references: [id])
+  newOrderItemId                String?
+  newOrderItem                  OrderItem? @relation("ExchangeNewOrderItem", fields: [newOrderItemId], references: [id])
+
+  exchangeMethod                String   // 'courier_replacement' | 'customer_self_return' (CHECK in SQL)
+  status                        String   @default("requested") // 9 states (CHECK in SQL)
+
+  // Old item verification (manual — no courier API confirms arrival)
+  oldItemCondition              String?  // 'perfect' | 'good' | 'open_box' | 'damaged' (CHECK in SQL)
+  oldItemVerifiedAt             DateTime?
+  oldItemVerifiedBy             String?
+  oldItemVerifiedByEmployee     Employee? @relation("ExchangeOldItemVerifier", fields: [oldItemVerifiedBy], references: [id], onDelete: SetNull)
+  oldItemEvidenceUrls           String   @default("[]") // JSONB array
+  oldItemNotes                  String?
+
+  // Links to inventory txn + optional stock_loss (if damaged)
+  oldItemInventoryTxnId         String?
+  oldItemInventoryTransaction   InventoryTransaction? @relation("ExchangeOldItemTxn", fields: [oldItemInventoryTxnId], references: [id], onDelete: SetNull)
+  oldItemStockLossId            String?
+  oldItemStockLossRecord        StockLossRecord? @relation("ExchangeOldItemLoss", fields: [oldItemStockLossId], references: [id], onDelete: SetNull)
+
+  // Customer self-return specific
+  customerReturnTrackingNumber  String?
+  customerReturnCourier         String?
+  customerConfirmedShippedAt    DateTime?
+  customerConfirmedShippedBy    String?
+  customerConfirmedShippedByEmployee Employee? @relation("ExchangeCustomerShippedConfirmer", fields: [customerConfirmedShippedBy], references: [id], onDelete: SetNull)
+
+  // Price difference (GENERATED in DB as new-old)
+  oldItemPrice                  Decimal  @db.Decimal(12, 2)
+  newItemPrice                  Decimal  @db.Decimal(12, 2)
+  priceDifference              Decimal  @db.Decimal(12, 2) // GENERATED ALWAYS AS (new-old) STORED
+  priceDifferenceStatus        String   @default("unsettled") // 'unsettled' | 'customer_owes' | 'refund_due' | 'settled' (CHECK in SQL)
+  priceDifferenceSettledAmount  Decimal? @db.Decimal(12, 2)
+  priceDifferenceSettledAt      DateTime?
+  priceDifferenceSettledBy      String?
+  priceDifferenceSettledByEmployee Employee? @relation("ExchangePriceDiffSettler", fields: [priceDifferenceSettledBy], references: [id], onDelete: SetNull)
+
+  // "Did not return" outcome
+  markedAsNotReturned           Boolean  @default(false)
+  notReturnedReason             String?
+  notReturnedRecoveryStatus     String?  // 'pending' | 'recovered' | 'written_off' (CHECK in SQL)
+  notReturnedRecoveryAmount     Decimal? @db.Decimal(12, 2)
+
+  reason                        String
+  requestedBy                   String
+  requestedByEmployee           Employee @relation("ExchangeRequester", fields: [requestedBy], references: [id])
+  requestedAt                   DateTime @default(now())
+  completedAt                   DateTime?
+  cancelledAt                   DateTime?
+  cancellationReason            String?
+
+  updatedAt                     DateTime @updatedAt
+
+  @@index([companyId, status])
+  @@index([originalOrderId])
+  @@index([originalOrderItemId])
+  @@index([exchangeMethod, status])
+  @@index([requestedBy])
+  @@map("order_exchanges")
+}
+
 /// Per-company configurable order workflow strictness. When
 /// requireOrderConfirmation or requirePackingStep are FALSE, orders can
 /// jump straight to 'dispatched' and the DB trigger auto-backfills the
@@ -1562,6 +1685,10 @@ model Order {
   items                       OrderItem[]
   inventoryTransactions       InventoryTransaction[]
 
+  // Item Exchange System back-relations (migration 003)
+  exchangesAsOriginalOrder    OrderExchange[] @relation("ExchangeOriginalOrder")
+  exchangesAsNewOrder         OrderExchange[] @relation("ExchangeNewOrder")
+
   @@unique([companyId, flowopsOrderNumber])
   @@index([companyId, status])
   @@index([companyId, createdAt])
@@ -1609,6 +1736,10 @@ model OrderItem {
   updatedAt                   DateTime @updatedAt
 
   stockLossRecords            StockLossRecord[]
+
+  // Item Exchange System back-relations (migration 003)
+  exchangesAsOriginalItem     OrderExchange[] @relation("ExchangeOriginalOrderItem")
+  exchangesAsNewItem          OrderExchange[] @relation("ExchangeNewOrderItem")
 
   @@index([orderId])
   @@index([orgVariantId, fulfillmentStatus])

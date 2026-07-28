@@ -2361,3 +2361,87 @@ Stage Summary:
 - The critical spec rule is verified end-to-end: selecting a saved address + editing its text for an order → the order's snapshot has the edited text, the saved customer_addresses row is UNCHANGED, and the address's lastUsedAt is updated.
 - No province field anywhere in any form.
 - Last-phone / last-address deletion prevention is enforced in the UI (disabled button + tooltip) as well as server-side.
+
+---
+Task ID: EXCHANGE-STEP-1-SCHEMA
+Agent: main
+Task: Build the Item Exchange System schema (Step 1) — order_exchanges table + indexes + CHECK constraints + RLS + updatedAt trigger. Schema-only, no server actions or frontend.
+
+Work Log:
+
+INVESTIGATION:
+- Read worklog entries from CMS Steps 1-3 to understand the existing schema conventions: TEXT/cuid PKs everywhere, double-quoted camelCase columns, RLS ENABLED (not FORCED) so postgres role bypasses, lowercase table names for SQL-managed tables.
+- Verified via Prisma $queryRaw that all 8 referenced tables exist with TEXT id columns: Organization, Company, Employee, Order, OrderItem, OrgProductVariant, InventoryTransaction, StockLossRecord.
+- Confirmed RLS helper signatures: get_active_company_id() RETURNS TEXT, has_permission(TEXT, TEXT) RETURNS BOOLEAN. The spec used UUID syntax but the correct production adaptation (matching live schema) is TEXT FKs.
+
+MIGRATION FILE: /home/z/my-project/supabase/migrations/003_exchange_system_schema.sql (Parts 1-3)
+
+PART 1 — order_exchanges TABLE:
+- TEXT PK with DEFAULT gen_random_uuid()::text (Prisma overrides with cuid on its own inserts; raw-SQL inserts from future server actions get a DB-generated id).
+- All FKs are TEXT referencing the existing PascalCase tables (e.g. REFERENCES "Order"(id), "OrderItem"(id), "OrgProductVariant"(id), "InventoryTransaction"(id), "StockLossRecord"(id), "Employee"(id), "Company"(id), "Organization"(id)).
+- All camelCase columns double-quoted to preserve casing (matching existing tables).
+- exchangeMethod CHECK('courier_replacement','customer_self_return').
+- status CHECK with 9 states: requested, new_item_dispatched, awaiting_old_item_return, awaiting_customer_to_ship_old_item, customer_confirmed_shipped, old_item_manually_verified, completed, customer_did_not_return, cancelled.
+- oldItemCondition CHECK('perfect','good','open_box','damaged') — nullable until verification.
+- priceDifferenceStatus CHECK('unsettled','customer_owes','refund_due','settled').
+- notReturnedRecoveryStatus CHECK('pending','recovered','written_off').
+- priceDifference NUMERIC(12,2) GENERATED ALWAYS AS ("newItemPrice" - "oldItemPrice") STORED — auto-computes the price delta.
+- Consistency CHECK constraint order_exchanges_not_returned_implies_status: markedAsNotReturned=TRUE implies status='customer_did_not_return'. Catches application bugs that set the flag without transitioning status.
+- oldItemEvidenceUrls JSONB DEFAULT '[]' for verification photos.
+- Customer self-return fields: customerReturnTrackingNumber, customerReturnCourier, customerConfirmedShippedAt, customerConfirmedShippedBy.
+- Price-difference settlement fields: priceDifferenceSettledAmount, priceDifferenceSettledAt, priceDifferenceSettledBy.
+- "Did not return" fields: markedAsNotReturned, notReturnedReason, notReturnedRecoveryStatus, notReturnedRecoveryAmount.
+- newOrderId/newOrderItemId NULLABLE — populated only once the linked exchange order is created (LATE for customer_self_return, after old item verification).
+
+PART 2 — CUSTOMER FLAG INTEGRATION:
+- No schema change — reuses the existing customers.is_flagged/flagged_reason mechanism from CMS Step 1. Step 2's server actions will call the existing flagCustomer() action with reason "Exchange item not returned".
+
+INDEXES (5):
+- (companyId, status) — main exchanges list view
+- (originalOrderId) — "exchanges for this order" lookup
+- (originalOrderItemId) — "exchanges for this order_item" lookup
+- (exchangeMethod, status) — method-filtered queues
+- (requestedBy) — audit view per employee
+
+TRIGGER:
+- trg_order_exchanges_updatedAt — BEFORE UPDATE sets updatedAt=NOW() (matches Customer/customer_addresses pattern).
+
+PART 3 — RLS:
+- ENABLED on order_exchanges.
+- SELECT: companyId = get_active_company_id()
+- INSERT: companyId check + has_permission('orders.manage')
+- UPDATE: companyId check + has_permission('orders.manage')
+- DELETE: denied (use status='cancelled').
+- postgres role bypasses (app keeps working); anon/authenticated roles enforced.
+
+APPLY + VERIFY:
+- Applied via pg.Client multi-statement query — SUCCESS.
+- 16 verification checks (11 structural + 5 functional), ALL PASS:
+  * Table exists with 39 columns.
+  * priceDifference is GENERATED ALWAYS AS (newItemPrice - oldItemPrice) STORED.
+  * All 3 CHECK constraints present (exchangeMethod, status, markedAsNotReturned consistency).
+  * 5 indexes present.
+  * RLS enabled with SELECT/INSERT/UPDATE policies (no DELETE).
+  * updatedAt trigger present.
+  * 13 FKs reference correct tables.
+  * Functional: INSERT with old=1000/new=1500 → priceDifference=500.00 ✅
+  * Functional: INSERT with old=1500/new=1000 → priceDifference=-500.00 ✅
+  * Functional: markedAsNotReturned=true + status=requested → REJECTED by CHECK ✅
+  * Functional: markedAsNotReturned=true + status=customer_did_not_return → ACCEPTED ✅
+  * Functional: updatedAt trigger fires on UPDATE ✅
+
+PRISMA SCHEMA UPDATE: /home/z/my-project/prisma/schema.prisma
+- Added OrderExchange model with @@map("order_exchanges"), all fields, relations to Organization/Company/Employee(×4 named relations)/Order(×2)/OrderItem(×2)/OrgProductVariant/InventoryTransaction/StockLossRecord.
+- Added back-relations on 7 models: Organization.orderExchanges, Company.orderExchanges, Employee (4 named: ExchangeRequester, ExchangeOldItemVerifier, ExchangeCustomerShippedConfirmer, ExchangePriceDiffSettler), Order (2: ExchangeOriginalOrder, ExchangeNewOrder), OrderItem (2: ExchangeOriginalOrderItem, ExchangeNewOrderItem), OrgProductVariant.exchangesAsNewVariant, InventoryTransaction.exchangeOldItemTxns, StockLossRecord.exchangeOldItemLosses.
+- Comment: do NOT run prisma db push (would drop GENERATED column + CHECK constraints + RLS). Use prisma generate only.
+- npx prisma validate → valid. npx prisma generate → success. Smoke test: prisma.orderExchange.count() = 0, relation includes work.
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors (no new errors introduced).
+- bun run lint: 0 errors, 18 pre-existing warnings (0 new).
+- Dev server: HTTP 200, no errors.
+
+Stage Summary:
+- Item Exchange System schema fully built and live on Supabase. The order_exchanges table is ready for Step 2's server actions (createExchangeRequest, approveExchange, markCustomerConfirmedShipped, verifyOldItemReceived which calls receiveReturnedStitchedItem/receiveReturn, createExchangeReplacementOrder, settlePriceDifference, markAsNotReturned which calls flagCustomer, cancelExchange) and Step 3's frontend (exchanges list, exchange detail, "Request Exchange" action on delivered order_items).
+- The two distinct exchange methods (courier_replacement vs customer_self_return) are modeled with their own state sequences. The DB enforces data integrity (CHECK constraints, GENERATED column, consistency CHECK); the state-machine transitions are enforced at the application layer (Step 2) where the business rules about sequencing live.
+- KNOWN Step 2 work: server actions for the full exchange lifecycle, including calling the existing receiveReturnedStitchedItem()/receiveReturn() inventory functions once the old item is manually verified (NOT reimplemented — reused per spec), and calling the existing flagCustomer() action when marking as not-returned.
