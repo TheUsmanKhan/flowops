@@ -249,7 +249,7 @@ function renderRoute(
     case 'orders':
       return <OrdersView />
     case 'order-create':
-      return <OrderCreateView />
+      return <OrderCreateViewWithBack />
     case 'order-detail':
       return <OrderDetailView orderId={route.id} />
     case 'orders-pending-confirmation':
@@ -290,4 +290,9 @@ function CreateCompanyViewWithBack({ orgId }: { orgId?: string }) {
 function ProductCreateViewWithBack() {
   const navigate = useAppStore((s) => s.navigate)
   return <ProductCreateView onBack={() => navigate({ name: 'products' })} />
+}
+
+function OrderCreateViewWithBack() {
+  const navigate = useAppStore((s) => s.navigate)
+  return <OrderCreateView onBack={() => navigate({ name: 'orders' })} />
 }

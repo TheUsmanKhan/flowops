@@ -79,6 +79,7 @@ export interface EmployeePublic {
 
 export interface InvitationPublic {
   id: string
+  token: string
   invitedEmail: string
   status: string
   message: string | null

@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
-import type { InvitationPublic } from '@/lib/types'
+import type { InvitationPublic, SessionResponse } from '@/lib/types'
 import { OnboardingSelector } from '@/components/onboarding/onboarding-selector'
 import { CreateCompanyWizard } from '@/components/onboarding/create-company-wizard'
 import { AcceptInviteCard } from '@/components/onboarding/accept-invite-card'
@@ -27,7 +27,7 @@ export function OnboardingView() {
       .finally(() => setLoading(false))
   }, [])
 
-  function handleDone(session: Awaited<ReturnType<typeof api.post>>) {
+  function handleDone(session: SessionResponse) {
     setSession({
       user: session.user,
       activeCompany: session.activeCompany,

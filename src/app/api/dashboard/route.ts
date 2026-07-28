@@ -28,7 +28,7 @@ export async function GET() {
           where: { companyId },
           orderBy: { createdAt: 'desc' },
           take: 6,
-          include: { user: { select: { fullName: true, email: true } } },
+          include: { user: { select: { id: true, fullName: true, email: true } } },
         }),
         db.metricEvent.findMany({
           where: {

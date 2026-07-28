@@ -30,5 +30,12 @@ export const updateCompanySchema = z.object({
   addressProvince: z.string().max(80).optional().or(z.literal('')),
   addressPostalCode: z.string().max(20).optional().or(z.literal('')),
   addressCountry: z.string().max(2).optional().or(z.literal('')),
+  // These fields exist on the Company model and are used by the PATCH route;
+  // they were missing from the schema, causing TS errors when the route
+  // handler referenced them.
+  countryCode: z.string().min(2).max(2).optional(),
+  timezone: z.string().max(50).optional(),
+  fiscalYearStart: z.number().int().min(1).max(12).optional(),
+  logoUrl: z.string().url().optional().or(z.literal('')),
 })
 export type UpdateCompanyInput = z.infer<typeof updateCompanySchema>

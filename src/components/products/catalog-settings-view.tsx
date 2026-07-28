@@ -143,6 +143,7 @@ const attributeValueFormSchema = z.object({
     .regex(/^#[0-9a-fA-F]{6}$/, 'Use #RRGGBB format')
     .optional()
     .or(z.literal('')),
+  skuCode: z.string().max(50).optional().or(z.literal('')),
   displayOrder: z.number().int().min(0).optional(),
 })
 type AttributeValueFormValues = z.infer<typeof attributeValueFormSchema>

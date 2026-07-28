@@ -1,8 +1,9 @@
 'use client'
 
 import { useState } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, type Resolver } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import {
   Loader2,
   ArrowLeft,
@@ -15,10 +16,7 @@ import {
 import { toast } from 'sonner'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
-import {
-  createCompanySchema,
-  type CreateCompanyInput,
-} from '@/lib/validations/company'
+import { createCompanySchema } from '@/lib/validations/company'
 import type { SessionResponse } from '@/lib/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -46,8 +44,12 @@ export function CreateCompanyWizard({
   const [submitError, setSubmitError] = useState<string | null>(null)
   const user = useAppStore((s) => s.user)
 
-  const form = useForm<CreateCompanyInput>({
-    resolver: zodResolver(createCompanySchema),
+  // Use the OUTPUT type of the schema (where .default() fields are required
+  // strings) so the form values match what defaultValues provides. The
+  // zodResolver is typed for the INPUT type, so we cast it to match.
+  type CreateCompanyFormValues = z.output<typeof createCompanySchema>
+  const form = useForm<CreateCompanyFormValues>({
+    resolver: zodResolver(createCompanySchema) as unknown as Resolver<CreateCompanyFormValues>,
     defaultValues: {
       orgName: '',
       companyName: '',
@@ -69,7 +71,7 @@ export function CreateCompanyWizard({
   /** Validate only the fields belonging to a given step, then advance. */
   async function goNext() {
     setSubmitError(null)
-    const fieldsForStep: (keyof CreateCompanyInput)[] =
+    const fieldsForStep: (keyof CreateCompanyFormValues)[] =
       step === 0 ? ['orgName'] : ['companyName']
     const valid = await form.trigger(fieldsForStep)
     if (valid) setStep((s) => Math.min(s + 1, STEPS.length - 1))

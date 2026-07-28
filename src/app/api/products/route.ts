@@ -213,7 +213,7 @@ export async function POST(req: Request) {
     })
 
     // Create variants + company pricing
-    const variantRecords = []
+    const variantRecords: Array<{ id: string }> = []
     for (const v of d.variants) {
       // Sync fulfillment_type ↔ inventory_policy
       const inventoryPolicy = syncInventoryPolicy(v.fulfillment_type, v.allow_backorder)

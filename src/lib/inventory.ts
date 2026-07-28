@@ -1,5 +1,6 @@
 import { db } from './db'
 import { Decimal } from '@prisma/client/runtime/library'
+import type { Prisma } from '@prisma/client'
 
 /**
  * THE CORE INVENTORY FUNCTION.
@@ -384,7 +385,25 @@ export async function getProductInventorySummary(productId: string) {
     select: { id: true, sku: true, fulfillmentType: true, trackInventory: true },
   })
 
-  const result = []
+  const result: Array<{
+    variantId: string
+    sku: string
+    fulfillmentType: string
+    trackInventory: boolean
+    totalOnHand: number
+    totalReserved: number
+    totalAvailable: number
+    totalValue: number
+    locations: Array<{
+      locationId: string
+      locationName: string
+      onHand: number
+      reserved: number
+      available: number
+      avgCost: number
+      incoming: number
+    }>
+  }> = []
   for (const variant of variants) {
     const pools = await db.inventoryPool.findMany({
       where: { orgVariantId: variant.id },
@@ -590,11 +609,11 @@ export async function checkAndFulfillMadeToOrderVariant(
       fabricLocationId: fabricLocation.locationId,
       quantity,
       status: 'fabric_reserved',
-      stitchingCost: Number(variant.stitchingCharges) || 0,
-      fabricCost,
+      stitchingCost: new Decimal(Number(variant.stitchingCharges) || 0),
+      fabricCost: new Decimal(fabricCost),
       estimatedCompletionDate,
       fabricTxnId: txnResult.transactionId ?? null,
-    },
+    } as Prisma.ProductionOrderUncheckedCreateInput,
   })
 
   return {

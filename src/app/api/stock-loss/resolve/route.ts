@@ -40,8 +40,8 @@ export async function POST(req: Request) {
       })) > 0
     if (!allowed) throw new ApiError(403, 'You lack permission to resolve stock loss records.')
 
-    const body = await readBody(req)
-    const lossId = body.loss_id as string | undefined
+    const body = await readBody<{ loss_id?: string }>(req)
+    const lossId = body.loss_id
     if (!lossId) throw new ApiError(400, 'loss_id is required')
 
     const record = await db.stockLossRecord.findFirst({ where: { id: lossId, companyId: company.id } })

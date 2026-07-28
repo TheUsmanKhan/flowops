@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
+import type { SessionResponse } from '@/lib/types'
 import { PageHeader } from '@/components/layout/dashboard-shell'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -99,7 +100,7 @@ export function CompanySettingsView() {
   async function saveProfile() {
     setSaving(true)
     try {
-      const session = await api.patch('/api/company', {
+      const session = await api.patch<SessionResponse>('/api/company', {
         name: profile.name,
         legalName: profile.legalName,
         logoUrl: profile.logoUrl,
@@ -143,7 +144,7 @@ export function CompanySettingsView() {
   async function saveFinancial() {
     setSaving(true)
     try {
-      const session = await api.patch('/api/company', {
+      const session = await api.patch<SessionResponse>('/api/company', {
         baseCurrency: financial.baseCurrency,
         fiscalYearStart: financial.fiscalYearStart,
         timezone: financial.timezone,
@@ -159,7 +160,7 @@ export function CompanySettingsView() {
   async function archiveCompany() {
     setSaving(true)
     try {
-      const session = await api.post('/api/companies/' + data?.id + '/archive', { id: data?.id, confirmation_text: archiveConfirm })
+      const session = await api.post<SessionResponse>('/api/companies/' + data?.id + '/archive', { id: data?.id, confirmation_text: archiveConfirm })
       setSession({ user, activeCompany: session.activeCompany, companies: session.companies, employee: session.employee ?? undefined })
       toast.success('Company archived')
       setArchiveOpen(false)

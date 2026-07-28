@@ -135,6 +135,7 @@ interface CycleCountDetailResponse {
 interface InventoryLocation {
   id: string
   name: string
+  isDefault?: boolean
 }
 interface LocationsResponse {
   locations: InventoryLocation[]

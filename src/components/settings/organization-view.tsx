@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError, initials } from '@/lib/api-client'
+import type { SessionResponse } from '@/lib/types'
 import { PageHeader } from '@/components/layout/dashboard-shell'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -89,7 +90,7 @@ export function OrganizationView() {
     if (!org) return
     setSaving(true)
     try {
-      const session = await api.patch('/api/organizations/' + org.id, {
+      const session = await api.patch<SessionResponse>('/api/organizations/' + org.id, {
         org_id: org.id,
         name,
         description,
@@ -107,7 +108,7 @@ export function OrganizationView() {
     if (!org) return
     setSaving(true)
     try {
-      const session = await api.post('/api/organizations/' + org.id, { id: org.id, confirmation_text: archiveConfirm })
+      const session = await api.post<SessionResponse>('/api/organizations/' + org.id, { id: org.id, confirmation_text: archiveConfirm })
       setSession({ user, activeCompany: session.activeCompany, companies: session.companies, employee: session.employee ?? undefined })
       toast.success('Organization archived')
       setArchiveOpen(false)

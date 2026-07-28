@@ -30,7 +30,10 @@ export async function PATCH(
     if (!companyId || !orgId) throw new ApiError(403, 'No active company')
 
     const { id } = await params
-    const record = await db.supplierReturn.findFirst({ where: { id, companyId } })
+    const record = await db.supplierReturn.findFirst({
+      where: { id, companyId },
+      include: { linkedLossRecord: true },
+    })
     if (!record) throw new ApiError(404, 'Supplier return not found.')
 
     const caller = await db.employee.findFirst({
