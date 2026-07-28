@@ -25,7 +25,16 @@ export async function GET() {
             id: true,
             flowopsOrderNumber: true,
             status: true,
-            customer: { select: { name: true, phone: true } },
+            customer: {
+              select: {
+                name: true,
+                phones: {
+                  where: { isPrimary: true },
+                  take: 1,
+                  select: { phoneRaw: true },
+                },
+              },
+            },
           },
         },
         orgVariant: {
@@ -92,7 +101,7 @@ export async function GET() {
         flowopsOrderNumber: item.order.flowopsOrderNumber,
         orderStatus: item.order.status,
         customerName: item.order.customer.name,
-        customerPhone: item.order.customer.phone,
+        customerPhone: item.order.customer.phones[0]?.phoneRaw ?? null,
         quantity: item.quantity,
         backorderedAt: item.backorderedAt?.toISOString() ?? null,
         daysWaiting: days,

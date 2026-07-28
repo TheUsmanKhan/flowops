@@ -17,7 +17,16 @@ export async function GET() {
     const orders = await db.order.findMany({
       where: { companyId, status: 'pending' },
       include: {
-        customer: { select: { name: true, phone: true } },
+        customer: {
+          select: {
+            name: true,
+            phones: {
+              where: { isPrimary: true },
+              take: 1,
+              select: { phoneRaw: true },
+            },
+          },
+        },
         _count: { select: { items: true } },
       },
       orderBy: { createdAt: 'asc' },
@@ -37,7 +46,7 @@ export async function GET() {
         totalOrderValue: Number(o.totalOrderValue),
         itemCount: o._count.items,
         customerName: o.customer.name,
-        customerPhone: o.customer.phone,
+        customerPhone: o.customer.phones[0]?.phoneRaw ?? null,
         createdAt: o.createdAt.toISOString(),
       })),
       stats: {

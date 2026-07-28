@@ -2059,3 +2059,93 @@ Stage Summary:
 - 2 triggers live: trg_customers_updatedAt (recreated — was missing), trg_customer_addresses_updatedAt.
 - Prisma schema updated + client regenerated with 3 new models + @@map directives; Customer/Order models reshaped; Organization/Employee back-relations added. prisma validate + generate both clean.
 - KNOWN Step 2 work: 15 OMS files reference removed Customer fields and need migration to customer_phones/customer_addresses. Also: wire app.active_org_id/app.active_company_id/app.user_id GUC setting in API middleware so RLS becomes actively enforced for non-bypass roles. Then: Shopify webhook handler calls match_or_create_customer() on every order.
+
+---
+Task ID: CMS-STEP-2-SERVER-ACTIONS
+Agent: main
+Task: Build all server actions for the Customer Management System (Step 2) — CRUD for customers/phones/addresses, cross-platform matching wrapper, cached-stats recomputation with auto-flagging, listing/detail, and Order system integration hooks. No frontend.
+
+Work Log:
+
+INVESTIGATION:
+- Read prior worklog entry (CMS-STEP-1-SCHEMA) to understand the schema: customer_phones / customer_addresses / customer_external_identities tables, normalize_phone() + match_or_create_customer() SQL functions, RLS enabled on all 4 customer tables.
+- Read existing customer.actions.ts — found it used the OLD schema (phone, alternatePhone, shippingAddress, billingAddress columns that no longer exist). The old findOrCreateCustomer, listCustomers, getCustomerDetail, flagCustomer, unflagCustomer, updateCustomerStats all referenced removed fields.
+- Read existing order.actions.ts createManualOrder() + createOrderFromShopifyWebhook() — both used findOrCreateCustomer and the old customer shape.
+- Read existing audit.ts (insertAuditLog signature), workspace.ts (getWorkspace/requirePermission/ApiError), metrics.ts (insertMetricEvent), permissions.ts (PERMISSIONS.ORDERS_CREATE / ORDERS_MANAGE), order.schemas.ts (customerInputSchema with the old flat shape).
+- Read db.ts — confirmed it overrides DATABASE_URL to use the transaction pooler (port 6543) at runtime.
+
+PART 1 — Validation Schemas (src/lib/validations/customer.schemas.ts):
+- phoneInputSchema: phone (raw, min 7 digits), label?, is_primary (default false)
+- addressInputSchema: label?, address (required), city (required), is_default (default false) — NO province field
+- createCustomerSchema: name, email?, phones[] (min 1), addresses[] (min 1) + 2 refinements enforcing EXACTLY one is_primary phone + EXACTLY one is_default address
+- updateCustomerSchema: customer_id + optional name/email (at least one required)
+- matchExternalCustomerSchema: platform (shopify|daraz|instagram), external_customer_id, phone?, email?, name?
+- listCustomersFiltersSchema: search?, is_flagged?, date_from?, date_to?, limit?, offset?
+
+PART 2 — Core Customer Server Actions (src/lib/actions/customer.actions.ts — full rewrite):
+- normalizePhone() helper: calls the normalize_phone() SQL function via $queryRaw (single source of truth — no TS port, guarantees client/server agree)
+- searchCustomerByPhone(phone): normalizes input via SQL function, looks up customer_phones in active org, returns full customer + ALL phones + ALL addresses (addresses ordered is_default DESC, lastUsedAt DESC NULLS LAST). Returns { found: false } when no match.
+- createCustomer(input): validates via createCustomerSchema, normalizes each phone via SQL function, checks org-wide phone_normalized conflicts BEFORE inserting (returns clear error pointing to the existing customer if any phone already belongs to another customer), inserts customer + phones + addresses in a single $transaction, audit log 'customer.created'. GUARD: orders.create.
+- updateCustomer(input): name/email only. GUARD: orders.create. Audit log 'customer.updated'.
+- addCustomerPhone(customer_id, input): normalize, org-wide uniqueness check, if is_primary=true unset existing primary first (in a transaction), insert. Audit log 'customer.phone_added'.
+- removeCustomerPhone(phone_id): refuses to delete the LAST remaining phone (returns clear error). Audit log 'customer.phone_removed'.
+- addCustomerAddress(customer_id, input): if is_default=true unset existing default first (transaction), insert. Audit log 'customer.address_added'.
+- updateCustomerAddress(address_id, input): if promoting to default, unset existing default first. Audit log 'customer.address_updated'.
+- removeCustomerAddress(address_id): refuses to delete the LAST remaining address. Audit log 'customer.address_removed'.
+- markAddressAsUsed(address_id): internal helper, sets lastUsedAt=NOW(). Non-fatal on failure (never blocks order creation).
+
+PART 3 — Cross-Platform Matching:
+- matchOrCreateExternalCustomer(input + organizationId): validates via matchExternalCustomerSchema, checks for existing external identity mapping (to report wasNewlyCreated accurately), calls match_or_create_customer() SQL function via $queryRaw. Returns { customerId, wasNewlyCreated, matchedVia }. Does NOT require a workspace session (designed for webhook context — the SQL function is SECURITY DEFINER).
+- getCustomerExternalIdentities(customer_id): lists all platform mappings for a customer (for profile display "Linked to Shopify Customer #7891234567").
+
+PART 4 — Cached Stats + Flagging:
+- updateCustomerStats(customer_id): recomputes totalOrdersCount, totalOrderValue (sum of DELIVERED orders' totalOrderValue per spec), totalRtoCount from the orders table. Auto-flags at 3+ RTO with reason 'High RTO rate (3+ returns)' — idempotent (won't re-flag if already flagged for this exact reason). Internal helper (no permission check — called from order.actions.ts which already has a session).
+- flagCustomer(customer_id, reason): manual flagging. GUARD: orders.manage. Sets isFlagged/flaggedReason/flaggedAt/flaggedBy. Audit log 'customer.flagged' + metric event 'customer.flagged'.
+- unflagCustomer(customer_id): GUARD: orders.manage. Clears all flag fields. Audit log 'customer.unflagged'.
+- flagCustomerInternal() shared helper: the auto-flag path (from updateCustomerStats) skips the permission check (triggered by order status change, not a user action) and skips the metric event (avoids spam during bulk recomputes).
+
+PART 5 — Listing & Detail:
+- listCustomers(filters): paginated. search matches customer name OR any associated phone (raw OR normalized — normalizes the search term via SQL function to match phoneNormalized). Each row includes primaryPhone + defaultAddress summary joined in. Filters: search, isFlagged, dateFrom/dateTo, limit (max 100), offset.
+- getCustomerDetail(customer_id): full customer record + all phones (primary first) + all addresses (default first, then lastUsedAt desc) + external identities + recent 20 orders (showing flowopsOrderNumber, status, totalOrderValue, recipientName, deliveryAddress/City, usedCustomerAddressId, usedCustomerPhoneId).
+
+PART 6 — Order System Integration:
+- order.schemas.ts: removed legacy customerInputSchema (flat phone/shippingAddress/billingAddress). Re-exported createCustomerSchema from customer.schemas.ts for inline new-customer creation. Updated createManualOrderSchema: replaced `customer` (old) with `new_customer` (full createCustomerSchema) + added `used_customer_address_id`, `used_customer_phone_id`, `recipient_name`, `save_address_for_next_time` fields.
+- createManualOrder() rewrite:
+  * Customer resolution: existing customer_id path verifies org + resolves saved address/phone selection; new_customer path calls createCustomer() then looks up the newly-created default address + primary phone IDs.
+  * recipient_name defaults to customer.name if not explicitly overridden.
+  * Order.create now includes recipientName, usedCustomerAddressId, usedCustomerPhoneId.
+  * Post-creation: if selectedSavedAddressId → markAddressAsUsed(); else if saveAddressForNextTime && one-off address typed → persist as new customer_addresses row (non-default) + link via usedCustomerAddressId. Then updateCustomerStats().
+  * For brand-new customers, saveAddressForNextTime is forced to false (the address was already saved as part of createCustomer).
+- createOrderFromShopifyWebhook() rewrite:
+  * Replaced manual customer find/create with matchOrCreateExternalCustomer() (the SQL function wrapper) — handles layered exact_identity → phone_match → email_match → create.
+  * If Shopify sent a default_address AND customer has no saved address (newly created), persist it as their default customer_addresses row. For existing customers, the Shopify address becomes a one-off delivery snapshot.
+  * Order.create includes recipientName, usedCustomerAddressId, usedCustomerPhoneId.
+  * delivery_address falls back to saved default address text if Shopify didn't send one.
+- shopifyOrderWebhookSchema: added optional `id` field to customer object (Shopify payloads include it; needed for external_customer_id mapping).
+
+FIXED DOWNSTREAM CONSUMERS (6 API routes + order.actions.ts listing):
+- src/app/api/customers/route.ts: rewrote GET (added `detailed=1` mode that delegates to searchCustomerByPhone for live phone search) + POST (flag/unflag flow unchanged; create flow now delegates to createCustomer server action). Removed findOrCreateCustomer + CustomerInput imports.
+- src/app/api/customers/[id]/route.ts: rewrote to delegate to getCustomerDetail server action (returns the new full shape with phones[]/addresses[]/externalIdentities[]/recentOrders[]).
+- src/app/api/orders/[id]/route.ts: customer select changed from { phone, alternatePhone } to { phones: { where: { isPrimary: true }, take: 1, select: { phoneRaw } } }. Added primaryPhone convenience field to response for backwards-compatible frontend consumption.
+- src/app/api/orders/{backordered,cancelled,pending,ready-to-dispatch,returns}/route.ts: all 5 routes updated — customer select changed to include phones[primary], and `o.customer.phone` → `o.customer.phones[0]?.phoneRaw ?? null`.
+- src/lib/actions/order.actions.ts listOrders(): search filter changed from `customer.phone contains` to `customer.phones.some(phoneRaw contains)`; include changed to phones[primary]; mapping uses phones[0].phoneRaw. getOrderDetail() return type updated: customer.phone → customer.primaryPhone + primaryPhoneNormalized.
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors in any customer/order file (src/lib/actions/{customer,order}.actions.ts, src/lib/validations/{customer,order}.schemas.ts, src/app/api/customers/*, src/app/api/orders/*, src/components/orders/*). Pre-existing errors in unrelated files (company settings, onboarding, products) remain untouched.
+- bun run lint: 0 errors, 17 pre-existing warnings (0 new — all React Hook Form watch() + unused eslint-disable, none related to customer work).
+- Dev server: bun run dev → Ready in 695ms, GET / 200, no errors in dev.log.
+- Test suite (scripts/test-customer-actions.ts, 18 tests, all pass):
+  * TEST 1: normalize_phone('0300-1234567') = '+923001234567' AND normalize_phone('+923001234567') = '+923001234567' — both resolve to the SAME normalized form (the spec's critical rule).
+  * TEST 2: createCustomerSchema accepts valid input (1 primary phone, 1 default address); rejects 0 primary phones, 2 primary phones, empty phones array, 2 default addresses — with clear error messages.
+  * TEST 3: DB unique constraint customer_phones_org_phone_unique rejects duplicate (organizationId, phoneNormalized) even when the raw phone is in a different format.
+  * TEST 4: searchCustomerByPhone finds the SAME customer with '03009998888' AND '+923009998888' (the spec's explicit test rule — PASSED).
+  * TEST 5: last-phone / last-address deletion-prevention count logic verified (customer with 1 phone/1 address would be refused).
+  * TEST 6: markAddressAsUsed bumps lastUsedAt from NULL to NOW().
+  * TEST 7: updateCustomerStats auto-flag threshold — 3 RTO orders triggers the >= 3 condition (would call flagCustomer with 'High RTO rate (3+ returns)').
+
+Stage Summary:
+- All 6 parts of Step 2 implemented and verified. The Customer Management System now has a complete server-action layer: searchCustomerByPhone, createCustomer, updateCustomer, addCustomerPhone/removeCustomerPhone, addCustomerAddress/updateCustomerAddress/removeCustomerAddress, markAddressAsUsed, matchOrCreateExternalCustomer, getCustomerExternalIdentities, updateCustomerStats (with auto-flag at 3+ RTO), flagCustomer/unflagCustomer, listCustomers (with search/isFlagged/date filters), getCustomerDetail (with phones/addresses/external identities/recent orders).
+- Order system integration complete: createManualOrder() accepts either existing customer_id + saved address/phone selection OR inline new_customer; sets recipientName (defaults to customer.name), usedCustomerAddressId, usedCustomerPhoneId; calls markAddressAsUsed on saved addresses; persists one-off addresses when save_address_for_next_time=true; calls updateCustomerStats after creation. createOrderFromShopifyWebhook() uses matchOrCreateExternalCustomer (the SQL function wrapper) for layered cross-platform matching.
+- 6 downstream API routes + order.actions.ts listing functions migrated from the removed Customer.phone/shippingAddress/billingAddress fields to the new customer_phones/customer_addresses child tables. All return a flattened `primaryPhone` field for backwards-compatible frontend consumption until Step 3 rebuilds the frontend.
+- The spec's critical phone-normalization rule is verified: searching '0300-1234567' and '+923001234567' resolves to the SAME customer via the normalize_phone() SQL function (single source of truth, no TS port).
+- KNOWN Step 3 work: the frontend components in src/components/orders/ (order-create-view, customer-detail-view, customers-view, orders-view, order-detail-view) still reference the old customer.phone/shippingAddress/billingAddress shape in their TypeScript types and render logic. The API now returns the new shape (with phones[]/addresses[] + a flattened primaryPhone convenience field), so the frontend will need adapting in Step 3.

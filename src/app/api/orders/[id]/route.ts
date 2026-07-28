@@ -25,13 +25,18 @@ export async function GET(
           select: {
             id: true,
             name: true,
-            phone: true,
-            alternatePhone: true,
             email: true,
             isFlagged: true,
             flaggedReason: true,
             totalOrdersCount: true,
             totalRtoCount: true,
+            // Customer Management System: phones live in customer_phones now.
+            // Include the primary phone for display.
+            phones: {
+              where: { isPrimary: true },
+              take: 1,
+              select: { phoneRaw: true, phoneNormalized: true },
+            },
           },
         },
         items: {
@@ -117,7 +122,12 @@ export async function GET(
 
         createdAt: order.createdAt.toISOString(),
       },
-      customer: order.customer,
+      customer: {
+        ...order.customer,
+        // Convenience: flatten the primary phone for backwards-compatible
+        // frontend consumption. The full phones array is also available.
+        primaryPhone: order.customer.phones[0]?.phoneRaw ?? null,
+      },
       items: order.items.map((item) => {
         let attributeValues: Record<string, string> = {}
         try {

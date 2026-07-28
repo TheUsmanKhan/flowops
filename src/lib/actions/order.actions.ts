@@ -36,7 +36,7 @@ import {
   type ShopifyOrderWebhook,
   type UpdatePaymentScreenshotInput,
 } from '@/lib/validations/order.schemas'
-import { findOrCreateCustomer, updateCustomerStats } from './customer.actions'
+import { updateCustomerStats, createCustomer, markAddressAsUsed, matchOrCreateExternalCustomer } from './customer.actions'
 import type { Prisma } from '@prisma/client'
 
 // ──────────────────────────────────────────────────────────────
@@ -324,28 +324,101 @@ export async function createManualOrder(
     }
     const d = parsed.data
 
-    // 2. Find or create customer
+    // 2. Resolve customer (existing customer_id OR inline new_customer).
+    //    Also resolve optional saved address/phone selection and recipient_name.
     let customerId: string
+    let customerName: string
+    let usedCustomerAddressId: string | null = null
+    let usedCustomerPhoneId: string | null = null
+    let saveAddressForNextTime = d.save_address_for_next_time ?? false
+    // Whether the delivery_address came from a saved customer_addresses row
+    // (vs. typed as a one-off). Used to decide whether to bump lastUsedAt.
+    let selectedSavedAddressId: string | null = null
+
     if (d.customer_id) {
-      // Verify existing customer belongs to this org
+      // Existing customer path — verify they belong to this org.
       const existing = await db.customer.findFirst({
         where: { id: d.customer_id, organizationId: ctx.company.organizationId },
+        select: { id: true, name: true },
       })
       if (!existing) return { success: false, error: 'Customer not found' }
       customerId = existing.id
-    } else if (d.customer) {
-      const customerResult = await findOrCreateCustomer({
-        ...d.customer,
-        organizationId: ctx.company.organizationId,
-        companyId: ctx.company.id,
-      })
-      if (!customerResult.success || !customerResult.data) {
-        return { success: false, error: customerResult.error ?? 'Failed to create customer' }
+      customerName = existing.name
+
+      // If a saved address was selected, verify it belongs to this customer.
+      if (d.used_customer_address_id) {
+        const addr = await db.customerAddress.findFirst({
+          where: {
+            id: d.used_customer_address_id,
+            customerId: existing.id,
+            organizationId: ctx.company.organizationId,
+          },
+          select: { id: true, address: true, city: true },
+        })
+        if (addr) {
+          usedCustomerAddressId = addr.id
+          selectedSavedAddressId = addr.id
+          // The delivery_address snapshot is the order's own editable copy.
+          // If the caller passed the same address text, we trust it; if they
+          // passed different text (edited it), we still record the link to
+          // the saved address for lastUsedAt tracking but keep the edited text
+          // as the order's snapshot. Either way, delivery_address comes from
+          // the input — we do NOT override it here.
+        }
       }
-      customerId = customerResult.data.customerId
+
+      // If a saved phone was selected, verify it belongs to this customer.
+      if (d.used_customer_phone_id) {
+        const phone = await db.customerPhone.findFirst({
+          where: {
+            id: d.used_customer_phone_id,
+            customerId: existing.id,
+            organizationId: ctx.company.organizationId,
+          },
+          select: { id: true },
+        })
+        if (phone) {
+          usedCustomerPhoneId = phone.id
+        }
+      }
+    } else if (d.new_customer) {
+      // Inline new-customer path — create the customer + their phones +
+      // addresses now via the Customer Management System. The first phone is
+      // primary and the first address is default (validated by createCustomerSchema).
+      const createResult = await createCustomer(d.new_customer)
+      if (!createResult.success || !createResult.data) {
+        return { success: false, error: createResult.error ?? 'Failed to create customer' }
+      }
+      customerId = createResult.data.customerId
+      customerName = d.new_customer.name.trim()
+      // For a brand-new customer, the first address they provided IS the
+      // saved default address. Mark it as the selected address so we bump
+      // its lastUsedAt after order creation.
+      const newAddr = await db.customerAddress.findFirst({
+        where: { customerId, isDefault: true },
+        select: { id: true },
+      })
+      if (newAddr) {
+        usedCustomerAddressId = newAddr.id
+        selectedSavedAddressId = newAddr.id
+      }
+      // Same for the primary phone.
+      const newPhone = await db.customerPhone.findFirst({
+        where: { customerId, isPrimary: true },
+        select: { id: true },
+      })
+      if (newPhone) {
+        usedCustomerPhoneId = newPhone.id
+      }
+      // For a brand-new customer, we already saved the address as part of
+      // createCustomer — don't double-save it.
+      saveAddressForNextTime = false
     } else {
-      return { success: false, error: 'Either customer or customer_id is required' }
+      return { success: false, error: 'Either customer_id or new_customer is required' }
     }
+
+    // 3. recipient_name defaults to the customer's name if not explicitly overridden.
+    const recipientName = (d.recipient_name && d.recipient_name.trim()) || customerName
 
     // 3. Fetch variants + their pricing for this company + fulfillment_type snapshot
     const variantIds = d.items.map((i) => i.org_variant_id)
@@ -458,6 +531,15 @@ export async function createManualOrder(
         flowopsOrderNumber,
         orderSource: 'manual',
         customerId,
+        // Customer Management System integration (migration 002):
+        //   - recipientName: the name to deliver to (defaults to customer.name)
+        //   - usedCustomerAddressId / usedCustomerPhoneId: which saved
+        //     customer_addresses / customer_phones rows were used for this
+        //     order, for lastUsedAt tracking and reporting. Nullable when a
+        //     one-off address/phone was typed without saving.
+        recipientName,
+        usedCustomerAddressId,
+        usedCustomerPhoneId,
         status: orderStatus,
         paymentType: d.payment_type,
         paymentStatus,
@@ -526,7 +608,40 @@ export async function createManualOrder(
       },
     })
 
-    // 12. Update customer stats
+    // 12. Customer Management System integration:
+    //   a. If a saved address was selected, bump its lastUsedAt to NOW() so
+    //      the UI can sort saved addresses by recency.
+    //   b. If a brand-new one-off address was typed AND the caller set
+    //      save_address_for_next_time=true, persist it as a new
+    //      customer_addresses row (and link it via usedCustomerAddressId
+    //      for future tracking). This is the "Save this address for next
+    //      time" UX from Step 3's frontend.
+    //   c. Recompute cached customer stats (total_orders_count, etc.) and
+    //      auto-flag if RTO threshold crossed.
+    if (selectedSavedAddressId) {
+      await markAddressAsUsed(selectedSavedAddressId)
+    } else if (saveAddressForNextTime && d.delivery_address && d.delivery_city) {
+      // One-off address typed + user opted to save it for next time.
+      // Persist as a non-default customer_addresses row (default stays as-is
+      // unless the user explicitly changes it via the customer profile).
+      const savedAddr = await db.customerAddress.create({
+        data: {
+          customerId,
+          organizationId: ctx.company.organizationId,
+          label: null,
+          address: d.delivery_address,
+          city: d.delivery_city,
+          isDefault: false,
+          lastUsedAt: new Date(),
+        },
+      })
+      // Link the order to the newly-saved address for future tracking.
+      await db.order.update({
+        where: { id: order.id },
+        data: { usedCustomerAddressId: savedAddr.id },
+      })
+    }
+
     await updateCustomerStats(customerId)
 
     // 13. If the order auto-confirmed (payment-driven or company setting),
@@ -615,32 +730,77 @@ export async function createOrderFromShopifyWebhook(
         }
     }
 
-    // Find or create customer from Shopify customer data
-    const customerPhone = d.customer.phone || '0000000000' // fallback
-    let customer = await db.customer.findFirst({
-      where: { organizationId, phone: customerPhone },
+    // Resolve customer via the cross-platform matching strategy (Step 1's
+    // match_or_create_customer() SQL function, wrapped by
+    // matchOrCreateExternalCustomer). This handles the layered:
+    //   1. exact_identity (existing Shopify customer mapping)
+    //   2. phone_match (normalized phone)
+    //   3. email_match
+    //   4. create new customer + primary phone + external identity mapping
+    //
+    // The customer's name comes from Shopify's first_name + last_name.
+    // Phone/email come from the Shopify payload (may be null for guest orders).
+    const shopifyCustomerName =
+      `${d.customer.first_name ?? ''} ${d.customer.last_name ?? ''}`.trim() ||
+      'Unknown Shopify Customer'
+
+    const matchResult = await matchOrCreateExternalCustomer({
+      platform: 'shopify',
+      external_customer_id: String(d.customer.id ?? d.id),
+      phone: d.customer.phone || undefined,
+      email: d.customer.email || undefined,
+      name: shopifyCustomerName,
+      organizationId,
     })
+    if (!matchResult.success || !matchResult.data) {
+      return {
+        success: false,
+        error: matchResult.error ?? 'Could not resolve customer from Shopify payload',
+      }
+    }
+    const customerId = matchResult.data.customerId
 
-    if (!customer && d.customer.first_name) {
-      const shippingAddr = d.customer.default_address
-        ? { address: d.customer.default_address.address1 || '', city: d.customer.default_address.city || '' }
-        : { address: '', city: '' }
+    // Fetch the resolved customer (for recipient_name default + address lookup).
+    const customer = await db.customer.findUnique({
+      where: { id: customerId },
+      include: {
+        phones: { where: { isPrimary: true }, take: 1 },
+        addresses: { where: { isDefault: true }, take: 1 },
+      },
+    })
+    if (!customer) {
+      return { success: false, error: 'Resolved customer not found' }
+    }
 
-      customer = await db.customer.create({
+    // If Shopify sent a default_address AND the customer has no saved address
+    // yet (newly created), persist it as their default customer_addresses row.
+    // For existing customers, we leave their saved addresses alone — the
+    // Shopify address becomes a one-off delivery snapshot on this order only.
+    let usedCustomerAddressId: string | null = null
+    let usedCustomerPhoneId: string | null = customer.phones[0]?.id ?? null
+    const shopifyAddress1 = d.customer.default_address?.address1 || null
+    const shopifyCity = d.customer.default_address?.city || null
+
+    if (shopifyAddress1 && shopifyCity && customer.addresses.length === 0) {
+      const newAddr = await db.customerAddress.create({
         data: {
+          customerId: customer.id,
           organizationId,
-          name: `${d.customer.first_name} ${d.customer.last_name ?? ''}`.trim(),
-          phone: customerPhone,
-          email: d.customer.email || null,
-          shippingAddress: JSON.stringify(shippingAddr),
-          billingAddress: JSON.stringify(shippingAddr),
+          label: 'Shopify Default',
+          address: shopifyAddress1,
+          city: shopifyCity,
+          isDefault: true,
+          lastUsedAt: new Date(),
         },
       })
+      usedCustomerAddressId = newAddr.id
+    } else if (customer.addresses.length > 0) {
+      // Existing customer with a saved default address — use it for this order.
+      usedCustomerAddressId = customer.addresses[0].id
+      await markAddressAsUsed(usedCustomerAddressId)
     }
 
-    if (!customer) {
-      return { success: false, error: 'Could not resolve customer from Shopify payload' }
-    }
+    const recipientName = shopifyCustomerName
 
     // Resolve variants by SKU
     const skus = d.line_items.map((li) => li.sku).filter(Boolean) as string[]
@@ -695,7 +855,11 @@ export async function createOrderFromShopifyWebhook(
         orderSource: 'shopify',
         externalOrderReference: d.name,
         externalOrderId: String(d.id),
-        customerId: customer.id,
+        customerId,
+        // Customer Management System integration (migration 002):
+        recipientName,
+        usedCustomerAddressId,
+        usedCustomerPhoneId,
         status: orderStatus,
         paymentType,
         paymentStatus,
@@ -706,8 +870,11 @@ export async function createOrderFromShopifyWebhook(
         advancePaidAt,
         remainingCodAmount,
         confirmedAt,
-        deliveryAddress: d.customer.default_address?.address1 || null,
-        deliveryCity: d.customer.default_address?.city || null,
+        // delivery_address is the order's own editable snapshot. Use the
+        // Shopify address if provided; otherwise fall back to the saved
+        // default address's text (if any).
+        deliveryAddress: shopifyAddress1 || customer.addresses[0]?.address || null,
+        deliveryCity: shopifyCity || customer.addresses[0]?.city || null,
       },
     })
 
@@ -742,7 +909,7 @@ export async function createOrderFromShopifyWebhook(
       },
     })
 
-    await updateCustomerStats(customer.id)
+    await updateCustomerStats(customerId)
 
     await insertMetricEvent({
       companyId,
@@ -1266,8 +1433,10 @@ export async function listOrders(
       where.OR = [
         { flowopsOrderNumber: { contains: filters.search, mode: 'insensitive' } },
         { externalOrderReference: { contains: filters.search, mode: 'insensitive' } },
-        { customer: { phone: { contains: filters.search } } },
+        // Customer Management System: phones live in customer_phones now.
+        // Search across the customer's name + any of their phone numbers.
         { customer: { name: { contains: filters.search, mode: 'insensitive' } } },
+        { customer: { phones: { some: { phoneRaw: { contains: filters.search, mode: 'insensitive' } } } } },
       ]
     }
 
@@ -1275,7 +1444,16 @@ export async function listOrders(
       db.order.findMany({
         where,
         include: {
-          customer: { select: { name: true, phone: true } },
+          customer: {
+            select: {
+              name: true,
+              phones: {
+                where: { isPrimary: true },
+                take: 1,
+                select: { phoneRaw: true },
+              },
+            },
+          },
           _count: { select: { items: true } },
         },
         orderBy: { createdAt: 'desc' },
@@ -1323,7 +1501,7 @@ export async function listOrders(
           deliveredAt: o.deliveredAt,
           createdAt: o.createdAt,
           customerName: o.customer.name,
-          customerPhone: o.customer.phone,
+          customerPhone: o.customer.phones[0]?.phoneRaw ?? null,
           itemCount: o._count.items,
         })),
         total,
@@ -1390,7 +1568,8 @@ export async function getOrderDetail(
   customer: {
     id: string
     name: string
-    phone: string
+    primaryPhone: string | null
+    primaryPhoneNormalized: string | null
     email: string | null
     isFlagged: boolean
   }
@@ -1416,7 +1595,18 @@ export async function getOrderDetail(
       where: { id: orderId, companyId: ctx.company.id },
       include: {
         customer: {
-          select: { id: true, name: true, phone: true, email: true, isFlagged: true },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            isFlagged: true,
+            // Customer Management System: phones live in customer_phones now.
+            phones: {
+              where: { isPrimary: true },
+              take: 1,
+              select: { phoneRaw: true, phoneNormalized: true },
+            },
+          },
         },
         items: {
           include: {
@@ -1448,7 +1638,16 @@ export async function getOrderDetail(
           codCollectedAmount: order.codCollectedAmount ? Number(order.codCollectedAmount) : null,
           deliveryAddress: order.deliveryAddress,
         },
-        customer: order.customer,
+        customer: {
+          id: order.customer.id,
+          name: order.customer.name,
+          email: order.customer.email,
+          isFlagged: order.customer.isFlagged,
+          // Convenience: flatten the primary phone for backwards-compatible
+          // frontend consumption.
+          primaryPhone: order.customer.phones[0]?.phoneRaw ?? null,
+          primaryPhoneNormalized: order.customer.phones[0]?.phoneNormalized ?? null,
+        },
         items: order.items.map((item) => ({
           id: item.id,
           orgVariantId: item.orgVariantId,

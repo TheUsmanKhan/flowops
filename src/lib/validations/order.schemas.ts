@@ -1,37 +1,29 @@
 import { z } from 'zod'
+import {
+  createCustomerSchema,
+  type CreateCustomerInput,
+} from '@/lib/validations/customer.schemas'
 
 /**
  * OMS — Order Management System validation schemas.
  *
  * These schemas validate all order creation, payment conversion, and
  * lifecycle transition inputs. Every server action in order.actions.ts
- * and customer.actions.ts validates its input against one of these
- * before touching the database.
+ * validates its input against one of these before touching the database.
+ *
+ * The inline new-customer shape (when creating an order for a brand-new
+ * customer without a saved record) is reused from customer.schemas.ts so
+ * there is a single source of truth for customer validation.
  */
 
 // ──────────────────────────────────────────────────────────────
-// CUSTOMER
+// CUSTOMER (inline new-customer shape — re-exported from customer.schemas.ts)
 // ──────────────────────────────────────────────────────────────
-
-export const customerInputSchema = z.object({
-  name: z.string().min(2, 'Customer name must be at least 2 characters').max(200),
-  phone: z
-    .string()
-    .min(7, 'Phone number is required')
-    .max(20)
-    .regex(/^(?:\+92|0)?3\d{2}[-\s]?\d{7}$|^(?:\+92|0)?\d{9,11}$/, 'Invalid phone format'),
-  alternate_phone: z.string().max(20).optional().or(z.literal('')),
-  email: z.string().email('Invalid email').optional().or(z.literal('')),
-  shipping_address: z.object({
-    address: z.string().min(2, 'Shipping address is required'),
-    city: z.string().min(2, 'City is required'),
-  }),
-  billing_address: z.object({
-    address: z.string().min(2, 'Billing address is required'),
-    city: z.string().min(2, 'City is required'),
-  }).optional(),
-})
-export type CustomerInput = z.infer<typeof customerInputSchema>
+// The legacy `customerInputSchema` (flat phone/shippingAddress/billingAddress)
+// was removed when the Customer Management System schema replaced the
+// simplified customer design. Inline new-customer creation now uses the full
+// createCustomerSchema (name + email + phones[] + addresses[]).
+export { createCustomerSchema, type CreateCustomerInput }
 
 // ──────────────────────────────────────────────────────────────
 // ORDER ITEM
@@ -52,29 +44,53 @@ export type OrderItemInput = z.infer<typeof orderItemInputSchema>
 // ──────────────────────────────────────────────────────────────
 // CREATE MANUAL ORDER
 // ──────────────────────────────────────────────────────────────
-
+// Accepts EITHER:
+//   - customer_id (existing) + optional used_customer_address_id +
+//     used_customer_phone_id (saved phone/address selection)
+//   - new_customer (full createCustomerSchema) to create inline
+// Plus:
+//   - recipient_name (optional — defaults to customer.name server-side)
+//   - delivery_address + delivery_city (always required — the order's own
+//     editable snapshot; pre-filled from a selected saved address but can
+//     be edited per-order without altering the saved customer_addresses row)
+//   - save_address_for_next_time (optional — when true AND a new one-off
+//     address was typed, persists it as a new customer_addresses row after
+//     order creation. Step 3's frontend will expose this as a checkbox.)
 export const createManualOrderSchema = z
   .object({
-    // Either provide a new customer object OR an existing customer_id
-    customer: customerInputSchema.optional(),
+    // Existing customer path
     customer_id: z.string().min(1).optional(),
+    used_customer_address_id: z.string().min(1).optional(),
+    used_customer_phone_id: z.string().min(1).optional(),
+    // New customer path (full createCustomerSchema from customer.schemas.ts)
+    new_customer: createCustomerSchema.optional(),
+    // Recipient name (may differ from customer.name — e.g. son orders, mother receives)
+    recipient_name: z.string().max(200).optional().or(z.literal('')),
+    // Order items
     items: z.array(orderItemInputSchema).min(1, 'At least one item is required'),
+    // Payment
     payment_type: z.enum(['full_cod', 'partial_advance', 'fully_prepaid']).default('full_cod'),
     advance_amount: z.number().min(0).optional(),
     advance_payment_method: z.string().max(50).optional().or(z.literal('')),
     advance_payment_reference: z.string().max(200).optional().or(z.literal('')),
+    // Delivery (always required — the order's editable snapshot)
     delivery_address: z.string().min(2, 'Delivery address is required'),
     delivery_city: z.string().min(2, 'Delivery city is required'),
+    // Logistics
     courier_name: z.string().max(100).optional().or(z.literal('')),
     dispatch_location_id: z.string().min(1, 'Dispatch location is required'),
     notes_for_courier: z.string().max(500).optional().or(z.literal('')),
     discount_amount: z.number().min(0).optional(),
     discount_reason: z.string().max(200).optional().or(z.literal('')),
     courier_charges: z.number().min(0).optional(),
+    // Step 3 frontend flag: when true AND a new one-off address was typed
+    // (i.e. used_customer_address_id is null), persist delivery_address as
+    // a new customer_addresses row after order creation.
+    save_address_for_next_time: z.boolean().optional().default(false),
   })
-  .refine((data) => data.customer || data.customer_id, {
-    message: 'Either customer (new) or customer_id (existing) is required',
-    path: ['customer'],
+  .refine((data) => data.customer_id || data.new_customer, {
+    message: 'Either customer_id (existing) or new_customer is required',
+    path: ['customer_id'],
   })
   .refine(
     (data) => {
@@ -174,6 +190,7 @@ export const shopifyOrderWebhookSchema = z.object({
   subtotal_price: z.string(),
   total_discounts: z.string(),
   customer: z.object({
+    id: z.union([z.string(), z.number()]).optional(),
     first_name: z.string().nullable().optional(),
     last_name: z.string().nullable().optional(),
     phone: z.string().nullable().optional(),

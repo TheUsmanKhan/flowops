@@ -23,7 +23,16 @@ export async function GET(req: Request) {
     let orders = await db.order.findMany({
       where: { companyId, status: 'rto' },
       include: {
-        customer: { select: { name: true, phone: true } },
+        customer: {
+          select: {
+            name: true,
+            phones: {
+              where: { isPrimary: true },
+              take: 1,
+              select: { phoneRaw: true },
+            },
+          },
+        },
         items: {
           select: {
             id: true,
@@ -57,7 +66,7 @@ export async function GET(req: Request) {
           status: o.status,
           totalOrderValue: Number(o.totalOrderValue),
           customerName: o.customer.name,
-          customerPhone: o.customer.phone,
+          customerPhone: o.customer.phones[0]?.phoneRaw ?? null,
           itemCount: o.items.length,
           itemsNeedingReview: reviewCount,
           needsReview: reviewCount > 0,

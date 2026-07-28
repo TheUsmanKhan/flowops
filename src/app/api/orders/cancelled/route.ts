@@ -16,7 +16,18 @@ export async function GET() {
 
     const orders = await db.order.findMany({
       where: { companyId, status: 'cancelled' },
-      include: { customer: { select: { name: true, phone: true } } },
+      include: {
+        customer: {
+          select: {
+            name: true,
+            phones: {
+              where: { isPrimary: true },
+              take: 1,
+              select: { phoneRaw: true },
+            },
+          },
+        },
+      },
       orderBy: { cancelledAt: 'desc' },
       take: 200,
     })
@@ -29,7 +40,7 @@ export async function GET() {
         status: o.status,
         totalOrderValue: Number(o.totalOrderValue),
         customerName: o.customer.name,
-        customerPhone: o.customer.phone,
+        customerPhone: o.customer.phones[0]?.phoneRaw ?? null,
         cancellationReason: o.cancellationReason ?? '—',
         cancelledAt: o.cancelledAt?.toISOString() ?? null,
         createdAt: o.createdAt.toISOString(),
