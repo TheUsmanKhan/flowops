@@ -2149,3 +2149,215 @@ Stage Summary:
 - 6 downstream API routes + order.actions.ts listing functions migrated from the removed Customer.phone/shippingAddress/billingAddress fields to the new customer_phones/customer_addresses child tables. All return a flattened `primaryPhone` field for backwards-compatible frontend consumption until Step 3 rebuilds the frontend.
 - The spec's critical phone-normalization rule is verified: searching '0300-1234567' and '+923001234567' resolves to the SAME customer via the normalize_phone() SQL function (single source of truth, no TS port).
 - KNOWN Step 3 work: the frontend components in src/components/orders/ (order-create-view, customer-detail-view, customers-view, orders-view, order-detail-view) still reference the old customer.phone/shippingAddress/billingAddress shape in their TypeScript types and render logic. The API now returns the new shape (with phones[]/addresses[] + a flattened primaryPhone convenience field), so the frontend will need adapting in Step 3.
+
+---
+Task ID: CMS-STEP-3-PART-1
+Agent: full-stack-developer
+Task: Rewrite CustomersView for new Customer Management System schema
+
+Work Log:
+- Read worklog.md (last ~200 lines) to understand Steps 1 (schema) + 2 (server actions): Customer table reshaped (legacy phone/shippingAddress/billingAddress dropped); customer_phones/customer_addresses/customer_external_identities child tables added; listCustomers returns CustomerSummary with primaryPhone + defaultAddress; POST /api/customers handles both create + flag/unflag via single endpoint.
+- Read shared types: src/components/customers/types.ts (CustomerSummary shape: id, name, email, primaryPhone, defaultAddress {address,city}, totalOrdersCount, totalOrderValue, totalRtoCount, isFlagged, flaggedReason, createdAt) + src/components/customers/index.ts (exports CreateCustomerForm, CustomerSearchAutocomplete, AddressSelector, types).
+- Read CreateCustomerForm.tsx — confirms it self-handles POST /api/customers + toast + onCreated(customerId) callback. Uses compact mode for inline rendering.
+- Read existing customers-view.tsx to extract reusable patterns: debounced search, FlagDialog component, navigate({name:'customer-detail', id}), useCan(PERMISSIONS.ORDERS_MANAGE), formatPKR/formatDate/getErrorMessage from ./_shared, initials() from @/lib/api-client.
+- Read /api/customers/route.ts to confirm exact response shape: GET returns {customers: CustomerSummary[], total: number} (NOT the old {customers, stats:{total,flagged}}); POST flag/unflag accepts {customer_id, action:'flag'|'unflag', reason?}; query param is is_flagged (NOT flagged).
+- Rewrote /home/z/my-project/src/components/orders/customers-view.tsx:
+  * Removed old CustomerRow/CustomersResponse interfaces (referenced removed phone/alternatePhone columns) — replaced with CustomerSummary from @/components/customers/types.
+  * Updated API query to use is_flagged=true (was flagged=true) and read response.total (was response.stats.total). Removed dependency on removed stats object.
+  * Added 3rd stats card "New This Month" — computes count where createdAt is within current calendar month via isThisMonth() helper. Total Customers now uses API total (reflects unfiltered count when no filters; reflects matching count when search/flag filter is active). Flagged Customers + New This Month computed client-side from the loaded list.
+  * Restructured table columns to match spec: Customer (avatar initials + name + email), Phone (primaryPhone, em-dash fallback), City (defaultAddress.city with MapPin icon, em-dash fallback), Orders (count), Value (Rs. formatted), RTO (rose for >0), Status (flag badge), Joined (formatDate createdAt), Actions (view Eye + flag/unflag).
+  * Removed the old "Email" column (email now shows under customer name as a secondary line, freeing space).
+  * Added [+ Add Customer] button in PageHeader actions; opens a Dialog containing <CreateCustomerForm compact /> with sm:max-w-2xl + scrollable max-h. On onCreated(customerId): close dialog, invalidate ['customers'] query, toast success, navigate to the new customer's detail page.
+  * Empty state now distinguishes between "no customers at all" (shows Add Customer CTA) and "no customers match filters" (suggests clearing filters).
+  * Footer shows "Showing X of Y customers" using API total.
+  * FlagDialog: changed customer prop type from CustomerRow to CustomerSummary. Updated footer to use flex-col-reverse on mobile (sm:flex-row) for touch-friendly button order.
+  * All icon imports from lucide-react: added Plus, CalendarDays, MapPin; kept existing RefreshCw, Search, Eye, Flag, Users, AlertTriangle, Loader2, ShieldCheck.
+  * No province field anywhere; no any types; mobile-responsive (grid sm:grid-cols-3 stats, flex-col sm:flex-row search bar, overflow-x-auto table).
+
+VERIFICATION:
+- bun run lint: 0 errors, 18 warnings (all pre-existing React Hook Form watch() + unused eslint-disable in unrelated files; 0 new).
+- npx tsc --noEmit: 0 errors in any src/components/orders/* or src/components/customers/* file (pre-existing errors in unrelated files only: onboarding, settings, products, company API).
+- Dev server: bun run dev → Ready in 809ms, GET / 200, no errors in dev.log.
+
+Stage Summary:
+- CustomersView fully migrated to the new Customer Management System schema. All references to removed Customer.phone/alternatePhone/shippingAddress/billingAddress fields are gone; the view now consumes the CustomerSummary shape (primaryPhone + defaultAddress) returned by GET /api/customers.
+- Stats cards now match the spec: Total Customers, Flagged Customers, New This Month — all computed from the loaded list (per spec), with New This Month filtering on current-calendar-month createdAt.
+- Add Customer flow uses the shared CreateCustomerForm component (which handles its own API call + toast). The view just renders it in a Dialog and reacts to onCreated by closing, invalidating the list query, and navigating to the new customer's detail page.
+- Flag/unflag actions correctly gated behind PERMISSIONS.ORDERS_MANAGE via useCan(); use the single POST /api/customers endpoint with {customer_id, action, reason} payload; FlagDialog requires a reason of at least 3 chars (matching server-side validation).
+- Table columns match the spec exactly: name (with avatar initials), primary phone, primary address city, total orders, total order value (Rs.), RTO count, flag badge, created date, actions (view, flag/unflag).
+- Mobile-responsive throughout: stats grid stacks to 1 column on mobile, search bar stacks vertically, table scrolls horizontally on small screens, Flag dialog buttons stack vertically on mobile.
+
+---
+Task ID: CMS-STEP-3-PART-4
+Agent: full-stack-developer
+Task: Rebuild OrderCreateView Customer section with shared components + AddressSelector
+
+Work Log:
+- Read worklog tail (CMS-STEP-1-SCHEMA + CMS-STEP-2-SERVER-ACTIONS) to understand the new customer schema (customer_phones / customer_addresses child tables, CustomerSearchResult returned by `GET /api/customers?detailed=1&search=`, CustomerDetail from `GET /api/customers/[id]`).
+- Read all 5 required shared component files: types.ts (PhoneDTO/AddressDTO/CustomerSearchResult/CustomerDetail), CustomerSearchAutocomplete.tsx (debounced search with dropdown + onCreateNew callback), CreateCustomerForm.tsx (compact mode for inline use, onCreated(customerId)), AddressSelector.tsx (radio-style address picker with editable snapshot text + saveAddressForNextTime checkbox).
+- Read the full 1989-line order-create-view.tsx to map out all sections (OrderCreateView main + CustomerSection + CrmStatsWidget + StatCell + ItemsSection + VariantThumbnail + PaymentSection + PaymentTypeCard + ProofFileInput + SummarySection) and the cross-references between them.
+- Read /lib/validations/order.schemas.ts to confirm the new createManualOrderSchema shape (customer_id + used_customer_address_id + used_customer_phone_id + recipient_name + save_address_for_next_time + delivery_address + delivery_city + items + payment fields; .refine requires customer_id OR new_customer).
+
+REWRITE OF /home/z/my-project/src/components/orders/order-create-view.tsx (1989 → 1826 lines):
+
+1) Imports — removed `useMutation` (no longer needed) and `Textarea` (no longer used directly; AddressSelector owns its own). Added imports for `CustomerSearchAutocomplete`, `CreateCustomerForm`, `AddressSelector` + `AddressSelectorValue` type, and types `CustomerSearchResult` + `CustomerDetail` from `@/components/customers/`.
+
+2) Types — removed the old `CustomerRow`, `CustomersSearchResponse`, `CustomerAddress`, `CrmStats`, `CustomerDetailResponse`, `CreateCustomerResponse` interfaces (all referenced fields that no longer exist on Customer). Added `type SelectedCustomer = NonNullable<CustomerSearchResult['customer']>` alias — the shape of the customer object handed to `onSelect` by the autocomplete. Kept `InventoryLocation`, `LocationsResponse`, `VariantOption`, `ProductsResponse`, `CartItem`, `CreateOrderResponse`, `PaymentType` unchanged.
+
+3) OrderCreateView main component state:
+   - REMOVED: `phoneSearch`, `debouncedPhone`, `newCustomer` (8-field object), `customersQuery`, `customerDetailQuery`, `createCustomerMutation`, the phone-debounce `useEffect`, the auto-fill-delivery-from-customerDetailQuery `useEffect`.
+   - ADDED: `selectedCustomer: SelectedCustomer | null`, `showCreateForm: boolean`, `usedCustomerAddressId: string | null`, `usedCustomerPhoneId: string | null`, `recipientName: string`, `saveAddressForNextTime: boolean`.
+   - KEPT: `deliveryAddress`, `deliveryCity` (now controlled by AddressSelector via onChange), `courierName`, `dispatchLocationId`, `notesForCourier`, `discountAmount`, `discountReason`, all payment state, all item state, `locationsQuery`, `productsQuery`, the dispatch-location auto-select effect, payment-proof file handling, validation, uploadPaymentProof, handleSubmit.
+
+4) New handlers:
+   - `handleSelectCustomer(c)` — sets selectedCustomer, picks primary phone (or first) → usedCustomerPhoneId, picks default address (or first) → usedCustomerAddressId, pre-fills deliveryAddress/deliveryCity snapshot from that address, defaults recipientName to customer.name, resets saveAddressForNextTime.
+   - `handleDeselectCustomer()` — clears all customer-related state.
+   - `handleCustomerCreated(customerId)` — called by CreateCustomerForm's onCreated; fetches `GET /api/customers/{id}` (CustomerDetail shape), maps the detail → SelectedCustomer shape (drops externalIdentities/recentOrders/etc.), then calls handleSelectCustomer. Invalidates `['customers']` query cache.
+
+5) buildPayload() rewrite — now emits the new schema:
+   ```
+   { items, payment_type, delivery_address, delivery_city, courier_name,
+     dispatch_location_id, notes_for_courier, discount_amount, discount_reason,
+     [advance_amount, advance_payment_method, advance_payment_reference],
+     customer_id, used_customer_address_id, used_customer_phone_id,
+     recipient_name, save_address_for_next_time }
+   ```
+   No more inline `customer: {...}` object — the customer is always created/selected BEFORE order submission, so only `customer_id` + the per-order selections are sent.
+
+6) CustomerSection component — full rewrite (~280 lines):
+   - SEARCH MODE (no customer selected, no create form): renders `<CustomerSearchAutocomplete onSelect={onSelectCustomer} onCreateNew={onShowCreateForm} autoFocus />` + a hint explaining the "+ Create new customer" affordance in the dropdown.
+   - CREATE MODE (no customer selected + showCreateForm): renders the `<CreateCustomerForm compact onCreated={onCustomerCreated} />` inline (no outer Card — compact mode), with a "Back to search" button above it. CreateCustomerForm handles its own POST to /api/customers and shows toasts on success/error.
+   - SELECTED MODE (customer selected): renders the customer info card (name + phones[0].phoneRaw + flagged badge + Change button), then `<CrmStatsWidget customer={selectedCustomer} />`, then a phone selector (`<Select>` of all customer.phones, only shown if >1 phone, controlling usedCustomerPhoneId, defaults to primary) + recipient_name Input (defaults to customer.name, editable independently), then `<AddressSelector addresses={selectedCustomer.addresses} value={addressSelectorValue} onChange={...} />` (REPLACES the empty address/city Textarea/Input — bound to the saved addresses so fields show REAL pre-filled editable data immediately on selection), then the Delivery Logistics block (courier + dispatch location + notes + discount — unchanged, NO address/city inputs here).
+   - Props list slimmed down: removed `phoneSearch`, `setPhoneSearch`, `isSearching`, `customers`, `hasSearched`, `customerDetail`, `newCustomer`, `setNewCustomer`, `onCreateNewCustomer`, `creatingCustomer`, `deliveryAddress`, `setDeliveryAddress`, `deliveryCity`, `setDeliveryCity`. Added `showCreateForm`, `onShowCreateForm`, `onCancelCreateForm`, `onCustomerCreated`, `usedCustomerAddressId`, `usedCustomerPhoneId`, `setUsedCustomerPhoneId`, `recipientName`, `setRecipientName`, `addressSelectorValue` (AddressSelectorValue), `onAddressSelectorChange`.
+
+7) CrmStatsWidget — props changed from `{ customerDetail, selectedCustomer: CustomerRow }` to `{ customer: SelectedCustomer }`. Removed the loading skeleton state (the search result already includes everything needed — no separate detail fetch required for the widget). Now derives stats directly from `customer.totalOrdersCount` + `customer.totalRtoCount`: Total Orders, Delivered (derived count + deliveryRate %), Returned (count + rtoRate %), Delivery Rate. Renders the customer's saved addresses (with isDefault badge + compact lastUsedAt label) as the address-history list, replacing the old `crmStats.addressHistory` field that no longer exists in the new schema. Added a small `formatLastUsedShort()` helper for the compact date labels.
+
+8) StatCell, ItemsSection, VariantThumbnail, PaymentSection, PaymentTypeCard, ProofFileInput, SummarySection — preserved verbatim from the previous file (no changes to items/payment/summary flows).
+
+VERIFICATION:
+- `bun run lint` → 0 errors, 18 warnings (all pre-existing: react-hook-form watch() warnings + unused eslint-disable directives — same count as the baseline git stash check, NO new warnings introduced by this task).
+- `npx tsc --noEmit` → 0 errors in order-create-view.tsx, the shared customer components (CustomerSearchAutocomplete / CreateCustomerForm / AddressSelector / types), or any customer-related API route. Pre-existing errors in unrelated files (onboarding, settings, inventory, products catalog) remain untouched.
+- `rg "province|shippingAddress|alternatePhone|CustomerRow|newCustomer|customerDetailQuery|createCustomerMutation|phoneSearch" src/components/orders/order-create-view.tsx` → ZERO matches (all old-schema references removed).
+- Dev server log: clean — `Ready in 809ms`, `GET / 200`, no fatal errors.
+
+Stage Summary:
+- The OrderCreateView customer/address bug is fixed: selecting a customer now shows REAL pre-filled editable address data immediately via the AddressSelector bound to the customer's saved customer_addresses rows. The empty/unbound Textarea+Input fields that referenced the removed `selectedCustomer.phone` + flat `shippingAddress` JSONB are gone.
+- The shared Customer Management System components (CustomerSearchAutocomplete, CreateCustomerForm, AddressSelector) are now the single source of truth for the customer-search + inline-create + address-selection flow on the order-create page. No duplicate logic.
+- The order submission payload (`buildPayload`) emits the new schema (customer_id + used_customer_address_id + used_customer_phone_id + recipient_name + save_address_for_next_time + editable delivery_address/delivery_city snapshot), matching what `createManualOrder()` in order.actions.ts accepts (no more inline `customer: {...}` object).
+- Phone selection (defaults to primary, Select dropdown shown only when >1 phone) + recipient_name (defaults to customer.name, editable) are surfaced within the customer section.
+- CrmStatsWidget updated to use the new customer shape: derives Total Orders / Delivered / Returned / Delivery Rate from `customer.totalOrdersCount` + `customer.totalRtoCount`, and shows the customer's saved addresses (with lastUsedAt) as the address-history list (replacing the old `crmStats.addressHistory` field that no longer exists in the schema).
+- Delivery Logistics section kept intact (courier, dispatch location, notes, discount) — no address/city inputs there (those are now in the AddressSelector above).
+- ItemsSection, PaymentSection, SummarySection unchanged — all preserved verbatim from the previous file.
+
+---
+Task ID: CMS-STEP-3-PART-2
+Agent: full-stack-developer
+Task: Rewrite CustomerDetailView with 4 tabs for new Customer Management System schema
+
+Work Log:
+- Read worklog tail (CMS-STEP-1-SCHEMA, CMS-STEP-2-SERVER-ACTIONS, CMS-STEP-3-PART-1, CMS-STEP-3-PART-4) to understand schema (customer_phones / customer_addresses / customer_external_identities child tables + CustomerDetail shape with phones[], addresses[], externalIdentities[], recentOrders[]).
+- Read src/components/customers/types.ts (CustomerDetail, PhoneDTO, AddressDTO, ExternalIdentityDTO, RecentOrderDTO, formatLastUsed helper, PLATFORM_LABELS map).
+- Read existing customer-detail-view.tsx (old flat-schema version), customers-view.tsx (FlagDialog pattern, CustomerSummary usage), _shared.ts (formatPKR, formatDate, getErrorMessage, badgeForStatus), and confirmed API endpoint response shapes (GET /api/customers/[id] returns CustomerDetail directly — NOT wrapped).
+- Verified api.delete(url) takes only URL (DELETE endpoints have no body).
+- Wrote new src/components/orders/customer-detail-view.tsx (~1455 lines, full rewrite):
+  * Removed all old local interfaces (CustomerAddress, CrmStats, CustomerDetail, RecentOrder, CustomerDetailResponse) that referenced removed columns. Now imports CustomerDetail + PhoneDTO + AddressDTO + ExternalIdentityDTO + RecentOrderDTO from @/components/customers/types.
+  * Query key changed from ['customer', customerId] → ['customer-detail', customerId]. invalidate() helper invalidates both ['customer-detail', customerId] AND ['customers'] (list cache) on every mutation.
+  * HEADER: inline-editable name (click → Input; Enter saves via PATCH /api/customers/[id] with {name}; Escape cancels; onBlur cancels). Pencil icon shows on hover when canManage. Flag badge with Tooltip showing flaggedReason + flaggedAt. Flag/Unflag button gated behind PERMISSIONS.ORDERS_MANAGE. Email also shown inline as a secondary chip.
+  * STATS ROW: 5 cards in responsive grid (2 cols mobile → 3 cols sm → 5 cols lg): Total Orders, Total Value (Rs. via formatPKR), RTO Count, RTO Rate % (Math.round(totalRtoCount/totalOrdersCount*100)), Delivery Rate % (Math.round((totalOrdersCount-totalRtoCount)/totalOrdersCount*100)). Tone coloring: rose for high RTO, amber for medium, emerald for good. All guard against divide-by-zero.
+  * TAB — Phone Numbers (Tabs/TabsList/TabsTrigger/TabsContent from @/components/ui/tabs): list of phones with phoneRaw + label + primary Badge (Star icon). "+ Add Phone" inline form (phone Input + label Input + "set as primary" Checkbox). Per-row "Set as Primary" button on non-primary phones — uses sequential DELETE then POST with is_primary:true (the backend addCustomerPhone unsets existing primary). Per-row Remove (Trash2 icon) — DISABLED if last remaining phone, with Tooltip "A customer must always have at least one phone".
+  * TAB — Addresses: list of address cards (label, address, city, default Badge, "Last used: X ago" via formatLastUsed, "Clock" icon). "+ Add Address" inline form (Textarea address + city Input + label Input + "set as default" Checkbox). Per-card Edit button turns the card into AddressCardEdit form (inline edit mode with Save/Cancel). Per-card Remove — DISABLED if last remaining with Tooltip "A customer must always have at least one address". Per-card "Set as Default" on non-default cards — PATCH with is_default:true (backend unsets others).
+  * TAB — Linked Platforms: externalIdentities entries as cards with PLATFORM_LABELS badge (Shopify emerald / Daraz orange / Instagram pink) + externalCustomerId ("Shopify Customer #7891234567") + matchedVia (snake_case → space) + linked date. Empty state: "No linked external accounts yet — this customer was created directly in FlowOps."
+  * TAB — Order History: Table of recentOrders with columns: Order number (clickable button → navigate({name:'order-detail', id})), Date (formatDate), Status (badgeForStatus Badge), Total Value (formatPKR right-aligned), Recipient (recipientName or em-dash), Address Used (deliveryAddress+deliveryCity joined or em-dash with MapPin). Empty state when no orders. Footer: "Showing last N orders".
+  * FlagDialog: Dialog/DialogContent/DialogHeader/DialogTitle/DialogDescription/DialogFooter. Textarea for reason (min 3 chars enforced both client-side via disabled button + server-side). Reason auto-resets when dialog closes via useEffect.
+  * All mutations use useMutation + invalidate() + Sonner toast. 8 mutations total: updateName (PATCH), flag/unflag (POST /api/customers), addPhone (POST), removePhone (DELETE), setPrimaryPhone (sequential DELETE+POST), addAddress (POST), updateAddress (PATCH), removeAddress (DELETE), setDefaultAddress (PATCH is_default:true).
+  * Mobile-responsive throughout: stats grid 2→3→5 cols, TabsList scrolls horizontally on mobile, address cards stack on mobile (grid sm:grid-cols-2), all dialog footers use flex-col-reverse on mobile.
+  * TypeScript strict — no `any` types. Imported `type ReactNode` from 'react' for the StatCard icon prop type.
+  * NO province field anywhere.
+
+VERIFICATION:
+- bun run lint: 0 errors, 18 pre-existing warnings (NONE in customer-detail-view.tsx — verified via `rg customer-detail-view` filter on lint output returned no matches).
+- npx tsc --noEmit: 0 errors in customer-detail-view.tsx or any src/components/orders/* or src/components/customers/* file. Pre-existing errors only in unrelated files (company-settings, organization-view, lib/inventory).
+- rg for old-schema references (phone:, alternatePhone, shippingAddress, billingAddress, crmStats, addressHistory, CustomerDetailResponse, interface Customer): only legitimate matches to the new schema (phone field on PhoneInput, phoneRaw on PhoneDTO). NO old-schema leakage.
+- Dev server log: clean — "Ready in 809ms", "GET / 200", no fatal errors.
+- File length: 1455 lines (was 624). Single export: `CustomerDetailView` (matches page.tsx import `{ CustomerDetailView customerId={route.id} }`).
+
+Stage Summary:
+- CustomerDetailView fully migrated to the new Customer Management System schema. All references to removed Customer.phone/alternatePhone/shippingAddress/billingAddress JSONB columns are gone; the view now consumes the CustomerDetail shape (phones[], addresses[], externalIdentities[], recentOrders[]) returned by GET /api/customers/[id].
+- 4-tab UI matches the spec: Phones (CRUD with primary management), Addresses (CRUD with default management + inline edit mode), Platforms (read-only with empty state), Order History (clickable table).
+- Inline name editing (click → Enter to save / Escape to cancel via PATCH /api/customers/[id]) + flag/unflag Dialog with min-3-char reason Textarea + tooltips on disabled "last phone/address" Remove buttons all implemented per spec.
+- Set-as-Primary phone action implemented correctly: sequential DELETE then POST with is_primary:true (per spec — Promise.all explicitly forbidden).
+- After every mutation, queryClient.invalidateQueries({ queryKey: ['customer-detail', customerId] }) is called (plus ['customers'] for list cache freshness).
+- Mobile-responsive, accessibility (ARIA labels, tooltips for disabled buttons, semantic HTML), consistent styling with the rest of the OMS UI, and TypeScript strict throughout.
+
+---
+Task ID: CMS-STEP-3-FRONTEND
+Agent: main (+ 3 parallel subagents for Parts 1, 2, 4)
+Task: Build the standalone /customers module frontend AND fix the Order Creation page's broken customer/address flow. Shared components + customer list + customer detail (4 tabs) + order-create customer section rebuild.
+
+Work Log:
+
+INVESTIGATION:
+- Read worklog entries from Steps 1 (schema) + 2 (server actions) to understand the new Customer Management System schema (customer_phones / customer_addresses / customer_external_identities child tables, normalize_phone() + match_or_create_customer() SQL functions).
+- Read app-store.ts — confirmed SPA routing already supports `customers` and `customer-detail` routes.
+- Read sidebar.tsx — confirmed Customers nav link already present (line 98, Users icon, /customers route, ORDERS_VIEW permission). Part 5 was already done.
+- Read existing customers-view.tsx + customer-detail-view.tsx — both used the OLD schema (flat phone, alternatePhone, shippingAddress, billingAddress). Both needed full rewrites.
+- Read order-create-view.tsx (1989 lines) — the CustomerSection had the broken address flow: empty/unbound address fields because the old code referenced selectedCustomer.phone and flat shippingAddress JSONB which no longer exist.
+- Read api-client.ts, _shared.ts for existing patterns.
+
+SHARED INFRASTRUCTURE (built by main agent):
+- src/components/customers/types.ts — shared TypeScript types (PhoneDTO, AddressDTO, ExternalIdentityDTO, RecentOrderDTO, CustomerSummary, CustomerDetail, CustomerSearchResult, CreateCustomerInput, etc.) + formatLastUsed() helper + PLATFORM_LABELS map. Used by ALL customer-facing components so there's a single source of truth.
+- API routes for phone/address CRUD (server actions existed from Step 2 but weren't exposed as HTTP endpoints):
+  * PATCH /api/customers/[id] — updateCustomer (name/email)
+  * POST /api/customers/[id]/phones — addCustomerPhone
+  * DELETE /api/customers/[id]/phones/[phoneId] — removeCustomerPhone
+  * POST /api/customers/[id]/addresses — addCustomerAddress
+  * PATCH /api/customers/[id]/addresses/[addressId] — updateCustomerAddress
+  * DELETE /api/customers/[id]/addresses/[addressId] — removeCustomerAddress
+
+PART 3 — SHARED REUSABLE COMPONENTS (built by main agent):
+- src/components/customers/CustomerSearchAutocomplete.tsx — debounced phone/name search (300ms), calls GET /api/customers?detailed=1&search=..., dropdown with exact match (name + primary phone + order count + flagged badge) + "+ Create New Customer" option. Keyboard navigation (ArrowUp/Down/Enter/Escape). Used by order-create page.
+- src/components/customers/CreateCustomerForm.tsx — full multi-phone/multi-address form. First phone defaults to primary (badge shown, no checkbox), first address defaults to default. "+ Add another phone/address" buttons. Each additional entry has a "set as primary/default" star button + remove button. Calls POST /api/customers itself, fires onCreated(customerId) on success. Supports compact mode (inline, no Card wrapper) for the order-create page.
+- src/components/customers/AddressSelector.tsx — radio-style cards for saved addresses (label, address, city, default badge, lastUsedAt relative time) + "+ Use a new address" option. The selected/entered address text is ALWAYS editable (Textarea + city Input) — this IS the order's delivery_address snapshot per Step 2's design. "Save this address for future orders" checkbox appears only in new-address mode. Used by order-create page.
+- src/components/customers/index.ts — barrel export.
+
+PART 1 — CUSTOMER LIST PAGE (subagent CMS-STEP-3-PART-1):
+- Rewrote src/components/orders/customers-view.tsx. 3 stats cards (Total Customers, Flagged Customers, New This Month). Search bar. is_flagged toggle. Table: name (avatar initials), primary phone, primary address city, total orders, total order value, RTO count, flag badge, created date, actions. [+ Add Customer] dialog with CreateCustomerForm. Smart empty state (no customers at all vs. no matches). FlagDialog for flag reason input.
+
+PART 2 — CUSTOMER DETAIL PAGE (subagent CMS-STEP-3-PART-2):
+- Rewrote src/components/orders/customer-detail-view.tsx (624 → 1455 lines). Inline-editable name (click → Input, Enter saves via PATCH, Escape cancels). Flag badge with Tooltip. 5 stats cards (Total Orders, Total Value, RTO Count, RTO Rate %, Delivery Rate %). 4 tabs:
+  * Phone Numbers: list + inline add form + "Set as Primary" (DELETE + re-POST with is_primary=true) + Remove (Tooltip-disabled when last remaining).
+  * Addresses: cards with formatLastUsed + inline add/edit forms + "Set as Default" (PATCH is_default=true) + Remove (Tooltip-disabled when last).
+  * Linked Platforms: PLATFORM_LABELS badge + externalCustomerId + empty state.
+  * Order History: clickable order numbers + status badge + recipientName + deliveryAddress/City.
+
+PART 4 — ORDER CREATION PAGE FIX (subagent CMS-STEP-3-PART-4):
+- Rewrote src/components/orders/order-create-view.tsx (1989 → 1826 lines). CustomerSection now has 3 modes:
+  * Search mode: CustomerSearchAutocomplete (handles its own debounced search).
+  * Create mode: CreateCustomerForm compact inline (handles its own POST → onCreated auto-selects the new customer).
+  * Selected mode: customer header + CrmStatsWidget (updated to use new customer shape) + phone Select dropdown (only when >1 phone) + recipient_name Input (defaults to customer.name) + AddressSelector (THE FIX — bound to the customer's saved customer_addresses, so address/city show REAL pre-filled editable data immediately). Delivery Logistics block (courier/dispatch/notes/discount, no address inputs).
+- buildPayload() now sends the new schema: customer_id, used_customer_address_id, used_customer_phone_id, recipient_name, save_address_for_next_time, delivery_address, delivery_city + items + payment fields.
+- All old-schema references (province, shippingAddress, alternatePhone, CustomerRow, newCustomer, customerDetailQuery, createCustomerMutation, phoneSearch) removed — verified via grep (ZERO matches).
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors in any customer/order file (src/components/customers/*, src/components/orders/*, src/lib/actions/customer.actions.ts, src/lib/actions/order.actions.ts, src/lib/validations/customer.schemas.ts, src/lib/validations/order.schemas.ts, src/app/api/customers/*).
+- bun run lint: 0 errors, 18 pre-existing warnings (0 new — all React Hook Form watch() + unused eslint-disable, none related to customer work).
+- Dev server: bun run dev → Ready in 722ms, GET / 200, no errors in dev.log.
+- End-to-end test (scripts/e2e-test.ts, 12 tests, all pass):
+  * Created a customer with 2 addresses (Home=default, Office=non-default).
+  * Simulated markAddressAsUsed on the Office address → lastUsedAt set.
+  * Created an order with EDITED delivery_address text (the snapshot) pointing to the saved Office address via usedCustomerAddressId.
+  * Verified: order's delivery_address has the EDITED text, but the saved customer_addresses row is UNCHANGED (still "456 Office Rd"). This is the critical spec rule — the address snapshot is isolated to the order, the saved address is not altered.
+  * Verified: order.recipient_name = customer.name (defaults correctly).
+  * Verified: phone normalization — 0300-555-6666 and +923005556666 both resolve to +923005556666 (same customer findable via either format).
+
+Stage Summary:
+- All 5 parts of Step 3 implemented and verified. The Customer Management System now has a complete frontend:
+  * Standalone /customers list page with stats, search, flag filter, Add Customer dialog, smart empty state.
+  * Standalone /customers/[id] detail page with inline-editable name, flag action, 5 stats cards, 4 tabs (Phones with add/remove/set-primary, Addresses with add/edit/remove/set-default, Linked Platforms, Order History).
+  * Shared reusable components (CustomerSearchAutocomplete, CreateCustomerForm, AddressSelector) used by BOTH the standalone pages AND the Order Creation page — genuinely shared, not duplicated.
+  * Order Creation page's Customer section rebuilt: the broken empty address fields are replaced by AddressSelector bound to the selected customer's real saved addresses. Address fields now show REAL, pre-filled, editable data immediately on customer selection (the exact bug that was reported is fixed).
+  * Delivery Logistics section contains ONLY courier/dispatch/notes/discount — no address inputs (confirming the fix from the earlier address-integration prompt is now properly supported by real customer data).
+  * Sidebar already had the Customers link (Part 5 was already done from prior sprints).
+- The critical spec rule is verified end-to-end: selecting a saved address + editing its text for an order → the order's snapshot has the edited text, the saved customer_addresses row is UNCHANGED, and the address's lastUsedAt is updated.
+- No province field anywhere in any form.
+- Last-phone / last-address deletion prevention is enforced in the UI (disabled button + tooltip) as well as server-side.

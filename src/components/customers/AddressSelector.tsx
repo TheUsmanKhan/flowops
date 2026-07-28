@@ -1,0 +1,218 @@
+'use client'
+
+import { useEffect } from 'react'
+import { cn } from '@/lib/utils'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
+import { MapPin, Star, Plus } from 'lucide-react'
+import { formatLastUsed, type AddressDTO } from './types'
+
+export interface AddressSelectorValue {
+  /** The selected saved address ID, or null if "new address" mode. */
+  usedCustomerAddressId: string | null
+  /** The editable delivery address text (the order's own snapshot). */
+  deliveryAddress: string
+  /** The editable delivery city text. */
+  deliveryCity: string
+  /** Whether to persist a new one-off address as a permanent customer_addresses row. */
+  saveAddressForNextTime: boolean
+}
+
+export interface AddressSelectorProps {
+  /** The customer's saved addresses (already ordered: default first, then lastUsedAt desc). */
+  addresses: AddressDTO[]
+  /** Current value. */
+  value: AddressSelectorValue
+  /** Callback when the value changes. */
+  onChange: (value: AddressSelectorValue) => void
+  /** Show the field error for delivery_address (from form validation). */
+  addressError?: string
+  /** Show the field error for delivery_city (from form validation). */
+  cityError?: string
+}
+
+/**
+ * Radio-style card selector for a customer's saved addresses, plus a
+ * "+ Use a new address" option that reveals fresh address + city inputs.
+ *
+ * The selected/entered address text is ALWAYS editable (per the snapshot
+ * behavior established in Step 2's createManualOrder()): the order's own
+ * delivery_address is a copy that can be tweaked per-order without altering
+ * the saved customer_addresses row.
+ *
+ * Used in:
+ *   - The Order Creation page's customer section (replaces the broken empty
+ *     address fields)
+ */
+export function AddressSelector({
+  addresses,
+  value,
+  onChange,
+  addressError,
+  cityError,
+}: AddressSelectorProps) {
+  const { usedCustomerAddressId, deliveryAddress, deliveryCity, saveAddressForNextTime } = value
+  const isNewMode = usedCustomerAddressId === null
+
+  // When a saved address is selected, pre-fill the editable text from it
+  // (but only if the current text is empty OR matches a previously-selected
+  // saved address — so we don't overwrite user edits when switching addresses).
+  useEffect(() => {
+    if (usedCustomerAddressId) {
+      const selected = addresses.find((a) => a.id === usedCustomerAddressId)
+      if (selected) {
+        // Check if the current text is empty or matches a different saved address
+        const currentMatch = addresses.find(
+          (a) => a.address === deliveryAddress && a.city === deliveryCity,
+        )
+        if (!deliveryAddress || currentMatch) {
+          onChange({
+            ...value,
+            deliveryAddress: selected.address,
+            deliveryCity: selected.city,
+          })
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [usedCustomerAddressId])
+
+  const selectSaved = (addr: AddressDTO) => {
+    onChange({
+      ...value,
+      usedCustomerAddressId: addr.id,
+      deliveryAddress: addr.address,
+      deliveryCity: addr.city,
+      saveAddressForNextTime: false,
+    })
+  }
+
+  const selectNew = () => {
+    onChange({
+      ...value,
+      usedCustomerAddressId: null,
+      deliveryAddress: '',
+      deliveryCity: '',
+      saveAddressForNextTime: false,
+    })
+  }
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+        <MapPin className="h-3 w-3" /> Delivery Address
+      </p>
+
+      {/* Saved address cards */}
+      {addresses.length > 0 && (
+        <div className="space-y-1.5">
+          {addresses.map((addr) => {
+            const isSelected = usedCustomerAddressId === addr.id
+            return (
+              <button
+                key={addr.id}
+                type="button"
+                onClick={() => selectSaved(addr)}
+                className={cn(
+                  'w-full text-left rounded-md border p-2.5 transition-colors',
+                  isSelected
+                    ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+                    : 'border-border hover:border-primary/30 hover:bg-muted/40',
+                )}
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {addr.label && (
+                        <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                          {addr.label}
+                        </span>
+                      )}
+                      {addr.isDefault && (
+                        <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[10px] h-4 px-1.5">
+                          <Star className="h-2 w-2 mr-0.5 fill-current" /> Default
+                        </Badge>
+                      )}
+                    </div>
+                    <p className="text-sm font-medium truncate mt-0.5">{addr.address}</p>
+                    <p className="text-xs text-muted-foreground">{addr.city}</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
+                      Last used: {formatLastUsed(addr.lastUsedAt)}
+                    </p>
+                  </div>
+                  <div className={cn(
+                    'mt-0.5 h-4 w-4 rounded-full border-2 shrink-0',
+                    isSelected ? 'border-primary bg-primary' : 'border-muted-foreground/30',
+                  )} />
+                </div>
+              </button>
+            )
+          })}
+        </div>
+      )}
+
+      {/* "+ Use a new address" option */}
+      <button
+        type="button"
+        onClick={selectNew}
+        className={cn(
+          'w-full text-left rounded-md border border-dashed p-2.5 transition-colors',
+          isNewMode
+            ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+            : 'border-border hover:border-primary/30 hover:bg-muted/40',
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <Plus className="h-4 w-4 text-muted-foreground" />
+          <span className="text-sm">Use a new address</span>
+        </div>
+      </button>
+
+      {/* Editable address text (always visible — this IS the order's snapshot) */}
+      <div className="grid sm:grid-cols-2 gap-2 pt-1">
+        <div className="space-y-1 sm:col-span-2">
+          <Label className="text-xs">Address {isNewMode ? '*' : '(editable for this order)'}</Label>
+          <Textarea
+            placeholder="House #, street, area"
+            value={deliveryAddress}
+            onChange={(e) => onChange({ ...value, deliveryAddress: e.target.value })}
+            className="text-sm"
+            rows={2}
+          />
+          {addressError && <p className="text-xs text-destructive">{addressError}</p>}
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">City *</Label>
+          <Input
+            placeholder="e.g. Lahore"
+            value={deliveryCity}
+            onChange={(e) => onChange({ ...value, deliveryCity: e.target.value })}
+          />
+          {cityError && <p className="text-xs text-destructive">{cityError}</p>}
+        </div>
+      </div>
+
+      {/* "Save for next time" checkbox — only in new-address mode */}
+      {isNewMode && (
+        <label className="flex items-center gap-2 cursor-pointer pt-1">
+          <Checkbox
+            checked={saveAddressForNextTime}
+            onCheckedChange={(v) => onChange({ ...value, saveAddressForNextTime: v === true })}
+          />
+          <span className="text-xs text-muted-foreground">
+            Save this address for future orders
+          </span>
+        </label>
+      )}
+
+      {!isNewMode && (
+        <p className="text-[10px] text-muted-foreground">
+          Edit the text above for this order only — the saved customer address is not changed.
+        </p>
+      )}
+    </div>
+  )
+}

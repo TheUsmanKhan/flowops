@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
@@ -11,7 +11,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Separator } from '@/components/ui/separator'
@@ -50,6 +49,19 @@ import {
 import { cn } from '@/lib/utils'
 import { createManualOrderSchema } from '@/lib/validations/order.schemas'
 
+// Shared customer components (the entire customer-search + create + address
+// selection flow lives in these — order-create-view just orchestrates them).
+import { CustomerSearchAutocomplete } from '@/components/customers/CustomerSearchAutocomplete'
+import { CreateCustomerForm } from '@/components/customers/CreateCustomerForm'
+import {
+  AddressSelector,
+  type AddressSelectorValue,
+} from '@/components/customers/AddressSelector'
+import type {
+  CustomerSearchResult,
+  CustomerDetail,
+} from '@/components/customers/types'
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -67,64 +79,11 @@ interface LocationsResponse {
   locations: InventoryLocation[]
 }
 
-interface CustomerRow {
-  id: string
-  name: string
-  phone: string
-  email: string | null
-  totalOrdersCount: number
-  totalRtoCount: number
-  isFlagged: boolean
-}
-
-interface CustomersSearchResponse {
-  customers: CustomerRow[]
-  total: number
-}
-
-interface CustomerAddress {
-  address: string
-  city: string
-}
-
-interface CrmStats {
-  totalOrders: number
-  totalDelivered: number
-  totalReturned: number
-  deliveryRatio: number
-  returnRatio: number
-  addressHistory: Array<{ address: string; city: string; orderCount: number }>
-}
-
-interface CustomerDetailResponse {
-  customer: {
-    id: string
-    name: string
-    phone: string
-    alternatePhone: string | null
-    email: string | null
-    shippingAddress: CustomerAddress | null
-    billingAddress: CustomerAddress | null
-    totalOrdersCount: number
-    totalOrderValue: number
-    totalRtoCount: number
-    isFlagged: boolean
-    flaggedReason: string | null
-  }
-  recentOrders: Array<{
-    id: string
-    flowopsOrderNumber: string
-    status: string
-    totalOrderValue: number
-    createdAt: string
-  }>
-  crmStats: CrmStats
-}
-
-interface CreateCustomerResponse {
-  customerId: string
-  isNewCustomer: boolean
-}
+/**
+ * The customer shape returned by CustomerSearchAutocomplete.onSelect —
+ * matches `NonNullable<CustomerSearchResult['customer']>`.
+ */
+type SelectedCustomer = NonNullable<CustomerSearchResult['customer']>
 
 interface VariantOption {
   variantId: string
@@ -239,26 +198,17 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
   const canCreate = can(PERMISSIONS.ORDERS_CREATE)
 
   // ── Form state ────────────────────────────────────────────────────────────
-  // Customer — search mode by default; once a customer is selected (existing
-  // or newly created inline), we render the selected-customer card + CRM
-  // insights + delivery/discount sub-section.
-  const [phoneSearch, setPhoneSearch] = useState('')
-  const [debouncedPhone, setDebouncedPhone] = useState('')
-  const [selectedCustomer, setSelectedCustomer] = useState<CustomerRow | null>(null)
+  // Customer — the search, dropdown, and inline-create flow are owned entirely
+  // by <CustomerSearchAutocomplete /> + <CreateCustomerForm />. The parent only
+  // holds the resulting customer + the per-order address/phone/recipient
+  // selection so buildPayload can reference them.
+  const [selectedCustomer, setSelectedCustomer] = useState<SelectedCustomer | null>(null)
+  const [showCreateForm, setShowCreateForm] = useState(false)
+  const [usedCustomerAddressId, setUsedCustomerAddressId] = useState<string | null>(null)
+  const [usedCustomerPhoneId, setUsedCustomerPhoneId] = useState<string | null>(null)
+  const [recipientName, setRecipientName] = useState('')
+  const [saveAddressForNextTime, setSaveAddressForNextTime] = useState(false)
 
-  // New-customer draft (only used while the user is filling in the form
-  // BEFORE clicking "Create New Customer"). Once the inline creation
-  // succeeds, we discard these and switch to selectedCustomer mode.
-  const [newCustomer, setNewCustomer] = useState({
-    name: '',
-    phone: '',
-    alternate_phone: '',
-    email: '',
-    shipping_address: '',
-    shipping_city: '',
-    billing_address: '',
-    billing_city: '',
-  })
   // Items
   const [cart, setCart] = useState<CartItem[]>([])
   const [variantSearch, setVariantSearch] = useState('')
@@ -277,9 +227,9 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
   // Delivery / dispatch / discount — folded into the customer section now,
   // but the underlying state still lives here so the order payload builder
   // and validation can reference it cleanly.
-  // When an existing/inline customer is selected, the delivery address is
-  // auto-filled from their saved shippingAddress. Toggling this false lets
-  // the user override it.
+  // The order's own delivery_address/delivery_city are editable snapshots
+  // controlled by <AddressSelector /> (it owns the live text; we mirror it
+  // here for buildPayload + validation).
   const [deliveryAddress, setDeliveryAddress] = useState('')
   const [deliveryCity, setDeliveryCity] = useState('')
   const [courierName, setCourierName] = useState('')
@@ -300,12 +250,6 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
   // state on the submit button.
   const [uploadingProof, setUploadingProof] = useState(false)
 
-  // ── Debounce phone search ────────────────────────────────────────────────
-  useEffect(() => {
-    const t = setTimeout(() => setDebouncedPhone(phoneSearch.trim()), 350)
-    return () => clearTimeout(t)
-  }, [phoneSearch])
-
   // ── Data queries ──────────────────────────────────────────────────────────
   const locationsQuery = useQuery<LocationsResponse>({
     queryKey: ['locations'],
@@ -317,69 +261,6 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
     queryKey: ['products', 'for-order-create'],
     queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100'),
     staleTime: 60_000,
-  })
-
-  const trimmedPhone = debouncedPhone
-  const customersQuery = useQuery<CustomersSearchResponse>({
-    queryKey: ['customers', 'search', trimmedPhone],
-    queryFn: () =>
-      api.get<CustomersSearchResponse>(
-        `/api/customers?search=${encodeURIComponent(trimmedPhone)}&limit=10`,
-      ),
-    enabled: trimmedPhone.length >= 4,
-    staleTime: 10_000,
-  })
-
-  // Fetch the selected customer's full detail (including saved addresses +
-  // CRM insights) so we can auto-fill delivery and surface stats.
-  const customerDetailQuery = useQuery<CustomerDetailResponse>({
-    queryKey: ['customer', 'detail', selectedCustomer?.id],
-    queryFn: () =>
-      api.get<CustomerDetailResponse>(`/api/customers/${selectedCustomer!.id}`),
-    enabled: !!selectedCustomer,
-    staleTime: 30_000,
-  })
-
-  // ── Inline customer creation (Shopify-like) ─────────────────────────────
-  // Triggered when the user types a new phone and clicks "Create New
-  // Customer". Posts to /api/customers immediately; on success we switch
-  // to selected-customer mode and the form continues as if the customer
-  // had been picked from the search results.
-  const createCustomerMutation = useMutation({
-    mutationFn: async (payload: {
-      name: string
-      phone: string
-      alternate_phone?: string
-      email?: string
-      shipping_address: CustomerAddress
-      billing_address?: CustomerAddress
-    }) => api.post<CreateCustomerResponse>('/api/customers', payload),
-    onSuccess: (data, vars) => {
-      toast.success(
-        data.isNewCustomer
-          ? `Customer ${vars.name} created.`
-          : 'Existing customer matched by phone — loaded their profile.',
-      )
-      // Build a synthetic CustomerRow from the inline payload so the rest
-      // of the form (delivery autofill, CRM insights, etc.) treats the
-      // newly-created customer exactly like a picked search result.
-      const synthetic: CustomerRow = {
-        id: data.customerId,
-        name: vars.name,
-        phone: vars.phone,
-        email: vars.email ?? null,
-        totalOrdersCount: 0,
-        totalRtoCount: 0,
-        isFlagged: false,
-      }
-      setSelectedCustomer(synthetic)
-      // Prime the cache so customerDetailQuery doesn't refetch immediately
-      void queryClient.invalidateQueries({
-        queryKey: ['customer', 'detail', data.customerId],
-      })
-      void queryClient.invalidateQueries({ queryKey: ['customers'] })
-    },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   // ── Variant options (flatten products → variants) ─────────────────────────
@@ -425,19 +306,6 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
       : paymentType === 'partial_advance'
         ? Math.max(0, total - parsePrice(advanceAmount))
         : total
-
-  // ── Auto-fill delivery fields when a customer is selected ────────────────
-  // The customer's saved shippingAddress (flat { address, city }) doubles
-  // as the delivery address. Fields are always editable.
-  useEffect(() => {
-    if (!selectedCustomer) return
-
-    const ship = customerDetailQuery.data?.customer.shippingAddress
-    if (ship) {
-      setDeliveryAddress(ship.address)
-      setDeliveryCity(ship.city)
-    }
-  }, [selectedCustomer, customerDetailQuery.data])
 
   // ── Auto-select default dispatch location ─────────────────────────────────
   useEffect(() => {
@@ -511,11 +379,66 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
     }
   }, [paymentProofPreview])
 
-  // ── Deselect customer (return to search mode) ───────────────────────────
+  // ── Customer selection handlers ───────────────────────────────────────────
+  // When a customer is picked from the autocomplete (either an existing match
+  // or just-created via CreateCustomerForm), pre-select the primary phone,
+  // the default address, and default recipient_name to the customer's name.
+  function handleSelectCustomer(c: SelectedCustomer) {
+    setSelectedCustomer(c)
+    setShowCreateForm(false)
+
+    const primaryPhone = c.phones.find((p) => p.isPrimary) ?? c.phones[0] ?? null
+    setUsedCustomerPhoneId(primaryPhone?.id ?? null)
+
+    const defaultAddr = c.addresses.find((a) => a.isDefault) ?? c.addresses[0] ?? null
+    setUsedCustomerAddressId(defaultAddr?.id ?? null)
+    // Pre-fill the editable delivery snapshot from the default saved address.
+    // (AddressSelector's own useEffect would also do this, but setting it
+    // explicitly here guarantees the snapshot is bound immediately, even
+    // before the selector re-renders.)
+    setDeliveryAddress(defaultAddr?.address ?? '')
+    setDeliveryCity(defaultAddr?.city ?? '')
+
+    setRecipientName(c.name)
+    setSaveAddressForNextTime(false)
+  }
+
   function handleDeselectCustomer() {
     setSelectedCustomer(null)
+    setShowCreateForm(false)
+    setUsedCustomerAddressId(null)
+    setUsedCustomerPhoneId(null)
+    setRecipientName('')
+    setSaveAddressForNextTime(false)
     setDeliveryAddress('')
     setDeliveryCity('')
+  }
+
+  // When the user clicks "+ Create New Customer" in the autocomplete dropdown,
+  // reveal the inline <CreateCustomerForm />. Its onCreated callback receives
+  // the new customer ID; we then fetch the full record so we can populate
+  // selectedCustomer exactly like a picked search result.
+  async function handleCustomerCreated(customerId: string) {
+    try {
+      const detail = await api.get<CustomerDetail>(`/api/customers/${customerId}`)
+      // Map the detail shape → SelectedCustomer shape (the search-result
+      // customer carries a slightly smaller field set than the full detail).
+      const c: SelectedCustomer = {
+        id: detail.id,
+        name: detail.name,
+        email: detail.email,
+        totalOrdersCount: detail.totalOrdersCount,
+        totalRtoCount: detail.totalRtoCount,
+        isFlagged: detail.isFlagged,
+        flaggedReason: detail.flaggedReason,
+        phones: detail.phones,
+        addresses: detail.addresses,
+      }
+      handleSelectCustomer(c)
+      void queryClient.invalidateQueries({ queryKey: ['customers'] })
+    } catch (err) {
+      toast.error(getErrorMessage(err))
+    }
   }
 
   // ── Build the create-order payload ────────────────────────────────────────
@@ -546,11 +469,16 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
       // (see handleSubmit).
     }
 
-    // After the inline-creation refactor, by the time the user submits the
-    // order they MUST have a selectedCustomer (existing or just-created).
-    // We send only the customer_id — no inline `customer` object anymore.
+    // Customer linkage — by the time the user submits they MUST have a
+    // selectedCustomer (existing or just-created). The new schema sends
+    // customer_id + the saved address/phone selection + recipient_name +
+    // save_address_for_next_time, instead of the old inline `customer` object.
     if (selectedCustomer) {
       payload.customer_id = selectedCustomer.id
+      payload.used_customer_address_id = usedCustomerAddressId ?? undefined
+      payload.used_customer_phone_id = usedCustomerPhoneId ?? undefined
+      payload.recipient_name = recipientName.trim() || undefined
+      payload.save_address_for_next_time = saveAddressForNextTime
     }
 
     return payload
@@ -694,6 +622,21 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
 
   const isSubmitting = uploadingProof
 
+  // The AddressSelector manages {usedCustomerAddressId, deliveryAddress,
+  // deliveryCity, saveAddressForNextTime} as a single value object.
+  const addressSelectorValue: AddressSelectorValue = {
+    usedCustomerAddressId,
+    deliveryAddress,
+    deliveryCity,
+    saveAddressForNextTime,
+  }
+  const handleAddressSelectorChange = (v: AddressSelectorValue) => {
+    setUsedCustomerAddressId(v.usedCustomerAddressId)
+    setDeliveryAddress(v.deliveryAddress)
+    setDeliveryCity(v.deliveryCity)
+    setSaveAddressForNextTime(v.saveAddressForNextTime)
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -712,40 +655,20 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
           {/* SECTION 1: Customer + Delivery (merged) */}
           <div ref={customerSectionRef}>
             <CustomerSection
-              phoneSearch={phoneSearch}
-              setPhoneSearch={(v) => {
-                setPhoneSearch(v)
-                if (selectedCustomer) handleDeselectCustomer()
-              }}
-              isSearching={customersQuery.isFetching && trimmedPhone.length >= 4}
               selectedCustomer={selectedCustomer}
-              onSelectCustomer={setSelectedCustomer}
+              showCreateForm={showCreateForm}
+              onShowCreateForm={() => setShowCreateForm(true)}
+              onCancelCreateForm={() => setShowCreateForm(false)}
+              onSelectCustomer={handleSelectCustomer}
               onDeselectCustomer={handleDeselectCustomer}
-              customers={customersQuery.data?.customers ?? []}
-              hasSearched={trimmedPhone.length >= 4}
-              customerDetail={customerDetailQuery.data}
-              newCustomer={newCustomer}
-              setNewCustomer={setNewCustomer}
-              onCreateNewCustomer={(phoneOverride) => {
-                const phone = (phoneOverride ?? newCustomer.phone).trim()
-                const name = newCustomer.name.trim()
-                const addr = newCustomer.shipping_address.trim()
-                const city = newCustomer.shipping_city.trim()
-                if (name.length < 2) { toast.error('Customer name must be at least 2 characters.'); return }
-                if (phone.length < 7) { toast.error('A valid phone number is required.'); return }
-                if (addr.length < 2 || city.length < 2) { toast.error('Address and city are required.'); return }
-                createCustomerMutation.mutate({
-                  name,
-                  phone,
-                  shipping_address: { address: addr, city },
-                  billing_address: { address: addr, city },
-                })
-              }}
-              creatingCustomer={createCustomerMutation.isPending}
-              deliveryAddress={deliveryAddress}
-              setDeliveryAddress={setDeliveryAddress}
-              deliveryCity={deliveryCity}
-              setDeliveryCity={setDeliveryCity}
+              onCustomerCreated={handleCustomerCreated}
+              usedCustomerAddressId={usedCustomerAddressId}
+              usedCustomerPhoneId={usedCustomerPhoneId}
+              setUsedCustomerPhoneId={setUsedCustomerPhoneId}
+              recipientName={recipientName}
+              setRecipientName={setRecipientName}
+              addressSelectorValue={addressSelectorValue}
+              onAddressSelectorChange={handleAddressSelectorChange}
               courierName={courierName}
               setCourierName={setCourierName}
               dispatchLocationId={dispatchLocationId}
@@ -864,23 +787,20 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function CustomerSection({
-  phoneSearch,
-  setPhoneSearch,
-  isSearching,
   selectedCustomer,
+  showCreateForm,
+  onShowCreateForm,
+  onCancelCreateForm,
   onSelectCustomer,
   onDeselectCustomer,
-  customers,
-  hasSearched,
-  customerDetail,
-  newCustomer,
-  setNewCustomer,
-  onCreateNewCustomer,
-  creatingCustomer,
-  deliveryAddress,
-  setDeliveryAddress,
-  deliveryCity,
-  setDeliveryCity,
+  onCustomerCreated,
+  usedCustomerAddressId,
+  usedCustomerPhoneId,
+  setUsedCustomerPhoneId,
+  recipientName,
+  setRecipientName,
+  addressSelectorValue,
+  onAddressSelectorChange,
   courierName,
   setCourierName,
   dispatchLocationId,
@@ -895,43 +815,20 @@ function CustomerSection({
   isLoadingLocations,
   fieldError,
 }: {
-  phoneSearch: string
-  setPhoneSearch: (v: string) => void
-  isSearching: boolean
-  selectedCustomer: CustomerRow | null
-  onSelectCustomer: (c: CustomerRow | null) => void
+  selectedCustomer: SelectedCustomer | null
+  showCreateForm: boolean
+  onShowCreateForm: () => void
+  onCancelCreateForm: () => void
+  onSelectCustomer: (c: SelectedCustomer) => void
   onDeselectCustomer: () => void
-  customers: CustomerRow[]
-  hasSearched: boolean
-  customerDetail: CustomerDetailResponse | undefined
-  newCustomer: {
-    name: string
-    phone: string
-    alternate_phone: string
-    email: string
-    shipping_address: string
-    shipping_city: string
-    billing_address: string
-    billing_city: string
-  }
-  setNewCustomer: React.Dispatch<
-    React.SetStateAction<{
-      name: string
-      phone: string
-      alternate_phone: string
-      email: string
-      shipping_address: string
-      shipping_city: string
-      billing_address: string
-      billing_city: string
-    }>
-  >
-  onCreateNewCustomer: (phoneOverride?: string) => void
-  creatingCustomer: boolean
-  deliveryAddress: string
-  setDeliveryAddress: (v: string) => void
-  deliveryCity: string
-  setDeliveryCity: (v: string) => void
+  onCustomerCreated: (customerId: string) => void
+  usedCustomerAddressId: string | null
+  usedCustomerPhoneId: string | null
+  setUsedCustomerPhoneId: (id: string | null) => void
+  recipientName: string
+  setRecipientName: (v: string) => void
+  addressSelectorValue: AddressSelectorValue
+  onAddressSelectorChange: (v: AddressSelectorValue) => void
   courierName: string
   setCourierName: (v: string) => void
   dispatchLocationId: string
@@ -955,120 +852,49 @@ function CustomerSection({
       </CardHeader>
       <CardContent className="space-y-4">
         {/* ── SEARCH MODE (no customer selected) ──────────────────────────── */}
-        {!selectedCustomer && (
-          <div className="space-y-4">
-            {/* Search bar */}
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                placeholder="Search by phone or name…"
-                className="pl-9"
-                value={phoneSearch}
-                onChange={(e) => setPhoneSearch(e.target.value)}
-              />
-              {isSearching && (
-                <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
-              )}
-            </div>
+        {!selectedCustomer && !showCreateForm && (
+          <div className="space-y-3">
+            <CustomerSearchAutocomplete
+              onSelect={onSelectCustomer}
+              onCreateNew={onShowCreateForm}
+              autoFocus
+            />
+            <p className="text-xs text-muted-foreground text-center">
+              Search by phone or name. Click{' '}
+              <span className="font-medium text-foreground">+ Create new customer</span>{' '}
+              in the dropdown to add a brand-new customer.
+            </p>
+          </div>
+        )}
 
-            {/* Search results */}
-            {hasSearched && (
-              <div className="rounded-md border max-h-60 overflow-y-auto scrollbar-thin">
-                {customers.length === 0 ? (
-                  <div className="p-4 text-sm text-muted-foreground text-center">
-                    {isSearching ? 'Searching…' : 'No match found. Create a new customer below.'}
-                  </div>
-                ) : (
-                  <ul className="divide-y">
-                    {customers.map((c) => (
-                      <li key={c.id}>
-                        <button
-                          type="button"
-                          onClick={() => onSelectCustomer(c)}
-                          className="w-full text-left px-3 py-2.5 hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
-                        >
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium truncate">{c.name}</p>
-                            <p className="text-xs text-muted-foreground font-mono">{c.phone}</p>
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            {c.isFlagged && (
-                              <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
-                                Flagged
-                              </Badge>
-                            )}
-                            <span className="text-xs text-muted-foreground">
-                              {c.totalOrdersCount} order{c.totalOrdersCount === 1 ? '' : 's'}
-                            </span>
-                          </div>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            )}
-
-            {/* ── Inline New Customer Form (simple, 4 fields) ── */}
-            <Separator />
-            <div className="space-y-3">
+        {/* ── INLINE CREATE MODE (no customer selected + showCreateForm) ──── */}
+        {!selectedCustomer && showCreateForm && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
               <p className="text-sm font-medium flex items-center gap-1.5">
                 <Plus className="h-4 w-4 text-muted-foreground" /> New Customer
               </p>
-              <div className="grid sm:grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-xs">Full Name *</Label>
-                  <Input
-                    placeholder="e.g. Ayesha Khan"
-                    value={newCustomer.name}
-                    onChange={(e) => setNewCustomer((p) => ({ ...p, name: e.target.value }))}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Phone *</Label>
-                  <Input
-                    placeholder="e.g. 03001234567"
-                    value={newCustomer.phone || phoneSearch}
-                    onChange={(e) => setNewCustomer((p) => ({ ...p, phone: e.target.value }))}
-                  />
-                </div>
-                <div className="space-y-1 sm:col-span-2">
-                  <Label className="text-xs">Address *</Label>
-                  <Input
-                    placeholder="House #, street, area"
-                    value={newCustomer.shipping_address}
-                    onChange={(e) => setNewCustomer((p) => ({ ...p, shipping_address: e.target.value }))}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">City *</Label>
-                  <Input
-                    placeholder="e.g. Lahore"
-                    value={newCustomer.shipping_city}
-                    onChange={(e) => setNewCustomer((p) => ({ ...p, shipping_city: e.target.value }))}
-                  />
-                </div>
-              </div>
               <Button
-                type="button"
-                onClick={() => onCreateNewCustomer()}
-                disabled={creatingCustomer}
-                className="w-full"
+                size="sm"
+                variant="ghost"
+                onClick={onCancelCreateForm}
+                className="h-7 text-xs"
               >
-                {creatingCustomer ? (
-                  <><Loader2 className="h-4 w-4 animate-spin" /> Creating…</>
-                ) : (
-                  <><Plus className="h-4 w-4" /> Create Customer</>
-                )}
+                <RotateCcw className="h-3.5 w-3.5" /> Back to search
               </Button>
             </div>
+            <CreateCustomerForm
+              compact
+              onCreated={onCustomerCreated}
+              submitLabel="Create Customer"
+            />
           </div>
         )}
 
         {/* ── SELECTED MODE (customer selected) ──────────────────────────── */}
         {selectedCustomer && (
           <div className="space-y-4">
-            {/* Customer info card + CRM stats + editable address */}
+            {/* Customer info card + CRM stats + address selector + phone + recipient */}
             <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-3 space-y-3">
               <div className="flex items-start justify-between gap-2">
                 <div className="flex items-start gap-2.5 min-w-0">
@@ -1084,7 +910,11 @@ function CustomerSection({
                         </Badge>
                       )}
                     </div>
-                    <p className="text-xs text-muted-foreground font-mono">{selectedCustomer.phone}</p>
+                    {selectedCustomer.phones[0] && (
+                      <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
+                        <Phone className="h-2.5 w-2.5" /> {selectedCustomer.phones[0].phoneRaw}
+                      </p>
+                    )}
                   </div>
                 </div>
                 <Button size="sm" variant="ghost" onClick={onDeselectCustomer}>
@@ -1093,45 +923,67 @@ function CustomerSection({
               </div>
 
               {/* Compact CRM stats (informational only) */}
-              <CrmStatsWidget customerDetail={customerDetail} selectedCustomer={selectedCustomer} />
+              <CrmStatsWidget customer={selectedCustomer} />
 
               <Separator />
 
-              {/* ── Editable Shipping/Delivery Address (lives HERE, not in a separate section) ── */}
-              <div className="space-y-2">
-                <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-1">
-                  <MapPin className="h-3 w-3" /> Shipping / Delivery Address
-                </p>
-                <div className="grid sm:grid-cols-2 gap-2">
-                  <div className="space-y-1 sm:col-span-2">
-                    <Label className="text-xs">Address *</Label>
-                    <Textarea
-                      placeholder="House #, street, area"
-                      value={deliveryAddress}
-                      onChange={(e) => setDeliveryAddress(e.target.value)}
-                      className="text-sm"
-                      rows={2}
-                    />
-                    {fieldError('delivery_address') && (
-                      <p className="text-xs text-destructive">{fieldError('delivery_address')}</p>
-                    )}
-                  </div>
+              {/* Phone selector + Recipient name */}
+              <div className="grid sm:grid-cols-2 gap-3">
+                {selectedCustomer.phones.length > 1 && (
                   <div className="space-y-1">
-                    <Label className="text-xs">City *</Label>
-                    <Input
-                      placeholder="e.g. Lahore"
-                      value={deliveryCity}
-                      onChange={(e) => setDeliveryCity(e.target.value)}
-                    />
-                    {fieldError('delivery_city') && (
-                      <p className="text-xs text-destructive">{fieldError('delivery_city')}</p>
-                    )}
+                    <Label className="text-xs flex items-center gap-1">
+                      <Phone className="h-3 w-3" /> Contact Phone
+                    </Label>
+                    <Select
+                      value={usedCustomerPhoneId ?? undefined}
+                      onValueChange={(v) => setUsedCustomerPhoneId(v)}
+                    >
+                      <SelectTrigger className="text-sm">
+                        <SelectValue placeholder="Select phone" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {selectedCustomer.phones.map((p) => (
+                          <SelectItem key={p.id} value={p.id}>
+                            <span className="font-mono">{p.phoneRaw}</span>
+                            {p.isPrimary && (
+                              <Badge variant="outline" className="ml-2 text-[10px] bg-primary/10 text-primary border-primary/20">
+                                Primary
+                              </Badge>
+                            )}
+                            {p.label && (
+                              <span className="text-xs text-muted-foreground ml-1">· {p.label}</span>
+                            )}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
+                )}
+
+                <div className="space-y-1">
+                  <Label className="text-xs flex items-center gap-1">
+                    <User className="h-3 w-3" /> Recipient Name
+                  </Label>
+                  <Input
+                    placeholder="Who is receiving this order?"
+                    value={recipientName}
+                    onChange={(e) => setRecipientName(e.target.value)}
+                    className="text-sm"
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Defaults to the customer name — edit if someone else is receiving.
+                  </p>
                 </div>
-                <p className="text-[10px] text-muted-foreground">
-                  Pre-filled from customer&apos;s saved address. Edit for this order only — customer profile is not changed.
-                </p>
               </div>
+
+              {/* ── Address selector (REPLACES the empty address/city inputs) ── */}
+              <AddressSelector
+                addresses={selectedCustomer.addresses}
+                value={addressSelectorValue}
+                onChange={onAddressSelectorChange}
+                addressError={fieldError('delivery_address')}
+                cityError={fieldError('delivery_city')}
+              />
             </div>
 
             {/* ── Delivery Logistics (courier, dispatch, discount — NO address fields here) ── */}
@@ -1212,100 +1064,71 @@ function CustomerSection({
 // CRM Stats widget — shows when a customer is selected
 // ─────────────────────────────────────────────────────────────────────────────
 
-function CrmStatsWidget({
-  customerDetail,
-  selectedCustomer,
-}: {
-  customerDetail: CustomerDetailResponse | undefined
-  selectedCustomer: CustomerRow
-}) {
-  const stats = customerDetail?.crmStats
-  const loading = !!selectedCustomer && !customerDetail
-
-  if (loading) {
-    return (
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Skeleton key={i} className="h-16" />
-        ))}
-      </div>
-    )
-  }
-
-  if (!stats) {
-    return (
-      <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-md bg-background p-2.5">
-          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-            Previous Orders
-          </p>
-          <p className="text-lg font-semibold">{selectedCustomer.totalOrdersCount}</p>
-        </div>
-        <div className="rounded-md bg-background p-2.5">
-          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
-            Total RTOs
-          </p>
-          <p
-            className={cn(
-              'text-lg font-semibold',
-              selectedCustomer.totalRtoCount > 0 ? 'text-rose-600' : '',
-            )}
-          >
-            {selectedCustomer.totalRtoCount}
-          </p>
-        </div>
-      </div>
-    )
-  }
+function CrmStatsWidget({ customer }: { customer: SelectedCustomer }) {
+  const totalOrders = customer.totalOrdersCount
+  const totalRto = customer.totalRtoCount
+  // Derive a delivery rate from the cached totals (returned orders / total).
+  // This is informational — not the source of truth (the live query is).
+  const deliveryRate =
+    totalOrders > 0 ? ((totalOrders - totalRto) / totalOrders) * 100 : 100
+  const rtoRate = totalOrders > 0 ? (totalRto / totalOrders) * 100 : 0
+  const deliveredCount = Math.max(0, totalOrders - totalRto)
 
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <StatCell label="Total Orders" value={String(stats.totalOrders)} />
+        <StatCell label="Total Orders" value={String(totalOrders)} />
         <StatCell
           label="Delivered"
-          value={String(stats.totalDelivered)}
-          sub={`${stats.deliveryRatio.toFixed(1)}%`}
+          value={String(deliveredCount)}
+          sub={`${deliveryRate.toFixed(1)}%`}
           tone="emerald"
         />
         <StatCell
           label="Returned"
-          value={String(stats.totalReturned)}
-          sub={`${stats.returnRatio.toFixed(1)}%`}
+          value={String(totalRto)}
+          sub={`${rtoRate.toFixed(1)}%`}
           tone="rose"
         />
         <StatCell
           label="Delivery Rate"
-          value={`${stats.deliveryRatio.toFixed(1)}%`}
+          value={`${deliveryRate.toFixed(1)}%`}
           tone="emerald"
         />
       </div>
 
-      {selectedCustomer.totalOrdersCount > 0 && (
+      {totalOrders > 0 && (
         <p className="text-xs text-muted-foreground flex items-center gap-1.5">
           <History className="h-3 w-3" />
           Returning customer — verify address before dispatch.
         </p>
       )}
 
-      {/* Address history */}
-      {stats.addressHistory.length > 0 && (
+      {/* Saved address history (from customer.addresses[] with lastUsedAt) */}
+      {customer.addresses.length > 0 && (
         <div className="space-y-1.5">
           <p className="text-[10px] uppercase tracking-wide text-muted-foreground flex items-center gap-1">
-            <MapPin className="h-3 w-3" /> Address history
+            <MapPin className="h-3 w-3" /> Saved addresses
           </p>
-          <ul className="space-y-1 max-h-32 overflow-y-auto pr-1">
-            {stats.addressHistory.slice(0, 5).map((h, i) => (
+          <ul className="space-y-1 max-h-32 overflow-y-auto pr-1 scrollbar-thin">
+            {customer.addresses.slice(0, 5).map((a) => (
               <li
-                key={i}
+                key={a.id}
                 className="text-xs flex items-center justify-between gap-2 rounded bg-background/60 px-2 py-1"
               >
                 <span className="truncate">
-                  {h.address || '—'} · {h.city}
+                  {a.address || '—'} · {a.city}
                 </span>
-                <Badge variant="outline" className="text-[10px] shrink-0">
-                  {h.orderCount}× delivered
-                </Badge>
+                <div className="flex items-center gap-1 shrink-0">
+                  {a.isDefault && (
+                    <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20">
+                      Default
+                    </Badge>
+                  )}
+                  <Badge variant="outline" className="text-[10px]">
+                    {formatLastUsedShort(a.lastUsedAt)}
+                  </Badge>
+                </div>
               </li>
             ))}
           </ul>
@@ -1313,6 +1136,19 @@ function CrmStatsWidget({
       )}
     </div>
   )
+}
+
+/** Compact relative-time formatter for the inline address list. */
+function formatLastUsedShort(iso: string | null): string {
+  if (!iso) return 'Never used'
+  const date = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffDays = Math.floor(diffMs / 86_400_000)
+  if (diffDays < 1) return 'Today'
+  if (diffDays === 1) return '1 day ago'
+  if (diffDays < 30) return `${diffDays} days ago`
+  return date.toLocaleDateString('en-PK', { day: '2-digit', month: 'short' })
 }
 
 function StatCell({
