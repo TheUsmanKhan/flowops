@@ -854,15 +854,26 @@ function CustomerSection({
         {/* ── SEARCH MODE (no customer selected) ──────────────────────────── */}
         {!selectedCustomer && !showCreateForm && (
           <div className="space-y-3">
-            <CustomerSearchAutocomplete
-              onSelect={onSelectCustomer}
-              onCreateNew={onShowCreateForm}
-              autoFocus
-            />
+            <div className="flex flex-col sm:flex-row gap-2">
+              <CustomerSearchAutocomplete
+                onSelect={onSelectCustomer}
+                onCreateNew={onShowCreateForm}
+                autoFocus
+                className="flex-1"
+              />
+              <Button
+                type="button"
+                variant="default"
+                onClick={onShowCreateForm}
+                className="sm:shrink-0"
+              >
+                <Plus className="h-4 w-4" /> Create New Customer
+              </Button>
+            </div>
             <p className="text-xs text-muted-foreground text-center">
-              Search by phone or name. Click{' '}
-              <span className="font-medium text-foreground">+ Create new customer</span>{' '}
-              in the dropdown to add a brand-new customer.
+              Search by phone or name to find an existing customer, or click{' '}
+              <span className="font-medium text-foreground">Create New Customer</span>{' '}
+              to add a brand-new one.
             </p>
           </div>
         )}
