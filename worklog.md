@@ -2445,3 +2445,86 @@ Stage Summary:
 - Item Exchange System schema fully built and live on Supabase. The order_exchanges table is ready for Step 2's server actions (createExchangeRequest, approveExchange, markCustomerConfirmedShipped, verifyOldItemReceived which calls receiveReturnedStitchedItem/receiveReturn, createExchangeReplacementOrder, settlePriceDifference, markAsNotReturned which calls flagCustomer, cancelExchange) and Step 3's frontend (exchanges list, exchange detail, "Request Exchange" action on delivered order_items).
 - The two distinct exchange methods (courier_replacement vs customer_self_return) are modeled with their own state sequences. The DB enforces data integrity (CHECK constraints, GENERATED column, consistency CHECK); the state-machine transitions are enforced at the application layer (Step 2) where the business rules about sequencing live.
 - KNOWN Step 2 work: server actions for the full exchange lifecycle, including calling the existing receiveReturnedStitchedItem()/receiveReturn() inventory functions once the old item is manually verified (NOT reimplemented — reused per spec), and calling the existing flagCustomer() action when marking as not-returned.
+
+---
+Task ID: EXCHANGE-STEP-2-SERVER-ACTIONS
+Agent: main
+Task: Build all server actions for the Item Exchange System (Step 2) — createExchangeRequest, dispatchExchangeNewItem (courier_replacement), confirmCustomerShippedOldItem (customer_self_return), verifyOldItemReceived (shared, the gating point), settlePriceDifference, markExchangeAsNotReturned, cancelExchangeRequest, listExchanges, getExchangeDetail, listOverdueExchanges. No frontend.
+
+Work Log:
+
+INVESTIGATION:
+- Read worklog from EXCHANGE-STEP-1-SCHEMA to understand the order_exchanges table structure (2 exchange methods, 9-state machine, GENERATED priceDifference column, consistency CHECK constraint).
+- Studied the receive-returned-stitched + receive API routes — found that receiveReturnedStitchedItem()/receiveReturn() are NOT standalone exported functions; their logic is inline in the API routes, both calling processInventoryTransaction() from src/lib/inventory.ts. The exchange actions call processInventoryTransaction() directly (same pattern) rather than HTTP-calling the API routes.
+- Confirmed processInventoryTransaction() signature: takes orgVariantId, locationId, organizationId, companyId, employeeId, transactionType, quantity, costPerUnit, referenceType, referenceId, notes. Returns { success, transactionId?, poolState? }.
+- Confirmed reserveStockForOrder() signature (from src/lib/inventory.ts, exported).
+- Confirmed dispatchOrderAction() is exported from order.actions.ts but reserveOrderStock() + generateOrderNumber() are internal (not exported). Built internal equivalents in exchange.actions.ts.
+- Confirmed flagCustomer() is exported from customer.actions.ts.
+- Restored .env (had reverted to SQLite again) to the Supabase URL.
+- Fixed Prisma schema: added @default(auto()) to priceDifference (GENERATED column) + used `as Prisma.OrderExchangeUncheckedCreateInput` cast on create (Prisma doesn't fully understand GENERATED columns).
+
+PART 1 — Validation Schemas (src/lib/validations/exchange.schemas.ts):
+- createExchangeRequestSchema: original_order_item_id, new_org_variant_id, exchange_method (enum), reason (required, min 3 chars)
+- confirmCustomerShippedSchema: exchange_id, customer_return_tracking_number?, customer_return_courier?
+- verifyOldItemReceivedSchema: exchange_id, condition (enum perfect/good/open_box/damaged), evidence_urls (optional, max 10), notes?
+- settlePriceDifferenceSchema: exchange_id, settled_amount, settlement_type (enum collected_from_customer/refunded_to_customer)
+- markNotReturnedSchema: exchange_id, not_returned_reason, recovery_status (enum pending/recovered/written_off), recovery_amount?
+- cancelExchangeSchema: exchange_id, reason
+- listExchangesFiltersSchema: status?, exchange_method?, date_from?, date_to?, limit?, offset?
+
+PARTS 2-9 — Server Actions (src/lib/actions/exchange.actions.ts):
+
+PART 2 — createExchangeRequest:
+- GUARD: orders.manage. Validates original order_item's parent order status='delivered' (returns clear error "Items can only be exchanged after the order has been delivered to the customer." if not). Fetches old_item_price from order_item.unit_price, new_item_price from company_variant_pricing. Computes price_difference_status (>0→customer_owes, <0→refund_due, =0→settled). Sets initial status: courier_replacement→'requested', customer_self_return→'awaiting_customer_to_ship_old_item'. Audit log + metric event exchange.requested.
+
+PART 3 — dispatchExchangeNewItem (courier_replacement only):
+- REJECTS customer_self_return exchanges ("This action is only valid for courier_replacement exchanges"). Only valid when status='requested'. Calls internal createAndDispatchExchangeOrder() helper which: generates order number, creates new order (order_source='exchange', paymentType='fully_prepaid', status='confirmed'), creates single order_item, links exchange.newOrderId/newOrderItemId, reserves stock (if stock_based), dispatches immediately. Updates exchange status→'awaiting_old_item_return'. Audit log + metric exchange.new_item_dispatched.
+
+PART 4 — confirmCustomerShippedOldItem (customer_self_return only):
+- Only valid when status='awaiting_customer_to_ship_old_item'. Records customer_return_tracking_number, customer_return_courier, customer_confirmed_shipped_at=NOW(), customer_confirmed_shipped_by. Transitions status→'customer_confirmed_shipped'. Does NOT trigger new item dispatch — dispatch remains gated on physical verification (Part 5). Audit log.
+
+PART 5 — verifyOldItemReceived (SHARED by both methods — the GATING POINT):
+- GUARD: inventory.receive. Only valid when status IN ('awaiting_old_item_return', 'customer_confirmed_shipped'). For condition IN ('perfect','good','open_box'): calls processInventoryTransaction() with transactionType 'return_stitched_received' (made_to_order) or 'return_resellable' (stock_based) — same function the receive API routes use. For condition='damaged': creates stock_loss_records entry directly (loss_type='damaged', resolution='written_off', responsibleParty='customer'). Stores inventoryTxnId/stockLossId. Updates exchange with verification data + status='old_item_manually_verified'. IF customer_self_return: THIS IS THE GATE — calls createAndDispatchExchangeOrder() NOW (was blocked until this point). Transitions status→'completed' (for both methods). Audit log + metrics exchange.old_item_verified + exchange.completed.
+
+PART 6 — settlePriceDifference:
+- GUARD: orders.manage. Sets price_difference_settled_amount, settled_at, settled_by, price_difference_status='settled'. Audit log.
+
+PART 7 — markExchangeAsNotReturned:
+- GUARD: orders.manage. Rejects if already terminal (completed/customer_did_not_return/cancelled). Sets marked_as_not_returned=true, not_returned_reason, recovery_status, recovery_amount, status='customer_did_not_return' (DB CHECK enforces consistency). Calls existing flagCustomer() with reason "Exchange item not returned". For self_return: new item was never dispatched (gating held), nothing to reverse. For courier_replacement: new item was dispatched — unrecovered loss tracked via not_returned_recovery_amount. Audit log + metric exchange.not_returned (numeric_value=old_item_price loss).
+
+cancelExchangeRequest: only valid when status IN ('requested', 'awaiting_customer_to_ship_old_item') — before any new item dispatched. Sets status='cancelled', cancelled_at, cancellation_reason. Audit log.
+
+PART 8 — listExchanges + getExchangeDetail + listOverdueExchanges:
+- listExchanges: filters by status, exchange_method, date range. Paginated. Joins original_order + new_order for order numbers.
+- getExchangeDetail: full record + original order (with customer + primary phone) + original order_item (with variant/product) + new variant + new order + new order_item + requested_by/verified_by employees.
+- listOverdueExchanges(days_threshold=7): returns exchanges in waiting states (awaiting_old_item_return, awaiting_customer_to_ship_old_item, customer_confirmed_shipped) where the relevant timestamp is older than threshold. Computes daysWaiting per exchange. Powers the alert/reminder system.
+
+PART 9 — Metric Events:
+- exchange.requested (numeric_value=1, entity_type=order)
+- exchange.new_item_dispatched (numeric_value=new_item_price)
+- exchange.old_item_verified (numeric_value=old_item_price, dimensions: condition, exchange_method)
+- exchange.completed (numeric_value=price_difference)
+- exchange.not_returned (numeric_value=old_item_price loss, dimensions: exchange_method)
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors (fixed the GENERATED-column Prisma issue with `as Prisma.OrderExchangeUncheckedCreateInput` cast).
+- bun run lint: 0 errors, 18 pre-existing warnings (0 new).
+- Dev server: HTTP 200, no errors.
+- Gating test (scripts/test-exchange-gating.ts, 17 tests, ALL PASS):
+  * TEST 1: customer_self_return exchange created with status=awaiting_customer_to_ship_old_item ✅
+  * TEST 2: dispatchExchangeNewItem would REJECT customer_self_return (method check); newOrderId is NULL (gating holds) ✅
+  * TEST 3: confirmCustomerShippedOldItem transitions to customer_confirmed_shipped; newOrderId STILL NULL (dispatch still gated) ✅
+  * TEST 4: verifyOldItemReceived transitions to old_item_manually_verified → completed; newOrderId NOW populated (gating released after verification) ✅
+  * TEST 5: courier_replacement exchange created with status=requested (ready for immediate dispatch) ✅
+  * TEST 6: priceDifference auto-computes (200.00 for new=1200/old=1000; 0.00 for equal prices) ✅
+  * TEST 7: "did not return" terminal outcome — newOrderId STILL NULL for self_return (nothing to reverse) ✅
+  * TEST 8: cancelExchangeRequest works on cancellable states (requested) ✅
+
+Stage Summary:
+- All 9 parts of Step 2 implemented and verified. The Item Exchange System now has a complete server-action layer with strict sequencing enforcement:
+  * courier_replacement: request → dispatch new item immediately → await old item return → manually verify → complete
+  * customer_self_return: request (awaiting customer to ship) → customer confirmed shipped → await physical arrival → manually verify (THIS IS THE GATE) → create+dispatch new order → complete
+- The CRITICAL RULE is verified: for customer_self_return, the new order/item is NEVER created before verifyOldItemReceived() succeeds. The gating holds through the entire awaiting → confirmed_shipped → verification flow (newOrderId stays NULL), and only releases after verification completes.
+- verifyOldItemReceived() is the ONLY function that processes the old item's return in inventory — it calls processInventoryTransaction() directly (the same function the receive API routes use, NOT reimplemented) for perfect/good/open_box conditions, and creates a stock_loss_records entry directly for damaged items.
+- markExchangeAsNotReturned calls the existing flagCustomer() action with reason "Exchange item not returned" (reusing the Customer Management System's flagging mechanism).
+- KNOWN Step 3 work: frontend (exchanges list view, exchange detail page, "Request Exchange" action on delivered order_items, overdue exchanges alert/reminder UI).
