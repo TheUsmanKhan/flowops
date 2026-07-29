@@ -100,7 +100,9 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
   const query = useQuery<CustomerDetail>({
     queryKey: ['customer-detail', customerId],
     queryFn: () => api.get<CustomerDetail>(`/api/customers/${customerId}`),
-    staleTime: 15_000,
+    // staleTime: 0 so navigating between customers always fetches fresh data
+    // (prevents showing the previous customer's stats while the new one loads).
+    staleTime: 0,
   })
 
   const invalidate = () => {
