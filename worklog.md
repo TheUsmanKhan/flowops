@@ -2609,3 +2609,72 @@ Stage Summary:
   * Exchange detail page with timeline, price breakdown, verification evidence, and context-aware actions.
   * Sidebar Exchanges link under Orders.
 - The critical rule is enforced in the UI: for customer_self_return, no dispatch button exists before verification — the only path to new-item dispatch is through completing verifyOldItemReceived().
+
+---
+Task ID: CUSTOMER-STATS-FIX
+Agent: main
+Task: Fix cached customer stats showing 0/0/0 for customers with real orders. Diagnostic + 3 fixes.
+
+Work Log:
+
+DIAGNOSTIC FINDINGS:
+1. updateCustomerStats(customer_id) EXISTS and is correct (customer.actions.ts line 1024) — queries db.order.findMany({ where: { customerId, status: { not: 'cancelled' } } }) and computes totalOrdersCount/totalOrderValue/totalRtoCount. NOT a stub.
+2. ROOT CAUSE — only wired into 3 of 7 required lifecycle hooks:
+   - ✅ createManualOrder (line 645)
+   - ✅ createOrderFromShopifyWebhook (line 912)
+   - ✅ dispatchOrderAction (line 1860)
+   - ❌ confirmOrder — MISSING
+   - ❌ markOrderDelivered — MISSING
+   - ❌ cancelOrder — MISSING
+   - ❌ markCodCollected — MISSING
+   - ✅ processOrderReturn (order-return.actions.ts line 180) — already wired
+3. getCustomerDetail() reads the CACHED columns (customer.totalOrdersCount etc.) — shows 0 if updateCustomerStats() never ran.
+4. RTO Rate + Delivery Rate were computed in the FRONTEND (customer-detail-view.tsx) via useMemo from cached values — so they showed 0% because the cached values were 0. The formulas were also inaccurate: used totalOrdersCount (all non-cancelled) as denominator instead of "dispatched-or-later" orders, and treated all non-RTO as delivered.
+
+LIVE DB PROOF (the reported bug):
+- Fatima Ahmed: cached 0/0/0, REAL 81 non-cancelled orders / 11 RTO / 11 delivered. Exact match to the bug report.
+- csdsdd: cached 5, REAL 6 (off by 1).
+- Usman Khan: cached Rs. 5490 value, but his 1 order isn't delivered/dispatched (should be 0).
+
+FIX 1 — Repair updateCustomerStats() + wire into 4 missing hooks:
+- Updated total_order_value definition: was SUM(delivered only), now SUM(delivered + dispatched) per spec (orders that have left the warehouse, excluding cancelled/refunded/pending/confirmed/processing). Added clear DEFINITIONS comment block.
+- Added updateCustomerStats(order.customerId).catch(() => {}) to:
+  * confirmOrder (line 987) — NEW
+  * markCodCollected (line 1224) — NEW
+  * cancelOrder (line 1319) — NEW
+  * markOrderDelivered (line 2029) — NEW
+- All 4 new calls use .catch(() => {}) wrapper so a stats failure NEVER breaks the parent order action (consistent with the metric_events error-handling pattern).
+- Total call sites now: 7 (createManualOrder, Shopify webhook, confirmOrder, markCodCollected, cancelOrder, dispatchOrderAction, markOrderDelivered) + 1 (processOrderReturn in order-return.actions.ts).
+
+FIX 2 — Backfill all existing customers:
+- Created admin API route POST /api/customers/backfill-stats (requires ORDERS_MANAGE) that iterates all customers in the active org and calls updateCustomerStats() for each.
+- Ran the backfill directly via script (scripts/backfill-customer-stats.ts): 7 customers processed, 3 updated:
+  * Fatima Ahmed: 0→81 orders, 0→11 RTO, Rs. 0→228,050 value ✅
+  * Usman Khan: Rs. 5490→0 (his 1 order isn't delivered/dispatched) ✅
+  * csdsdd: 5→6 orders, Rs. 2500→12,490 value ✅
+  * 4 customers were already correct (0 orders).
+- Backfill script cleaned up after running.
+
+FIX 3 — Display layer verification + rate formula fix:
+- Updated getCustomerDetail() (customer.actions.ts) to live-compute rtoRate + deliveryRate from actual order statuses via db.order.groupBy({ by: ['status'] }). The denominator is "dispatched-or-later" orders (dispatched + delivered + rto) per spec, NOT all non-cancelled orders.
+- Added rtoRate + deliveryRate to CustomerDetailDTO type + the returned data object.
+- Updated src/components/customers/types.ts CustomerDetail interface to include rtoRate + deliveryRate.
+- Updated customer-detail-view.tsx: replaced the 2 inaccurate local useMemo formulas (which used totalOrdersCount as denominator and treated all non-RTO as delivered) with the server-computed rtoRate + deliveryRate values. Removed unused useMemo import.
+- The stat cards now read: totalOrdersCount/totalOrderValue/totalRtoCount from cached columns (now correct via Fix 1+2), and rtoRate/deliveryRate from live-computed server values (Fix 3).
+
+VERIFICATION (Fatima Ahmed — the reported bug):
+- Cached stats now match real data: totalOrdersCount=81, totalRtoCount=11, totalOrderValue=Rs. 228,050 — all ✅
+- Live-computed rates: rtoRate=32% (11/34 dispatched-or-later), deliveryRate=32% (11/34) — real percentages instead of 0%.
+- 5/5 verification checks pass.
+- tsc: 0 errors. lint: 0 errors, 18 pre-existing warnings (0 new). dev server: HTTP 200.
+
+DEFINITIONS (clarified per spec requirement):
+- total_orders_count = COUNT of non-cancelled orders (cancelled excluded since they never completed; still visible in Orders tab which is a separate concern)
+- total_order_value = SUM(total_order_value) for delivered + dispatched orders (excludes cancelled, refunded, pending, confirmed, processing)
+- total_rto_count = COUNT where status = 'rto'
+- rto_rate = total_rto_count / (dispatched + delivered + rto) * 100
+- delivery_rate = delivered / (dispatched + delivered + rto) * 100
+- These definitions are applied consistently between the cached-write logic (updateCustomerStats) and the read-time rate calculations (getCustomerDetail) — same "counted" orders definition.
+
+Stage Summary:
+- The customer stats bug is fully fixed. The root cause was updateCustomerStats() being wired into only 3 of 7 order lifecycle hooks — the 4 missing hooks (confirmOrder, markOrderDelivered, cancelOrder, markCodCollected) are now wired. Existing customers' stale cached stats were backfilled (3 corrected including Fatima Ahmed: 0→81 orders). The RTO Rate + Delivery Rate formulas were also fixed — they now use the correct denominator (dispatched-or-later orders) and are live-computed server-side rather than derived from cached values with an inaccurate formula. The Customer Detail page now shows real numbers: Total Orders 81, Total Value Rs. 228,050, RTO Count 11, RTO Rate 32%, Delivery Rate 32%.

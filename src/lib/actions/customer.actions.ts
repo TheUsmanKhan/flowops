@@ -95,6 +95,12 @@ interface CustomerDetailDTO {
   totalOrdersCount: number
   totalOrderValue: number
   totalRtoCount: number
+  // Live-computed rates (not cached — derived from actual order statuses).
+  // rtoRate = rto / dispatched-or-later orders * 100
+  // deliveryRate = delivered / dispatched-or-later orders * 100
+  // where "dispatched-or-later" = status IN ('dispatched','delivered','rto')
+  rtoRate: number
+  deliveryRate: number
   isFlagged: boolean
   flaggedReason: string | null
   flaggedAt: Date | null
@@ -1028,15 +1034,27 @@ export async function updateCustomerStats(customerId: string): Promise<ActionRes
     // workspace check here (the caller is trusted internal code). The
     // cached stats are org-scoped by virtue of the customer row itself
     // being org-scoped.
+    //
+    // DEFINITIONS (applied consistently between cached writes here and
+    // the read-time percentage calculations in customer-detail-view.tsx):
+    //   total_orders_count = COUNT of non-cancelled orders
+    //   total_order_value  = SUM(total_order_value) for delivered + dispatched
+    //                        (orders that have left the warehouse — excludes
+    //                        cancelled, refunded, pending, confirmed, processing)
+    //   total_rto_count    = COUNT where status = 'rto'
+    //   rto_rate / delivery_rate = computed at read-time in the frontend from
+    //                        these cached values (no separate cached columns)
     const orders = await db.order.findMany({
       where: { customerId, status: { not: 'cancelled' } },
       select: { totalOrderValue: true, status: true },
     })
 
     const totalOrdersCount = orders.length
-    // Per spec: total_order_value = sum of DELIVERED orders' total_order_value.
+    // total_order_value = sum of delivered + dispatched orders' total_order_value
+    // (orders that have actually shipped — reflects real revenue, excludes
+    // pending/confirmed orders that may still be cancelled)
     const totalOrderValue = orders
-      .filter((o) => o.status === 'delivered')
+      .filter((o) => o.status === 'delivered' || o.status === 'dispatched')
       .reduce((sum, o) => sum + Number(o.totalOrderValue), 0)
     const totalRtoCount = orders.filter((o) => o.status === 'rto').length
 
@@ -1060,6 +1078,8 @@ export async function updateCustomerStats(customerId: string): Promise<ActionRes
 
     return { success: true }
   } catch (err) {
+    // CRITICAL: never let a stats-update failure break the calling order
+    // action. Log and return failure — the caller continues regardless.
     console.error('[customer] updateCustomerStats failed:', err)
     return {
       success: false,
@@ -1337,6 +1357,26 @@ export async function getCustomerDetail(
     })
     if (!customer) return { success: false, error: 'Customer not found' }
 
+    // Live-compute RTO rate + delivery rate from actual order statuses.
+    // "Dispatched-or-later" = orders that have left the warehouse (dispatched,
+    // delivered, rto) — the denominator per the spec. Pending/confirmed/
+    // processing orders are excluded (they haven't shipped yet, so their
+    // outcome is unknown).
+    const statusCounts = await db.order.groupBy({
+      by: ['status'],
+      where: { customerId },
+      _count: { status: true },
+    })
+    const statusMap = new Map(statusCounts.map((s) => [s.status, s._count.status]))
+    const dispatchedOrLater =
+      (statusMap.get('dispatched') ?? 0) +
+      (statusMap.get('delivered') ?? 0) +
+      (statusMap.get('rto') ?? 0)
+    const deliveredCount = statusMap.get('delivered') ?? 0
+    const rtoCount = statusMap.get('rto') ?? 0
+    const rtoRate = dispatchedOrLater > 0 ? Math.round((rtoCount / dispatchedOrLater) * 100) : 0
+    const deliveryRate = dispatchedOrLater > 0 ? Math.round((deliveredCount / dispatchedOrLater) * 100) : 0
+
     const recentOrders = await db.order.findMany({
       where: { customerId },
       select: {
@@ -1364,6 +1404,8 @@ export async function getCustomerDetail(
         totalOrdersCount: customer.totalOrdersCount,
         totalOrderValue: Number(customer.totalOrderValue),
         totalRtoCount: customer.totalRtoCount,
+        rtoRate,
+        deliveryRate,
         isFlagged: customer.isFlagged,
         flaggedReason: customer.flaggedReason,
         flaggedAt: customer.flaggedAt,

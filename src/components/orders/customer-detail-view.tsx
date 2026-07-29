@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, initials } from '@/lib/api-client'
@@ -236,17 +236,12 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
 
   const customer = query.data
 
-  const rtoRate = useMemo(() => {
-    if (!customer || customer.totalOrdersCount === 0) return 0
-    return Math.round((customer.totalRtoCount / customer.totalOrdersCount) * 100)
-  }, [customer])
-
-  const deliveryRate = useMemo(() => {
-    if (!customer || customer.totalOrdersCount === 0) return 0
-    return Math.round(
-      ((customer.totalOrdersCount - customer.totalRtoCount) / customer.totalOrdersCount) * 100,
-    )
-  }, [customer])
+  // RTO Rate + Delivery Rate are now live-computed server-side in
+  // getCustomerDetail() using the correct denominator (dispatched-or-later
+  // orders, not all non-cancelled orders). The old local useMemo formulas
+  // were inaccurate (treated all non-RTO as delivered, used wrong base).
+  const rtoRate = customer?.rtoRate ?? 0
+  const deliveryRate = customer?.deliveryRate ?? 0
 
   // Focus the inline name input when entering edit mode
   useEffect(() => {

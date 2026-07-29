@@ -981,6 +981,11 @@ export async function confirmOrder(orderId: string): Promise<ActionResult> {
       dimensions: { confirmation_method: 'manual' },
     }).catch(() => {})
 
+    // Recompute cached customer stats (order count may change if this was a
+    // re-confirmation, and the status transition affects value/rto calcs).
+    // Non-fatal — never break the confirm action on a stats failure.
+    await updateCustomerStats(order.customerId).catch(() => {})
+
     return { success: true }
   } catch (err) {
     return {
@@ -1214,6 +1219,10 @@ export async function markCodCollected(
       numericValue: d.collected_amount,
     }).catch(() => {})
 
+    // Recompute cached customer stats (COD collection is a financial event
+    // that may affect the value calculations). Non-fatal.
+    await updateCustomerStats(order.customerId).catch(() => {})
+
     return { success: true }
   } catch (err) {
     return {
@@ -1304,6 +1313,10 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
       numericValue: Number(order.totalOrderValue),
       dimensions: { cancellation_reason: d.cancellation_reason, had_reserved_items: reservedItems.length > 0 },
     }).catch(() => {})
+
+    // Recompute cached customer stats (cancelled orders are excluded from
+    // total_orders_count, so this count drops). Non-fatal.
+    await updateCustomerStats(order.customerId).catch(() => {})
 
     return { success: true }
   } catch (err) {
@@ -2010,6 +2023,10 @@ export async function markOrderDelivered(orderId: string): Promise<ActionResult>
       numericValue: Number(order.totalOrderValue),
       dimensions: { delivery_days: deliveryDays },
     }).catch(() => {})
+
+    // Recompute cached customer stats (delivery affects total_order_value
+    // and delivery_rate). Non-fatal.
+    await updateCustomerStats(order.customerId).catch(() => {})
 
     return { success: true }
   } catch (err) {

@@ -69,6 +69,10 @@ export interface CustomerDetail {
   totalOrdersCount: number
   totalOrderValue: number
   totalRtoCount: number
+  /** Live-computed: rto / dispatched-or-later orders * 100 */
+  rtoRate: number
+  /** Live-computed: delivered / dispatched-or-later orders * 100 */
+  deliveryRate: number
   isFlagged: boolean
   flaggedReason: string | null
   flaggedAt: string | null
