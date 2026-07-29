@@ -1377,6 +1377,10 @@ export async function getCustomerDetail(
     const rtoRate = dispatchedOrLater > 0 ? Math.round((rtoCount / dispatchedOrLater) * 100) : 0
     const deliveryRate = dispatchedOrLater > 0 ? Math.round((deliveredCount / dispatchedOrLater) * 100) : 0
 
+    // Fetch ALL orders for this customer (not just 20) so the Orders tab
+    // matches the stat card's totalOrdersCount. The Orders tab renders a
+    // scrollable table (max-h-96 overflow-y-auto) so even 100+ orders are
+    // manageable in the UI.
     const recentOrders = await db.order.findMany({
       where: { customerId },
       select: {
@@ -1392,7 +1396,6 @@ export async function getCustomerDetail(
         usedCustomerPhoneId: true,
       },
       orderBy: { createdAt: 'desc' },
-      take: 20,
     })
 
     return {

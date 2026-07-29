@@ -1307,7 +1307,7 @@ function OrderHistoryTab({ orders }: { orders: RecentOrderDTO[] }) {
   return (
     <Card>
       <CardContent className="p-0">
-        <div className="overflow-x-auto">
+        <div className="max-h-96 overflow-y-auto overflow-x-auto scrollbar-thin">
           <Table>
             <TableHeader>
               <TableRow>
@@ -1372,7 +1372,7 @@ function OrderHistoryTab({ orders }: { orders: RecentOrderDTO[] }) {
           </Table>
         </div>
         <p className="text-xs text-muted-foreground p-3">
-          Showing last {orders.length} order{orders.length === 1 ? '' : 's'}
+          {orders.length} order{orders.length === 1 ? '' : 's'}
         </p>
       </CardContent>
     </Card>
