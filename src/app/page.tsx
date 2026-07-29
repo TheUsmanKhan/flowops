@@ -57,6 +57,8 @@ import { OrdersReadyToDispatchView } from '@/components/orders/orders-ready-to-d
 import { OrdersReturnsView } from '@/components/orders/orders-returns-view'
 import { OrdersReturnsReviewView } from '@/components/orders/orders-returns-review-view'
 import { OrdersCancelledView } from '@/components/orders/orders-cancelled-view'
+import { ExchangesView } from '@/components/orders/exchanges-view'
+import { ExchangeDetailView } from '@/components/orders/exchange-detail-view'
 import { CustomersView } from '@/components/orders/customers-view'
 import { CustomerDetailView } from '@/components/orders/customer-detail-view'
 import { OrderWorkflowSettingsView } from '@/components/orders/order-workflow-settings-view'
@@ -266,6 +268,10 @@ function renderRoute(
       return <OrdersReturnsReviewView />
     case 'orders-cancelled':
       return <OrdersCancelledView />
+    case 'exchanges':
+      return <ExchangesView />
+    case 'exchange-detail':
+      return <ExchangeDetailView exchangeId={route.id} />
     case 'customers':
       return <CustomersView />
     case 'customer-detail':

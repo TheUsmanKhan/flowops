@@ -62,6 +62,7 @@ import {
   ExternalLink,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { RequestExchangeDialog } from './request-exchange-dialog'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types — match GET /api/orders/[id] response shape
@@ -304,6 +305,11 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
   const [convertDialogOpen, setConvertDialogOpen] = useState(false)
   const [codDialogOpen, setCodDialogOpen] = useState(false)
   const [proofDialogOpen, setProofDialogOpen] = useState(false)
+  const [exchangeTarget, setExchangeTarget] = useState<{
+    id: string
+    variant: { sku: string; productTitle: string }
+    unitPrice: number
+  } | null>(null)
 
   // ── Invalidate helper ─────────────────────────────────────────────────────
   const invalidateAll = () => {
@@ -695,6 +701,7 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                       <TableHead className="text-right">Unit price</TableHead>
                       <TableHead className="text-right">Line total</TableHead>
                       <TableHead>Fulfillment</TableHead>
+                      {order.status === 'delivered' && <TableHead className="text-right">Actions</TableHead>}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -790,6 +797,18 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                               </p>
                             )}
                           </TableCell>
+                          {order.status === 'delivered' && (
+                            <TableCell className="text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-xs"
+                                onClick={() => setExchangeTarget(item)}
+                              >
+                                <RefreshCw className="h-3 w-3" /> Request Exchange
+                              </Button>
+                            </TableCell>
+                          )}
                         </TableRow>
                       )
                     })}
@@ -1165,6 +1184,17 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
         isPending={codMutation.isPending}
         defaultAmount={remainingCod}
       />
+      {exchangeTarget && (
+        <RequestExchangeDialog
+          open={!!exchangeTarget}
+          onOpenChange={(v) => !v && setExchangeTarget(null)}
+          orderItemId={exchangeTarget.id}
+          orderItemSku={exchangeTarget.variant.sku}
+          orderItemTitle={exchangeTarget.variant.productTitle}
+          orderItemPrice={exchangeTarget.unitPrice}
+          orderId={orderId}
+        />
+      )}
     </div>
   )
 }

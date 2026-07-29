@@ -2528,3 +2528,84 @@ Stage Summary:
 - verifyOldItemReceived() is the ONLY function that processes the old item's return in inventory — it calls processInventoryTransaction() directly (the same function the receive API routes use, NOT reimplemented) for perfect/good/open_box conditions, and creates a stock_loss_records entry directly for damaged items.
 - markExchangeAsNotReturned calls the existing flagCustomer() action with reason "Exchange item not returned" (reusing the Customer Management System's flagging mechanism).
 - KNOWN Step 3 work: frontend (exchanges list view, exchange detail page, "Request Exchange" action on delivered order_items, overdue exchanges alert/reminder UI).
+
+---
+Task ID: EXCHANGE-STEP-3-FRONTEND
+Agent: main
+Task: Build the complete Exchange System frontend — Request Exchange dialog on Order Detail, Exchanges list page, Verification dialog (shared), Exchange detail page, sidebar navigation.
+
+Work Log:
+
+INVESTIGATION:
+- Read worklog from EXCHANGE-STEP-1 + STEP-2 to understand the schema + server actions (9-state machine, 2 exchange methods with strict sequencing, verifyOldItemReceived as the gating point).
+- Studied order-detail-view.tsx — found the items table where the [Request Exchange] button goes. order.status='delivered' is the condition for showing the button.
+- Studied order-create-view.tsx — found the variant search pattern (fetch /api/products?pageSize=100, client-side filter by SKU/product title).
+- Confirmed SPA routing: added 'exchanges' + 'exchange-detail' routes to app-store.ts.
+- Confirmed sidebar: added Exchanges link under Orders section with RefreshCw icon.
+
+API ROUTES (9 endpoints created):
+- GET/POST /api/exchanges — list + create
+- GET /api/exchanges/[id] — detail
+- POST /api/exchanges/[id]/dispatch-new-item — courier_replacement: dispatch new item
+- POST /api/exchanges/[id]/confirm-shipped — customer_self_return: confirm customer shipped
+- POST /api/exchanges/[id]/verify-old-item — the gating point: verify old item received
+- POST /api/exchanges/[id]/settle-price-difference — settle price difference
+- POST /api/exchanges/[id]/mark-not-returned — terminal "did not return" outcome
+- POST /api/exchanges/[id]/cancel — cancel exchange
+- GET /api/exchanges/overdue?days_threshold=7 — list overdue for alerts
+
+PART 1 — Request Exchange dialog (src/components/orders/request-exchange-dialog.tsx):
+- Shows old item (read-only: title, SKU, price). New variant search (reuses /api/products). Live price difference preview ("customer owes Rs. 100" / "refund due Rs. 100" / "no price difference"). Exchange method selector with two cards (Courier Replacement with description, Customer Self-Return with description). Reason textarea (required, min 3 chars). [Submit Request] calls createExchangeRequest.
+- On success: if courier_replacement → shows [Dispatch New Item Now] button calling dispatchExchangeNewItem. If customer_self_return → shows "Waiting for customer to ship the old item back" confirmation.
+- Added to order-detail-view.tsx: new Actions column in the items table (header + cell), ONLY rendered when order.status === 'delivered'. Button per row opens the dialog with that item's data.
+
+PART 2 — Exchanges list page (src/components/orders/exchanges-view.tsx):
+- Stats cards: Active Exchanges, Awaiting Verification (with overdue sub-count in red if any >7 days), Completed This Month, Not Returned (count + loss value).
+- Filters: status dropdown (9 values), exchange_method dropdown.
+- Table: original order #, items (old/new prices), method badge, status badge, price difference (+/− with owes/due badge), age (days, red + alert icon if overdue), actions.
+- Context-aware row actions:
+  * awaiting_customer_to_ship_old_item → [Confirm Customer Shipped] (opens dialog for tracking # + courier)
+  * customer_confirmed_shipped / awaiting_old_item_return → [Verify Old Item Received] (opens VerifyOldItemDialog)
+  * any non-terminal → [Mark as Not Returned] (destructive, opens reason + recovery dialog)
+  * price_difference_status = customer_owes/refund_due → [Settle Payment] button
+  * [Eye] → navigate to exchange-detail
+- 3 inline dialogs: ConfirmShippedDialog, NotReturnedDialog, SettlePaymentDialog.
+
+PART 3 — Verification dialog (src/components/orders/verify-old-item-dialog.tsx):
+- Shared component used by both the list page and the detail page.
+- Condition selector: 4 cards (Perfect / Good / Open Box / Damaged — color-coded).
+- Preview text based on condition: "This will add 1 unit back to inventory at [location]" (perfect/good/open_box) vs "This will be written off as a loss — no stock added" (damaged).
+- For customer_self_return specifically: prominent note "Confirming this will immediately dispatch the new item to the customer."
+- Evidence photo URLs (add/remove). Notes textarea. [Confirm Verification] calls verifyOldItemReceived.
+- Cache invalidation on ['exchanges'], ['exchange', exchangeId], ['inventory-pools'].
+
+PART 4 — Exchange detail page (src/components/orders/exchange-detail-view.tsx):
+- Full record with 3-column layout: main column (items card with old→new arrow, verification details with evidence photos, timeline) + sidebar (price difference breakdown with [Settle Payment] if unsettled, customer return tracking info for self-return, not-returned info if applicable, context-aware action buttons).
+- Timeline: requested → customer confirmed shipped → old item verified → completed (with timestamps, icons).
+- Links to original order + new order (when it exists) via navigate({ name: 'order-detail', id }).
+- Same context-aware actions as the list page (Verify Old Item, Settle Payment, Mark as Not Returned).
+
+PART 5 — Sidebar + SPA wiring:
+- Added 'exchanges' + 'exchange-detail' routes to app-store.ts.
+- Added Exchanges link under Orders in sidebar.tsx (RefreshCw icon, matchPrefixes: ['exchanges', 'exchange-detail']).
+- Added case 'exchanges' → <ExchangesView /> and case 'exchange-detail' → <ExchangeDetailView exchangeId={route.id} /> to page.tsx renderRoute switch.
+
+CRITICAL RULES verified:
+1. [Request Exchange] button only appears for delivered orders — checked via `{order.status === 'delivered' && <TableHead>}` and `{order.status === 'delivered' && <TableCell>}`.
+2. For customer_self_return, no dispatch button exists before verification — the only actions shown in 'awaiting_customer_to_ship_old_item' state are [Confirm Customer Shipped] and [Mark as Not Returned]. [Verify Old Item Received] appears only in 'customer_confirmed_shipped' / 'awaiting_old_item_return' states. The dispatch happens automatically inside verifyOldItemReceived() for self-return.
+3. Every mutation invalidates ['exchanges'], ['exchange', exchangeId], ['inventory-pools'], and ['order', orderId] where relevant.
+4. End-to-end test: the spec's critical rule was verified in Step 2 (17/17 tests pass) — create customer_self_return exchange → no dispatch available → confirm customer shipped → verify old item as 'perfect' → new order created + dispatched automatically as part of verification.
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors (fixed 2 comparison errors where `priceDifferenceStatus !== 'settled'` was redundant after narrowing to 'customer_owes' | 'refund_due').
+- bun run lint: 0 errors, 18 pre-existing warnings (0 new).
+- Dev server: HTTP 200, no errors.
+
+Stage Summary:
+- All 5 parts of Step 3 implemented and verified. The Exchange System now has a complete frontend:
+  * [Request Exchange] button on delivered order detail pages, opening a dialog with variant search, live price difference preview, and method selector.
+  * Exchanges list page with stats, filters, context-aware row actions, and 3 inline dialogs.
+  * Shared VerifyOldItemDialog with condition selector, preview text, and the customer_self_return prominent note.
+  * Exchange detail page with timeline, price breakdown, verification evidence, and context-aware actions.
+  * Sidebar Exchanges link under Orders.
+- The critical rule is enforced in the UI: for customer_self_return, no dispatch button exists before verification — the only path to new-item dispatch is through completing verifyOldItemReceived().

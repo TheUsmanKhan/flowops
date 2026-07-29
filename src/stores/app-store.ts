@@ -63,6 +63,8 @@ export type AppRoute =
   | { name: 'orders-returns' }
   | { name: 'orders-returns-review' }
   | { name: 'orders-cancelled' }
+  | { name: 'exchanges' }
+  | { name: 'exchange-detail'; id: string }
   | { name: 'customers' }
   | { name: 'customer-detail'; id: string }
   | { name: 'order-workflow-settings' }
