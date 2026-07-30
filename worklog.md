@@ -2820,3 +2820,59 @@ Stage Summary:
   * Generic webhook receiver that routes by provider category, reuses existing OMS functions (markOrderDelivered, processOrderReturn, matchOrCreateExternalCustomer)
 - The full chain (selection → logging → graceful stub failure) is verified end-to-end: calling a stub adapter's bookShipment() through the registry returns "not yet implemented" and logs the failure to integration_action_logs — proving real implementations can be swapped in without touching any calling code.
 - KNOWN Step 3 work: frontend (integration settings UI with dynamic form rendering from config_schema, connection status badges, action log viewer). KNOWN future work: real adapter implementations (TCS, Leopard, PostEx, Shopify, Daraz API calls).
+
+---
+Task ID: INTEGRATION-STEP-3-FRONTEND
+Agent: main
+Task: Build the Integration Framework frontend — Integrations overview page (Couriers + Ecommerce tabs with dynamic connect dialog), courier booking settings extension, integration action logs viewer, sidebar navigation.
+
+Work Log:
+
+INVESTIGATION:
+- Read worklog from INTEGRATION-STEP-1 + STEP-2 to understand the schema (3 tables, 5 seeded providers) + adapter infrastructure (registry, encryption, logging wrapper, server actions, webhook route, 5 API endpoints).
+- Studied existing order-workflow-settings-view.tsx (410 lines) — found the pattern for settings cards, toggles, selects, save bar. Identified where to add the new Courier Booking Mode card.
+- Studied existing sidebar.tsx — found the flat nav array structure, elevatedOnly flag, matchPrefixes pattern.
+- Confirmed SPA routing: added 'integrations' + 'integration-logs' routes to app-store.ts.
+
+PART 4 — Sidebar + SPA wiring (done first so views have somewhere to render):
+- Added 'integrations' + 'integration-logs' routes to app-store.ts.
+- Added 2 sidebar links: "Integrations" (Plug icon, elevatedOnly) + "Integration Logs" (Webhook icon, elevatedOnly), positioned after "Order Settings".
+- Added case 'integrations' → <IntegrationsView /> + case 'integration-logs' → <IntegrationLogsView /> to page.tsx renderRoute switch.
+- Imported the 2 new view components.
+
+PART 1 — Integrations overview page (src/components/settings/integrations-view.tsx):
+- Two tabs: Couriers | Ecommerce (no Ads/Payment tabs per scope).
+- Each tab shows CONNECTED section (cards with provider name, connection_name, status badge, default badge, last_error, webhook URL with copy button, [Set Default] [Test] [Disconnect] actions) + AVAILABLE TO CONNECT section (provider cards with [Connect] button).
+- ConnectDialog: DYNAMICALLY renders form fields from the selected provider's config_schema (loops through the JSONB array, renders text/password input per field with label + required indicator). Works generically for ANY provider — adding a new provider to integration_providers requires ZERO frontend code changes. On submit calls POST /api/integrations. If provider supports webhooks, shows the returned webhook_url in a copyable code block with instructions.
+- Framework-only notice: honest UI messaging that adapters are stubs, connection testing will show "not yet implemented", rather than presenting connections as fully functional.
+- Credentials are write-only: password-type fields mask input, "Edit Credentials" replaces (doesn't pre-fill). No page ever displays a previously-entered credential value.
+
+PART 2 — Courier booking settings (extended order-workflow-settings-view.tsx):
+- Added new "Courier Booking Mode" card with two selectable options: Automatic (books immediately on order confirmation for manual orders) vs Semi-Manual (book separately from Ready to Dispatch queue). Each with explanation text.
+- Default Courier Integration dropdown: populated from GET /api/integrations?category=courier (connected, active courier integrations). Only shown when Automatic mode is selected. Links to Integrations settings if no couriers connected.
+- Clear note: "This setting only applies to orders created directly in FlowOps. Orders from Shopify, Daraz, or other external platforms always require manual courier booking, regardless of this setting."
+- Updated order-settings API route (PUT): accepts courier_booking_mode + default_courier_company_integration_id. Updated GET to return them. Updated the OrderSettings interface + hydration + mutation.
+
+PART 3 — Integration action logs viewer (src/components/settings/integration-logs-view.tsx):
+- Created GET /api/integrations/logs API route (elevated only): returns integration_action_logs joined with company_integrations + providers. Filters: provider_key, action_type, status, date range.
+- LogsViewer: filterable table (provider, action_type, status dropdowns). Each row shows provider, action, direction (inbound/outbound), status badge, duration, timestamp, related entity. Rows are expandable — click to reveal full request/response JSON (pretty-printed, collapsible, scrollable). Primarily a debugging tool for when a courier booking or webhook fails.
+- Sticky table header, max-h-[70vh] scrollable container for long lists.
+
+CRITICAL RULES verified:
+1. Connection form renders dynamically from config_schema — no hardcoded fields per provider. Adding a new provider row requires ZERO frontend changes.
+2. Credentials never rendered/logged in plain text — password-type fields mask input, no page displays previously-entered values (write-only).
+3. Framework-only state communicated honestly through UI messaging (amber notice in connect dialog, sky-blue notice on overview page).
+4. No Ads/Payment Gateway UI — only Courier and Ecommerce tabs.
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors (fixed 1 type mismatch on api.post return type).
+- bun run lint: 0 errors, 18 pre-existing warnings (0 new).
+- Dev server: HTTP 200.
+
+Stage Summary:
+- All 4 parts of Step 3 implemented and verified. The Integration Framework now has a complete frontend:
+  * Integrations overview page with Couriers + Ecommerce tabs, connected/available sections, dynamic connect dialog that renders form fields from ANY provider's config_schema.
+  * Courier booking mode settings (Automatic/Semi-Manual) with default courier integration dropdown, integrated into the existing Order Workflow Settings page.
+  * Integration action logs viewer with filterable, expandable table for debugging.
+  * Sidebar navigation with Integrations + Integration Logs links (elevated only).
+- The connection form is fully generic — adding a new provider to integration_providers (with its config_schema) requires ZERO frontend code changes to support connecting it. The form dynamically renders the right fields from the schema.

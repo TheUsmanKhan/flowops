@@ -42,6 +42,8 @@ interface OrderSettings {
   requirePackingStep: boolean
   defaultCourier: string | null
   defaultDispatchLocationId: string | null
+  courierBookingMode: string
+  defaultCourierCompanyIntegrationId: string | null
   updatedAt: string
 }
 
@@ -93,6 +95,8 @@ export function OrderWorkflowSettingsView() {
   const [requirePacking, setRequirePacking] = useState(false)
   const [defaultCourier, setDefaultCourier] = useState('')
   const [defaultLocationId, setDefaultLocationId] = useState('')
+  const [courierBookingMode, setCourierBookingMode] = useState<'automatic' | 'semi_manual'>('semi_manual')
+  const [defaultCourierIntegrationId, setDefaultCourierIntegrationId] = useState('')
   const [hydrated, setHydrated] = useState(false)
 
   // Hydrate local form state from the fetched settings
@@ -103,9 +107,21 @@ export function OrderWorkflowSettingsView() {
       setRequirePacking(s.requirePackingStep)
       setDefaultCourier(s.defaultCourier ?? '')
       setDefaultLocationId(s.defaultDispatchLocationId ?? '')
+      setCourierBookingMode((s.courierBookingMode as 'automatic' | 'semi_manual') ?? 'semi_manual')
+      setDefaultCourierIntegrationId(s.defaultCourierCompanyIntegrationId ?? '')
       setHydrated(true)
     }
   }, [settingsQuery.data, hydrated])
+
+  // Fetch connected courier integrations for the default courier dropdown
+  const couriersQuery = useQuery<{
+    integrations: Array<{ id: string; connectionName: string; provider: { providerName: string } }>
+  }>({
+    queryKey: ['integrations', 'courier'],
+    queryFn: () => api.get('/api/integrations?category=courier'),
+    staleTime: 60_000,
+    enabled: canView,
+  })
 
   const mutation = useMutation({
     mutationFn: async () =>
@@ -114,6 +130,8 @@ export function OrderWorkflowSettingsView() {
         require_packing_step: requirePacking,
         default_courier: defaultCourier,
         default_dispatch_location_id: defaultLocationId,
+        courier_booking_mode: courierBookingMode,
+        default_courier_company_integration_id: defaultCourierIntegrationId,
       }),
     onSuccess: () => {
       toast.success('Order workflow settings saved.')
@@ -371,9 +389,97 @@ export function OrderWorkflowSettingsView() {
             )}
           </CardContent>
         </Card>
-      </div>
+        {/* Courier Booking Mode (Integration Framework) */}
+        <Card className="lg:col-span-2">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Truck className="h-4 w-4 text-muted-foreground" /> Courier Booking Mode
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setCourierBookingMode('automatic')}
+                disabled={mutation.isPending || !isElevated}
+                className={`text-left rounded-md border p-3 transition-colors ${
+                  courierBookingMode === 'automatic'
+                    ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+                    : 'border-border hover:border-primary/30'
+                }`}
+              >
+                <p className="text-sm font-medium">Automatic</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Courier booking happens automatically when a manual order is confirmed. Uses the
+                  default courier integration selected below.
+                </p>
+              </button>
+              <button
+                type="button"
+                onClick={() => setCourierBookingMode('semi_manual')}
+                disabled={mutation.isPending || !isElevated}
+                className={`text-left rounded-md border p-3 transition-colors ${
+                  courierBookingMode === 'semi_manual'
+                    ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+                    : 'border-border hover:border-primary/30'
+                }`}
+              >
+                <p className="text-sm font-medium">Semi-Manual</p>
+                <p className="text-xs text-muted-foreground mt-1">
+                  Book couriers separately from the Ready to Dispatch queue. More control over
+                  which courier is used per order.
+                </p>
+              </button>
+            </div>
 
-      {/* Save bar */}
+            {/* Default courier integration dropdown (only relevant for automatic mode) */}
+            {courierBookingMode === 'automatic' && (
+              <div className="space-y-1.5">
+                <Label>Default Courier Integration</Label>
+                {couriersQuery.isLoading ? (
+                  <Skeleton className="h-9" />
+                ) : (
+                  <Select
+                    value={defaultCourierIntegrationId || '__none__'}
+                    onValueChange={(v) => setDefaultCourierIntegrationId(v === '__none__' ? '' : v)}
+                    disabled={mutation.isPending || !isElevated}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a courier integration" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">No default</SelectItem>
+                      {(couriersQuery.data?.integrations ?? []).map((ci) => (
+                        <SelectItem key={ci.id} value={ci.id}>
+                          {ci.provider.providerName} — {ci.connectionName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+                {(couriersQuery.data?.integrations ?? []).length === 0 && !couriersQuery.isLoading && (
+                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mt-1">
+                    No courier integrations connected. Connect one in the{' '}
+                    <button
+                      onClick={() => navigate({ name: 'integrations' })}
+                      className="font-medium underline"
+                    >
+                      Integrations settings
+                    </button>{' '}
+                    to use automatic booking.
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div className="rounded-md bg-sky-50 border border-sky-200 p-2.5 text-xs text-sky-800">
+              <strong>Note:</strong> This setting only applies to orders created directly in FlowOps.
+              Orders from Shopify, Daraz, or other external platforms always require manual courier
+              booking, regardless of this setting.
+            </div>
+          </CardContent>
+        </Card>
+      </div>
       <div className="flex items-center justify-end gap-2 sticky bottom-0 bg-background/80 backdrop-blur border-t pt-4 -mx-4 px-4 sm:-mx-6 sm:px-6 lg:-mx-8 lg:px-8">
         <p className="text-xs text-muted-foreground mr-auto">
           Last updated {settingsQuery.data?.settings.updatedAt

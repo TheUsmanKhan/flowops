@@ -12,6 +12,9 @@ const updateSchema = z.object({
   require_packing_step: z.boolean().optional(),
   default_courier: z.string().max(100).optional().or(z.literal('')),
   default_dispatch_location_id: z.string().optional().or(z.literal('')),
+  // Integration Framework (migration 004)
+  courier_booking_mode: z.enum(['automatic', 'semi_manual']).optional(),
+  default_courier_company_integration_id: z.string().optional().or(z.literal('')),
 })
 
 /** Get the active company's order workflow settings. */
@@ -34,6 +37,8 @@ export async function GET() {
         requirePackingStep: settings.requirePackingStep,
         defaultCourier: settings.defaultCourier,
         defaultDispatchLocationId: settings.defaultDispatchLocationId,
+        courierBookingMode: settings.courierBookingMode,
+        defaultCourierCompanyIntegrationId: settings.defaultCourierCompanyIntegrationId,
         updatedAt: settings.updatedAt.toISOString(),
       },
     })
@@ -76,6 +81,12 @@ export async function PUT(req: Request) {
     }
     if (d.default_dispatch_location_id !== undefined) {
       updateData.defaultDispatchLocationId = d.default_dispatch_location_id || null
+    }
+    if (d.courier_booking_mode !== undefined) {
+      updateData.courierBookingMode = d.courier_booking_mode
+    }
+    if (d.default_courier_company_integration_id !== undefined) {
+      updateData.defaultCourierCompanyIntegrationId = d.default_courier_company_integration_id || null
     }
 
     await db.companyOrderSetting.update({

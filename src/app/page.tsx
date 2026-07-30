@@ -62,6 +62,8 @@ import { ExchangeDetailView } from '@/components/orders/exchange-detail-view'
 import { CustomersView } from '@/components/orders/customers-view'
 import { CustomerDetailView } from '@/components/orders/customer-detail-view'
 import { OrderWorkflowSettingsView } from '@/components/orders/order-workflow-settings-view'
+import { IntegrationsView } from '@/components/settings/integrations-view'
+import { IntegrationLogsView } from '@/components/settings/integration-logs-view'
 import { Card, CardContent } from '@/components/ui/card'
 
 export default function Page() {
@@ -278,6 +280,10 @@ function renderRoute(
       return <CustomerDetailView customerId={route.id} />
     case 'order-workflow-settings':
       return <OrderWorkflowSettingsView />
+    case 'integrations':
+      return <IntegrationsView />
+    case 'integration-logs':
+      return <IntegrationLogsView />
     default:
       return <DashboardHome />
   }

@@ -27,6 +27,8 @@ export type AppRoute =
   | { name: 'organization' }
   | { name: 'company-settings' }
   | { name: 'settings' }
+  | { name: 'integrations' }
+  | { name: 'integration-logs' }
   | { name: 'audit' }
   | { name: 'create-organization' }
   | { name: 'create-company'; orgId?: string }
