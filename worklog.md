@@ -2739,3 +2739,84 @@ Stage Summary:
 - The schema is provider-agnostic — no TCS/Leopard/Shopify-specific columns. All provider-specific config lives in the generic config_schema/credentials_encrypted JSONB/TEXT fields.
 - credentials_encrypted is a TEXT column for encrypted blobs — actual encrypt/decrypt happens in Step 2's application code (Supabase Vault or app-level key), NOT in SQL.
 - KNOWN Step 2 work: encryption utility, adapter interface + base class, server actions (connectIntegration, testConnection, disconnectIntegration), webhook route handler using webhook_endpoint_id, integration action logging helper, courier booking flow (bookShipment, trackShipment, cancelShipment), ecommerce sync (receiveOrder, pushProduct, updateInventory).
+
+---
+Task ID: INTEGRATION-STEP-2-ACTIONS
+Agent: main
+Task: Build the Integration Framework Step 2 — adapter pattern infrastructure (interfaces + registry + 5 stub adapters), encryption utility, credential management server actions, generic webhook receiver, universal action-logging wrapper. No real provider API calls — stubs prove the architecture end-to-end.
+
+Work Log:
+
+INVESTIGATION:
+- Read worklog from INTEGRATION-STEP-1-SCHEMA to understand the 3-table schema (integration_providers seeded with 5 providers, company_integrations, integration_action_logs).
+- Verified existing OMS functions to reuse: markOrderDelivered (order.actions.ts), processOrderReturn (order-return.actions.ts — takes orderId + returnReason), matchOrCreateExternalCustomer (customer.actions.ts).
+- Added INTEGRATION_ENCRYPTION_KEY (32-byte hex) + APP_URL to .env.
+
+PART 1 — Encryption utility (src/lib/utils/encryption.ts):
+- encryptCredentials: AES-256-GCM with key from INTEGRATION_ENCRYPTION_KEY env var. Returns base64(iv):base64(authTag):base64(ciphertext).
+- decryptCredentials: reverses encryption, throws clear error on failure (wrong key/corrupted data).
+- generateWebhookEndpointId: 32 hex chars (16 bytes randomBytes).
+- generateWebhookSecret: 64 hex chars (32 bytes).
+
+PART 2 — Adapter interfaces (src/lib/integrations/types.ts):
+- CourierAdapter: bookShipment, trackShipment, cancelShipment, calculateRate, parseStatusWebhook (added per Part 6 requirement), verifyWebhookSignature.
+- EcommerceAdapter: parseWebhookOrder, pushProduct, updateInventory, verifyWebhookSignature.
+- Full input/result types for each method (BookShipmentInput, TrackShipmentResult, ParsedWebhookOrder, etc.).
+
+PART 3 — Adapter registry + 5 stub adapters:
+- src/lib/integrations/registry.ts: getCourierAdapter(providerKey, credentials) + getEcommerceAdapter(providerKey, credentials) + getAdapterCategory(providerKey). Switch/map pattern — throws clear error for unrecognized keys.
+- 5 stub adapters (tcs.adapter.ts, leopard.adapter.ts, postex.adapter.ts, shopify.adapter.ts, daraz.adapter.ts): each implements its full interface but throws "{Provider} adapter method '{method}' not yet implemented" for all methods. verifyWebhookSignature returns true (skip until real implementation). This proves the architecture is sound — real implementations can be swapped in without touching calling code.
+
+PART 4 — Universal action-logging wrapper (src/lib/integrations/logged-call.ts):
+- executeLoggedIntegrationAction<T>(params): records start time, calls fn(), on success inserts integration_action_logs row (status='success', responsePayload, durationMs), on failure inserts row (status='failed', errorMessage) and RE-THROWS. Log insertion failures are non-fatal (console.error, don't break parent).
+
+PART 5 — Server actions (src/lib/actions/integration.actions.ts):
+- listAvailableProviders(category?): returns integration_providers (filtered by category) with configSchema for dynamic UI rendering.
+- listCompanyIntegrations(category?): returns company_integrations joined with provider info — credentialsEncrypted intentionally EXCLUDED from response (never send to client, even encrypted). Includes constructed webhookUrl.
+- connectIntegration({ provider_id, connection_name, credentials }): GUARD is_elevated. Validates required fields from config_schema. Encrypts credentials. Generates webhookEndpointId + webhookSecret if provider supports webhooks. INSERTs company_integration (status='pending'). Audit log. Returns { companyIntegrationId, webhookUrl? }.
+- updateIntegrationCredentials(company_integration_id, credentials): re-encrypts, resets status to 'pending'.
+- disconnectIntegration(company_integration_id): sets is_active=FALSE, is_default=FALSE.
+- setDefaultIntegration(company_integration_id): unsets is_default for all other integrations in the SAME category (join through provider) for this company, sets this one. Transaction-wrapped.
+- testIntegrationConnection(company_integration_id): decrypts credentials, gets adapter via registry, calls a lightweight capability check (calculateRate for couriers, parseWebhookOrder for ecommerce) via executeLoggedIntegrationAction. Updates connectionStatus + lastError based on result. For stubs, fails gracefully with "not yet implemented".
+- getIntegrationAdapter(company_integration_id): internal helper for future courier booking actions — returns decrypted credentials + providerKey + category.
+
+PART 6 — Generic webhook receiver route (/app/api/webhooks/[provider_key]/[webhook_endpoint_id]/route.ts):
+- Extracts provider_key + webhook_endpoint_id from URL.
+- Looks up company_integrations by webhook_endpoint_id (joined with provider to confirm provider_key matches) — 404 if no match (don't leak endpoint ID validity).
+- Decrypts credentials, gets adapter via registry.
+- Courier: adapter.parseStatusWebhook() → finds order by trackingNumber → calls markOrderDelivered() or processOrderReturn() (existing OMS functions, NOT reimplemented).
+- Ecommerce: adapter.parseWebhookOrder() → matchOrCreateExternalCustomer() (existing CMS function).
+- Wraps in executeLoggedIntegrationAction (direction='inbound').
+- Always returns 200 for processing errors (prevent external retries); 404 only for auth/routing failures.
+
+PART 7 — API routes (5 endpoints):
+- GET/POST /api/integrations — list providers+integrations, connect new
+- PATCH /api/integrations/[id]/credentials — update credentials
+- POST /api/integrations/[id]/test — test connection
+- POST /api/integrations/[id]/disconnect — deactivate
+- POST /api/integrations/[id]/set-default — set as default
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors (fixed processOrderReturn signature — takes orderId + returnReason, not an object).
+- bun run lint: 0 errors, 18 pre-existing warnings (0 new).
+- Dev server: HTTP 200.
+- End-to-end test (scripts/test-integration-e2e.ts, 16 tests, ALL PASS):
+  * Encryption round-trip: encrypt → decrypt → original creds ✅
+  * Webhook endpoint ID (32 hex) + secret (64 hex) generation ✅
+  * Connect stub TCS integration in DB ✅
+  * listCompanyIntegrations excludes credentialsEncrypted ✅
+  * getCourierAdapter("tcs") returns correct adapter ✅
+  * Stub bookShipment() throws "not yet implemented" (not crash) ✅
+  * executeLoggedIntegrationAction logs the failure (status=failed, error message, relatedEntityType=order, direction=outbound, durationMs recorded) ✅
+  * Unknown provider key throws clear error ✅
+
+Stage Summary:
+- All 6 parts of Step 2 implemented and verified. The Integration Framework now has a complete adapter pattern infrastructure:
+  * AES-256-GCM encryption for credentials (never stored in plain text, never returned to client)
+  * Provider-agnostic interfaces (CourierAdapter + EcommerceAdapter) that all 5 stub adapters satisfy
+  * Centralized adapter registry/factory — calling code never instantiates adapters directly
+  * Universal action-logging wrapper — every adapter call is logged for debugging
+  * Server actions for full credential lifecycle (connect, update, disconnect, set-default, test)
+  * Generic webhook receiver that routes by provider category, reuses existing OMS functions (markOrderDelivered, processOrderReturn, matchOrCreateExternalCustomer)
+- The full chain (selection → logging → graceful stub failure) is verified end-to-end: calling a stub adapter's bookShipment() through the registry returns "not yet implemented" and logs the failure to integration_action_logs — proving real implementations can be swapped in without touching any calling code.
+- KNOWN Step 3 work: frontend (integration settings UI with dynamic form rendering from config_schema, connection status badges, action log viewer). KNOWN future work: real adapter implementations (TCS, Leopard, PostEx, Shopify, Daraz API calls).
