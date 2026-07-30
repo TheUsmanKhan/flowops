@@ -2678,3 +2678,64 @@ DEFINITIONS (clarified per spec requirement):
 
 Stage Summary:
 - The customer stats bug is fully fixed. The root cause was updateCustomerStats() being wired into only 3 of 7 order lifecycle hooks — the 4 missing hooks (confirmOrder, markOrderDelivered, cancelOrder, markCodCollected) are now wired. Existing customers' stale cached stats were backfilled (3 corrected including Fatima Ahmed: 0→81 orders). The RTO Rate + Delivery Rate formulas were also fixed — they now use the correct denominator (dispatched-or-later orders) and are live-computed server-side rather than derived from cached values with an inaccurate formula. The Customer Detail page now shows real numbers: Total Orders 81, Total Value Rs. 228,050, RTO Count 11, RTO Rate 32%, Delivery Rate 32%.
+
+---
+Task ID: INTEGRATION-STEP-1-SCHEMA
+Agent: main
+Task: Build the Universal Integration Framework schema (Step 1) — integration_providers (master catalog, seeded) + company_integrations (company connections, encrypted creds) + integration_action_logs (universal call logging) + orders FK + company_order_settings extension + RLS. Schema-only, no adapters/server actions/frontend.
+
+Work Log:
+
+INVESTIGATION:
+- Read worklog from EXCHANGE-STEP-1/2/3 to understand the existing schema conventions.
+- Verified via Prisma $queryRaw: Organization, Company, Employee, Order, CompanyOrderSetting all use TEXT/cuid PKs.
+- Confirmed the 3 integration tables don't exist yet (safe to create).
+- Confirmed CompanyOrderSetting has: requireOrderConfirmation, requirePackingStep, defaultCourier, defaultDispatchLocationId, updatedBy, updatedAt.
+- Confirmed Order has courierName + courierCharges (text) but no integration FK.
+- Confirmed RLS helpers: get_active_company_id() RETURNS TEXT, is_elevated_employee(TEXT) RETURNS BOOLEAN.
+- Restored .env (had reverted to SQLite again).
+
+MIGRATION FILE: /home/z/my-project/supabase/migrations/004_integration_framework_schema.sql (Parts 1-6)
+
+PART 1 — integration_providers (master catalog):
+- TEXT PK with DEFAULT gen_random_uuid()::text. providerKey UNIQUE. category CHECK('courier','ecommerce','ads','payment'). authType CHECK('api_key','oauth2','basic_auth'). supportsWebhook boolean. configSchema JSONB (array of credential field defs for dynamic UI rendering). capabilities JSONB (array of supported actions). isActive boolean. updatedAt trigger.
+- Seeded 5 providers: tcs, leopard, postex (courier) + shopify, daraz (ecommerce). Each with correct config_schema (e.g. TCS needs account_id + api_key; Shopify needs store_url + access_token) and capabilities (e.g. courier: book_shipment/track_shipment/cancel_shipment/calculate_rate; ecommerce: receive_order/push_product/update_inventory). ON CONFLICT DO NOTHING for re-runnability.
+
+PART 2 — company_integrations (company connections):
+- TEXT PK. companyId FK→Company (ON DELETE CASCADE). organizationId FK→Organization. providerId FK→integration_providers. connectionName (e.g. "TCS - Main Account"). credentialsEncrypted TEXT (encrypted blob — application-layer encryption in Step 2, never plain JSON). webhookEndpointId TEXT UNIQUE (random token for webhook routing). webhookSecret TEXT. isActive + isDefault booleans. connectionStatus CHECK('pending','connected','error','expired'). lastSyncAt + lastError. createdBy FK→Employee. updatedAt trigger.
+- Indexes: (companyId, isActive), webhookEndpointId partial unique (WHERE NOT NULL).
+
+PART 3 — integration_action_logs (universal call logging):
+- TEXT PK. companyIntegrationId FK→company_integrations (ON DELETE CASCADE). organizationId FK→Organization. actionType (e.g. book_shipment, receive_order). direction CHECK('outbound','inbound'). requestPayload + responsePayload JSONB. status CHECK('success','failed'). errorMessage. relatedEntityType CHECK(NULL or 'order'/'product'). relatedEntityId. durationMs. createdAt.
+- Indexes: (companyIntegrationId, createdAt DESC), (relatedEntityType, relatedEntityId) partial, (status, createdAt DESC) for finding recent failures.
+- Immutable: no UPDATE or DELETE policies.
+
+PART 4 — Orders table extension:
+- Added Order.courierCompanyIntegrationId TEXT FK→company_integrations (ON DELETE SET NULL). This is the authoritative link to which courier connection was used to book this order's shipment (distinct from the existing courierName text field which remains for display/legacy). Partial index on the non-null values.
+
+PART 5 — CompanyOrderSetting extension:
+- Added courierBookingMode TEXT NOT NULL DEFAULT 'semi_manual' CHECK('automatic','semi_manual'). Added defaultCourierCompanyIntegrationId TEXT FK→company_integrations (ON DELETE SET NULL). The old defaultCourier text column is kept for display/manual-entry fallback. Business rule noted for Step 2: courier_booking_mode only applies to orders where order_source='manual'; external-platform orders always require manual booking.
+
+PART 6 — RLS:
+- integration_providers: ENABLED. SELECT all authenticated (global catalog). No INSERT/UPDATE/DELETE (platform-managed).
+- company_integrations: ENABLED. SELECT by companyId. INSERT/UPDATE elevated-only (is_elevated_employee). No DELETE (use is_active=FALSE).
+- integration_action_logs: ENABLED. SELECT by org + elevated-only (may contain sensitive data). No direct INSERT/UPDATE/DELETE (immutable; INSERT happens via SECURITY DEFINER server actions in Step 2 which bypass RLS).
+
+PRISMA SCHEMA UPDATE:
+- Added 3 new models: IntegrationProvider (@@map("integration_providers")), CompanyIntegration (@@map("company_integrations")), IntegrationActionLog (@@map("integration_action_logs")). All fields, relations, indexes.
+- Added back-relations on Organization (companyIntegrations, integrationActionLogs), Company (companyIntegrations), Employee (integrationsCreated "IntegrationCreator"), Order (courierCompanyIntegration "OrderCourierIntegration" + index), CompanyOrderSetting (courierBookingMode + defaultCourierCompanyIntegrationId "CompanyOrderSettingsDefaultCourier").
+- CompanyIntegration has back-relations: actionLogs, ordersBooked "OrderCourierIntegration", companyOrderSettingsDefault "CompanyOrderSettingsDefaultCourier".
+- npx prisma validate → valid. npx prisma generate → success. Smoke test: 5 providers accessible, TCS found with correct category/authType, relation includes work.
+
+VERIFICATION:
+- Applied via pg.Client multi-statement query — SUCCESS.
+- 19 verification checks ALL PASS: 3 tables exist, 5 providers seeded (3 courier + 2 ecommerce), Order.courierCompanyIntegrationId present, CompanyOrderSetting has 2 new columns, 4+ indexes, RLS enabled on all 3 tables, correct policy sets (providers: SELECT only; integrations: SELECT+INSERT+UPDATE no DELETE; logs: SELECT only immutable), 2 updatedAt triggers, 2 CHECK constraints, TCS config_schema valid JSONB with account_id + api_key.
+- npx tsc --noEmit: 0 errors.
+- bun run lint: 0 errors, 18 pre-existing warnings (0 new).
+- Dev server: HTTP 200.
+
+Stage Summary:
+- Universal Integration Framework schema fully built and live on Supabase. The 3 new tables (integration_providers seeded with 5 providers, company_integrations, integration_action_logs) + Order FK + CompanyOrderSetting extension are ready for Step 2 (server actions: encryption utility, adapter interface, connectIntegration, testConnection, webhook route handler, courier booking flow, ecommerce sync) and Step 3 (frontend: integration settings UI with dynamic form rendering from config_schema, connection status, action log viewer).
+- The schema is provider-agnostic — no TCS/Leopard/Shopify-specific columns. All provider-specific config lives in the generic config_schema/credentials_encrypted JSONB/TEXT fields.
+- credentials_encrypted is a TEXT column for encrypted blobs — actual encrypt/decrypt happens in Step 2's application code (Supabase Vault or app-level key), NOT in SQL.
+- KNOWN Step 2 work: encryption utility, adapter interface + base class, server actions (connectIntegration, testConnection, disconnectIntegration), webhook route handler using webhook_endpoint_id, integration action logging helper, courier booking flow (bookShipment, trackShipment, cancelShipment), ecommerce sync (receiveOrder, pushProduct, updateInventory).

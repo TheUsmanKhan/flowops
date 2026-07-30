@@ -100,6 +100,10 @@ model Organization {
 
   // Item Exchange System back-relations (migration 003)
   orderExchanges          OrderExchange[]
+
+  // Universal Integration Framework back-relations (migration 004)
+  companyIntegrations     CompanyIntegration[]
+  integrationActionLogs   IntegrationActionLog[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -164,6 +168,9 @@ model Company {
 
   // Item Exchange System back-relations (migration 003)
   orderExchanges          OrderExchange[]
+
+  // Universal Integration Framework back-relations (migration 004)
+  companyIntegrations    CompanyIntegration[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -285,6 +292,9 @@ model Employee {
   exchangesOldItemVerified        OrderExchange[] @relation("ExchangeOldItemVerifier")
   exchangesCustomerShippedConfirmed OrderExchange[] @relation("ExchangeCustomerShippedConfirmer")
   exchangePriceDiffSettled        OrderExchange[] @relation("ExchangePriceDiffSettler")
+
+  // Universal Integration Framework back-relations (migration 004)
+  integrationsCreated             CompanyIntegration[] @relation("IntegrationCreator")
 
   @@unique([companyId, userId])
 }
@@ -1576,6 +1586,104 @@ model OrderExchange {
   @@map("order_exchanges")
 }
 
+// ============================================================================
+// Universal Integration Framework (migration 004)
+// ============================================================================
+
+/// Master catalog of integration providers (TCS, Leopard, PostEx, Shopify,
+/// Daraz). Platform-level, seeded/maintained — not company-specific. Each
+/// row defines the provider's category, auth type, webhook support, and a
+/// config_schema describing the required credential fields for dynamic UI
+/// rendering.
+///
+/// NOTE: Managed jointly by Prisma (ORM access) + raw SQL (migration 004).
+/// Do NOT run `prisma db push` — it would drop the CHECK constraints, seed
+/// data, and RLS policies. Use `prisma generate` only.
+model IntegrationProvider {
+  id              String   @id @default(cuid())
+  providerKey     String   @unique
+  providerName    String
+  category        String   // 'courier' | 'ecommerce' | 'ads' | 'payment' (CHECK in SQL)
+  logoUrl         String?
+  authType        String   // 'api_key' | 'oauth2' | 'basic_auth' (CHECK in SQL)
+  supportsWebhook Boolean  @default(false)
+  configSchema    String   @default("[]") // JSONB array of credential field defs
+  capabilities    String   @default("[]") // JSONB array of supported actions
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  companyIntegrations CompanyIntegration[]
+
+  @@map("integration_providers")
+}
+
+/// A company's actual connection to a provider — encrypted credentials,
+/// connection status, webhook routing. A company can connect multiple
+/// providers in the same category (e.g. TCS + Leopard). One is_default per
+/// category (enforced via app logic).
+///
+/// credentialsEncrypted is a TEXT column holding an encrypted string —
+/// actual encrypt/decrypt happens in Step 2's application code, NOT in SQL.
+model CompanyIntegration {
+  id                        String   @id @default(cuid())
+  companyId                 String
+  company                   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId            String
+  organization              Organization @relation(fields: [organizationId], references: [id])
+  providerId                String
+  provider                  IntegrationProvider @relation(fields: [providerId], references: [id])
+
+  connectionName            String
+  credentialsEncrypted      String?
+  webhookEndpointId         String?  @unique
+  webhookSecret             String?
+  isActive                  Boolean  @default(true)
+  isDefault                 Boolean  @default(false)
+  connectionStatus          String   @default("pending") // 'pending' | 'connected' | 'error' | 'expired' (CHECK in SQL)
+  lastSyncAt                DateTime?
+  lastError                 String?
+
+  createdBy                 String?
+  createdByEmployee         Employee? @relation("IntegrationCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  actionLogs                IntegrationActionLog[]
+  ordersBooked              Order[]  @relation("OrderCourierIntegration")
+  companyOrderSettingsDefault CompanyOrderSetting[] @relation("CompanyOrderSettingsDefaultCourier")
+
+  @@index([companyId, isActive])
+  @@map("company_integrations")
+}
+
+/// Universal logging for every integration call — the single source of truth
+/// for debugging "why did this courier booking fail" or "did this Shopify
+/// webhook get processed." Immutable: no UPDATE or DELETE.
+model IntegrationActionLog {
+  id                    String   @id @default(cuid())
+  companyIntegrationId  String
+  companyIntegration    CompanyIntegration @relation(fields: [companyIntegrationId], references: [id], onDelete: Cascade)
+  organizationId        String
+  organization          Organization @relation(fields: [organizationId], references: [id])
+
+  actionType            String   // 'book_shipment', 'track_shipment', 'receive_order', etc.
+  direction             String   // 'outbound' | 'inbound' (CHECK in SQL)
+  requestPayload        String?  // JSONB
+  responsePayload       String?  // JSONB
+  status                String   // 'success' | 'failed' (CHECK in SQL)
+  errorMessage          String?
+  relatedEntityType     String?  // 'order' | 'product' | null (CHECK in SQL)
+  relatedEntityId       String?
+  durationMs            Int?
+  createdAt             DateTime @default(now())
+
+  @@index([companyIntegrationId, createdAt])
+  @@index([relatedEntityType, relatedEntityId])
+  @@index([status, createdAt])
+  @@map("integration_action_logs")
+}
+
 /// Per-company configurable order workflow strictness. When
 /// requireOrderConfirmation or requirePackingStep are FALSE, orders can
 /// jump straight to 'dispatched' and the DB trigger auto-backfills the
@@ -1590,6 +1698,11 @@ model CompanyOrderSetting {
   defaultCourier              String?
   defaultDispatchLocationId   String?
   defaultDispatchLocation     InventoryLocation? @relation("CompanyOrderSettingsDefaultLocation", fields: [defaultDispatchLocationId], references: [id])
+
+  // Universal Integration Framework (migration 004)
+  courierBookingMode          String   @default("semi_manual") // 'automatic' | 'semi_manual' (CHECK in SQL)
+  defaultCourierCompanyIntegrationId String?
+  defaultCourierCompanyIntegration CompanyIntegration? @relation("CompanyOrderSettingsDefaultCourier", fields: [defaultCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
 
   updatedBy                   String?
   updatedByEmployee           Employee? @relation("CompanyOrderSettingsUpdater", fields: [updatedBy], references: [id])
@@ -1662,6 +1775,12 @@ model Order {
   deliveryCity                String?
   courierName                 String?
   trackingNumber              String?
+  // Universal Integration Framework (migration 004): links to the specific
+  // courier integration used to book this order's shipment. Distinct from
+  // courierName (display text) — this is the authoritative FK for tracing
+  // back to the actual integration/credentials used.
+  courierCompanyIntegrationId String?
+  courierCompanyIntegration   CompanyIntegration? @relation("OrderCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
   dispatchLocationId          String?
   dispatchLocation            InventoryLocation? @relation("OrderDispatchLocation", fields: [dispatchLocationId], references: [id])
   notesForCourier             String?
@@ -1696,6 +1815,7 @@ model Order {
   @@index([customerId])
   @@index([usedCustomerAddressId])
   @@index([usedCustomerPhoneId])
+  @@index([courierCompanyIntegrationId])
 }
 
 /// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
