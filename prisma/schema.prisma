@@ -104,6 +104,9 @@ model Organization {
   // Universal Integration Framework back-relations (migration 004)
   companyIntegrations     CompanyIntegration[]
   integrationActionLogs   IntegrationActionLog[]
+
+  // Form Drafts back-relation (migration 005)
+  formDrafts              FormDraft[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -171,6 +174,9 @@ model Company {
 
   // Universal Integration Framework back-relations (migration 004)
   companyIntegrations    CompanyIntegration[]
+
+  // Form Drafts back-relation (migration 005)
+  formDrafts             FormDraft[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -295,6 +301,9 @@ model Employee {
 
   // Universal Integration Framework back-relations (migration 004)
   integrationsCreated             CompanyIntegration[] @relation("IntegrationCreator")
+
+  // Form Drafts back-relation (migration 005)
+  formDraftsCreated               FormDraft[] @relation("FormDraftCreator")
 
   @@unique([companyId, userId])
 }
@@ -1682,6 +1691,30 @@ model IntegrationActionLog {
   @@index([relatedEntityType, relatedEntityId])
   @@index([status, createdAt])
   @@map("integration_action_logs")
+}
+
+/// Generic form draft storage (Unsaved Changes Guard system). Stores
+/// in-progress product/order form data as JSON so users can save their work
+/// before completing a full creation flow.
+model FormDraft {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy       String?
+  createdByEmployee Employee? @relation("FormDraftCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  draftType       String   // 'product' | 'order' (CHECK in SQL)
+  draftData       String   @default("{}") // JSONB
+  draftTitle      String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([companyId, draftType, updatedAt])
+  @@index([createdBy])
+  @@map("form_drafts")
 }
 
 /// Per-company configurable order workflow strictness. When

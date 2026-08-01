@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
+import { useFormGuard } from '@/hooks/form-guard/use-form-guard'
 import { PageHeader } from '@/components/layout/dashboard-shell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -241,6 +242,35 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
 
   // Step 3 state
   const [productScope, setProductScope] = useState<ProductScope>('private')
+
+  // ── Form Guard: dirty-state tracking + save-draft + guard hook ─────────
+  const [hasChanges, setHasChanges] = useState(false)
+  const markDirty = useCallback(() => { if (!hasChanges) setHasChanges(true) }, [hasChanges])
+  const [draftId, setDraftId] = useState<string | undefined>(undefined)
+
+  const saveDraft = useCallback(async () => {
+    const result = await api.post<{ draftId: string }>('/api/products/drafts', {
+      draftId,
+      draftData: {
+        step, title, shortDescription, description, productType,
+        categoryId, brandId, baseSku, isFeatured, isStitchable,
+        simpleVariant, attributeSelection, generatedVariants, regularVariants,
+        productScope,
+      },
+      draftTitle: title || 'Untitled Product Draft',
+    })
+    if (result.draftId) setDraftId(result.draftId)
+  }, [draftId, step, title, shortDescription, description, productType,
+      categoryId, brandId, baseSku, isFeatured, isStitchable,
+      simpleVariant, attributeSelection, generatedVariants, regularVariants, productScope])
+
+  const { ConfirmModal: formGuardModal, attemptNavigation: guardedNavigate } = useFormGuard({
+    isDirty: hasChanges && !submitting,
+    onSaveDraft: saveDraft,
+  })
+
+  // Reset dirty flag after successful submission
+  // (called from the submit handler — see below)
 
   // ---- Derived: slug for variant SKU generation
   const slug = useMemo(() => slugify(title || 'product'), [title])
@@ -586,6 +616,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
       }
 
       toast.success(`"${res.title}" created.`)
+      setHasChanges(false) // Reset guard — no false-positive prompt after saving
       navigate({ name: 'product-detail', id: res.id })
     } catch (err) {
       const msg =
@@ -601,7 +632,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
   return (
     <div className="space-y-6 max-w-3xl mx-auto">
       <button
-        onClick={onBack}
+        onClick={() => guardedNavigate(onBack)}
         className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
         disabled={submitting}
       >
@@ -684,7 +715,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
               <Input
                 id="title"
                 value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                onChange={(e) => { setTitle(e.target.value); markDirty() }}
                 placeholder="e.g. Lawn Embroidered Kurta — Summer Collection"
                 autoFocus
               />
@@ -701,7 +732,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
               <Input
                 id="baseSku"
                 value={baseSku}
-                onChange={(e) => setBaseSku(e.target.value.toUpperCase().trim())}
+                onChange={(e) => { setBaseSku(e.target.value.toUpperCase().trim()); markDirty() }}
                 placeholder="e.g. FSES-10A"
               />
               <p className="text-xs text-muted-foreground">
@@ -714,7 +745,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
               <Textarea
                 id="shortDesc"
                 value={shortDescription}
-                onChange={(e) => setShortDescription(e.target.value)}
+                onChange={(e) => { setShortDescription(e.target.value); markDirty() }}
                 rows={2}
                 maxLength={500}
                 placeholder="One-line summary shown on product cards…"
@@ -729,7 +760,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
               <Textarea
                 id="desc"
                 value={description}
-                onChange={(e) => setDescription(e.target.value)}
+                onChange={(e) => { setDescription(e.target.value); markDirty() }}
                 rows={4}
                 placeholder="Full product description — fabric, care, what's included, etc."
               />
@@ -966,6 +997,7 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
           </Button>
         )}
       </div>
+      {formGuardModal}
     </div>
   )
 }

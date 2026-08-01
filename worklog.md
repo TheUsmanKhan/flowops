@@ -2876,3 +2876,82 @@ Stage Summary:
   * Integration action logs viewer with filterable, expandable table for debugging.
   * Sidebar navigation with Integrations + Integration Logs links (elevated only).
 - The connection form is fully generic — adding a new provider to integration_providers (with its config_schema) requires ZERO frontend code changes to support connecting it. The form dynamically renders the right fields from the schema.
+
+---
+Task ID: FORM-GUARD-SYSTEM
+Agent: main
+Task: Build a reusable "Unsaved Changes Guard" system — useFormGuard hook with 3 interception points (browser reload, in-app navigation, browser back/forward) + confirmation modal + draft persistence + pilot integration into Product Creation form.
+
+Work Log:
+
+PHASE 1 — Database Migration (005_draft_status_support.sql):
+- Created form_drafts table: TEXT PK (gen_random_uuid), companyId FK, organizationId FK, createdBy FK→Employee, draftType CHECK('product','order'), draftData JSONB, draftTitle, timestamps.
+- RLS enabled: SELECT by company, INSERT/UPDATE elevated-only, DELETE by company.
+- Updated_at trigger.
+- Indexes: (companyId, draftType, updatedAt DESC), (createdBy).
+- Prisma: added FormDraft model + back-relations on Organization, Company, Employee. prisma generate ✓.
+
+PHASE 2 — Draft Persistence Server Actions (src/lib/actions/drafts/save-draft.ts):
+- saveProductDraft({ draftId?, draftData, draftTitle? }): upsert-style — INSERT if no draftId, UPDATE if draftId exists. Uses existing getWorkspace() for auth/org scoping. Audit log + metric event.
+- saveOrderDraft: identical pattern for orders.
+- API routes: POST /api/products/drafts + POST /api/orders/drafts (thin wrappers, same pattern as all existing routes).
+
+PHASE 3 — Core Guard Hooks (src/hooks/form-guard/):
+- use-unsaved-changes-beforeunload.ts: registers native beforeunload listener when hasUnsavedChanges=true. Uses ref to avoid re-registering on every render. e.preventDefault() + e.returnValue=''.
+- use-navigation-interceptor.ts: state { isBlocked, pendingAction }. attemptNavigation(action, isDirty): if dirty, stores action + shows modal; else runs immediately. resolvePendingNavigation(choice): "discard" executes pending action, "cancel" clears.
+- use-browser-back-guard.ts: on popstate when hasUnsavedChanges=true, re-pushes current URL onto history stack (neutralizes the back), invokes onBeforeLeave callback (which triggers the modal). Uses refs for latest values.
+- use-form-guard.tsx: the single public hook. Composes all 3 hooks into one shared modal state. Modal actions: Save as Draft (calls onSaveDraft async, shows spinner, toasts success/error, proceeds with navigation on success), Discard (proceeds without saving), Keep Editing (closes modal). Returns { ConfirmModal: ReactNode, attemptNavigation: (action) => void }.
+
+PHASE 4 — Confirmation Modal (src/components/shared/unsaved-changes-modal.tsx):
+- Uses shadcn/ui AlertDialog (matches existing confirmation pattern in the codebase).
+- Three buttons: Save as Draft (primary, with spinner when saving), Discard (destructive), Keep Editing (ghost).
+- Responsive: buttons stack vertically on mobile (flex-col), horizontal on desktop (sm:flex-row).
+- Loading state on Save as Draft disables all buttons. Error surfaced via Sonner toast without closing modal.
+
+PHASE 5 — Integration into Product Creation Form (pilot):
+- Added useFormGuard to ProductCreateView component.
+- isDirty: tracked via hasChanges state — set to true on first field edit (markDirty() called in title, baseSku, shortDescription, description onChange handlers).
+- onSaveDraft: calls POST /api/products/drafts with current form state (all useState values). Stores returned draftId for upsert on subsequent saves.
+- attemptNavigation: wraps the "Back to products" button — shows modal if dirty, navigates immediately if clean.
+- formGuardModal: rendered at the component root.
+- After successful "Create Product" submission: setHasChanges(false) prevents false-positive prompts.
+- Guard is disabled during submission (isDirty = hasChanges && !submitting).
+
+PHASE 6 — Regression Safety Check:
+- NO existing server actions modified (order.actions.ts, customer.actions.ts, exchange.actions.ts, integration.actions.ts — all untouched).
+- NO existing API routes modified (only 2 new draft routes added: /api/products/drafts, /api/orders/drafts).
+- NO RLS policies modified (only new form_drafts table has its own policies).
+- NO existing tables modified (form_drafts is a new table; Order/OrgProduct untouched).
+- NO product variant/pricing logic touched (the guard wraps around the form; it doesn't modify field logic, variant builder, or the submit handler).
+- Metric events: draft.product_saved and draft.order_saved emitted (consistent with existing pattern).
+- Auth flow, org/company switching, employee management, order lifecycle, inventory — all completely unaffected.
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors (fixed 1 issue: use-form-guard.ts → use-form-guard.tsx for JSX support).
+- bun run lint: 0 errors, 18 pre-existing warnings (0 new).
+- Dev server: HTTP 200.
+- No test config exists in the project (no jest/vitest) — unit tests skipped per instruction.
+
+FILES CREATED (new):
+- supabase/migrations/005_draft_status_support.sql
+- src/lib/actions/drafts/save-draft.ts
+- src/app/api/products/drafts/route.ts
+- src/app/api/orders/drafts/route.ts
+- src/hooks/form-guard/use-unsaved-changes-beforeunload.ts
+- src/hooks/form-guard/use-navigation-interceptor.ts
+- src/hooks/form-guard/use-browser-back-guard.ts
+- src/hooks/form-guard/use-form-guard.tsx
+- src/components/shared/unsaved-changes-modal.tsx
+
+FILES TOUCHED (existing, minimal):
+- src/components/products/product-create-view.tsx — added form guard integration (import, hasChanges tracking, saveDraft, guardedNavigate on back button, formGuardModal render, setHasChanges(false) on submit success)
+- prisma/schema.prisma — added FormDraft model + back-relations on Organization, Company, Employee
+
+FILES NOT TOUCHED (confirmed):
+- All existing server actions (src/lib/actions/*.ts)
+- All existing API routes (src/app/api/**/route.ts — except 2 new draft routes)
+- All RLS policies
+- All existing database tables
+- Product variant/pricing logic
+- Inventory pool logic
+- OMS order lifecycle logic
