@@ -46,6 +46,7 @@ import {
   PackageCheck,
   FileImage,
   RotateCcw,
+  Save,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { createManualOrderSchema } from '@/lib/validations/order.schemas'
@@ -255,31 +256,38 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
   const [hasChanges, setHasChanges] = useState(false)
   const markDirty = useCallback(() => { if (!hasChanges) setHasChanges(true) }, [hasChanges])
   const [draftId, setDraftId] = useState<string | undefined>(undefined)
+  const [savingDraft, setSavingDraft] = useState(false)
 
   const saveDraft = useCallback(async () => {
-    const result = await api.post<{ draftId: string }>('/api/orders/drafts', {
-      draftId,
-      draftData: {
-        selectedCustomer: selectedCustomer?.id ?? null,
-        usedCustomerAddressId,
-        usedCustomerPhoneId,
-        recipientName,
-        cart: cart.map((c) => ({ variantId: c.variantId, quantity: c.quantity, unitPrice: c.unitPrice })),
-        paymentType,
-        advanceAmount,
-        advancePaymentMethod,
-        advancePaymentReference,
-        deliveryAddress,
-        deliveryCity,
-        courierName,
-        dispatchLocationId,
-        notesForCourier,
-        discountAmount,
-        discountReason,
-      },
-      draftTitle: `Order draft — ${selectedCustomer?.name ?? 'No customer'}`,
-    })
-    if (result.draftId) setDraftId(result.draftId)
+    setSavingDraft(true)
+    try {
+      const result = await api.post<{ draftId: string }>('/api/orders/drafts', {
+        draftId,
+        draftData: {
+          selectedCustomer: selectedCustomer?.id ?? null,
+          usedCustomerAddressId,
+          usedCustomerPhoneId,
+          recipientName,
+          cart: cart.map((c) => ({ variantId: c.variantId, quantity: c.quantity, unitPrice: c.unitPrice })),
+          paymentType,
+          advanceAmount,
+          advancePaymentMethod,
+          advancePaymentReference,
+          deliveryAddress,
+          deliveryCity,
+          courierName,
+          dispatchLocationId,
+          notesForCourier,
+          discountAmount,
+          discountReason,
+        },
+        draftTitle: `Order draft — ${selectedCustomer?.name ?? 'No customer'}`,
+      })
+      if (result.draftId) setDraftId(result.draftId)
+      setHasChanges(false) // Reset guard — just saved
+    } finally {
+      setSavingDraft(false)
+    }
   }, [draftId, selectedCustomer, usedCustomerAddressId, usedCustomerPhoneId,
       recipientName, cart, paymentType, advanceAmount, advancePaymentMethod,
       advancePaymentReference, deliveryAddress, deliveryCity, courierName,
@@ -630,6 +638,11 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
       const data = await api.post<CreateOrderResponse>('/api/orders', payload)
       toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
       setHasChanges(false) // Reset guard — no false-positive prompt after saving
+      // Phase 10: Delete the draft now that the real order is created
+      if (draftId) {
+        await api.delete(`/api/drafts?id=${draftId}`).catch(() => {})
+        setDraftId(undefined)
+      }
       void queryClient.invalidateQueries({ queryKey: ['orders'] })
 
       if (paymentProofFile) {
@@ -797,6 +810,18 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
                       <CheckCircle2 className="h-4 w-4" /> Create Order
                     </>
                   )}
+                </Button>
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  onClick={async () => {
+                    try { await saveDraft(); toast.success('Draft saved.') }
+                    catch { toast.error('Failed to save draft.') }
+                  }}
+                  disabled={isSubmitting || savingDraft}
+                >
+                  {savingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  Save as Draft
                 </Button>
                 <Button
                   variant="outline"

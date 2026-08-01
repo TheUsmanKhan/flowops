@@ -1,6 +1,8 @@
 'use client'
 
 import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '@/lib/api-client'
 import { useAppStore, useCan, type AppRoute } from '@/stores/app-store'
 import { FlowOpsLogo } from '@/components/layout/brand'
 import { cn } from '@/lib/utils'
@@ -122,6 +124,22 @@ export function Sidebar() {
 
   const isElevated = employee?.isElevated ?? false
 
+  // Phase 7: Lightweight draft count badges for sidebar
+  const productDraftsQuery = useQuery<{ count: number }>({
+    queryKey: ['draft-count', 'product'],
+    queryFn: () => api.get('/api/drafts?draftType=product&mode=count'),
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  })
+  const orderDraftsQuery = useQuery<{ count: number }>({
+    queryKey: ['draft-count', 'order'],
+    queryFn: () => api.get('/api/drafts?draftType=order&mode=count'),
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+  })
+  const productDraftCount = productDraftsQuery.data?.count ?? 0
+  const orderDraftCount = orderDraftsQuery.data?.count ?? 0
+
   const isMatch = (item: NavItem | { matchPrefixes?: string[] }) => {
     if (item.matchPrefixes) {
       return item.matchPrefixes.some((p) => route.name.startsWith(p))
@@ -197,6 +215,16 @@ export function Sidebar() {
                         >
                           <ChildIcon className="h-3.5 w-3.5 shrink-0" />
                           <span className="truncate">{child.label}</span>
+                          {child.label === 'All Products' && productDraftCount > 0 && (
+                            <span className="ml-auto text-[10px] bg-primary/10 text-primary rounded-full px-1.5 py-0.5 font-medium tabular-nums">
+                              {productDraftCount}
+                            </span>
+                          )}
+                          {child.label === 'All Orders' && orderDraftCount > 0 && (
+                            <span className="ml-auto text-[10px] bg-primary/10 text-primary rounded-full px-1.5 py-0.5 font-medium tabular-nums">
+                              {orderDraftCount}
+                            </span>
+                          )}
                         </button>
                       )
                     })}

@@ -59,6 +59,7 @@ import {
   Trash2,
   Sparkles,
   X,
+  Save,
 } from 'lucide-react'
 import {
   PRODUCT_TYPE_LABELS,
@@ -247,19 +248,26 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
   const [hasChanges, setHasChanges] = useState(false)
   const markDirty = useCallback(() => { if (!hasChanges) setHasChanges(true) }, [hasChanges])
   const [draftId, setDraftId] = useState<string | undefined>(undefined)
+  const [savingDraft, setSavingDraft] = useState(false)
 
   const saveDraft = useCallback(async () => {
-    const result = await api.post<{ draftId: string }>('/api/products/drafts', {
-      draftId,
-      draftData: {
-        step, title, shortDescription, description, productType,
-        categoryId, brandId, baseSku, isFeatured, isStitchable,
-        simpleVariant, attributeSelection, generatedVariants, regularVariants,
-        productScope,
-      },
-      draftTitle: title || 'Untitled Product Draft',
-    })
-    if (result.draftId) setDraftId(result.draftId)
+    setSavingDraft(true)
+    try {
+      const result = await api.post<{ draftId: string }>('/api/products/drafts', {
+        draftId,
+        draftData: {
+          step, title, shortDescription, description, productType,
+          categoryId, brandId, baseSku, isFeatured, isStitchable,
+          simpleVariant, attributeSelection, generatedVariants, regularVariants,
+          productScope,
+        },
+        draftTitle: title || 'Untitled Product Draft',
+      })
+      if (result.draftId) setDraftId(result.draftId)
+      setHasChanges(false) // Reset guard — just saved
+    } finally {
+      setSavingDraft(false)
+    }
   }, [draftId, step, title, shortDescription, description, productType,
       categoryId, brandId, baseSku, isFeatured, isStitchable,
       simpleVariant, attributeSelection, generatedVariants, regularVariants, productScope])
@@ -617,6 +625,11 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
 
       toast.success(`"${res.title}" created.`)
       setHasChanges(false) // Reset guard — no false-positive prompt after saving
+      // Phase 10: Delete the draft now that the real product is created
+      if (draftId) {
+        await api.delete(`/api/drafts?id=${draftId}`).catch(() => {})
+        setDraftId(undefined)
+      }
       navigate({ name: 'product-detail', id: res.id })
     } catch (err) {
       const msg =
@@ -978,6 +991,17 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
           disabled={submitting}
         >
           <ArrowLeft className="h-4 w-4" /> {step === 0 ? 'Cancel' : 'Back'}
+        </Button>
+        <Button
+          variant="outline"
+          onClick={async () => {
+            try { await saveDraft(); toast.success('Draft saved.') }
+            catch { toast.error('Failed to save draft.') }
+          }}
+          disabled={submitting || savingDraft}
+        >
+          {savingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          Save Draft
         </Button>
         {step < STEPS.length - 1 ? (
           <Button onClick={goNext} disabled={submitting}>

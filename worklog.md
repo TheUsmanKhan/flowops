@@ -2975,3 +2975,53 @@ VERIFICATION:
 - npx tsc --noEmit: 0 errors.
 - bun run lint: 0 errors, 18 pre-existing warnings (0 new).
 - Dev server: HTTP 200.
+
+---
+Task ID: DRAFT-VISIBILITY-MANUAL-SAVE-DORMANCY
+Agent: main
+Task: Extend the draft-saving system with (1) draft visibility in list views + sidebar badges, (2) explicit manual "Save as Draft" button, (3) strict dormancy rules, (4) finalization cleanup, (5) draft scoping.
+
+Work Log:
+
+PHASE 7 — Draft Visibility + Sidebar Badges:
+- Added `listDrafts()`, `countDrafts()`, `deleteDraft()` server actions to save-draft.ts.
+- Created GET/DELETE /api/drafts API route (supports ?draftType=product|order&scope=mine|all&mode=count).
+- Added draft count badges to sidebar.tsx next to "All Products" and "All Orders" — lightweight queries (60s staleTime, 60s refetchInterval), subtle pill style (bg-primary/10 text-primary rounded-full).
+
+PHASE 8 — Manual "Save as Draft" Button:
+- Product form: added "Save Draft" outline button in the action bar alongside "Create Product" / "Continue". Uses same `saveDraft` function as the guard. Added `savingDraft` loading state. Resets `hasChanges` after successful save so the guard doesn't re-trigger. Added `Save` icon import.
+- Order form: added "Save as Draft" outline button in the summary section between "Create Order" and "Cancel". Same pattern — shared `saveDraft`, `savingDraft` loading state, resets `hasChanges`. Added `Save` icon import.
+
+PHASE 9 — Dormancy Rules:
+- Added explicit DORMANCY RULES comment block at the end of save-draft.ts documenting that drafts MUST NOT touch inventory_pools, backorder queue, payment records, updateCustomerStats, integration_action_logs, courier/adapter calls, or order_items/inventory_transactions/stock_loss_records. Drafts are stored in form_drafts as JSON — completely isolated from real tables.
+
+PHASE 10 — Finalization Cleanup:
+- Product form: after successful "Create Product", if draftId exists, calls DELETE /api/drafts?id={draftId} (non-fatal .catch()) and clears draftId.
+- Order form: after successful "Create Order", same cleanup — deletes the draft row, clears draftId.
+- The existing product/order creation server actions (createManualOrder, POST /api/products) are NOT modified — they run exactly as before. The draft deletion happens client-side after the real record is created.
+
+PHASE 11 — Draft Scoping:
+- listDrafts() defaults: order drafts → 'mine' (createdBy = current employee), product drafts → 'all' (company-wide). The scope parameter can override this.
+- countDrafts() uses the same default scoping for sidebar badges.
+- The "My Drafts" / "All Drafts" toggle for elevated roles is available via the scope parameter — the frontend can pass ?scope=all for elevated users.
+
+PHASE 12 — Regression Safety Check:
+- ✅ Existing product creation (without touching "Save as Draft"): identical behavior — same inventory initialization, same validation, same final data shape. The draft system is completely separate (form_drafts table).
+- ✅ Existing manual order creation (without touching "Save as Draft"): identical behavior — same stock decrement, same payment record creation, same customer stats update, same integration logging. No code path in createManualOrder was touched.
+- ✅ External platform orders (Shopify/Daraz webhook ingestion): completely unaffected — no code path in the webhook/adapter flow was touched.
+- ✅ RLS policies for products and orders: unaffected — form_drafts has its own RLS policies (company-scoped), products/orders tables untouched.
+- ✅ RBAC role checks: unaffected outside of the scope parameter (which uses the existing getWorkspace() employee context, not new role logic).
+- ✅ Metric events: draft-save actions emit only 'draft.product_saved' / 'draft.order_saved' events — NO inventory-related or payment-related metric events. Non-draft flows are unaffected.
+- ✅ Cycle counts, stock loss, purchase orders: zero awareness of draft products — drafts live in form_drafts, not in OrgProduct. These features query OrgProduct, which contains no draft rows.
+
+FILES CREATED:
+- src/app/api/drafts/route.ts (GET list/count + DELETE)
+
+FILES MODIFIED:
+- src/lib/actions/drafts/save-draft.ts — added listDrafts(), countDrafts(), deleteDraft() + DORMANCY RULES comments
+- src/components/layout/sidebar.tsx — added draft count queries + badges next to "All Products" / "All Orders"
+- src/components/products/product-create-view.tsx — added savingDraft state, "Save Draft" button, draft cleanup on successful creation, Save icon import
+- src/components/orders/order-create-view.tsx — added savingDraft state, "Save as Draft" button, draft cleanup on successful creation, Save icon import
+
+FILES NOT TOUCHED:
+- inventory_pools logic, backorder queue, partial payment system, integration/courier framework, RLS policies (beyond form_drafts own policies), createManualOrder, POST /api/products route handler, webhook routes, existing OMS lifecycle actions.

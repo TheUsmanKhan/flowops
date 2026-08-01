@@ -172,3 +172,157 @@ export async function saveOrderDraft(input: {
     }
   }
 }
+
+// ══════════════════════════════════════════════════════════════
+// listDrafts — fetch drafts for the active company
+// ══════════════════════════════════════════════════════════════
+/**
+ * List form drafts for the active company.
+ *
+ * @param draftType - 'product' | 'order'
+ * @param scope - 'mine' (createdBy = current employee) | 'all' (all in company)
+ *                Default: 'mine' for orders, 'all' for products (per Phase 11 spec)
+ */
+export async function listDrafts(input: {
+  draftType: 'product' | 'order'
+  scope?: 'mine' | 'all'
+}): Promise<ActionResult<{
+  drafts: Array<{
+    id: string
+    draftType: string
+    draftTitle: string | null
+    draftData: string
+    createdAt: Date
+    updatedAt: Date
+    createdBy: string | null
+    createdByEmployee: { user: { fullName: string } } | null
+  }>
+}>> {
+  try {
+    const ctx = await getWorkspace()
+
+    const where: Record<string, unknown> = {
+      companyId: ctx.company.id,
+      draftType: input.draftType,
+    }
+
+    // Phase 11: order drafts default to 'mine', product drafts default to 'all'
+    const scope = input.scope ?? (input.draftType === 'order' ? 'mine' : 'all')
+    if (scope === 'mine') {
+      where.createdBy = ctx.employee.id
+    }
+
+    const drafts = await db.formDraft.findMany({
+      where,
+      orderBy: { updatedAt: 'desc' },
+      include: {
+        createdByEmployee: {
+          select: { user: { select: { fullName: true } } },
+        },
+      },
+    })
+
+    return {
+      success: true,
+      data: {
+        drafts: drafts.map((d) => ({
+          id: d.id,
+          draftType: d.draftType,
+          draftTitle: d.draftTitle,
+          draftData: d.draftData,
+          createdAt: d.createdAt,
+          updatedAt: d.updatedAt,
+          createdBy: d.createdBy,
+          createdByEmployee: d.createdByEmployee,
+        })),
+      },
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to list drafts',
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// countDrafts — lightweight count for sidebar badges
+// ══════════════════════════════════════════════════════════════
+/**
+ * Count drafts by type for the active company. Lightweight query for
+ * sidebar badge rendering — does not fetch draft data.
+ */
+export async function countDrafts(input: {
+  draftType: 'product' | 'order'
+  scope?: 'mine' | 'all'
+}): Promise<ActionResult<{ count: number }>> {
+  try {
+    const ctx = await getWorkspace()
+
+    const where: Record<string, unknown> = {
+      companyId: ctx.company.id,
+      draftType: input.draftType,
+    }
+
+    const scope = input.scope ?? (input.draftType === 'order' ? 'mine' : 'all')
+    if (scope === 'mine') {
+      where.createdBy = ctx.employee.id
+    }
+
+    const count = await db.formDraft.count({ where })
+
+    return { success: true, data: { count } }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to count drafts',
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// deleteDraft — remove a draft after finalization or explicit discard
+// ══════════════════════════════════════════════════════════════
+/**
+ * Delete a form draft. Called after a draft is finalized into a real
+ * product/order (Phase 10), or when the user explicitly discards a draft.
+ */
+export async function deleteDraft(draftId: string): Promise<ActionResult> {
+  try {
+    const ctx = await getWorkspace()
+
+    const draft = await db.formDraft.findFirst({
+      where: { id: draftId, companyId: ctx.company.id },
+    })
+    if (!draft) return { success: false, error: 'Draft not found' }
+
+    await db.formDraft.delete({ where: { id: draftId } })
+
+    return { success: true }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to delete draft',
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// DORMANCY RULES — CRITICAL DOCUMENTATION
+// ══════════════════════════════════════════════════════════════
+// The saveProductDraft and saveOrderDraft actions above MUST NOT:
+//   - Decrement or reference inventory_pools
+//   - Enter anything into the backorder FIFO queue
+//   - Create any payment record (COD, advance, prepaid)
+//   - Call updateCustomerStats()
+//   - Write to integration_action_logs
+//   - Trigger any courier/adapter call
+//   - Create any order_items, inventory_transactions, or stock_loss_records
+//
+// Drafts are stored in the form_drafts table as JSON — completely isolated
+// from the real products/orders/inventory tables. They only become real
+// records when the user completes the standard creation flow (Phase 10).
+//
+// If you are a future developer tempted to "helpfully" wire these in:
+// DON'T. The isolation is intentional and critical.
+// ══════════════════════════════════════════════════════════════
