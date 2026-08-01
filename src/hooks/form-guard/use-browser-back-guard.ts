@@ -36,6 +36,12 @@ export function useBrowserBackGuard(
     function handlePopState() {
       if (!hasUnsavedChangesRef.current) return
 
+      // Set a global flag so the page-level popstate handler (URL sync) knows
+      // to skip — we're intercepting this back/forward press.
+      if (typeof window !== 'undefined') {
+        ;(window as any).__formGuardIntercepting = true
+      }
+
       // Re-push the current state to neutralize the back/forward navigation
       // This keeps the user on the current page
       window.history.pushState(null, '', window.location.href)

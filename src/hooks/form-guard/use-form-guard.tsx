@@ -60,11 +60,31 @@ export function useFormGuard(options: UseFormGuardOptions): UseFormGuardResult {
   useBrowserBackGuard(isDirty, handleBackAttempt)
 
   // Modal action handlers
+  const handleDiscard = useCallback(() => {
+    // Clear the intercepting flag before proceeding
+    if (typeof window !== 'undefined') {
+      ;(window as any).__formGuardIntercepting = false
+    }
+    navInterceptor.resolvePendingNavigation('discard')
+  }, [navInterceptor])
+
+  const handleKeepEditing = useCallback(() => {
+    // Clear the intercepting flag — user chose to stay
+    if (typeof window !== 'undefined') {
+      ;(window as any).__formGuardIntercepting = false
+    }
+    navInterceptor.resolvePendingNavigation('cancel')
+  }, [navInterceptor])
+
   const handleSaveDraft = useCallback(async () => {
     setIsSaving(true)
     try {
       await onSaveDraft()
       toast.success('Draft saved.')
+      // Clear the intercepting flag before proceeding
+      if (typeof window !== 'undefined') {
+        ;(window as any).__formGuardIntercepting = false
+      }
       // After saving, proceed with the pending navigation
       navInterceptor.resolvePendingNavigation('discard')
     } catch (err) {
@@ -74,14 +94,6 @@ export function useFormGuard(options: UseFormGuardOptions): UseFormGuardResult {
       setIsSaving(false)
     }
   }, [onSaveDraft, navInterceptor])
-
-  const handleDiscard = useCallback(() => {
-    navInterceptor.resolvePendingNavigation('discard')
-  }, [navInterceptor])
-
-  const handleKeepEditing = useCallback(() => {
-    navInterceptor.resolvePendingNavigation('cancel')
-  }, [navInterceptor])
 
   // Wrap attemptNavigation so callers don't need to pass isDirty
   const attemptNavigation = useCallback(

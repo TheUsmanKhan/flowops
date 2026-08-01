@@ -1,6 +1,7 @@
 'use client'
 
 import { create } from 'zustand'
+import { pushRouteToURL, replaceRouteInURL, queryToRoute } from '@/lib/routing/url-sync'
 import type {
   UserPublic,
   CompanyPublic,
@@ -129,10 +130,12 @@ export const useAppStore = create<AppState>((set) => ({
     set({ route })
     if (typeof window !== 'undefined') {
       window.scrollTo({ top: 0, behavior: 'instant' as ScrollBehavior })
+      // URL sync: push the new route to the browser address bar
+      pushRouteToURL(route)
     }
   },
 
-  reset: () =>
+  reset: () => {
     set({
       user: null,
       activeCompany: null,
@@ -141,7 +144,11 @@ export const useAppStore = create<AppState>((set) => ({
       route: { name: 'login' },
       hydrated: true,
       loading: false,
-    }),
+    })
+    if (typeof window !== 'undefined') {
+      replaceRouteInURL({ name: 'login' })
+    }
+  },
 }))
 
 /** Permission check hook usable anywhere in the client. */

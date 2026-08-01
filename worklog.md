@@ -3025,3 +3025,78 @@ FILES MODIFIED:
 
 FILES NOT TOUCHED:
 - inventory_pools logic, backorder queue, partial payment system, integration/courier framework, RLS policies (beyond form_drafts own policies), createManualOrder, POST /api/products route handler, webhook routes, existing OMS lifecycle actions.
+
+---
+Task ID: URL-NAVIGATION-MIGRATION
+Agent: main
+Task: Migrate from Zustand-driven single-route SPA navigation to refresh-safe, URL-based navigation using Strategy B (Query-String Navigation).
+
+Work Log:
+
+PHASE 0 — Environment Capability Test:
+- Created src/app/test-route/page.tsx as a temporary test file.
+- Tested direct navigation to /test-route: HTTP 200, content renders. ✅
+- Tested hard refresh on /test-route: HTTP 200, content survives. ✅
+- Result: Deep linking works in the preview environment.
+- Decision: While Strategy A (Catch-All Route) is technically possible, the safer choice for this codebase is **Strategy B (Query-String Navigation)** because:
+  1. It requires ZERO changes to the 138 existing navigate() call sites across 59 components — they all continue to work transparently.
+  2. It doesn't require creating a new catch-all page + route-config + resolver — the existing page.tsx switch-case stays intact.
+  3. The URL sync is purely additive — if it fails, the app still works exactly as before (Zustand-driven).
+  4. The form guard integration is simpler — no conflicts between Next.js router and the guard's popstate handler.
+- Deleted the test-route file.
+
+PHASE 1 — Routing Foundation (Strategy B: Query-String Navigation):
+- Created src/lib/routing/url-sync.ts with 4 functions:
+  * routeToQuery(route: AppRoute): string — serializes route to ?view=orders&id=abc123
+  * queryToRoute(): AppRoute | null — deserializes URL search params back to AppRoute
+  * pushRouteToURL(route): void — pushes new URL state via history.pushState (no server request)
+  * replaceRouteInURL(route): void — replaces URL state via history.replaceState (for initial load)
+
+PHASE 2 — Auth/Tenant Resolution Guard:
+- Updated page.tsx's session hydration useEffect to:
+  1. Call queryToRoute() AFTER session loads (so we know if user is authenticated)
+  2. If the URL has a route AND the user is authenticated, restore it via navigate()
+  3. This ensures deep links to protected views (e.g. /?view=orders) correctly re-resolve the session before rendering
+- The existing auth guard (if !user → login, if !onboarded → onboarding) continues to work — the URL route is only restored after session validation.
+
+PHASE 3 — Zustand Store Split:
+- Modified app-store.ts navigate() to call pushRouteToURL(route) as a side effect — every existing navigate() call now automatically syncs the URL.
+- Modified reset() to call replaceRouteInURL({ name: 'login' }) — logout clears the URL.
+- The currentRoute stays in Zustand (per Strategy B) but is always kept in sync with the URL.
+- NO other Zustand state (sidebar, filters, etc.) was touched.
+
+PHASE 4 — Popstate Listener + URL Sync:
+- Added a popstate listener in page.tsx that reads the URL and restores Zustand state on browser back/forward.
+- Added a useEffect in page.tsx that calls replaceRouteInURL(route) whenever the route changes — ensures the address bar always reflects the current view (covers the case where user lands on "/" with no query string).
+- This means ALL 138 existing navigate() calls, ALL sidebar links, ALL mobile nav links, ALL "view details" buttons, ALL redirect-after-mutation calls now automatically get URL sync without any individual changes.
+
+PHASE 5 — Form Guard Integration:
+- Identified a potential conflict: both page.tsx's popstate handler and use-browser-back-guard's popstate handler listen to the same event.
+- Solution: use-browser-back-guard sets a global flag `window.__formGuardIntercepting = true` when it intercepts a back press. page.tsx's popstate handler checks this flag and skips if the guard is active.
+- The flag is cleared in use-form-guard.tsx's handleDiscard, handleKeepEditing, and handleSaveDraft handlers — so after the modal is resolved, the flag is cleared and normal URL sync resumes.
+- This approach does NOT modify the form guard's core logic — only adds the flag set/clear as side effects.
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors.
+- bun run lint: 0 errors, 19 pre-existing warnings (0 new).
+- Dev server: HTTP 200 on /, /?view=dashboard, /?view=orders, /?view=order-detail&id=test123.
+- URL sync: every navigate() call now pushes to the browser address bar.
+- Deep links: /?view=orders loads the orders view directly on refresh.
+- Back/forward: popstate listener restores Zustand state from URL.
+- Form guard: intercepting flag prevents URL sync from fighting the guard's modal.
+
+FILES CREATED:
+- src/lib/routing/url-sync.ts — URL serialization/deserialization utilities
+
+FILES MODIFIED:
+- src/stores/app-store.ts — navigate() now pushes URL; reset() replaces URL
+- src/app/page.tsx — added queryToRoute() restore on load + popstate listener + replaceRouteInURL on route change
+- src/hooks/form-guard/use-browser-back-guard.ts — sets __formGuardIntercepting flag on popstate
+- src/hooks/form-guard/use-form-guard.tsx — clears __formGuardIntercepting flag on modal resolve
+
+FILES NOT TOUCHED:
+- All 59 components using useAppStore — zero changes (transparent URL sync)
+- All 138 navigate() call sites — zero changes (transparent URL sync)
+- All Server Actions, API routes, RLS policies — untouched
+- All existing business logic (inventory, OMS, integrations, drafts) — untouched
+- Sidebar, mobile-nav — untouched (they call navigate() which now auto-syncs)

@@ -3,6 +3,7 @@
 import { useEffect } from 'react'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
+import { queryToRoute, replaceRouteInURL } from '@/lib/routing/url-sync'
 import type { SessionResponse } from '@/lib/types'
 import { Loader2 } from 'lucide-react'
 
@@ -77,12 +78,25 @@ export default function Page() {
       try {
         const session = await api.get<SessionResponse>('/api/auth/me')
         if (cancelled) return
+
+        // URL sync: restore route from URL query string on initial load/refresh
+        const urlRoute = queryToRoute()
+        const currentRoute = useAppStore.getState().route
+
         setSession({
           user: session.user,
           activeCompany: session.activeCompany,
           companies: session.companies,
           employee: session.employee ?? undefined,
         })
+
+        // If the URL has a route, restore it (overrides the default 'login')
+        if (urlRoute && urlRoute.name !== currentRoute.name) {
+          // Only restore if user is authenticated (urlRoute could be a protected view)
+          if (session.user) {
+            useAppStore.getState().navigate(urlRoute)
+          }
+        }
       } catch {
         if (cancelled) return
         setHydrated(true)
@@ -93,6 +107,39 @@ export default function Page() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Browser back/forward: sync URL → Zustand state
+  // NOTE: The useFormGuard's use-browser-back-guard also listens to popstate.
+  // When the guard is active (form is dirty), it re-pushes the URL to cancel
+  // the back navigation. We need to make sure our handler doesn't fight it.
+  // We use a global flag that the guard sets when it's intercepting.
+  useEffect(() => {
+    function handlePopState() {
+      // If the form guard is intercepting, skip our sync — the guard will
+      // handle the modal, and if the user confirms, the guard calls
+      // window.history.back() which will trigger another popstate that we'll handle.
+      if (typeof window !== 'undefined' && (window as any).__formGuardIntercepting) {
+        return
+      }
+      const urlRoute = queryToRoute()
+      if (urlRoute) {
+        // Use set() directly, NOT navigate(), to avoid pushing a new history entry
+        useAppStore.setState({ route: urlRoute })
+      }
+    }
+    window.addEventListener('popstate', handlePopState)
+    return () => window.removeEventListener('popstate', handlePopState)
+  }, [])
+
+  // URL sync: ensure the address bar always reflects the current route
+  // (covers the case where user lands on "/" with no query string)
+  // Must be before any early returns to satisfy React Hooks rules.
+  useEffect(() => {
+    if (hydrated) {
+      replaceRouteInURL(route)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrated, route.name, 'id' in route ? route.id : '', 'token' in route ? route.token : ''])
 
   // Loading screen while hydrating.
   if (!hydrated && loading) {
