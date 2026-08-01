@@ -9,12 +9,27 @@
  * After each item is reserved, recomputes the parent order's status
  * — if all items are now 'reserved', the order flips from
  * 'partially_backordered' to 'confirmed'.
+ *
+ * SECURITY: This is an internal function called from the purchase-order
+ * receipt API route (which has its own auth guard via getWorkspace +
+ * requirePermission). It does NOT directly accept user input — the
+ * orgVariantId and locationId come from the authenticated PO receipt
+ * flow. Adding getWorkspace() here would be redundant since the caller
+ * already validated the session. However, we add Zod validation for
+ * defense-in-depth on the parameter types.
  */
 
 import { db } from '@/lib/db'
 import { reserveStockForOrder } from '@/lib/inventory'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
+import { z } from 'zod'
+
+// Zod schema for input validation (defense-in-depth)
+const backorderInputSchema = z.object({
+  orgVariantId: z.string().min(1, 'orgVariantId is required'),
+  locationId: z.string().min(1, 'locationId is required'),
+})
 
 interface BackorderFulfillmentResult {
   success: boolean
@@ -43,6 +58,17 @@ export async function checkAndFulfillBackorders(
   orgVariantId: string,
   locationId: string,
 ): Promise<BackorderFulfillmentResult> {
+  // Defense-in-depth: validate inputs even though caller is trusted
+  const parsed = backorderInputSchema.safeParse({ orgVariantId, locationId })
+  if (!parsed.success) {
+    return {
+      success: false,
+      fulfilledCount: 0,
+      remainingBackordered: 0,
+      results: [],
+    }
+  }
+
   // Query backordered order_items for this variant, ordered oldest first.
   // Skip items belonging to cancelled orders.
   const backorderedItems = await db.orderItem.findMany({

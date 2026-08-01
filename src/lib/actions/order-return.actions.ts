@@ -24,6 +24,15 @@ import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 import { updateCustomerStats, flagCustomer } from './customer.actions'
+import { z } from 'zod'
+
+// ──────────────────────────────────────────────────────────────
+// Zod validation schemas
+// ──────────────────────────────────────────────────────────────
+const processOrderReturnSchema = z.object({
+  orderId: z.string().min(1, 'Order ID is required'),
+  returnReason: z.string().min(3, 'Return reason must be at least 3 characters').max(500),
+})
 
 // ──────────────────────────────────────────────────────────────
 // Types
@@ -44,6 +53,11 @@ export async function processOrderReturn(
   returnReason: string,
 ): Promise<ActionResult<{ itemsProcessed: number }>> {
   try {
+    const parsed = processOrderReturnSchema.safeParse({ orderId, returnReason })
+    if (!parsed.success) {
+      return { success: false, error: parsed.error.issues[0]?.message ?? 'Invalid input' }
+    }
+
     const ctx = await getWorkspace()
     await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
 

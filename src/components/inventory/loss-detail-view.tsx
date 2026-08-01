@@ -509,7 +509,7 @@ function LossDetailsCard({ record }: { record: LossDetail }) {
                   rel="noopener noreferrer"
                   className="aspect-square rounded-md overflow-hidden border bg-muted/30 block hover:opacity-90"
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  { }
                   <img
                     src={url}
                     alt={`Evidence ${i + 1}`}

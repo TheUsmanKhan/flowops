@@ -63,7 +63,7 @@ export function useFormGuard(options: UseFormGuardOptions): UseFormGuardResult {
   const handleDiscard = useCallback(() => {
     // Clear the intercepting flag before proceeding
     if (typeof window !== 'undefined') {
-      ;(window as any).__formGuardIntercepting = false
+      window.__formGuardIntercepting = false
     }
     navInterceptor.resolvePendingNavigation('discard')
   }, [navInterceptor])
@@ -71,7 +71,7 @@ export function useFormGuard(options: UseFormGuardOptions): UseFormGuardResult {
   const handleKeepEditing = useCallback(() => {
     // Clear the intercepting flag — user chose to stay
     if (typeof window !== 'undefined') {
-      ;(window as any).__formGuardIntercepting = false
+      window.__formGuardIntercepting = false
     }
     navInterceptor.resolvePendingNavigation('cancel')
   }, [navInterceptor])
@@ -83,7 +83,7 @@ export function useFormGuard(options: UseFormGuardOptions): UseFormGuardResult {
       toast.success('Draft saved.')
       // Clear the intercepting flag before proceeding
       if (typeof window !== 'undefined') {
-        ;(window as any).__formGuardIntercepting = false
+        window.__formGuardIntercepting = false
       }
       // After saving, proceed with the pending navigation
       navInterceptor.resolvePendingNavigation('discard')

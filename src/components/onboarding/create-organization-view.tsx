@@ -330,7 +330,7 @@ export function CreateOrganizationView({ onBack }: { onBack: () => void }) {
                 <p className="text-xs font-medium uppercase text-muted-foreground">Organization</p>
                 <div className="flex items-center gap-2">
                   {form.org_logo_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
+                     
                     <img src={form.org_logo_url} alt="" className="h-10 w-10 rounded-full object-cover" />
                   ) : (
                     <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center text-sm font-medium text-primary">
@@ -345,7 +345,7 @@ export function CreateOrganizationView({ onBack }: { onBack: () => void }) {
                 <p className="text-xs font-medium uppercase text-muted-foreground">Company</p>
                 <div className="flex items-center gap-2">
                   {form.company_logo_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
+                     
                     <img src={form.company_logo_url} alt="" className="h-10 w-10 rounded-md object-cover" />
                   ) : (
                     <div className="h-10 w-10 rounded-md bg-muted flex items-center justify-center text-sm font-medium">

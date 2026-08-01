@@ -49,7 +49,7 @@ export function RolesView() {
       .catch(() => setRoles([]))
       .finally(() => setLoading(false))
   }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   useEffect(refresh, [])
 
   async function deleteRole(role: RolePublic) {

@@ -1449,7 +1449,7 @@ function ItemsSection({
 function VariantThumbnail({ url, title }: { url: string | null; title: string }) {
   if (url) {
     return (
-      // eslint-disable-next-line @next/next/no-img-element
+       
       <img
         src={url}
         alt={title}
@@ -1735,7 +1735,7 @@ function ProofFileInput({
               onClick={() => inputRef.current?.click()}
               className="block rounded-md border overflow-hidden"
             >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
+              { }
               <img
                 src={preview}
                 alt="Payment proof preview"

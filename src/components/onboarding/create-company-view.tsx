@@ -278,7 +278,7 @@ export function CreateCompanyView({ orgId, onBack }: { orgId?: string; onBack: (
                 <p className="text-xs font-medium uppercase text-muted-foreground">New Company</p>
                 <div className="flex items-center gap-2">
                   {form.company_logo_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
+                     
                     <img src={form.company_logo_url} alt="" className="h-10 w-10 rounded-md object-cover" />
                   ) : (
                     <div className="h-10 w-10 rounded-md bg-muted flex items-center justify-center text-sm font-medium">{form.company_name.slice(0, 2).toUpperCase()}</div>

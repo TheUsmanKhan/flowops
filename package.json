@@ -3,6 +3,7 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
+    "predev": "node -e \"const fs=require('fs');const e=fs.readFileSync('.env','utf8');if(e.includes('file:')||!e.includes('postgresql://')){console.error('❌ .env has invalid DATABASE_URL — must be postgresql://, not file:. Fix .env before starting.');process.exit(1);}console.log('✅ .env verified — using PostgreSQL');\"",
     "dev": "next dev -p 3000 2>&1 | tee dev.log",
     "build": "next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
     "start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log",

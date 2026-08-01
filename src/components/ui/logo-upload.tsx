@@ -102,7 +102,7 @@ export function LogoUpload({
           )}
         >
           {currentUrl ? (
-            // eslint-disable-next-line @next/next/no-img-element
+             
             <img
               src={currentUrl}
               alt={`${name} logo`}

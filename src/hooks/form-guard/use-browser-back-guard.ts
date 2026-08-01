@@ -39,7 +39,7 @@ export function useBrowserBackGuard(
       // Set a global flag so the page-level popstate handler (URL sync) knows
       // to skip — we're intercepting this back/forward press.
       if (typeof window !== 'undefined') {
-        ;(window as any).__formGuardIntercepting = true
+        window.__formGuardIntercepting = true
       }
 
       // Re-push the current state to neutralize the back/forward navigation

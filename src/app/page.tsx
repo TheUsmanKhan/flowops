@@ -105,7 +105,7 @@ export default function Page() {
     return () => {
       cancelled = true
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [])
 
   // Browser back/forward: sync URL → Zustand state
@@ -118,7 +118,7 @@ export default function Page() {
       // If the form guard is intercepting, skip our sync — the guard will
       // handle the modal, and if the user confirms, the guard calls
       // window.history.back() which will trigger another popstate that we'll handle.
-      if (typeof window !== 'undefined' && (window as any).__formGuardIntercepting) {
+      if (typeof window !== 'undefined' && window.__formGuardIntercepting) {
         return
       }
       const urlRoute = queryToRoute()
@@ -138,7 +138,7 @@ export default function Page() {
     if (hydrated) {
       replaceRouteInURL(route)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [hydrated, route.name, 'id' in route ? route.id : '', 'token' in route ? route.token : ''])
 
   // Loading screen while hydrating.
