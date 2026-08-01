@@ -1,11 +1,12 @@
 'use client'
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
 import { PERMISSIONS } from '@/lib/permissions'
+import { useFormGuard } from '@/hooks/form-guard/use-form-guard'
 import { PageHeader } from '@/components/layout/dashboard-shell'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -250,6 +251,45 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
   // state on the submit button.
   const [uploadingProof, setUploadingProof] = useState(false)
 
+  // ── Form Guard: dirty-state tracking + save-draft + guard hook ─────────
+  const [hasChanges, setHasChanges] = useState(false)
+  const markDirty = useCallback(() => { if (!hasChanges) setHasChanges(true) }, [hasChanges])
+  const [draftId, setDraftId] = useState<string | undefined>(undefined)
+
+  const saveDraft = useCallback(async () => {
+    const result = await api.post<{ draftId: string }>('/api/orders/drafts', {
+      draftId,
+      draftData: {
+        selectedCustomer: selectedCustomer?.id ?? null,
+        usedCustomerAddressId,
+        usedCustomerPhoneId,
+        recipientName,
+        cart: cart.map((c) => ({ variantId: c.variantId, quantity: c.quantity, unitPrice: c.unitPrice })),
+        paymentType,
+        advanceAmount,
+        advancePaymentMethod,
+        advancePaymentReference,
+        deliveryAddress,
+        deliveryCity,
+        courierName,
+        dispatchLocationId,
+        notesForCourier,
+        discountAmount,
+        discountReason,
+      },
+      draftTitle: `Order draft — ${selectedCustomer?.name ?? 'No customer'}`,
+    })
+    if (result.draftId) setDraftId(result.draftId)
+  }, [draftId, selectedCustomer, usedCustomerAddressId, usedCustomerPhoneId,
+      recipientName, cart, paymentType, advanceAmount, advancePaymentMethod,
+      advancePaymentReference, deliveryAddress, deliveryCity, courierName,
+      dispatchLocationId, notesForCourier, discountAmount, discountReason])
+
+  const { ConfirmModal: formGuardModal, attemptNavigation: guardedNavigate } = useFormGuard({
+    isDirty: hasChanges && !uploadingProof,
+    onSaveDraft: saveDraft,
+  })
+
   // ── Data queries ──────────────────────────────────────────────────────────
   const locationsQuery = useQuery<LocationsResponse>({
     queryKey: ['locations'],
@@ -337,10 +377,12 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
       ]
     })
     setVariantSearch('')
+    markDirty()
   }
 
   const removeItem = (variantId: string) => {
     setCart((prev) => prev.filter((i) => i.variantId !== variantId))
+    markDirty()
   }
 
   const updateItem = (variantId: string, patch: Partial<CartItem>) => {
@@ -392,15 +434,12 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
 
     const defaultAddr = c.addresses.find((a) => a.isDefault) ?? c.addresses[0] ?? null
     setUsedCustomerAddressId(defaultAddr?.id ?? null)
-    // Pre-fill the editable delivery snapshot from the default saved address.
-    // (AddressSelector's own useEffect would also do this, but setting it
-    // explicitly here guarantees the snapshot is bound immediately, even
-    // before the selector re-renders.)
     setDeliveryAddress(defaultAddr?.address ?? '')
     setDeliveryCity(defaultAddr?.city ?? '')
 
     setRecipientName(c.name)
     setSaveAddressForNextTime(false)
+    markDirty()
   }
 
   function handleDeselectCustomer() {
@@ -590,6 +629,7 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
     try {
       const data = await api.post<CreateOrderResponse>('/api/orders', payload)
       toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
+      setHasChanges(false) // Reset guard — no false-positive prompt after saving
       void queryClient.invalidateQueries({ queryKey: ['orders'] })
 
       if (paymentProofFile) {
@@ -643,7 +683,7 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
         title="Create Order"
         description="Fill in customer, items, payment — then submit"
         actions={
-          <Button variant="outline" size="sm" onClick={onBack}>
+          <Button variant="outline" size="sm" onClick={() => guardedNavigate(onBack)}>
             <ArrowLeft className="h-4 w-4" /> Back to Orders
           </Button>
         }
@@ -761,7 +801,7 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
                 <Button
                   variant="outline"
                   className="w-full"
-                  onClick={onBack}
+                  onClick={() => guardedNavigate(onBack)}
                   disabled={isSubmitting}
                 >
                   Cancel
@@ -778,6 +818,7 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
           </div>
         </div>
       </div>
+      {formGuardModal}
     </div>
   )
 }

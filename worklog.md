@@ -2955,3 +2955,23 @@ FILES NOT TOUCHED (confirmed):
 - Product variant/pricing logic
 - Inventory pool logic
 - OMS order lifecycle logic
+
+---
+Task ID: FORM-GUARD-ORDER-CREATE
+Agent: main
+Task: Apply the useFormGuard pattern from the Product form to the Order Creation form.
+
+Work Log:
+- Added `useFormGuard` import to `src/components/orders/order-create-view.tsx`.
+- Added `useCallback` to the React imports (needed for `saveDraft` + `markDirty`).
+- Added form guard state after all existing state declarations: `hasChanges`, `markDirty`, `draftId`, `saveDraft` (posts to `/api/orders/drafts` with all form state), and the `useFormGuard` hook call (`isDirty: hasChanges && !uploadingProof`).
+- Wired `markDirty()` into key user-facing actions: `handleSelectCustomer`, `addVariant`, `removeItem`.
+- Replaced 2 `onBack` calls in the main return with `() => guardedNavigate(onBack)` (the PageHeader back button + the Cancel button in the summary section). Left the loading-state `onBack` unguarded (no form data yet).
+- Added `setHasChanges(false)` after successful order creation (prevents false-positive prompts immediately after saving).
+- Rendered `{formGuardModal}` at the end of the main return.
+- No existing server actions, API routes, or form field logic modified — the guard wraps around the form, not inside it.
+
+VERIFICATION:
+- npx tsc --noEmit: 0 errors.
+- bun run lint: 0 errors, 18 pre-existing warnings (0 new).
+- Dev server: HTTP 200.
