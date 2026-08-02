@@ -37,6 +37,7 @@ interface DraftItem {
   draftType: string
   draftTitle: string | null
   draftData: string
+  draftNumber: string | null
   createdAt: string
   updatedAt: string
   createdBy: string | null
@@ -240,6 +241,11 @@ function DraftList({
             <CardContent className="p-4 flex items-center justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
+                  {draft.draftNumber && (
+                    <Badge variant="outline" className="text-[10px] font-mono bg-primary/5 text-primary border-primary/20 shrink-0">
+                      {draft.draftNumber}
+                    </Badge>
+                  )}
                   <p className="text-sm font-medium truncate">
                     {draft.draftTitle || `Untitled ${typeLabel} Draft`}
                   </p>

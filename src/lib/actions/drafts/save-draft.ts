@@ -106,13 +106,14 @@ export async function saveOrderDraft(input: {
   draftId?: string
   draftData: Record<string, unknown>
   draftTitle?: string
-}): Promise<ActionResult<{ draftId: string }>> {
+}): Promise<ActionResult<{ draftId: string; draftNumber?: string }>> {
   try {
     const ctx = await getWorkspace()
 
     const data = JSON.stringify(input.draftData)
 
     if (input.draftId) {
+      // Update existing draft — do NOT generate a new draftNumber
       const existing = await db.formDraft.findFirst({
         where: {
           id: input.draftId,
@@ -132,8 +133,17 @@ export async function saveOrderDraft(input: {
         },
       })
 
-      return { success: true, data: { draftId: input.draftId } }
+      return { success: true, data: { draftId: input.draftId, draftNumber: existing.draftNumber ?? undefined } }
     }
+
+    // Create new draft — generate a draft number from the independent sequence
+    // This calls generate_draft_number() which does nextval('draft_order_number_seq')
+    // — completely separate from the real order number generation (generate_order_number()
+    // which does MAX+1 on the "Order" table). No shared counter, no shared code path.
+    const draftNumberRows = await db.$queryRaw<{ draft_number: string }[]>`
+      SELECT generate_draft_number() AS draft_number
+    `
+    const draftNumber = draftNumberRows[0]?.draft_number
 
     const draft = await db.formDraft.create({
       data: {
@@ -143,6 +153,7 @@ export async function saveOrderDraft(input: {
         draftType: 'order',
         draftData: data,
         draftTitle: input.draftTitle ?? 'Untitled Order Draft',
+        draftNumber,
       },
     })
 
@@ -164,7 +175,7 @@ export async function saveOrderDraft(input: {
       numericValue: 1,
     }).catch(() => {})
 
-    return { success: true, data: { draftId: draft.id } }
+    return { success: true, data: { draftId: draft.id, draftNumber: draftNumber ?? undefined } }
   } catch (err) {
     return {
       success: false,
@@ -230,6 +241,7 @@ export async function listDrafts(input: {
           draftType: d.draftType,
           draftTitle: d.draftTitle,
           draftData: d.draftData,
+          draftNumber: d.draftNumber,
           createdAt: d.createdAt,
           updatedAt: d.updatedAt,
           createdBy: d.createdBy,
@@ -312,6 +324,7 @@ export async function getDraft(draftId: string): Promise<ActionResult<{
   draftType: string
   draftTitle: string | null
   draftData: string
+  draftNumber: string | null
   createdAt: Date
   updatedAt: Date
 }>> {
@@ -328,6 +341,7 @@ export async function getDraft(draftId: string): Promise<ActionResult<{
         draftType: draft.draftType,
         draftTitle: draft.draftTitle,
         draftData: draft.draftData,
+        draftNumber: draft.draftNumber,
         createdAt: draft.createdAt,
         updatedAt: draft.updatedAt,
       },

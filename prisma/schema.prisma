@@ -1708,6 +1708,7 @@ model FormDraft {
   draftType       String   // 'product' | 'order' (CHECK in SQL)
   draftData       String   @default("{}") // JSONB
   draftTitle      String?
+  draftNumber     String?  // DRAFT-00001 format — only for order drafts, null for product drafts
 
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
