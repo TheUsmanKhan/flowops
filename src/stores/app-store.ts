@@ -34,7 +34,7 @@ export type AppRoute =
   | { name: 'create-organization' }
   | { name: 'create-company'; orgId?: string }
   | { name: 'products' }
-  | { name: 'product-create' }
+  | { name: 'product-create'; draftId?: string }
   | { name: 'product-drafts' }
   | { name: 'product-detail'; id: string }
   | { name: 'product-settings' }
@@ -58,7 +58,7 @@ export type AppRoute =
   | { name: 'inventory-cycle-counts' }
   // OMS
   | { name: 'orders' }
-  | { name: 'order-create' }
+  | { name: 'order-create'; draftId?: string }
   | { name: 'order-drafts' }
   | { name: 'order-detail'; id: string }
   | { name: 'orders-pending-confirmation' }

@@ -121,7 +121,7 @@ export function DraftsView() {
             isError={orderDraftsQuery.isError}
             error={orderDraftsQuery.error}
             onRetry={() => orderDraftsQuery.refetch()}
-            onResume={(d) => navigate({ name: 'order-create' })}
+            onResume={(d) => navigate({ name: 'order-create', draftId: d.id })}
             onDiscard={setDiscardTarget}
             typeLabel="Order"
           />
@@ -134,7 +134,7 @@ export function DraftsView() {
             isError={productDraftsQuery.isError}
             error={productDraftsQuery.error}
             onRetry={() => productDraftsQuery.refetch()}
-            onResume={(d) => navigate({ name: 'product-create' })}
+            onResume={(d) => navigate({ name: 'product-create', draftId: d.id })}
             onDiscard={setDiscardTarget}
             typeLabel="Product"
           />

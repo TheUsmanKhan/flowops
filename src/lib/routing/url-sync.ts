@@ -37,6 +37,9 @@ export function routeToQuery(route: AppRoute): string {
   if ('orgId' in route && route.orgId) {
     params.set('orgId', route.orgId)
   }
+  if ('draftId' in route && route.draftId) {
+    params.set('draftId', route.draftId)
+  }
 
   return `?${params.toString()}`
 }
@@ -56,6 +59,7 @@ export function queryToRoute(): AppRoute | null {
   const idParam = params.get('id')
   const tokenParam = params.get('token')
   const orgIdParam = params.get('orgId')
+  const draftIdParam = params.get('draftId')
 
   const routesWithId = [
     'employee-detail', 'role-edit', 'product-detail',
@@ -65,6 +69,7 @@ export function queryToRoute(): AppRoute | null {
   ]
   const routesWithToken = ['reset', 'accept-invite']
   const routesWithOrgId = ['create-company']
+  const routesWithDraftId = ['product-create', 'order-create']
 
   if (routesWithId.includes(view) && idParam) {
     return { name: view as AppRoute['name'], id: idParam } as AppRoute
@@ -74,6 +79,9 @@ export function queryToRoute(): AppRoute | null {
   }
   if (routesWithOrgId.includes(view)) {
     return { name: view as AppRoute['name'], orgId: orgIdParam || undefined } as AppRoute
+  }
+  if (routesWithDraftId.includes(view)) {
+    return { name: view as AppRoute['name'], draftId: draftIdParam || undefined } as AppRoute
   }
 
   return { name: view as AppRoute['name'] } as AppRoute

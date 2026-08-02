@@ -257,7 +257,7 @@ function renderRoute(
     case 'products':
       return <ProductsView />
     case 'product-create':
-      return <ProductCreateViewWithBack />
+      return <ProductCreateViewWithBack draftId={route.draftId} />
     case 'product-drafts':
       return <DraftsView />
     case 'product-detail':
@@ -303,7 +303,7 @@ function renderRoute(
     case 'orders':
       return <OrdersView />
     case 'order-create':
-      return <OrderCreateViewWithBack />
+      return <OrderCreateViewWithBack draftId={route.draftId} />
     case 'order-drafts':
       return <DraftsView />
     case 'order-detail':
@@ -351,12 +351,12 @@ function CreateCompanyViewWithBack({ orgId }: { orgId?: string }) {
   return <CreateCompanyView orgId={orgId} onBack={() => navigate({ name: 'organization' })} />
 }
 
-function ProductCreateViewWithBack() {
+function ProductCreateViewWithBack({ draftId }: { draftId?: string }) {
   const navigate = useAppStore((s) => s.navigate)
-  return <ProductCreateView onBack={() => navigate({ name: 'products' })} />
+  return <ProductCreateView onBack={() => navigate({ name: 'products' })} draftId={draftId} />
 }
 
-function OrderCreateViewWithBack() {
+function OrderCreateViewWithBack({ draftId }: { draftId?: string }) {
   const navigate = useAppStore((s) => s.navigate)
-  return <OrderCreateView onBack={() => navigate({ name: 'orders' })} />
+  return <OrderCreateView onBack={() => navigate({ name: 'orders' })} draftId={draftId} />
 }

@@ -207,7 +207,7 @@ const SCOPE_OPTIONS: Array<{
 // ----------------------------------------------------------------------------
 // Main component
 // ----------------------------------------------------------------------------
-export function ProductCreateView({ onBack }: { onBack: () => void }) {
+export function ProductCreateView({ onBack, draftId: initialDraftId }: { onBack: () => void; draftId?: string }) {
   const navigate = useAppStore((s) => s.navigate)
   const queryClient = useQueryClient()
 
@@ -247,7 +247,41 @@ export function ProductCreateView({ onBack }: { onBack: () => void }) {
   // ── Form Guard: dirty-state tracking + save-draft + guard hook ─────────
   const [hasChanges, setHasChanges] = useState(false)
   const markDirty = useCallback(() => { if (!hasChanges) setHasChanges(true) }, [hasChanges])
-  const [draftId, setDraftId] = useState<string | undefined>(undefined)
+  const [draftId, setDraftId] = useState<string | undefined>(initialDraftId)
+
+  // Load draft data on mount if a draftId was passed (from the Drafts list "Resume" button)
+  useEffect(() => {
+    if (!initialDraftId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const draft = await api.get<{ id: string; draftData: string; draftType: string }>(`/api/drafts?id=${initialDraftId}`)
+        if (cancelled || !draft) return
+        const data = JSON.parse(draft.draftData) as Record<string, unknown>
+        // Pre-fill all form fields from the draft data
+        if (typeof data.step === 'number') setStep(data.step)
+        if (typeof data.title === 'string') setTitle(data.title)
+        if (typeof data.shortDescription === 'string') setShortDescription(data.shortDescription)
+        if (typeof data.description === 'string') setDescription(data.description)
+        if (typeof data.productType === 'string') setProductType(data.productType as ProductType)
+        if (typeof data.categoryId === 'string') setCategoryId(data.categoryId)
+        if (typeof data.brandId === 'string') setBrandId(data.brandId)
+        if (typeof data.baseSku === 'string') setBaseSku(data.baseSku)
+        if (typeof data.isFeatured === 'boolean') setIsFeatured(data.isFeatured)
+        if (typeof data.isStitchable === 'boolean') setIsStitchable(data.isStitchable)
+        if (data.simpleVariant) setSimpleVariant(data.simpleVariant as VariantDraft)
+        if (data.attributeSelection) setAttributeSelection(data.attributeSelection as SelectionState)
+        if (Array.isArray(data.generatedVariants)) setGeneratedVariants(data.generatedVariants as GeneratedVariant[])
+        if (Array.isArray(data.regularVariants)) setRegularVariants(data.regularVariants as VariantDraft[])
+        if (typeof data.productScope === 'string') setProductScope(data.productScope as ProductScope)
+        toast.info('Draft loaded — continue editing.')
+      } catch {
+        if (!cancelled) toast.error('Failed to load draft.')
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDraftId])
   const [savingDraft, setSavingDraft] = useState(false)
 
   const saveDraft = useCallback(async () => {

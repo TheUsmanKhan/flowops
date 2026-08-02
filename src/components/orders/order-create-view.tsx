@@ -193,7 +193,7 @@ function stockBadgeFor(
 // Main view — single-page scrollable order creation form
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function OrderCreateView({ onBack }: { onBack: () => void }) {
+export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: () => void; draftId?: string }) {
   const navigate = useAppStore((s) => s.navigate)
   const can = useCan()
   const queryClient = useQueryClient()
@@ -247,6 +247,7 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
   const customerSectionRef = useRef<HTMLDivElement | null>(null)
   const itemsSectionRef = useRef<HTMLDivElement | null>(null)
   const paymentSectionRef = useRef<HTMLDivElement | null>(null)
+  const variantOptionsRef = useRef<VariantOption[]>([])
 
   // Track in-flight post-creation upload so we can render a "Saving proof…"
   // state on the submit button.
@@ -255,7 +256,58 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
   // ── Form Guard: dirty-state tracking + save-draft + guard hook ─────────
   const [hasChanges, setHasChanges] = useState(false)
   const markDirty = useCallback(() => { if (!hasChanges) setHasChanges(true) }, [hasChanges])
-  const [draftId, setDraftId] = useState<string | undefined>(undefined)
+  const [draftId, setDraftId] = useState<string | undefined>(initialDraftId)
+
+  // Load draft data on mount if a draftId was passed (from the Drafts list "Resume" button)
+  useEffect(() => {
+    if (!initialDraftId) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const draft = await api.get<{ id: string; draftData: string; draftType: string }>(`/api/drafts?id=${initialDraftId}`)
+        if (cancelled || !draft) return
+        const data = JSON.parse(draft.draftData) as Record<string, unknown>
+        // Pre-fill form fields from draft data
+        if (typeof data.recipientName === 'string') setRecipientName(data.recipientName)
+        if (typeof data.deliveryAddress === 'string') setDeliveryAddress(data.deliveryAddress)
+        if (typeof data.deliveryCity === 'string') setDeliveryCity(data.deliveryCity)
+        if (typeof data.courierName === 'string') setCourierName(data.courierName)
+        if (typeof data.dispatchLocationId === 'string') setDispatchLocationId(data.dispatchLocationId)
+        if (typeof data.notesForCourier === 'string') setNotesForCourier(data.notesForCourier)
+        if (typeof data.discountAmount === 'string') setDiscountAmount(data.discountAmount)
+        if (typeof data.discountReason === 'string') setDiscountReason(data.discountReason)
+        if (typeof data.paymentType === 'string') setPaymentType(data.paymentType as PaymentType)
+        if (typeof data.advanceAmount === 'string') setAdvanceAmount(data.advanceAmount)
+        if (typeof data.advancePaymentMethod === 'string') setAdvancePaymentMethod(data.advancePaymentMethod)
+        if (typeof data.advancePaymentReference === 'string') setAdvancePaymentReference(data.advancePaymentReference)
+        if (typeof data.usedCustomerAddressId === 'string') setUsedCustomerAddressId(data.usedCustomerAddressId)
+        if (typeof data.usedCustomerPhoneId === 'string') setUsedCustomerPhoneId(data.usedCustomerPhoneId)
+        if (typeof data.saveAddressForNextTime === 'boolean') setSaveAddressForNextTime(data.saveAddressForNextTime)
+        // Restore cart items
+        if (Array.isArray(data.cart)) {
+          const restoredCart = (data.cart as Array<{ variantId: string; quantity: number; unitPrice: number }>).map((c) => {
+            // Find the variant in the loaded products to get full details
+            const variant = variantOptionsRef.current?.find((v) => v.variantId === c.variantId)
+            return {
+              variantId: c.variantId,
+              sku: variant?.sku ?? '',
+              productTitle: variant?.productTitle ?? 'Unknown Product',
+              primaryImage: variant?.primaryImage ?? null,
+              unitPrice: c.unitPrice,
+              quantity: c.quantity,
+              fulfillmentType: variant?.fulfillmentType ?? 'stock_based',
+            }
+          })
+          setCart(restoredCart)
+        }
+        toast.info('Draft loaded — continue editing.')
+      } catch {
+        if (!cancelled) toast.error('Failed to load draft.')
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDraftId])
   const [savingDraft, setSavingDraft] = useState(false)
 
   const saveDraft = useCallback(async () => {
@@ -329,6 +381,11 @@ export function OrderCreateView({ onBack }: { onBack: () => void }) {
     }
     return list
   }, [productsQuery.data])
+
+  // Keep ref in sync so the draft-loading effect can access variant details
+  useEffect(() => {
+    variantOptionsRef.current = variantOptions
+  }, [variantOptions])
 
   const variantSearchResults = useMemo(() => {
     if (!variantSearch.trim()) return []
