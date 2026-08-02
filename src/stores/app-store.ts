@@ -35,6 +35,7 @@ export type AppRoute =
   | { name: 'create-company'; orgId?: string }
   | { name: 'products' }
   | { name: 'product-create' }
+  | { name: 'product-drafts' }
   | { name: 'product-detail'; id: string }
   | { name: 'product-settings' }
   | { name: 'returned-stitched' }
@@ -58,6 +59,7 @@ export type AppRoute =
   // OMS
   | { name: 'orders' }
   | { name: 'order-create' }
+  | { name: 'order-drafts' }
   | { name: 'order-detail'; id: string }
   | { name: 'orders-pending-confirmation' }
   | { name: 'orders-backordered' }

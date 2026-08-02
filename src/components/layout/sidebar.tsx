@@ -28,6 +28,7 @@ import {
   Factory,
   Plug,
   Webhook,
+  FileText,
   AlertTriangle,
   ClipboardCheck,
   PackagePlus,
@@ -57,8 +58,9 @@ const NAV: NavItem[] = [
     permission: PERMISSIONS.PRODUCTS_VIEW,
     matchPrefixes: ['product'],
     children: [
-      { route: { name: 'products' }, label: 'All Products', icon: Package, matchPrefixes: ['products'] },
+      { route: { name: 'products' }, label: 'All Products', icon: Package, matchPrefixes: ['products', 'product-drafts'] },
       { route: { name: 'product-create' }, label: 'Add Product', icon: Plus, matchPrefixes: ['product-create'] },
+      { route: { name: 'product-drafts' }, label: 'Product Drafts', icon: FileText, matchPrefixes: ['product-drafts'] },
       { route: { name: 'returned-stitched' }, label: 'Returned Stock', icon: RotateCcw, matchPrefixes: ['returned-stitched'] },
       { route: { name: 'product-settings' }, label: 'Catalog Settings', icon: Sliders, matchPrefixes: ['product-settings'] },
     ],
@@ -90,8 +92,9 @@ const NAV: NavItem[] = [
     permission: PERMISSIONS.ORDERS_VIEW,
     matchPrefixes: ['order'],
     children: [
-      { route: { name: 'orders' }, label: 'All Orders', icon: ShoppingCart, matchPrefixes: ['orders', 'order-detail', 'order-create'] },
+      { route: { name: 'orders' }, label: 'All Orders', icon: ShoppingCart, matchPrefixes: ['orders', 'order-detail', 'order-create', 'order-drafts'] },
       { route: { name: 'order-create' }, label: 'Create Order', icon: Plus, matchPrefixes: ['order-create'] },
+      { route: { name: 'order-drafts' }, label: 'Order Drafts', icon: FileText, matchPrefixes: ['order-drafts'] },
       { route: { name: 'orders-pending-confirmation' }, label: 'Pending Confirmation', icon: Clock, matchPrefixes: ['orders-pending'] },
       { route: { name: 'orders-backordered' }, label: 'Backordered', icon: AlertTriangle, matchPrefixes: ['orders-backordered'] },
       { route: { name: 'orders-awaiting-production' }, label: 'Awaiting Production', icon: Factory, matchPrefixes: ['orders-awaiting'] },
@@ -220,7 +223,17 @@ export function Sidebar() {
                               {productDraftCount}
                             </span>
                           )}
+                          {child.label === 'Product Drafts' && productDraftCount > 0 && (
+                            <span className="ml-auto text-[10px] bg-primary/10 text-primary rounded-full px-1.5 py-0.5 font-medium tabular-nums">
+                              {productDraftCount}
+                            </span>
+                          )}
                           {child.label === 'All Orders' && orderDraftCount > 0 && (
+                            <span className="ml-auto text-[10px] bg-primary/10 text-primary rounded-full px-1.5 py-0.5 font-medium tabular-nums">
+                              {orderDraftCount}
+                            </span>
+                          )}
+                          {child.label === 'Order Drafts' && orderDraftCount > 0 && (
                             <span className="ml-auto text-[10px] bg-primary/10 text-primary rounded-full px-1.5 py-0.5 font-medium tabular-nums">
                               {orderDraftCount}
                             </span>

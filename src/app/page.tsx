@@ -65,6 +65,7 @@ import { CustomerDetailView } from '@/components/orders/customer-detail-view'
 import { OrderWorkflowSettingsView } from '@/components/orders/order-workflow-settings-view'
 import { IntegrationsView } from '@/components/settings/integrations-view'
 import { IntegrationLogsView } from '@/components/settings/integration-logs-view'
+import { DraftsView } from '@/components/shared/drafts-view'
 import { Card, CardContent } from '@/components/ui/card'
 
 export default function Page() {
@@ -257,6 +258,8 @@ function renderRoute(
       return <ProductsView />
     case 'product-create':
       return <ProductCreateViewWithBack />
+    case 'product-drafts':
+      return <DraftsView />
     case 'product-detail':
       return <ProductDetailView productId={route.id} />
     case 'product-settings':
@@ -301,6 +304,8 @@ function renderRoute(
       return <OrdersView />
     case 'order-create':
       return <OrderCreateViewWithBack />
+    case 'order-drafts':
+      return <DraftsView />
     case 'order-detail':
       return <OrderDetailView orderId={route.id} />
     case 'orders-pending-confirmation':

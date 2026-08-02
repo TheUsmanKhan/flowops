@@ -290,19 +290,52 @@ export async function countDrafts(input: {
 export async function deleteDraft(draftId: string): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
-
     const draft = await db.formDraft.findFirst({
       where: { id: draftId, companyId: ctx.company.id },
     })
     if (!draft) return { success: false, error: 'Draft not found' }
-
     await db.formDraft.delete({ where: { id: draftId } })
-
     return { success: true }
   } catch (err) {
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Failed to delete draft',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// getDraft — fetch a single draft by ID (for resume/edit flow)
+// ──────────────────────────────────────────────────────────────
+export async function getDraft(draftId: string): Promise<ActionResult<{
+  id: string
+  draftType: string
+  draftTitle: string | null
+  draftData: string
+  createdAt: Date
+  updatedAt: Date
+}>> {
+  try {
+    const ctx = await getWorkspace()
+    const draft = await db.formDraft.findFirst({
+      where: { id: draftId, companyId: ctx.company.id },
+    })
+    if (!draft) return { success: false, error: 'Draft not found' }
+    return {
+      success: true,
+      data: {
+        id: draft.id,
+        draftType: draft.draftType,
+        draftTitle: draft.draftTitle,
+        draftData: draft.draftData,
+        createdAt: draft.createdAt,
+        updatedAt: draft.updatedAt,
+      },
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to get draft',
     }
   }
 }
