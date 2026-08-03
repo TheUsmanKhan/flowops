@@ -398,7 +398,5 @@
   3097→FILES NOT TOUCHED:
   3098→- All 59 components using useAppStore — zero changes (transparent URL sync)
   3099→- All 138 navigate() call sites — zero changes (transparent URL sync)
-  3100→- All Server Actions, API routes, RLS policies — untouched
-  3101→- All existing business logic (inventory, OMS, integrations, drafts) — untouched
 
-[showing lines 2700-3101 of 3103; use offset=3102 with limit to continue reading]
+[showing lines 2700-3099 of 3103; use offset=3100 with limit to continue reading]
