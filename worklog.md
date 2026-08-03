@@ -3100,3 +3100,132 @@ FILES NOT TOUCHED:
 - All Server Actions, API routes, RLS policies — untouched
 - All existing business logic (inventory, OMS, integrations, drafts) — untouched
 - Sidebar, mobile-nav — untouched (they call navigate() which now auto-syncs)
+
+---
+Task ID: WEIGHT-TRACKING-SYSTEM
+Agent: main
+Task: Add weight tracking system to Product/Variant catalog mirroring the exact costPrice cascade/override/resync pattern. Data layer + UI only, not courier logic.
+
+Work Log:
+
+PHASE 1 — Schema:
+- Added two columns to OrgProductVariant in prisma/schema.prisma:
+  * weightKg Decimal? @db.Decimal(6,3) — nullable, KG unit, 3 decimal precision
+  * weightSyncedWithParent Boolean @default(true) — mirrors costPriceSyncedWithParent
+- Ran `bun run db:push` — schema applied to Supabase PostgreSQL successfully.
+- Ran `bun run db:generate` — Prisma Client regenerated with new fields.
+- Fixed .env reversion issue: .env had reverted to SQLite (file:...), restored to PostgreSQL connection string with DATABASE_URL + DIRECT_URL.
+
+PHASE 2 — API Routes (3 new routes, exact mirrors of cost equivalents):
+- Created POST /api/products/[id]/variant-groups/[parentValueId]/weight/route.ts
+  * Mirrors .../cost route exactly. Body: { weightKg, parent_attribute_name, parent_value }
+  * Cascades to variants where weightSyncedWithParent=true via updateMany.
+  * Permission: products.edit. Audit: variant.parent_weight_updated. Metric: variant.parent_weight_updated.
+- Created POST /api/products/[id]/variants/[variantId]/override-weight/route.ts
+  * Mirrors override-cost route. Body: { weightKg }
+  * Sets weightKg + flips weightSyncedWithParent=false.
+  * Permission: products.edit. Audit: variant.weight_overridden. Metric: variant.weight_overridden.
+- Created POST /api/products/[id]/variants/[variantId]/resync-weight/route.ts
+  * Mirrors resync-cost route. No body.
+  * Uses determineParentAttribute() shared utility to find parent attribute.
+  * Finds synced sibling in same parent group, copies its weightKg, flips weightSyncedWithParent=true.
+  * Returns 400 "No synced siblings found. Set the parent group weight first." if all siblings overridden.
+  * Permission: products.edit. Audit: variant.weight_resynced. Metric: variant.weight_resynced.
+
+PHASE 2 — Existing API routes updated to pass weightKg through:
+- GET /api/products/[id]/variant-groups — now returns weightKg + weightSyncedWithParent per child.
+- GET /api/products/[id] — now returns weightKg + weightSyncedWithParent per variant.
+- PATCH /api/products/[id]/variants/[variantId] — now accepts weight_kg in body, updates weightKg field.
+- POST /api/products — now accepts weight_kg in variant payload, persists to DB.
+- POST /api/products/[id]/variants — now accepts weight_kg, persists to DB.
+- src/lib/validations/product.ts — variantSchema now includes weight_kg: z.number().min(0).optional().nullable().
+
+PHASE 3 — Frontend (shared parts):
+- src/components/products/variant-table-parts.tsx:
+  * Added WeightCell component (mirrors CostCell with step="0.001").
+  * Extended ParentGroupInputs with optional parentWeight/onWeightChange/showWeight/canEditWeight props.
+  * Weight input shown in parent group bulk-set row when showWeight=true.
+
+PHASE 3 — Frontend (server-backed ParentChildVariantTable):
+- src/components/products/parent-child-variant-table.tsx:
+  * ChildVariant interface: added weightKg?: number | null, weightSyncedWithParent?: boolean.
+  * GroupCard: added parentWeight state, weight cascade in applyAllToGroup() (calls /weight endpoint in sequence with cost + sale-price).
+  * ChildRow: added weightValue state, saveWeight(), resyncWeight() functions. Added Weight (kg) column with sync indicator. Added "Wt" resync button in Actions.
+  * VariantEditDialog: added weightKg to form state, Weight (kg) input field, weight_kg in patch payload.
+  * FlatVariantTable + FlatRow: added Weight (kg) column header + cell with saveWeight().
+
+PHASE 3 — Frontend (client-side wizard ClientSideParentChildVariantTable):
+- src/components/products/client-side-parent-child-variant-table.tsx:
+  * WizardGroupableVariant interface: added weight_kg?: number | null, weight_synced_with_parent?: boolean.
+  * GroupCard: added parentWeight state + initialization, weight cascade in applyAllToGroup() (local state only, no network). Extended getSyncedSiblingValue() to support 'weight_kg' field.
+  * GroupedChildRow: added weightValue state, saveWeight() (flips weight_synced_with_parent=false locally), Weight (kg) cell with SyncIndicator, "Wt" ResyncButton.
+  * FlatVariantTable + FlatChildRow: added Weight (kg) column.
+
+PHASE 3 — Frontend (product-create-view.tsx wizard):
+- VariantDraft interface: added weight_kg: number | null.
+- GeneratedVariant interface: added weight_kg?: number | null, weight_synced_with_parent?: boolean.
+- blankSimpleVariant() + blankRegularVariant(): default weight_kg: null.
+- Generated combinations mapping: propagates weight_kg from generated variants, defaults to null for new.
+- Submit payload: includes weight_kg: v.weight_kg ?? undefined.
+- SimpleVariantForm: added Weight (kg) input field (step="0.001", placeholder="0.000").
+- RegularVariantBuilder: added Weight (kg) input in the per-variant grid.
+
+PHASE 3 — Frontend (product-detail-view.tsx):
+- ProductVariant interface: added weightKg?: number | null, weightSyncedWithParent?: boolean.
+- VariantsTab: added "Weight not set" amber warning banner at top when any variant has weightKg=null (non-blocking, lists count of affected variants).
+- VariantsTab table: added "Weight (kg)" column header + cell. Cell shows value or amber "⚠ —" indicator with tooltip when null.
+- Shopify Sync tab JSON preview: added weight_kg field to variant payload.
+- Updated colSpan on empty-state row (13→14 with edit, 12→13 without).
+
+PHASE 4 — Shared Calculation Utility:
+- Created src/lib/utils/order-weight.ts:
+  * export function calculateOrderWeightKg(items): { totalWeightKg: number; hasMissingWeight: boolean }
+  * Accepts Prisma Decimal, number, or null for variant.weightKg.
+  * Sums quantity × weightKg across all items.
+  * If ANY item's weightKg is null, hasMissingWeight=true (callers should force safe Overland fallback).
+  * Rounds to 3 decimal places (matches DB Decimal(6,3) precision).
+  * NOT wired into order creation or courier booking — standalone utility ready for later phases.
+
+VERIFICATION:
+- `bun run db:push`: ✅ schema applied successfully.
+- `bun run lint`: ✅ 0 errors, 10 pre-existing warnings (React Hook Form watch() memoization — none from this task).
+- `npx tsc --noEmit`: ✅ 0 errors in src/ (only errors in examples/ and skills/ folders which are unrelated).
+- Dev server: ✅ compiled successfully, GET / returned HTTP 200 in 21.9s (first compile), no runtime errors in dev.log.
+- Existing cost/price cascade behavior: UNAFFECTED — all changes are additive (new weightKg field, new weight cascade endpoints, new Weight column). The costPriceSyncedWithParent / salePriceSyncedWithParent / comparePriceSyncedWithParent flags and their cascade logic were not modified. The applyAllToGroup() handler in both ParentChildVariantTable and ClientSideParentChildVariantTable now calls the weight endpoint IN SEQUENCE with the existing cost + sale-price endpoints — each endpoint only updates children whose relevant synced flag is true, so all four flags (cost, sale, compare, weight) remain INDEPENDENT.
+
+Stage Summary:
+- Weight tracking system fully implemented mirroring the exact costPrice cascade/override/resync pattern.
+- 3 new API routes created (variant-groups/weight, override-weight, resync-weight).
+- 6 existing API routes updated to pass weightKg through.
+- 5 frontend components updated (variant-table-parts, parent-child-variant-table, client-side-parent-child-variant-table, product-create-view, product-detail-view).
+- 1 new utility created (src/lib/utils/order-weight.ts).
+- Schema: 2 new columns on OrgProductVariant (weightKg, weightSyncedWithParent).
+- Zero regressions to existing cost/price cascade logic — all changes additive.
+- "Weight not set" warning indicator added to Product Detail Variants tab (non-blocking amber banner + per-row ⚠ indicator).
+- calculateOrderWeightKg() utility ready for future courier booking logic to consume (returns hasMissingWeight flag for safe Overland fallback).
+
+FILES CREATED:
+- src/app/api/products/[id]/variant-groups/[parentValueId]/weight/route.ts
+- src/app/api/products/[id]/variants/[variantId]/override-weight/route.ts
+- src/app/api/products/[id]/variants/[variantId]/resync-weight/route.ts
+- src/lib/utils/order-weight.ts
+
+FILES MODIFIED:
+- prisma/schema.prisma — added weightKg + weightSyncedWithParent to OrgProductVariant
+- .env — restored PostgreSQL connection string (was reverted to SQLite)
+- src/lib/validations/product.ts — added weight_kg to variantSchema
+- src/app/api/products/route.ts — persist weightKg on variant create
+- src/app/api/products/[id]/route.ts — return weightKg in GET, accept in PATCH
+- src/app/api/products/[id]/variants/route.ts — persist weightKg on variant add
+- src/app/api/products/[id]/variants/[variantId]/route.ts — accept weight_kg in PATCH
+- src/app/api/products/[id]/variant-groups/route.ts — return weightKg in grouped response
+- src/components/products/variant-table-parts.tsx — added WeightCell + weight support in ParentGroupInputs
+- src/components/products/parent-child-variant-table.tsx — Weight column + cascade + override + resync in GroupCard, ChildRow, FlatRow, VariantEditDialog
+- src/components/products/client-side-parent-child-variant-table.tsx — Weight column + cascade + override + resync (local state)
+- src/components/products/product-create-view.tsx — weight_kg in VariantDraft/GeneratedVariant + SimpleVariantForm + RegularVariantBuilder + submit payload
+- src/components/products/product-detail-view.tsx — ProductVariant type + Weight column + "Weight not set" warning + Shopify Sync payload
+
+FILES NOT TOUCHED:
+- All costPrice/salePrice/comparePrice cascade logic — completely unaffected.
+- inventory_pools, OMS order creation, RLS policies — untouched.
+- All other modules (orders, inventory, CRM, integrations) — untouched.

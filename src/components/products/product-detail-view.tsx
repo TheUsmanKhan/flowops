@@ -100,6 +100,8 @@ interface ProductVariant {
   attributeValues: Record<string, string>
   costPrice: number
   weightGrams: number
+  weightKg?: number | null
+  weightSyncedWithParent?: boolean
   fulfillmentType: string
   stitchingType: string | null
   stitchingCharges: number
@@ -335,6 +337,7 @@ export function ProductDetailView({ productId }: { productId: string }) {
       price: v.salePrice,
       compare_at_price: v.comparePrice,
       grams: v.weightGrams,
+      weight_kg: v.weightKg ?? null,
       requires_shipping: v.requiresShipping,
       taxable: v.isTaxable,
       inventory_management: v.fulfillmentType === 'stock_based' ? 'shopify' : null,
@@ -1000,6 +1003,18 @@ function VariantsTab({
 
   return (
     <>
+      {/* Weight not set warning — non-blocking indicator for variants with NULL weightKg */}
+      {product.variants.some((v) => v.weightKg == null) && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 flex items-start gap-2">
+          <AlertCircle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+          <div className="text-xs text-amber-800">
+            <p className="font-medium">Weight not set for {product.variants.filter((v) => v.weightKg == null).length} variant(s)</p>
+            <p className="mt-0.5">
+              Courier booking (Overland vs Normal) requires weight. Set it per variant or via the parent-group bulk action in the Variants table below.
+            </p>
+          </div>
+        </div>
+      )}
       <Card>
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
@@ -1021,6 +1036,7 @@ function VariantsTab({
                   <TableHead className="text-right">Stock</TableHead>
                   <TableHead className="text-right">Sale</TableHead>
                   <TableHead className="text-right">Compare</TableHead>
+                  <TableHead className="text-right">Weight (kg)</TableHead>
                   <TableHead>Fulfillment</TableHead>
                   <TableHead>Stitching</TableHead>
                   <TableHead className="text-right">Days</TableHead>
@@ -1032,7 +1048,7 @@ function VariantsTab({
               <TableBody>
                 {product.variants.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={canEdit ? 13 : 12} className="h-24 text-center text-muted-foreground text-sm">
+                    <TableCell colSpan={canEdit ? 14 : 13} className="h-24 text-center text-muted-foreground text-sm">
                       No variants on this product.
                     </TableCell>
                   </TableRow>
@@ -1094,8 +1110,14 @@ function VariantsTab({
                       <TableCell className="text-right text-xs font-medium">
                         {v.salePrice != null ? formatMoney(v.salePrice) : '—'}
                       </TableCell>
-                      <TableCell className="text-right text-xs text-muted-foreground">
-                        {v.comparePrice != null ? formatMoney(v.comparePrice) : '—'}
+                      <TableCell className="text-right text-xs">
+                        {v.weightKg != null ? (
+                          <span>{v.weightKg}</span>
+                        ) : (
+                          <span className="text-amber-600 inline-flex items-center gap-0.5" title="Weight not set — courier booking will fall back to Overland">
+                            <AlertCircle className="h-3 w-3" /> —
+                          </span>
+                        )}
                       </TableCell>
                       <TableCell>
                         <FulfillmentTypeBadge type={v.fulfillmentType} />

@@ -120,6 +120,10 @@ interface GeneratedVariant {
   // optimistically in local state when the user enters Qty > 0 for an MTO
   // variant's opening stock.
   track_inventory: boolean
+  // Weight tracking (kg) — mirrors cost_price cascade pattern. Default null
+  // (not set); weight_synced_with_parent defaults true.
+  weight_kg?: number | null
+  weight_synced_with_parent?: boolean
 }
 
 interface VariantDraft {
@@ -130,6 +134,7 @@ interface VariantDraft {
   stitching_charges: number
   compare_price: number | null
   weight_grams: number
+  weight_kg: number | null
   fulfillment_type: 'stock_based' | 'made_to_order'
   stitching_type: 'unstitched' | 'stitched_basic' | 'stitched_heavy' | 'custom_order' | null
   production_days: number
@@ -374,6 +379,7 @@ export function ProductCreateView({ onBack, draftId: initialDraftId }: { onBack:
         stitching_charges: g.stitching_charges,
         compare_price: g.compare_price,
         weight_grams: 0,
+        weight_kg: g.weight_kg ?? null,
         fulfillment_type: g.fulfillment_type as 'stock_based' | 'made_to_order',
         stitching_type: g.stitching_type as VariantDraft['stitching_type'],
         production_days: g.production_days,
@@ -479,6 +485,9 @@ export function ProductCreateView({ onBack, draftId: initialDraftId }: { onBack:
                 track_inventory:
                   existing?.track_inventory ??
                   c.suggested_fulfillment_type === 'stock_based',
+                // Weight (kg) — default null (not set); preserved for existing.
+                weight_kg: existing?.weight_kg ?? null,
+                weight_synced_with_parent: existing?.weight_synced_with_parent ?? true,
               }
             })
           })
@@ -546,6 +555,7 @@ export function ProductCreateView({ onBack, draftId: initialDraftId }: { onBack:
         stitching_charges: Number(v.stitching_charges) || 0,
         compare_price: v.compare_price ?? undefined,
         weight_grams: Number(v.weight_grams) || 0,
+        weight_kg: v.weight_kg ?? undefined,
         fulfillment_type: v.fulfillment_type,
         stitching_type: v.stitching_type ?? undefined,
         production_days: Number(v.production_days) || 0,
@@ -1393,6 +1403,10 @@ function SimpleVariantForm({
           <Label>Weight (grams)</Label>
           <Input type="number" min="0" step="1" value={value.weight_grams || ''} onChange={(e) => set('weight_grams', Number(e.target.value))} placeholder="0" />
         </div>
+        <div className="space-y-1.5">
+          <Label>Weight (kg)</Label>
+          <Input type="number" min="0" step="0.001" value={value.weight_kg ?? ''} onChange={(e) => set('weight_kg', e.target.value ? Number(e.target.value) : null)} placeholder="0.000" />
+        </div>
       </div>
 
       <div className="grid sm:grid-cols-2 gap-4">
@@ -1802,6 +1816,18 @@ function RegularVariantBuilder({
                   value={v.sale_price || ''}
                   onChange={(e) => update(i, { sale_price: Number(e.target.value) })}
                   placeholder="0.00"
+                  className="h-8 text-sm"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Weight (kg)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.001"
+                  value={v.weight_kg ?? ''}
+                  onChange={(e) => update(i, { weight_kg: e.target.value ? Number(e.target.value) : null })}
+                  placeholder="0.000"
                   className="h-8 text-sm"
                 />
               </div>
@@ -2225,6 +2251,7 @@ function blankSimpleVariant(): VariantDraft {
     stitching_charges: 0,
     compare_price: null,
     weight_grams: 0,
+    weight_kg: null,
     fulfillment_type: 'stock_based',
     stitching_type: null,
     production_days: 0,
@@ -2248,6 +2275,7 @@ function blankRegularVariant(n: number): VariantDraft {
     stitching_charges: 0,
     compare_price: null,
     weight_grams: 0,
+    weight_kg: null,
     fulfillment_type: 'stock_based',
     stitching_type: null,
     production_days: 0,

@@ -235,6 +235,7 @@ export async function POST(req: Request) {
           attributeValues: JSON.stringify(v.attribute_values),
           costPrice: v.cost_price,
           weightGrams: v.weight_grams,
+          weightKg: v.weight_kg ?? null,
           fulfillmentType,
           stitchingType: v.stitching_type ?? null,
           stitchingCharges: v.stitching_charges,

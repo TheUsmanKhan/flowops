@@ -73,6 +73,9 @@ export interface WizardGroupableVariant {
   fulfillment_type: string
   is_active: boolean
   is_default: boolean
+  // Weight tracking (kg) — mirrors cost_price cascade pattern
+  weight_kg?: number | null
+  weight_synced_with_parent?: boolean
 }
 
 interface Props<T extends WizardGroupableVariant> {
@@ -217,6 +220,7 @@ function GroupCard<T extends WizardGroupableVariant>({
   const firstSyncedCost = group.children.find((c) => c.cost_price_synced_with_parent)
   const firstSyncedSale = group.children.find((c) => c.sale_price_synced_with_parent)
   const firstSyncedCompare = group.children.find((c) => c.compare_price_synced_with_parent)
+  const firstSyncedWeight = group.children.find((c) => c.weight_synced_with_parent)
   const [parentCost, setParentCost] = useState(
     String(firstSyncedCost?.cost_price ?? group.children[0]?.cost_price ?? 0),
   )
@@ -230,6 +234,13 @@ function GroupCard<T extends WizardGroupableVariant>({
         ? String(group.children[0].compare_price)
         : '',
   )
+  const [parentWeight, setParentWeight] = useState(
+    firstSyncedWeight?.weight_kg != null
+      ? String(firstSyncedWeight.weight_kg)
+      : group.children[0]?.weight_kg != null
+        ? String(group.children[0].weight_kg)
+        : '',
+  )
 
   // Re-init when the group identity changes (different children)
   const groupKey = group.children.map((c) => c.sku).join(',')
@@ -240,6 +251,7 @@ function GroupCard<T extends WizardGroupableVariant>({
       const sc = group.children.find((c) => c.cost_price_synced_with_parent)
       const ss = group.children.find((c) => c.sale_price_synced_with_parent)
       const sp = group.children.find((c) => c.compare_price_synced_with_parent)
+      const sw = group.children.find((c) => c.weight_synced_with_parent)
       setParentCost(String(sc?.cost_price ?? group.children[0]?.cost_price ?? 0))
       setParentSale(String(ss?.sale_price ?? group.children[0]?.sale_price ?? 0))
       setParentCompare(
@@ -247,6 +259,13 @@ function GroupCard<T extends WizardGroupableVariant>({
           ? String(sp.compare_price)
           : group.children[0]?.compare_price != null
             ? String(group.children[0].compare_price)
+            : '',
+      )
+      setParentWeight(
+        sw?.weight_kg != null
+          ? String(sw.weight_kg)
+          : group.children[0]?.weight_kg != null
+            ? String(group.children[0].weight_kg)
             : '',
       )
     }
@@ -267,6 +286,7 @@ function GroupCard<T extends WizardGroupableVariant>({
     const cost = Number(parentCost)
     const sale = Number(parentSale)
     const compare = parentCompare ? Number(parentCompare) : null
+    const weight = parentWeight ? Number(parentWeight) : null
 
     if (isNaN(cost) || cost < 0) {
       toast.error('Enter a valid cost price')
@@ -274,6 +294,10 @@ function GroupCard<T extends WizardGroupableVariant>({
     }
     if (isNaN(sale) || sale < 0) {
       toast.error('Enter a valid sale price')
+      return
+    }
+    if (parentWeight && (isNaN(weight as number) || (weight as number) < 0)) {
+      toast.error('Enter a valid weight')
       return
     }
 
@@ -293,6 +317,10 @@ function GroupCard<T extends WizardGroupableVariant>({
       if (v.compare_price_synced_with_parent) {
         ;(patch as Record<string, unknown>).compare_price = compare
       }
+      // Weight cascades to weight-synced children only (only if a weight was entered)
+      if (v.weight_synced_with_parent && parentWeight) {
+        ;(patch as Record<string, unknown>).weight_kg = weight
+      }
       return Object.keys(patch).length > 0 ? { ...v, ...patch } : v
     })
     onVariantsChange(updated)
@@ -300,8 +328,9 @@ function GroupCard<T extends WizardGroupableVariant>({
     const costCount = group.children.filter((c) => c.cost_price_synced_with_parent).length
     const saleCount = group.children.filter((c) => c.sale_price_synced_with_parent).length
     const compareCount = group.children.filter((c) => c.compare_price_synced_with_parent).length
+    const weightCount = parentWeight ? group.children.filter((c) => c.weight_synced_with_parent).length : 0
     toast.success(
-      `Applied to group — Cost: ${costCount}, Sale: ${saleCount}, Compare: ${compareCount} variant(s)`,
+      `Applied to group — Cost: ${costCount}, Sale: ${saleCount}, Compare: ${compareCount}${parentWeight ? `, Weight: ${weightCount}` : ''} variant(s)`,
     )
   }
 
@@ -310,17 +339,19 @@ function GroupCard<T extends WizardGroupableVariant>({
   }
 
   // Find the current synced value from siblings (for re-sync)
-  function getSyncedSiblingValue(field: 'cost_price' | 'sale_price' | 'compare_price'): number | null | undefined {
+  function getSyncedSiblingValue(field: 'cost_price' | 'sale_price' | 'compare_price' | 'weight_kg'): number | null | undefined {
     const synced = group.children.find((c) => {
       if (field === 'cost_price') return c.cost_price_synced_with_parent
       if (field === 'sale_price') return c.sale_price_synced_with_parent
-      return c.compare_price_synced_with_parent
+      if (field === 'compare_price') return c.compare_price_synced_with_parent
+      return c.weight_synced_with_parent
     })
     if (synced) return synced[field] as number | null
     // Fall back to the parent input value
     if (field === 'cost_price') return Number(parentCost)
     if (field === 'sale_price') return Number(parentSale)
-    return parentCompare ? Number(parentCompare) : null
+    if (field === 'compare_price') return parentCompare ? Number(parentCompare) : null
+    return parentWeight ? Number(parentWeight) : null
   }
 
   return (
@@ -349,14 +380,18 @@ function GroupCard<T extends WizardGroupableVariant>({
               parentCost={parentCost}
               parentSale={parentSale}
               parentCompare={parentCompare}
+              parentWeight={parentWeight}
               onCostChange={setParentCost}
               onSaleChange={setParentSale}
               onCompareChange={setParentCompare}
+              onWeightChange={setParentWeight}
               onApplyAll={applyAllToGroup}
               showCost={showCost}
               showPricing={showPricing}
+              showWeight={canEdit}
               canEditCost={canEdit}
               canEditPrice={canEdit}
+              canEditWeight={canEdit}
               applying={false}
             />
 
@@ -373,6 +408,7 @@ function GroupCard<T extends WizardGroupableVariant>({
                     <th className="px-3 py-2 font-medium text-right">Cost</th>
                     <th className="px-3 py-2 font-medium text-right">Sale</th>
                     <th className="px-3 py-2 font-medium text-right">Compare</th>
+                    <th className="px-3 py-2 font-medium text-right">Weight (kg)</th>
                     <th className="px-3 py-2 font-medium text-center">Active</th>
                     <th className="px-3 py-2 font-medium">Actions</th>
                   </tr>
@@ -411,6 +447,14 @@ function GroupCard<T extends WizardGroupableVariant>({
                         } as Partial<T>)
                         toast.success('Re-synced compare price with parent')
                       }}
+                      onResyncWeight={() => {
+                        const val = getSyncedSiblingValue('weight_kg')
+                        updateChild(child.sku, {
+                          weight_kg: val,
+                          weight_synced_with_parent: true,
+                        } as Partial<T>)
+                        toast.success(`Re-synced weight with parent${val != null ? ` (${val} kg)` : ''}`)
+                      }}
                       canResync={
                         group.children.some((c) => c.cost_price_synced_with_parent && c.sku !== child.sku) ||
                         !!firstSyncedCost
@@ -439,6 +483,7 @@ function GroupedChildRow<T extends WizardGroupableVariant>({
   onResyncCost,
   onResyncSale,
   onResyncCompare,
+  onResyncWeight,
   canResync,
 }: {
   child: T
@@ -448,11 +493,13 @@ function GroupedChildRow<T extends WizardGroupableVariant>({
   onResyncCost: () => void
   onResyncSale: () => void
   onResyncCompare: () => void
+  onResyncWeight: () => void
   canResync: boolean
 }) {
   const [costValue, setCostValue] = useState(String(child.cost_price))
   const [saleValue, setSaleValue] = useState(child.sale_price != null ? String(child.sale_price) : '')
   const [compareValue, setCompareValue] = useState(child.compare_price != null ? String(child.compare_price) : '')
+  const [weightValue, setWeightValue] = useState(child.weight_kg != null ? String(child.weight_kg) : '')
 
   // Sync local input state when the child's values change externally (e.g. after Apply to Group or re-sync)
   useEffect(() => {
@@ -464,6 +511,9 @@ function GroupedChildRow<T extends WizardGroupableVariant>({
   useEffect(() => {
     setCompareValue(child.compare_price != null ? String(child.compare_price) : '')
   }, [child.compare_price])
+  useEffect(() => {
+    setWeightValue(child.weight_kg != null ? String(child.weight_kg) : '')
+  }, [child.weight_kg])
 
   function saveCost() {
     const newCost = Number(costValue)
@@ -471,6 +521,14 @@ function GroupedChildRow<T extends WizardGroupableVariant>({
     if (newCost === child.cost_price) return
     // Override: flip synced flag to false
     onUpdate({ cost_price: newCost, cost_price_synced_with_parent: false } as Partial<T>)
+  }
+
+  function saveWeight() {
+    const newWeight = weightValue ? Number(weightValue) : null
+    if (weightValue && (isNaN(newWeight as number) || (newWeight as number) < 0)) return
+    if (newWeight === child.weight_kg) return
+    // Override: flip synced flag to false
+    onUpdate({ weight_kg: newWeight, weight_synced_with_parent: false } as Partial<T>)
   }
 
   function saveSale() {
@@ -587,6 +645,26 @@ function GroupedChildRow<T extends WizardGroupableVariant>({
           <SyncIndicator synced={child.compare_price_synced_with_parent} />
         </div>
       </td>
+      {/* Weight (kg) with sync indicator */}
+      <td className="px-3 py-2">
+        <div className="flex items-center gap-1 justify-end">
+          {canEdit ? (
+            <Input
+              type="number"
+              min="0"
+              step="0.001"
+              value={weightValue}
+              onChange={(e) => setWeightValue(e.target.value)}
+              onBlur={saveWeight}
+              className="h-7 w-20 text-xs text-right"
+              placeholder="—"
+            />
+          ) : (
+            <span className="text-xs text-muted-foreground">{child.weight_kg ?? '—'}</span>
+          )}
+          <SyncIndicator synced={child.weight_synced_with_parent ?? true} />
+        </div>
+      </td>
       <td className="px-3 py-2 text-center">
         <Switch checked={child.is_active} onCheckedChange={toggleActive} disabled={!canEdit} />
       </td>
@@ -614,6 +692,14 @@ function GroupedChildRow<T extends WizardGroupableVariant>({
               onClick={onResyncCompare}
               disabled={!canResync}
               title={canResync ? 'Re-sync compare price with parent' : 'No synced siblings to sync from yet'}
+            />
+          )}
+          {canEdit && !(child.weight_synced_with_parent ?? true) && (
+            <ResyncButton
+              label="Wt"
+              onClick={onResyncWeight}
+              disabled={!canResync}
+              title={canResync ? 'Re-sync weight with parent' : 'No synced siblings to sync from yet'}
             />
           )}
         </div>
@@ -678,6 +764,7 @@ function FlatVariantTable<T extends WizardGroupableVariant>({
               <th className="px-3 py-2 font-medium">Cost</th>
               <th className="px-3 py-2 font-medium">Fulfillment</th>
               <th className="px-3 py-2 font-medium">Sale price</th>
+              <th className="px-3 py-2 font-medium">Weight (kg)</th>
               <th className="px-3 py-2 font-medium text-center">Active</th>
             </tr>
           </thead>
@@ -760,6 +847,18 @@ function FlatChildRow<T extends WizardGroupableVariant>({
           onChange={(e) => onUpdate({ sale_price: Number(e.target.value) } as Partial<T>)}
           className="h-8 w-24 text-xs"
           disabled={!canEdit}
+        />
+      </td>
+      <td className="px-3 py-2">
+        <Input
+          type="number"
+          min="0"
+          step="0.001"
+          value={variant.weight_kg ?? ''}
+          onChange={(e) => onUpdate({ weight_kg: e.target.value ? Number(e.target.value) : null, weight_synced_with_parent: false } as Partial<T>)}
+          className="h-8 w-20 text-xs"
+          disabled={!canEdit}
+          placeholder="—"
         />
       </td>
       <td className="px-3 py-2 text-center">

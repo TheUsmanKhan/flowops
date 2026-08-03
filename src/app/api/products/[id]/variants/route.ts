@@ -100,6 +100,7 @@ export async function POST(
           attributeValues: JSON.stringify(parsed.attribute_values),
           costPrice,
           weightGrams: parsed.weight_grams,
+          weightKg: parsed.weight_kg ?? null,
           fulfillmentType,
           stitchingType: parsed.stitching_type ?? null,
           stitchingCharges: parsed.stitching_charges,

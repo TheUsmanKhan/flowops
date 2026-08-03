@@ -59,6 +59,7 @@ export const variantSchema = z
     stitching_charges: z.number().min(0).default(0),
     compare_price: z.number().min(0).optional(),
     weight_grams: z.number().int().min(0).default(0),
+    weight_kg: z.number().min(0).optional().nullable(),
     dimensions: z
       .object({
         length_cm: z.number().min(0).optional(),

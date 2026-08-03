@@ -606,6 +606,13 @@ model OrgProductVariant {
   // Sprint 10 — Parent-child pricing sync flag
   costPriceSyncedWithParent Boolean @default(true) // TRUE = follows parent group cost; FALSE = manually overridden
 
+  // Weight tracking (KG, 3 decimal precision). Nullable so existing variants
+  // remain NULL until manually set. Mirrors costPriceSyncedWithParent for the
+  // parent-child cascade/override/re-sync pattern. Consumed by future courier
+  // booking logic (Overland vs Normal order type).
+  weightKg                  Decimal? @db.Decimal(6,3)
+  weightSyncedWithParent    Boolean  @default(true)
+
   createdById     String?
   createdBy       Employee? @relation("VariantCreator", fields: [createdById], references: [id])
   createdAt       DateTime @default(now())

@@ -117,6 +117,8 @@ export async function GET(
           salePriceSyncedWithParent: item.pricing?.salePriceSyncedWithParent ?? true,
           comparePriceSyncedWithParent: item.pricing?.comparePriceSyncedWithParent ?? true,
           pricingId: item.pricing?.id ?? null,
+          weightKg: item.dbVariant.weightKg ? Number(item.dbVariant.weightKg) : null,
+          weightSyncedWithParent: item.dbVariant.weightSyncedWithParent,
         })),
       })),
     })

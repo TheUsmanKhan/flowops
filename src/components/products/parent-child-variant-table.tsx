@@ -65,6 +65,9 @@ interface ChildVariant {
   salePriceSyncedWithParent: boolean
   comparePriceSyncedWithParent: boolean
   pricingId: string | null
+  // Weight tracking (kg) — mirrors costPrice/costPriceSyncedWithParent pattern
+  weightKg?: number | null
+  weightSyncedWithParent?: boolean
   // Edit dialog fields
   weightGrams?: number
   stitchingCharges?: number
@@ -348,28 +351,34 @@ function GroupCard({
   const [parentCost, setParentCost] = useState('')
   const [parentSale, setParentSale] = useState('')
   const [parentCompare, setParentCompare] = useState('')
+  const [parentWeight, setParentWeight] = useState('')
   const [applying, setApplying] = useState(false)
 
   const firstChild = group.children[0]
   if (parentCost === '' && firstChild) setParentCost(String(firstChild.costPrice))
   if (parentSale === '' && firstChild?.salePrice != null) setParentSale(String(firstChild.salePrice))
   if (parentCompare === '' && firstChild?.comparePrice != null) setParentCompare(String(firstChild.comparePrice))
+  if (parentWeight === '' && firstChild?.weightKg != null) setParentWeight(String(firstChild.weightKg))
 
   // Bug 1 fix: ONE handler cascades ALL THREE fields (cost, sale, compare).
   // Calls both server endpoints (cost + sale-price) in sequence, then
   // invalidates the cache once. Each endpoint only updates children whose
   // relevant synced flag is true, so the three flags remain INDEPENDENT.
+  // Weight cascade added — calls the weight endpoint in the same sequence.
   async function applyAllToGroup() {
     const cost = Number(parentCost)
     const sale = Number(parentSale)
     const compare = parentCompare ? Number(parentCompare) : null
+    const weight = parentWeight ? Number(parentWeight) : null
 
     if (isNaN(cost) || cost < 0) { toast.error('Enter a valid cost price'); return }
     if (isNaN(sale) || sale < 0) { toast.error('Enter a valid sale price'); return }
+    if (parentWeight && (isNaN(weight as number) || (weight as number) < 0)) { toast.error('Enter a valid weight'); return }
 
     setApplying(true)
     let costCount = 0
     let saleCount = 0
+    let weightCount = 0
     try {
       // Cascade cost to cost-synced children
       const costRes = await api.post<{ success: boolean; updated_count: number }>(
@@ -385,7 +394,16 @@ function GroupCard({
       )
       saleCount = saleRes.updated_count
 
-      toast.success(`Applied to group — Cost: ${costCount}, Sale+Compare: ${saleCount} variant(s)`)
+      // Cascade weight to weight-synced children (only if a weight was entered)
+      if (parentWeight && weight != null) {
+        const weightRes = await api.post<{ success: boolean; updated_count: number }>(
+          `/api/products/${productId}/variant-groups/dummy/weight`,
+          { weightKg: weight, parent_attribute_name: parentAttributeName, parent_value: group.parentValue },
+        )
+        weightCount = weightRes.updated_count
+      }
+
+      toast.success(`Applied to group — Cost: ${costCount}, Sale+Compare: ${saleCount}${parentWeight ? `, Weight: ${weightCount}` : ''} variant(s)`)
       queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
       queryClient.invalidateQueries({ queryKey: ['product', productId] })
     } catch (err) {
@@ -412,20 +430,24 @@ function GroupCard({
       {expanded && (
         <CardContent className="space-y-4">
           {/* Parent group inputs — uses the shared ParentGroupInputs component
-              with a single "Apply to Group" button that cascades ALL THREE
-              fields (cost, sale, compare) independently. Bug 1 fix. */}
+              with a single "Apply to Group" button that cascades ALL fields
+              (cost, sale, compare, weight) independently. Bug 1 fix + weight extension. */}
           <ParentGroupInputs
             parentCost={parentCost}
             parentSale={parentSale}
             parentCompare={parentCompare}
+            parentWeight={parentWeight}
             onCostChange={setParentCost}
             onSaleChange={setParentSale}
             onCompareChange={setParentCompare}
+            onWeightChange={setParentWeight}
             onApplyAll={applyAllToGroup}
             showCost={showCost}
             showPricing={showPricing}
+            showWeight={canEditCost}
             canEditCost={canEditCost}
             canEditPrice={canEditPrice}
+            canEditWeight={canEditCost}
             applying={applying}
           />
 
@@ -441,6 +463,7 @@ function GroupCard({
                   {showCost && <th className="px-3 py-2 font-medium text-right">Cost</th>}
                   {showPricing && <th className="px-3 py-2 font-medium text-right">Sale</th>}
                   {showPricing && <th className="px-3 py-2 font-medium text-right">Compare</th>}
+                  {canEditCost && <th className="px-3 py-2 font-medium text-right">Weight (kg)</th>}
                   <th className="px-3 py-2 font-medium text-center">Active</th>
                   <th className="px-3 py-2 font-medium">Actions</th>
                 </tr>
@@ -499,6 +522,7 @@ function ChildRow({
   const [costValue, setCostValue] = useState(String(child.costPrice))
   const [saleValue, setSaleValue] = useState(child.salePrice != null ? String(child.salePrice) : '')
   const [compareValue, setCompareValue] = useState(child.comparePrice != null ? String(child.comparePrice) : '')
+  const [weightValue, setWeightValue] = useState(child.weightKg != null ? String(child.weightKg) : '')
   const [saving, setSaving] = useState(false)
   const [toggling, setToggling] = useState(false)
 
@@ -515,6 +539,34 @@ function ChildRow({
     } catch (err) {
       toast.error(err instanceof FetchError ? err.message : 'Failed to override cost')
       setCostValue(String(child.costPrice))
+    } finally { setSaving(false) }
+  }
+
+  async function saveWeight() {
+    const newWeight = weightValue ? Number(weightValue) : null
+    if (weightValue && (isNaN(newWeight as number) || (newWeight as number) < 0)) return
+    if (newWeight === child.weightKg) return
+    setSaving(true)
+    try {
+      await api.post(`/api/products/${productId}/variants/${child.variantId}/override-weight`, { weightKg: newWeight })
+      toast.success('Weight overridden — no longer synced with parent')
+      queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
+      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+    } catch (err) {
+      toast.error(err instanceof FetchError ? err.message : 'Failed to override weight')
+      setWeightValue(child.weightKg != null ? String(child.weightKg) : '')
+    } finally { setSaving(false) }
+  }
+
+  async function resyncWeight() {
+    setSaving(true)
+    try {
+      const res = await api.post<{ success: boolean; weightKg: number | null }>(`/api/products/${productId}/variants/${child.variantId}/resync-weight`)
+      toast.success(`Re-synced weight with parent${res.weightKg != null ? ` (${res.weightKg} kg)` : ''}`)
+      queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
+      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+    } catch (err) {
+      toast.error(err instanceof FetchError ? err.message : 'Failed to re-sync')
     } finally { setSaving(false) }
   }
 
@@ -614,6 +666,27 @@ function ChildRow({
           </div>
         </td>
       )}
+      {canEditCost && (
+        <td className="px-3 py-2">
+          <div className="flex items-center gap-1 justify-end">
+            {canEditCost ? (
+              <Input
+                type="number"
+                min="0"
+                step="0.001"
+                value={weightValue}
+                onChange={(e) => setWeightValue(e.target.value)}
+                onBlur={saveWeight}
+                className="h-7 w-20 text-xs text-right"
+                placeholder="—"
+              />
+            ) : (
+              <span className="text-xs">{child.weightKg ?? '—'}</span>
+            )}
+            {child.weightSyncedWithParent ? <Link2 className="h-3 w-3 text-emerald-500" /> : <Unlink className="h-3 w-3 text-amber-500" />}
+          </div>
+        </td>
+      )}
       <td className="px-3 py-2 text-center">
         {canEditCost ? (
           <Switch checked={child.isActive} onCheckedChange={toggleActive} disabled={toggling} />
@@ -637,6 +710,11 @@ function ChildRow({
           {showPricing && !child.salePriceSyncedWithParent && canEditPrice && (
             <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px]" onClick={() => resyncPrice('sale_price')} disabled={saving} title="Re-sync sale price with parent">
               <RefreshCw className="h-3 w-3" /> Price
+            </Button>
+          )}
+          {canEditCost && !child.weightSyncedWithParent && (
+            <Button size="sm" variant="ghost" className="h-6 px-2 text-[10px]" onClick={resyncWeight} disabled={saving} title="Re-sync weight with parent">
+              <RefreshCw className="h-3 w-3" /> Wt
             </Button>
           )}
         </div>
@@ -664,6 +742,7 @@ function VariantEditDialog({
     barcode: variant.barcode ?? '',
     costPrice: String(variant.costPrice),
     weightGrams: String(variant.weightGrams ?? 0),
+    weightKg: variant.weightKg != null ? String(variant.weightKg) : '',
     stitchingCharges: String(variant.stitchingCharges ?? 0),
     productionDays: String(variant.productionDays ?? 0),
     isTaxable: variant.isTaxable ?? true,
@@ -686,6 +765,10 @@ function VariantEditDialog({
       if (form.barcode !== (variant.barcode ?? '')) patch.barcode = form.barcode
       if (Number(form.costPrice) !== variant.costPrice) patch.cost_price = Number(form.costPrice)
       if (Number(form.weightGrams) !== (variant.weightGrams ?? 0)) patch.weight_grams = Number(form.weightGrams)
+      // Weight (kg) — null when empty, otherwise the number
+      const newWeightKg = form.weightKg === '' ? null : Number(form.weightKg)
+      const oldWeightKg = variant.weightKg ?? null
+      if (newWeightKg !== oldWeightKg) patch.weight_kg = newWeightKg
       if (Number(form.stitchingCharges) !== (variant.stitchingCharges ?? 0)) patch.stitching_charges = Number(form.stitchingCharges)
       if (Number(form.productionDays) !== (variant.productionDays ?? 0)) patch.production_days = Number(form.productionDays)
       if (form.isTaxable !== (variant.isTaxable ?? true)) patch.is_taxable = form.isTaxable
@@ -739,6 +822,10 @@ function VariantEditDialog({
           <div className="space-y-1.5">
             <Label className="text-xs">Weight (grams)</Label>
             <Input type="number" min="0" step="1" value={form.weightGrams} onChange={(e) => setForm({ ...form, weightGrams: e.target.value })} className="h-9 text-sm" />
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs">Weight (kg)</Label>
+            <Input type="number" min="0" step="0.001" value={form.weightKg} onChange={(e) => setForm({ ...form, weightKg: e.target.value })} className="h-9 text-sm" placeholder="0.000" />
           </div>
           <div className="space-y-1.5">
             <Label className="text-xs">Stitching Charges</Label>
@@ -815,6 +902,7 @@ function FlatVariantTable({
                 {showCost && <th className="px-3 py-2 font-medium text-right">Cost</th>}
                 {showPricing && <th className="px-3 py-2 font-medium text-right">Sale</th>}
                 {showPricing && <th className="px-3 py-2 font-medium text-right">Compare</th>}
+                {canEditCost && <th className="px-3 py-2 font-medium text-right">Weight (kg)</th>}
                 <th className="px-3 py-2 font-medium text-center">Active</th>
                 {canEditCost && <th className="px-3 py-2 font-medium">Actions</th>}
               </tr>
@@ -872,6 +960,7 @@ function FlatRow({
   const [costValue, setCostValue] = useState(String(child.costPrice))
   const [saleValue, setSaleValue] = useState(child.salePrice != null ? String(child.salePrice) : '')
   const [compareValue, setCompareValue] = useState(child.comparePrice != null ? String(child.comparePrice) : '')
+  const [weightValue, setWeightValue] = useState(child.weightKg != null ? String(child.weightKg) : '')
   const [toggling, setToggling] = useState(false)
 
   async function saveCost() {
@@ -880,6 +969,17 @@ function FlatRow({
     try {
       await api.post(`/api/products/${productId}/variants/${child.variantId}/override-cost`, { cost_price: newCost })
       toast.success('Cost updated')
+      queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
+    } catch (err) { toast.error(err instanceof FetchError ? err.message : 'Failed') }
+  }
+
+  async function saveWeight() {
+    const newWeight = weightValue ? Number(weightValue) : null
+    if (weightValue && (isNaN(newWeight as number) || (newWeight as number) < 0)) return
+    if (newWeight === child.weightKg) return
+    try {
+      await api.post(`/api/products/${productId}/variants/${child.variantId}/override-weight`, { weightKg: newWeight })
+      toast.success('Weight updated')
       queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
     } catch (err) { toast.error(err instanceof FetchError ? err.message : 'Failed') }
   }
@@ -933,6 +1033,24 @@ function FlatRow({
       )}
       {showPricing && (
         <td className="px-3 py-2 text-right text-xs text-muted-foreground">{child.comparePrice ?? '—'}</td>
+      )}
+      {canEditCost && (
+        <td className="px-3 py-2 text-right">
+          {canEditCost ? (
+            <Input
+              type="number"
+              min="0"
+              step="0.001"
+              value={weightValue}
+              onChange={(e) => setWeightValue(e.target.value)}
+              onBlur={saveWeight}
+              className="h-7 w-20 text-xs text-right"
+              placeholder="—"
+            />
+          ) : (
+            <span className="text-xs">{child.weightKg ?? '—'}</span>
+          )}
+        </td>
       )}
       <td className="px-3 py-2 text-center">
         {canEditCost ? (

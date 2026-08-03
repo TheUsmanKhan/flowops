@@ -81,6 +81,8 @@ export async function GET(
           attributeValues: JSON.parse(v.attributeValues),
           costPrice: Number(v.costPrice),
           weightGrams: v.weightGrams,
+          weightKg: v.weightKg ? Number(v.weightKg) : null,
+          weightSyncedWithParent: v.weightSyncedWithParent,
           fulfillmentType: v.fulfillmentType,
           stitchingType: v.stitchingType,
           stitchingCharges: Number(v.stitchingCharges),

@@ -125,28 +125,36 @@ export function ParentGroupInputs({
   parentCost,
   parentSale,
   parentCompare,
+  parentWeight,
   onCostChange,
   onSaleChange,
   onCompareChange,
+  onWeightChange,
   onApplyAll,
   showCost,
   showPricing,
+  showWeight,
   canEditCost,
   canEditPrice,
+  canEditWeight,
   applying,
 }: {
   parentCost: string
   parentSale: string
   parentCompare: string
+  parentWeight?: string
   onCostChange: (v: string) => void
   onSaleChange: (v: string) => void
   onCompareChange: (v: string) => void
-  /** Single handler that cascades cost + sale + compare to synced children. */
+  onWeightChange?: (v: string) => void
+  /** Single handler that cascades cost + sale + compare (+ weight if shown) to synced children. */
   onApplyAll: () => void
   showCost: boolean
   showPricing: boolean
+  showWeight?: boolean
   canEditCost: boolean
   canEditPrice: boolean
+  canEditWeight?: boolean
   applying: boolean
 }) {
   return (
@@ -197,6 +205,20 @@ export function ParentGroupInputs({
             </div>
           </>
         )}
+        {showWeight && canEditWeight && (
+          <div className="space-y-1">
+            <Label className="text-xs">Weight (kg)</Label>
+            <Input
+              type="number"
+              min="0"
+              step="0.001"
+              value={parentWeight ?? ''}
+              onChange={(e) => onWeightChange?.(e.target.value)}
+              className="h-8 w-24 text-sm"
+              placeholder="0.000"
+            />
+          </div>
+        )}
         <Button
           size="sm"
           variant="outline"
@@ -213,6 +235,46 @@ export function ParentGroupInputs({
         </Button>
       </div>
     </div>
+  )
+}
+
+// ──────────────────────────────────────────────────────────────
+// Weight cell — weight (kg) with sync indicator (mirrors CostCell)
+// ──────────────────────────────────────────────────────────────
+
+export function WeightCell({
+  value,
+  synced,
+  canEdit,
+  onChange,
+  onSave,
+}: {
+  value: string
+  synced: boolean
+  canEdit: boolean
+  onChange: (v: string) => void
+  onSave: () => void
+}) {
+  return (
+    <td className="px-3 py-2">
+      <div className="flex items-center gap-1 justify-end">
+        {canEdit ? (
+          <Input
+            type="number"
+            min="0"
+            step="0.001"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            onBlur={onSave}
+            className="h-7 w-20 text-xs text-right"
+            placeholder="—"
+          />
+        ) : (
+          <span className="text-xs">{value || '—'}</span>
+        )}
+        <SyncIndicator synced={synced} />
+      </div>
+    </td>
   )
 }
 
