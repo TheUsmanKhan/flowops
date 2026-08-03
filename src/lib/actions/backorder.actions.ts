@@ -6,9 +6,18 @@
  * variant can now be fulfilled. Processes the FIFO queue (oldest
  * backordered_at first), reserving stock until it runs out.
  *
- * After each item is reserved, recomputes the parent order's status
+ * EXCHANGE SHIPMENT PRIORITY (migration 008): this function ALSO checks
+ * backordered exchange_shipments for the same variant. The combined queue
+ * is ordered: all isPriorityBackorder=true exchange shipments first (oldest
+ * first among them), then regular OrderItems (oldest first). This is the
+ * concrete implementation of the "exchange shipments get priority" rule.
+ *
+ * After each OrderItem is reserved, recomputes the parent order's status
  * — if all items are now 'reserved', the order flips from
  * 'partially_backordered' to 'confirmed'.
+ *
+ * After each ExchangeShipment is reserved, flips its status from 'backordered'
+ * to 'confirmed'.
  *
  * SECURITY: This is an internal function called from the purchase-order
  * receipt API route (which has its own auth guard via getWorkspace +
@@ -44,12 +53,34 @@ interface BackorderFulfillmentResult {
   }>
 }
 
+// Internal unified type for the combined priority queue
+interface QueueEntry {
+  kind: 'order_item' | 'exchange_shipment'
+  id: string
+  quantity: number
+  backorderedAt: Date
+  isPriority: boolean // exchange shipments are always priority; OrderItems are not
+  // For order_item entries:
+  orderItemId?: string
+  orderId?: string
+  flowopsOrderNumber?: string
+  companyId: string
+  organizationId: string
+  // For exchange_shipment entries:
+  exchangeShipmentId?: string
+  exchangeShipmentNumber?: string
+}
+
 /**
- * Check and fulfill backordered order_items for a specific variant+location.
- * Called after receiveAgainstPurchaseOrder() successfully adds stock.
+ * Check and fulfill backordered order_items AND exchange_shipments for a
+ * specific variant+location. Called after receiveAgainstPurchaseOrder()
+ * successfully adds stock.
  *
- * FIFO ordering: oldest backordered_at first (fairness).
- * Skips order_items belonging to cancelled orders.
+ * PRIORITY QUEUE: all isPriorityBackorder=true exchange shipments first
+ * (oldest first among them), then regular OrderItems (oldest first).
+ *
+ * Skips order_items belonging to cancelled orders and exchange_shipments
+ * with status='cancelled'.
  *
  * @param orgVariantId - The variant that just received new stock
  * @param locationId - The location where stock was received
@@ -69,8 +100,7 @@ export async function checkAndFulfillBackorders(
     }
   }
 
-  // Query backordered order_items for this variant, ordered oldest first.
-  // Skip items belonging to cancelled orders.
+  // ── Fetch backordered OrderItems (same as before) ──
   const backorderedItems = await db.orderItem.findMany({
     where: {
       orgVariantId,
@@ -90,7 +120,70 @@ export async function checkAndFulfillBackorders(
     orderBy: { backorderedAt: 'asc' },
   })
 
-  if (backorderedItems.length === 0) {
+  // ── Fetch backordered ExchangeShipments (NEW — migration 008) ──
+  // Only stock_based exchange shipments can be backordered (MTO uses production)
+  const backorderedShipments = await db.exchangeShipment.findMany({
+    where: {
+      newOrgVariantId: orgVariantId,
+      status: 'backordered',
+      fulfillmentTypeSnapshot: 'stock_based',
+    },
+    select: {
+      id: true,
+      exchangeShipmentNumber: true,
+      quantity: true,
+      backorderedAt: true,
+      isPriorityBackorder: true,
+      companyId: true,
+      organizationId: true,
+      createdAt: true,
+    },
+    orderBy: { backorderedAt: 'asc' },
+  })
+
+  // ── Build the combined priority queue ──
+  // Priority: isPriorityBackorder=true first (oldest first), then regular (oldest first)
+  const queue: QueueEntry[] = []
+
+  // Add exchange shipments (all are isPriorityBackorder=true by default)
+  for (const s of backorderedShipments) {
+    queue.push({
+      kind: 'exchange_shipment',
+      id: s.id,
+      quantity: s.quantity,
+      backorderedAt: s.backorderedAt ?? s.createdAt ?? new Date(),
+      isPriority: s.isPriorityBackorder, // true by default
+      companyId: s.companyId,
+      organizationId: s.organizationId,
+      exchangeShipmentId: s.id,
+      exchangeShipmentNumber: s.exchangeShipmentNumber,
+    })
+  }
+
+  // Add order items (regular priority — isPriority=false)
+  for (const item of backorderedItems) {
+    queue.push({
+      kind: 'order_item',
+      id: item.id,
+      quantity: item.quantity,
+      backorderedAt: item.backorderedAt ?? new Date(),
+      isPriority: false,
+      companyId: item.order.companyId,
+      organizationId: item.order.organizationId,
+      orderItemId: item.id,
+      orderId: item.order.id,
+      flowopsOrderNumber: item.order.flowopsOrderNumber,
+    })
+  }
+
+  // Sort: priority items first, then by backorderedAt ascending (oldest first)
+  queue.sort((a, b) => {
+    if (a.isPriority && !b.isPriority) return -1
+    if (!a.isPriority && b.isPriority) return 1
+    return a.backorderedAt.getTime() - b.backorderedAt.getTime()
+  })
+
+  if (queue.length === 0) {
     return { success: true, fulfilledCount: 0, remainingBackordered: 0, results: [] }
   }
 
@@ -105,11 +198,11 @@ export async function checkAndFulfillBackorders(
     return {
       success: true,
       fulfilledCount: 0,
-      remainingBackordered: backorderedItems.length,
-      results: backorderedItems.map((item) => ({
-        orderItemId: item.id,
-        orderId: item.order.id,
-        flowopsOrderNumber: item.order.flowopsOrderNumber,
+      remainingBackordered: queue.length,
+      results: queue.map((entry) => ({
+        orderItemId: entry.orderItemId ?? entry.exchangeShipmentId ?? entry.id,
+        orderId: entry.orderId ?? '',
+        flowopsOrderNumber: entry.flowopsOrderNumber ?? entry.exchangeShipmentNumber ?? '',
         outcome: 'still_backordered' as const,
         reason: 'No inventory pool at this location',
       })),
@@ -120,96 +213,145 @@ export async function checkAndFulfillBackorders(
   let fulfilledCount = 0
   let remainingBackordered = 0
 
-  for (const item of backorderedItems) {
+  for (const entry of queue) {
     const available = pool.onHand - pool.reserved
 
-    if (available >= item.quantity) {
+    if (available >= entry.quantity) {
       // Enough stock to fulfill this backorder
       const reserveResult = await reserveStockForOrder({
         orgVariantId,
         locationId,
-        organizationId: item.order.organizationId,
-        companyId: item.order.companyId,
-        quantity: item.quantity,
-        orderId: item.order.id,
+        organizationId: entry.organizationId,
+        companyId: entry.companyId,
+        quantity: entry.quantity,
+        orderId: entry.orderId, // undefined for exchange_shipments — that's OK
       })
 
       if (reserveResult.success) {
-        await db.orderItem.update({
-          where: { id: item.id },
-          data: {
-            fulfillmentStatus: 'reserved',
-            fulfilledAt: new Date(),
-            reservedLocationId: locationId,
-          },
-        })
-
-        await insertAuditLog({
-          action: 'order.backorder_fulfilled',
-          entityType: 'order_item',
-          entityId: item.id,
-          companyId: item.order.companyId,
-          organizationId: item.order.organizationId,
-          newValues: {
-            flowopsOrderNumber: item.order.flowopsOrderNumber,
-            quantity: item.quantity,
-            locationId,
-          },
-        })
-
-        const daysWaited = item.backorderedAt
-          ? Math.round((Date.now() - new Date(item.backorderedAt).getTime()) / (1000 * 60 * 60 * 24))
-          : 0
-        await insertMetricEvent({
-          companyId: item.order.companyId,
-          entityType: 'product',
-          entityId: orgVariantId,
-          metricKey: 'order.backorder_fulfilled',
-          numericValue: item.quantity,
-          dimensions: { order_id: item.order.id, days_waited: daysWaited },
-        }).catch(() => {})
-
-        // Recompute the parent order's status
-        await db.$queryRaw`SELECT recompute_order_status(${item.order.id}::TEXT)`
-
-        // Check if the order should flip from 'partially_backordered' to 'confirmed'
-        const remainingBackorderedItems = await db.orderItem.count({
-          where: {
-            orderId: item.order.id,
-            fulfillmentStatus: 'backordered',
-          },
-        })
-
-        if (remainingBackorderedItems === 0) {
-          // All items are now reserved — flip order to 'confirmed'
-          await db.order.update({
-            where: { id: item.order.id },
-            data: { status: 'confirmed' },
+        // Update the appropriate record based on kind
+        if (entry.kind === 'order_item' && entry.orderItemId) {
+          await db.orderItem.update({
+            where: { id: entry.orderItemId },
+            data: {
+              fulfillmentStatus: 'reserved',
+              fulfilledAt: new Date(),
+              reservedLocationId: locationId,
+            },
           })
 
           await insertAuditLog({
-            action: 'order.all_backorders_fulfilled',
-            entityType: 'order',
-            entityId: item.order.id,
-            companyId: item.order.companyId,
-            organizationId: item.order.organizationId,
-            newValues: { status: 'confirmed' },
+            action: 'order.backorder_fulfilled',
+            entityType: 'order_item',
+            entityId: entry.orderItemId,
+            companyId: entry.companyId,
+            organizationId: entry.organizationId,
+            newValues: {
+              flowopsOrderNumber: entry.flowopsOrderNumber,
+              quantity: entry.quantity,
+              locationId,
+            },
+          })
+
+          const daysWaited = Math.round(
+            (Date.now() - entry.backorderedAt.getTime()) / (1000 * 60 * 60 * 24),
+          )
+          await insertMetricEvent({
+            companyId: entry.companyId,
+            entityType: 'product',
+            entityId: orgVariantId,
+            metricKey: 'order.backorder_fulfilled',
+            numericValue: entry.quantity,
+            dimensions: { order_id: entry.orderId, days_waited: daysWaited },
+          }).catch(() => {})
+
+          // Recompute the parent order's status
+          if (entry.orderId) {
+            await db.$queryRaw`SELECT recompute_order_status(${entry.orderId}::TEXT)`
+
+            const remainingBackorderedItems = await db.orderItem.count({
+              where: {
+                orderId: entry.orderId,
+                fulfillmentStatus: 'backordered',
+              },
+            })
+
+            if (remainingBackorderedItems === 0) {
+              await db.order.update({
+                where: { id: entry.orderId },
+                data: { status: 'confirmed' },
+              })
+
+              await insertAuditLog({
+                action: 'order.all_backorders_fulfilled',
+                entityType: 'order',
+                entityId: entry.orderId,
+                companyId: entry.companyId,
+                organizationId: entry.organizationId,
+                newValues: { status: 'confirmed' },
+              })
+            }
+          }
+
+          results.push({
+            orderItemId: entry.orderItemId,
+            orderId: entry.orderId ?? '',
+            flowopsOrderNumber: entry.flowopsOrderNumber ?? '',
+            outcome: 'reserved',
+          })
+        } else if (entry.kind === 'exchange_shipment' && entry.exchangeShipmentId) {
+          // Flip the exchange shipment from 'backordered' to 'confirmed'
+          await db.exchangeShipment.update({
+            where: { id: entry.exchangeShipmentId },
+            data: {
+              status: 'confirmed',
+              backorderedAt: null,
+            },
+          })
+
+          await insertAuditLog({
+            action: 'exchange_shipment.backorder_fulfilled',
+            entityType: 'exchange_shipment',
+            entityId: entry.exchangeShipmentId,
+            companyId: entry.companyId,
+            organizationId: entry.organizationId,
+            newValues: {
+              exchangeShipmentNumber: entry.exchangeShipmentNumber,
+              quantity: entry.quantity,
+              locationId,
+              status: 'confirmed',
+            },
+          })
+
+          const daysWaited = Math.round(
+            (Date.now() - entry.backorderedAt.getTime()) / (1000 * 60 * 60 * 24),
+          )
+          await insertMetricEvent({
+            companyId: entry.companyId,
+            entityType: 'exchange_shipment',
+            entityId: entry.exchangeShipmentId,
+            metricKey: 'exchange_shipment.backorder_fulfilled',
+            numericValue: entry.quantity,
+            dimensions: {
+              exchange_shipment_number: entry.exchangeShipmentNumber,
+              days_waited: daysWaited,
+            },
+          }).catch(() => {})
+
+          results.push({
+            orderItemId: entry.exchangeShipmentId, // reuse field for result shape compat
+            orderId: '',
+            flowopsOrderNumber: entry.exchangeShipmentNumber ?? '',
+            outcome: 'reserved',
           })
         }
 
-        results.push({
-          orderItemId: item.id,
-          orderId: item.order.id,
-          flowopsOrderNumber: item.order.flowopsOrderNumber,
-          outcome: 'reserved',
-        })
         fulfilledCount++
       } else {
         // Reservation failed (race condition? stock was taken by another process)
         results.push({
-          orderItemId: item.id,
-          orderId: item.order.id,
-          flowopsOrderNumber: item.order.flowopsOrderNumber,
+          orderItemId: entry.orderItemId ?? entry.exchangeShipmentId ?? entry.id,
+          orderId: entry.orderId ?? '',
+          flowopsOrderNumber: entry.flowopsOrderNumber ?? entry.exchangeShipmentNumber ?? '',
           outcome: 'still_backordered',
           reason: reserveResult.error,
         })
@@ -219,11 +361,11 @@ export async function checkAndFulfillBackorders(
     } else {
       // Not enough stock for this item — stop (FIFO: later items won't have enough either)
       results.push({
-        orderItemId: item.id,
-        orderId: item.order.id,
-        flowopsOrderNumber: item.order.flowopsOrderNumber,
+        orderItemId: entry.orderItemId ?? entry.exchangeShipmentId ?? entry.id,
+        orderId: entry.orderId ?? '',
+        flowopsOrderNumber: entry.flowopsOrderNumber ?? entry.exchangeShipmentNumber ?? '',
         outcome: 'still_backordered',
-        reason: `Available: ${available}, required: ${item.quantity}`,
+        reason: `Available: ${available}, required: ${entry.quantity}`,
       })
       remainingBackordered++
       break // FIFO — if this item can't be fulfilled, later ones can't either
@@ -231,7 +373,7 @@ export async function checkAndFulfillBackorders(
   }
 
   // Count any remaining items we didn't process
-  remainingBackordered += backorderedItems.length - fulfilledCount - results.filter((r) => r.outcome === 'still_backordered').length
+  remainingBackordered += queue.length - fulfilledCount - results.filter((r) => r.outcome === 'still_backordered').length
 
   return { success: true, fulfilledCount, remainingBackordered, results }
 }

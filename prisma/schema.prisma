@@ -107,6 +107,9 @@ model Organization {
 
   // Form Drafts back-relation (migration 005)
   formDrafts              FormDraft[]
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments       ExchangeShipment[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -180,6 +183,9 @@ model Company {
 
   // City & Address Book System back-relation (migration 007)
   cityAliases            CourierCityAlias[]
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments      ExchangeShipment[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -307,6 +313,9 @@ model Employee {
 
   // Form Drafts back-relation (migration 005)
   formDraftsCreated               FormDraft[] @relation("FormDraftCreator")
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipmentsCreated        ExchangeShipment[] @relation("ExchangeShipmentCreator")
 
   @@unique([companyId, userId])
 }
@@ -643,6 +652,9 @@ model OrgProductVariant {
 
   // Item Exchange System back-relations (migration 003)
   exchangesAsNewVariant OrderExchange[] @relation("ExchangeNewVariant")
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipmentsAsNewVariant ExchangeShipment[] @relation("ExchangeShipmentNewVariant")
 
   @@index([productId])
   @@index([organizationId, fulfillmentType])
@@ -1423,6 +1435,9 @@ model Customer {
   addresses         CustomerAddress[]
   externalIdentities CustomerExternalIdentity[]
 
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments  ExchangeShipment[] @relation("ExchangeShipmentCustomer")
+
   @@index([organizationId, isFlagged])
 }
 
@@ -1446,6 +1461,9 @@ model CustomerPhone {
   createdAt         DateTime @default(now())
 
   ordersUsedIn      Order[] @relation("OrderUsedPhone")
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments ExchangeShipment[] @relation("ExchangeShipmentShippingPhone")
 
   @@unique([organizationId, phoneNormalized])
   @@index([organizationId, phoneNormalized])
@@ -1474,6 +1492,9 @@ model CustomerAddress {
   updatedAt         DateTime @updatedAt
 
   ordersUsedIn      Order[] @relation("OrderUsedAddress")
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments ExchangeShipment[] @relation("ExchangeShipmentShippingAddress")
 
   @@index([customerId])
   @@index([organizationId])
@@ -1546,6 +1567,13 @@ model OrderExchange {
   newOrder                      Order?   @relation("ExchangeNewOrder", fields: [newOrderId], references: [id])
   newOrderItemId                String?
   newOrderItem                  OrderItem? @relation("ExchangeNewOrderItem", fields: [newOrderItemId], references: [id])
+
+  // NEW (migration 008): link to the new exchange_shipments system. An exchange
+  // can have multiple shipments over its lifecycle (e.g. if the first is
+  // cancelled and a new one is created), so this is a 1-N relation.
+  // The legacy newOrderId/newOrderItemId above remain populated only on old,
+  // pre-migration historical exchange records.
+  exchangeShipments             ExchangeShipment[] @relation("ExchangeNewShipment")
 
   exchangeMethod                String   // 'courier_replacement' | 'customer_self_return' (CHECK in SQL)
   status                        String   @default("requested") // 9 states (CHECK in SQL)
@@ -1672,6 +1700,7 @@ model CompanyIntegration {
   ordersBooked              Order[]  @relation("OrderCourierIntegration")
   companyOrderSettingsDefault CompanyOrderSetting[] @relation("CompanyOrderSettingsDefaultCourier")
   pickupAddresses           CourierPickupAddress[]
+  exchangeShipmentsBooked   ExchangeShipment[] @relation("ExchangeShipmentCourierIntegration")
 
   @@index([companyId, isActive])
   @@map("company_integrations")
@@ -1978,4 +2007,75 @@ model CourierPickupAddress {
 
   @@index([companyIntegrationId])
   @@map("courier_pickup_addresses")
+}
+
+// ============================================================================
+// Exchange Shipments System (migration 008) — Structurally separate from Order
+// ============================================================================
+// Each row is one shipment of a new variant to a customer as part of an item
+// exchange. Has its own EXCH-{YYYY}-{NNNNN} numbering, completely independent
+// from ORD-{YYYY}-{NNNNN}. Never appears in Order list views, never affects
+// updateCustomerStats(), never counts toward revenue metrics.
+model ExchangeShipment {
+  id                            String   @id @default(cuid())
+  exchangeShipmentNumber        String   @unique // EXCH-{YYYY}-{NNNNN}
+  organizationId                String
+  organization                  Organization @relation(fields: [organizationId], references: [id])
+  companyId                     String
+  company                       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Links back to the parent exchange request
+  orderExchangeId               String
+  orderExchange                 OrderExchange @relation("ExchangeNewShipment", fields: [orderExchangeId], references: [id], onDelete: Cascade)
+
+  // The new variant being shipped
+  newOrgVariantId               String
+  newOrgVariant                 OrgProductVariant @relation("ExchangeShipmentNewVariant", fields: [newOrgVariantId], references: [id])
+
+  quantity                      Int      @default(1)
+  fulfillmentTypeSnapshot       String   @default("stock_based") // stock_based | made_to_order
+
+  // Customer reference (always existing — createCustomer() is NEVER called here)
+  customerId                    String
+  customer                      Customer @relation("ExchangeShipmentCustomer", fields: [customerId], references: [id])
+
+  // CRM address/phone FKs (NOT snapshot copies — living references)
+  shippingAddressId             String?
+  shippingAddress               CustomerAddress? @relation("ExchangeShipmentShippingAddress", fields: [shippingAddressId], references: [id], onDelete: SetNull)
+  shippingPhoneId               String?
+  shippingPhone                 CustomerPhone? @relation("ExchangeShipmentShippingPhone", fields: [shippingPhoneId], references: [id], onDelete: SetNull)
+
+  shippingCityOverride          String?
+
+  // Simplified lifecycle (6 states vs Order's 9)
+  status                        String   @default("confirmed") // pending | confirmed | backordered | dispatched | delivered | cancelled (CHECK in SQL)
+  isPriorityBackorder           Boolean  @default(true)
+  backorderedAt                 DateTime?
+
+  invoiceAmount                 Decimal  @default(0) @db.Decimal(14, 2)
+
+  // Courier integration (nullable until courier chosen)
+  courierCompanyIntegrationId   String?
+  courierCompanyIntegration     CompanyIntegration? @relation("ExchangeShipmentCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  trackingNumber                String?
+  courierSubStatus              String?
+  needsShipperAdvice            Boolean  @default(false)
+  unrecognizedCourierStatus     Boolean  @default(false)
+  courierCityStatus             String   @default("not_applicable") // matched | unresolved | not_applicable (CHECK in SQL)
+
+  // Lifecycle timestamps
+  confirmedAt                   DateTime?
+  dispatchedAt                  DateTime?
+  deliveredAt                   DateTime?
+  cancelledAt                   DateTime?
+
+  createdBy                     String?
+  createdByEmployee             Employee? @relation("ExchangeShipmentCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  createdAt                     DateTime @default(now())
+  updatedAt                     DateTime @updatedAt
+
+  @@index([companyId, status])
+  @@index([orderExchangeId])
+  @@index([newOrgVariantId])
+  @@map("exchange_shipments")
 }

@@ -3354,3 +3354,104 @@ FILES NOT TOUCHED:
 - integration_action_logs — unchanged.
 - All Order/Product/OMS business logic — unchanged.
 - RLS on unrelated tables — unchanged.
+
+---
+Task ID: EXCHANGE-SHIPMENTS-SYSTEM
+Agent: main
+Task: Build exchange_shipments system as structurally separate parallel to Order — same interaction patterns with Inventory/Products/CRM, but living in its own table with independent numbering. Database, server actions, and CRM address/phone integration.
+
+Work Log:
+
+PHASE 1 — Schema (migration 008):
+- Created supabase/migrations/008_exchange_shipments_schema.sql:
+  * exchange_shipment_number_seq — plain Postgres sequence (nextval-based), completely independent from generate_order_number(). NO CYCLE.
+  * generate_exchange_shipment_number() SQL function — returns EXCH-{YYYY}-{NNNNN} format (zero-padded 5 digits, per-year scope).
+  * exchange_shipments table — 29 columns: exchangeShipmentNumber (unique), organizationId, companyId, orderExchangeId (FK → order_exchanges, NOT NULL), newOrgVariantId, quantity, fulfillmentTypeSnapshot, customerId, shippingAddressId (FK → customer_addresses, nullable, ON DELETE SET NULL), shippingPhoneId (FK → customer_phones, nullable), shippingCityOverride, status (6-state CHECK: pending|confirmed|backordered|dispatched|delivered|cancelled), isPriorityBackorder (default true), backorderedAt, invoiceAmount (Decimal 14,2), courierCompanyIntegrationId, trackingNumber, courierSubStatus, needsShipperAdvice, unrecognizedCourierStatus, courierCityStatus (3-state CHECK), confirmedAt/dispatchedAt/deliveredAt/cancelledAt timestamps, createdBy, createdAt, updatedAt.
+  * RLS: SELECT by company match, INSERT/UPDATE by company + orders.manage permission (reuses existing permission key), DELETE denied (use status='cancelled'). Mirrors Order RLS pattern exactly.
+  * Triggers: trg_exchange_shipments_updatedAt for updatedAt.
+  * Indexes: (companyId, status), (orderExchangeId), (newOrgVariantId) WHERE status='backordered', (courierCompanyIntegrationId) partial, (trackingNumber) partial.
+- relation: order_exchanges → exchange_shipments is 1-N (an exchange can have multiple shipments over its lifecycle if the first is cancelled). FK lives on exchange_shipments.orderExchangeId. Legacy order_exchanges.newOrderId column remains populated only on old pre-migration historical records.
+- Applied migration via pg client. Verified: generate_exchange_shipment_number() returned EXCH-2026-00001, table has 29 columns.
+- Added ExchangeShipment Prisma model + back-relations on Organization, Company, Employee, Customer, CustomerAddress, CustomerPhone, OrgProductVariant, CompanyIntegration, OrderExchange.
+- Ran `bun run db:push` to sync Prisma schema.
+
+PHASE 2 — CRM Multi-Address/Phone Integration (Reuse, Do Not Rebuild):
+- Verified existing customer_addresses and customer_phones tables/patterns (as used in Order creation's customer section) support the needed flow.
+- Existing server actions reused: addCustomerAddress() and addCustomerPhone() in customer.actions.ts — these create new CRM records that become available on the customer's record going forward (same as Order Create).
+- exchange_shipments.shippingAddressId and shippingPhoneId are REAL FKs into customer_addresses/customer_phones — NOT snapshot copies. If a customer's address is later edited from their CRM profile, historical exchange shipments referencing that address ID will reflect the update. This mirrors how the address book "last used" tracking already treats addresses as living CRM records.
+- createCustomer() is NEVER called — customerId is always an existing, already-resolved customer from the original order. Verified via grep: 0 actual function calls.
+
+PHASE 3 — Server Actions (src/lib/actions/exchange-shipment.actions.ts):
+- createExchangeShipment(input): generates EXCH number via DB sequence, captures fulfillmentTypeSnapshot from variant, sets status='confirmed', determines invoiceAmount (defaults to priceDifference if customer_owes, else 0). Does NOT reserve inventory yet (separate step). Audit + metric: exchange_shipment.created.
+- reserveExchangeShipmentStock(exchangeShipmentId): mirrors reserveOrderStock() — branches on fulfillmentTypeSnapshot: stock_based → reserveStockForOrder() (checks available stock, marks backordered if insufficient with isPriorityBackorder=true), made_to_order → checkAndFulfillMadeToOrderVariant() (existing_stock or fresh_production). Audit + metric: exchange_shipment.reserved / exchange_shipment.backordered.
+- dispatchExchangeShipment(exchangeShipmentId, trackingNumber, courierCompanyIntegrationId): mirrors dispatchOrderAction() — blocks if backordered, calls dispatchOrder() to deduct stock, sets status='dispatched', updates parent order_exchanges.status ('awaiting_old_item_return' for courier_replacement, 'completed' for customer_self_return). Audit + metric: exchange_shipment.dispatched.
+- markExchangeShipmentDelivered(exchangeShipmentId): mirrors markOrderDelivered(), sets status='delivered'. Ready for PostEx polling job (Prompt 5). Audit + metric: exchange_shipment.delivered.
+- cancelExchangeShipment(exchangeShipmentId, reason): mirrors cancelOrder() — unreserves stock if was 'confirmed', sets status='cancelled'. Audit + metric: exchange_shipment.cancelled.
+- listExchangeShipments(filters): company-scoped list with filters (statuses, orderExchangeId, customerId, newOrgVariantId, trackingNumber, isBackordered).
+- getExchangeShipmentDetail(id): full detail with customer, address, phone, variant, exchange, courier integration.
+- updateExchangeShipmentInvoiceAmount(id, amount): staff edits invoice before dispatch.
+- All actions use getWorkspace() + requirePermission(ORDERS_MANAGE or ORDERS_FULFILL). Audit + metric on every mutation (non-fatal try/catch).
+- CRITICAL RULES enforced: updateCustomerStats() NEVER called (verified), createCustomer() NEVER called (verified).
+
+PHASE 3.6 — Extended checkAndFulfillBackorders() (backorder.actions.ts):
+- Modified the existing function to ALSO fetch backordered exchange_shipments for the same variant+location.
+- Built a combined priority queue: all isPriorityBackorder=true exchange shipments first (oldest first among them), then regular OrderItems (oldest first). This is the concrete implementation of the "exchange shipments get priority" rule.
+- For each queue entry: calls reserveStockForOrder(), then updates the appropriate record (OrderItem → fulfillmentStatus='reserved' + recompute_order_status; ExchangeShipment → status='confirmed' + backorderedAt=null).
+- Audit + metric: exchange_shipment.backorder_fulfilled (with days_waited dimension).
+- Existing OrderItem backorder logic completely unchanged — exchange shipments are ADDITIVE to the queue.
+
+PHASE 3 Integration — Updated exchange.actions.ts:
+- Rewrote createAndDispatchExchangeOrder() internal helper: now creates an ExchangeShipment (EXCH-{YYYY}-{NNNNN}) instead of an Order + OrderItem. Uses generateExchangeShipmentNumber() (independent sequence). Reserves stock via reserveStockForOrder(), dispatches via dispatchOrder(). Links to order_exchanges via the exchangeShipments relation.
+- Updated dispatchExchangeNewItem(): return type changed from { newOrderId } to { newExchangeShipmentId, exchangeShipmentNumber }.
+- Updated verifyOldItemReceived(): still calls createAndDispatchExchangeOrder() for customer_self_return after verification gate — now creates an ExchangeShipment.
+- Updated listExchanges(): now includes exchangeShipments relation in the response (id, exchangeShipmentNumber, status).
+- Updated getExchangeDetail(): now includes exchangeShipments relation (id, exchangeShipmentNumber, status, quantity, invoiceAmount, trackingNumber, dispatchedAt, deliveredAt, createdAt).
+- Legacy order_exchanges.newOrderId/newOrderItemId columns remain untouched — they stay populated only on old pre-migration historical exchange records.
+- Removed unused generateOrderNumber() helper from exchange.actions.ts (no longer needed since we use generateExchangeShipmentNumber() instead).
+
+PHASE 4 — Audit + Metrics:
+- 5 new audit action keys: exchange_shipment.created, exchange_shipment.reserved, exchange_shipment.dispatched, exchange_shipment.delivered, exchange_shipment.cancelled. Plus: exchange_shipment.backorder_fulfilled, exchange_shipment.backordered, exchange_shipment.invoice_updated.
+- All use entityType='exchange_shipment' (string type in audit.ts/metrics.ts — no enum constraint, so no type changes needed).
+- relatedEntityType='exchange_shipment' is NOT needed in audit.ts/metrics.ts (they accept string). For inventory_transactions, referenceType is also string — the exchange shipment actions pass referenceType='order' via the existing reserveStockForOrder/dispatchOrder helpers (which are tightly coupled to the Order type). A future refactor could add exchange_shipment as a referenceType, but the current approach is non-breaking and the audit log + exchange_shipments table provide full traceability.
+
+VERIFICATION:
+- Migration 008 applied: ✅ 3 new tables verified (exchange_shipments, sequence, function).
+- Sequence independence: ✅ verified by interleaving 2 order numbers + 5 exchange numbers — neither sequence affected the other.
+- `bun run db:push`: ✅ Prisma schema synced.
+- `bun run lint`: ✅ 0 errors, 10 pre-existing warnings (React Hook Form watch() — none from this task).
+- `npx tsc --noEmit`: ✅ 0 errors in src/.
+- Dev server: ✅ compiled successfully, GET / returned HTTP 200 in 14.9s, no runtime errors.
+- updateCustomerStats() calls in new code: ✅ 0 (verified via grep — only appears in comment documentation).
+- createCustomer() calls in new code: ✅ 0 (verified via grep — only appears in comment documentation).
+- Existing order_exchanges state machine: UNTOUCHED (9-state CHECK constraint unchanged, all existing status transitions preserved).
+- Existing Order/OrderItem tables: UNTOUCHED (no schema changes, no business logic changes).
+- Legacy order_exchanges.newOrderId column: UNTOUCHED (remains populated only on old historical records).
+
+Stage Summary:
+- Exchange shipments system fully implemented as structurally separate parallel to Order.
+- Independent EXCH-{YYYY}-{NNNNN} numbering (verified independent from ORD-{YYYY}-{NNNNN}).
+- 6-state simplified lifecycle (pending|confirmed|backordered|dispatched|delivered|cancelled).
+- ALL exchange shipments get isPriorityBackorder=true — fulfilled ahead of regular OrderItems in the FIFO backorder queue.
+- CRM address/phone FKs (living references, not snapshots) — editing customer address updates all historical exchange shipments.
+- Same inventory gateway (processInventoryTransaction) as OMS — tagged via audit log for traceability.
+- exchange.actions.ts createAndDispatchExchangeOrder() rewritten to create ExchangeShipments instead of Order rows.
+- listExchanges() + getExchangeDetail() updated to include exchangeShipments relation.
+- Zero regressions to existing Order/Product/Exchange logic — all changes additive except the createAndDispatchExchangeOrder rewrite (which was the required integration point).
+
+FILES CREATED:
+- supabase/migrations/008_exchange_shipments_schema.sql
+- src/lib/actions/exchange-shipment.actions.ts
+
+FILES MODIFIED:
+- prisma/schema.prisma — added ExchangeShipment model + newExchangeShipmentId relation on OrderExchange + back-relations on 8 models
+- src/lib/actions/backorder.actions.ts — extended checkAndFulfillBackorders() to include exchange_shipments with priority queue
+- src/lib/actions/exchange.actions.ts — rewrote createAndDispatchExchangeOrder() to create ExchangeShipments; updated dispatchExchangeNewItem() return type; updated listExchanges() + getExchangeDetail() to include exchangeShipments relation; removed unused generateOrderNumber() helper; added generateExchangeShipmentNumber() helper + dispatchOrder import
+
+FILES NOT TOUCHED:
+- processInventoryTransaction() internals — unchanged (reused directly).
+- updateCustomerStats() — unchanged (and NEVER called by new code).
+- createCustomer() — unchanged (and NEVER called by new code).
+- Existing Order/OrderItem tables — no schema changes.
+- order_exchanges state machine (9-state CHECK) — unchanged.
+- order_exchanges.newOrderId/newOrderItemId columns — unchanged (legacy, for old records).
+- RLS on unrelated tables — unchanged.

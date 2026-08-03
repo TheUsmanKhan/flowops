@@ -36,6 +36,7 @@ import { PERMISSIONS } from '@/lib/permissions'
 import {
   processInventoryTransaction,
   reserveStockForOrder,
+  dispatchOrder,
 } from '@/lib/inventory'
 import { flagCustomer } from './customer.actions'
 import {
@@ -55,6 +56,17 @@ import {
 import type { Prisma } from '@prisma/client'
 
 // ──────────────────────────────────────────────────────────────
+// Exchange Shipments System (migration 008) — generate shipment number
+// via the INDEPENDENT sequence (completely separate from generate_order_number).
+// ──────────────────────────────────────────────────────────────
+async function generateExchangeShipmentNumber(): Promise<string> {
+  const result = await db.$queryRaw<{ generate_exchange_shipment_number: string }[]>`
+    SELECT generate_exchange_shipment_number()
+  `
+  return result[0].generate_exchange_shipment_number
+}
+
+// ──────────────────────────────────────────────────────────────
 // Types
 // ──────────────────────────────────────────────────────────────
 
@@ -65,163 +77,173 @@ interface ActionResult<T = unknown> {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Internal helper: generate order number via the DB function
-// (mirrors order.actions.ts's private generateOrderNumber)
-// ──────────────────────────────────────────────────────────────
-async function generateOrderNumber(companyId: string): Promise<string> {
-  const result = await db.$queryRaw<{ generate_order_number: string }[]>`
-    SELECT generate_order_number(${companyId}::TEXT)
-  `
-  return result[0].generate_order_number
-}
-
-// ──────────────────────────────────────────────────────────────
-// Internal helper: create the linked exchange order + order_item + reserve
-// stock + dispatch. Used by BOTH:
+// Internal helper: create the linked EXCHANGE SHIPMENT + reserve stock +
+// dispatch. Used by BOTH:
 //   - dispatchExchangeNewItem() for courier_replacement (immediate)
 //   - verifyOldItemReceived() for customer_self_return (after verification)
-// Returns the new order + order_item IDs.
+//
+// MIGRATION 008 CHANGE: this function now creates an ExchangeShipment
+// (EXCH-{YYYY}-{NNNNN}) instead of an Order row. The legacy newOrderId/
+// newOrderItemId columns on order_exchanges remain populated only on old,
+// pre-migration historical exchange records. NEW exchanges are linked via
+// the exchange_shipments.orderExchangeId FK.
+//
+// Returns the new exchange shipment ID + number.
 // ──────────────────────────────────────────────────────────────
 async function createAndDispatchExchangeOrder(
   exchangeId: string,
   ctx: Awaited<ReturnType<typeof getWorkspace>>,
-): Promise<{ newOrderId: string; newOrderItemId: string }> {
+): Promise<{ newExchangeShipmentId: string; exchangeShipmentNumber: string }> {
   // Fetch the exchange record (already validated by caller)
   const exchange = await db.orderExchange.findUniqueOrThrow({
     where: { id: exchangeId },
     include: {
-      originalOrder: { select: { customerId: true, dispatchLocationId: true } },
+      originalOrder: {
+        select: {
+          customerId: true,
+          dispatchLocationId: true,
+          usedCustomerAddressId: true,
+          usedCustomerPhoneId: true,
+        },
+      },
       newOrgVariant: {
         select: {
           id: true,
           fulfillmentType: true,
           costPrice: true,
-          companyPricing: { where: { companyId: ctx.company.id }, take: 1 },
         },
       },
     },
   })
 
-  const unitPrice = exchange.newItemPrice
-  const lineTotal = unitPrice
+  const customerId = exchange.originalOrder.customerId
 
-  // 1. Generate order number
-  const flowopsOrderNumber = await generateOrderNumber(ctx.company.id)
+  // Determine the shipping address/phone to use. Default to the original
+  // order's used address/phone (the customer wants the replacement shipped
+  // to the same place). These may be null if the original order was created
+  // before the CRM address system existed.
+  const shippingAddressId = exchange.originalOrder.usedCustomerAddressId
+  const shippingPhoneId = exchange.originalOrder.usedCustomerPhoneId
 
-  // 2. Create the new order (order_source='exchange')
-  const newOrder = await db.order.create({
+  // Determine invoice amount from the exchange's priceDifference
+  const priceDiff = Number(exchange.priceDifference)
+  const invoiceAmount =
+    exchange.priceDifferenceStatus === 'customer_owes' && priceDiff > 0 ? priceDiff : 0
+
+  // 1. Generate the EXCH-{YYYY}-{NNNNN} number (independent sequence)
+  const exchangeShipmentNumber = await generateExchangeShipmentNumber()
+
+  // 2. Create the exchange shipment (status='confirmed')
+  const shipment = await db.exchangeShipment.create({
     data: {
+      exchangeShipmentNumber,
       organizationId: ctx.company.organizationId,
       companyId: ctx.company.id,
-      flowopsOrderNumber,
-      orderSource: 'exchange',
-      customerId: exchange.originalOrder.customerId,
-      // This is an exchange — no separate COD collection for the item itself.
-      // The price_difference (if any) is settled separately via settlePriceDifference().
+      orderExchangeId: exchangeId,
+      newOrgVariantId: exchange.newOrgVariantId,
+      quantity: 1,
+      fulfillmentTypeSnapshot: exchange.newOrgVariant.fulfillmentType,
+      customerId,
+      shippingAddressId,
+      shippingPhoneId,
       status: 'confirmed',
-      paymentType: 'fully_prepaid',
-      paymentStatus: 'fully_prepaid',
-      paymentSource: 'cod_native',
-      subtotal: lineTotal,
-      totalOrderValue: lineTotal,
-      advanceAmount: lineTotal, // mark as fully paid (exchange item)
-      advancePaidAt: new Date(),
-      remainingCodAmount: 0,
+      isPriorityBackorder: true,
+      invoiceAmount,
       confirmedAt: new Date(),
       createdBy: ctx.employee.id,
     },
   })
 
-  // 3. Create the single order_item for the new variant
-  const newItem = await db.orderItem.create({
-    data: {
-      orderId: newOrder.id,
-      orgVariantId: exchange.newOrgVariantId,
-      organizationId: ctx.company.organizationId,
-      quantity: 1,
-      unitPrice,
-      lineTotal,
-      fulfillmentStatus: 'reserved',
-      fulfillmentTypeSnapshot: exchange.newOrgVariant.fulfillmentType,
-      reservedLocationId: exchange.originalOrder.dispatchLocationId,
-    },
+  // 3. Reserve stock (if stock_based) — mirrors reserveOrderStock()
+  const locationId = exchange.originalOrder.dispatchLocationId
+  if (locationId && exchange.newOrgVariant.fulfillmentType === 'stock_based') {
+    const pool = await db.inventoryPool.findUnique({
+      where: {
+        orgVariantId_locationId: {
+          orgVariantId: exchange.newOrgVariantId,
+          locationId,
+        },
+      },
+    })
+    const available = pool ? pool.onHand - pool.reserved : 0
+
+    if (available >= 1) {
+      await reserveStockForOrder({
+        orgVariantId: exchange.newOrgVariantId,
+        locationId,
+        organizationId: ctx.company.organizationId,
+        companyId: ctx.company.id,
+        employeeId: ctx.employee.id,
+        quantity: 1,
+      })
+    } else {
+      // Insufficient stock — mark as backordered (isPriorityBackorder=true)
+      await db.exchangeShipment.update({
+        where: { id: shipment.id },
+        data: { status: 'backordered', backorderedAt: new Date() },
+      })
+    }
+  }
+  // NOTE: made_to_order variants don't reserve here — they'll trigger production
+  // via checkAndFulfillMadeToOrderVariant when the dispatch is attempted.
+
+  // 4. Dispatch the shipment immediately (if not backordered)
+  const updatedShipment = await db.exchangeShipment.findUniqueOrThrow({
+    where: { id: shipment.id },
+    select: { status: true },
   })
 
-  // 4. Link the exchange to the new order/item
-  await db.orderExchange.update({
-    where: { id: exchangeId },
-    data: {
-      newOrderId: newOrder.id,
-      newOrderItemId: newItem.id,
-    },
-  })
-
-  // 5. Reserve stock for the new item (if stock_based)
-  const dispatchLocationId = exchange.originalOrder.dispatchLocationId
-  if (dispatchLocationId && exchange.newOrgVariant.fulfillmentType === 'stock_based') {
-    const reserveResult = await reserveStockForOrder({
+  if (updatedShipment.status !== 'backordered' && locationId) {
+    // Deduct stock via dispatchOrder() (same as dispatchOrderAction)
+    const dispatchResult = await dispatchOrder({
       orgVariantId: exchange.newOrgVariantId,
-      locationId: dispatchLocationId,
+      locationId,
       organizationId: ctx.company.organizationId,
       companyId: ctx.company.id,
       employeeId: ctx.employee.id,
       quantity: 1,
-      orderId: newOrder.id,
     })
-    if (!reserveResult.success) {
-      // Mark the item as backordered if reservation fails
-      await db.orderItem.update({
-        where: { id: newItem.id },
-        data: { fulfillmentStatus: 'backordered', backorderedAt: new Date() },
-      })
-      await db.order.update({
-        where: { id: newOrder.id },
-        data: { status: 'partially_backordered' },
+
+    if (dispatchResult.success) {
+      await db.exchangeShipment.update({
+        where: { id: shipment.id },
+        data: {
+          status: 'dispatched',
+          dispatchedAt: new Date(),
+        },
       })
     }
+    // If dispatch failed (e.g. race condition on stock), the shipment stays
+    // 'confirmed' and staff will see it needs attention.
   }
 
-  // 6. Dispatch the order immediately (for courier_replacement, the courier
-  //    collects the old item during this same delivery; for customer_self_return,
-  //    the old item was already verified before this function is called)
-  await db.order.update({
-    where: { id: newOrder.id },
-    data: {
-      status: 'dispatched',
-      dispatchedAt: new Date(),
-    },
-  })
-  await db.orderItem.update({
-    where: { id: newItem.id },
-    data: { fulfillmentStatus: 'dispatched', fulfilledAt: new Date() },
-  })
-
+  // 5. Audit + metric
   await insertAuditLog({
     action: 'exchange.new_item_dispatched',
-    entityType: 'order',
-    entityId: newOrder.id,
+    entityType: 'exchange_shipment',
+    entityId: shipment.id,
     companyId: ctx.company.id,
     organizationId: ctx.company.organizationId,
     userId: ctx.user.id,
     employeeId: ctx.employee.id,
     newValues: {
       exchangeId,
-      flowopsOrderNumber,
+      exchangeShipmentNumber,
       newOrgVariantId: exchange.newOrgVariantId,
-      unitPrice: Number(unitPrice),
+      invoiceAmount,
     },
   })
 
   await insertMetricEvent({
     companyId: ctx.company.id,
-    entityType: 'order',
-    entityId: newOrder.id,
+    entityType: 'exchange_shipment',
+    entityId: shipment.id,
     metricKey: 'exchange.new_item_dispatched',
-    numericValue: Number(unitPrice),
+    numericValue: Number(exchange.newItemPrice),
     dimensions: { exchange_id: exchangeId, exchange_method: exchange.exchangeMethod },
   }).catch(() => {})
 
-  return { newOrderId: newOrder.id, newOrderItemId: newItem.id }
+  return { newExchangeShipmentId: shipment.id, exchangeShipmentNumber }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -375,7 +397,7 @@ export async function createExchangeRequest(
 
 export async function dispatchExchangeNewItem(
   exchangeId: string,
-): Promise<ActionResult<{ newOrderId: string }>> {
+): Promise<ActionResult<{ newExchangeShipmentId: string; exchangeShipmentNumber: string }>> {
   try {
     const ctx = await getWorkspace()
     await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
@@ -400,8 +422,8 @@ export async function dispatchExchangeNewItem(
       }
     }
 
-    // Create + dispatch the new order (courier collects old item during this delivery)
-    const { newOrderId } = await createAndDispatchExchangeOrder(exchangeId, ctx)
+    // Create + dispatch the new EXCHANGE SHIPMENT (courier collects old item during this delivery)
+    const { newExchangeShipmentId, exchangeShipmentNumber } = await createAndDispatchExchangeOrder(exchangeId, ctx)
 
     // Update exchange status to 'awaiting_old_item_return' (old item collection
     // happens during this delivery, but manual verification still needed)
@@ -410,7 +432,7 @@ export async function dispatchExchangeNewItem(
       data: { status: 'awaiting_old_item_return' },
     })
 
-    return { success: true, data: { newOrderId } }
+    return { success: true, data: { newExchangeShipmentId, exchangeShipmentNumber } }
   } catch (err) {
     return {
       success: false,
@@ -945,6 +967,12 @@ export async function listExchanges(
     originalOrder: { flowopsOrderNumber: string }
     newOrderId: string | null
     newOrder: { flowopsOrderNumber: string } | null
+    // NEW (migration 008): exchange shipments linked to this exchange
+    exchangeShipments: Array<{
+      id: string
+      exchangeShipmentNumber: string
+      status: string
+    }>
   }>
   total: number
 }>> {
@@ -973,6 +1001,11 @@ export async function listExchanges(
         include: {
           originalOrder: { select: { flowopsOrderNumber: true } },
           newOrder: { select: { flowopsOrderNumber: true } },
+          // NEW: include exchange shipments (migration 008)
+          exchangeShipments: {
+            select: { id: true, exchangeShipmentNumber: true, status: true },
+            orderBy: { createdAt: 'desc' },
+          },
         },
       }),
       db.orderExchange.count({ where }),
@@ -996,6 +1029,7 @@ export async function listExchanges(
           originalOrder: e.originalOrder,
           newOrderId: e.newOrderId,
           newOrder: e.newOrder,
+          exchangeShipments: e.exchangeShipments,
         })),
         total,
       },
@@ -1061,6 +1095,21 @@ export async function getExchangeDetail(
         },
         newOrderItem: {
           select: { id: true, fulfillmentStatus: true },
+        },
+        // NEW (migration 008): include exchange shipments linked to this exchange
+        exchangeShipments: {
+          select: {
+            id: true,
+            exchangeShipmentNumber: true,
+            status: true,
+            quantity: true,
+            invoiceAmount: true,
+            trackingNumber: true,
+            dispatchedAt: true,
+            deliveredAt: true,
+            createdAt: true,
+          },
+          orderBy: { createdAt: 'desc' },
         },
         requestedByEmployee: {
           select: { id: true, user: { select: { fullName: true } } },
