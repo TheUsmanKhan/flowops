@@ -177,6 +177,9 @@ model Company {
 
   // Form Drafts back-relation (migration 005)
   formDrafts             FormDraft[]
+
+  // City & Address Book System back-relation (migration 007)
+  cityAliases            CourierCityAlias[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -1668,6 +1671,7 @@ model CompanyIntegration {
   actionLogs                IntegrationActionLog[]
   ordersBooked              Order[]  @relation("OrderCourierIntegration")
   companyOrderSettingsDefault CompanyOrderSetting[] @relation("CompanyOrderSettingsDefaultCourier")
+  pickupAddresses           CourierPickupAddress[]
 
   @@index([companyId, isActive])
   @@map("company_integrations")
@@ -1822,6 +1826,10 @@ model Order {
   // back to the actual integration/credentials used.
   courierCompanyIntegrationId String?
   courierCompanyIntegration   CompanyIntegration? @relation("OrderCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  // City validation state for courier booking. 'not_applicable' until the
+  // order goes through courier city validation (Prompt 4/5). Left unused in
+  // this foundational prompt — no business logic touches Order here.
+  courierCityStatus           String   @default("not_applicable") // 'matched' | 'unresolved' | 'not_applicable' (CHECK in SQL)
   dispatchLocationId          String?
   dispatchLocation            InventoryLocation? @relation("OrderDispatchLocation", fields: [dispatchLocationId], references: [id])
   notesForCourier             String?
@@ -1904,4 +1912,70 @@ model OrderItem {
 
   @@index([orderId])
   @@index([orgVariantId, fulfillmentStatus])
+}
+
+// ============================================================================
+// City & Address Book System (migration 007) — Courier-Agnostic Foundation
+// ============================================================================
+
+/// Global, provider-level cache of which cities each courier serves.
+/// NOT company-scoped — cities don't vary per company. Synced via the
+/// syncCourierOperationalCities() server action from the adapter's
+/// fetchOperationalCities() method.
+model CourierOperationalCity {
+  id                String   @id @default(cuid())
+  providerKey       String   // 'postex', 'tcs', 'leopard' — matches integration_providers.providerKey
+  cityName          String   // Human-readable city name from courier API
+  cityId            String?  // Courier's own city ID (nullable, stored as TEXT)
+  isPickupCity      Boolean  @default(true)
+  isDeliveryCity    Boolean  @default(true)
+  lastSyncedAt      DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([providerKey, cityName])
+  @@index([providerKey])
+  @@map("courier_operational_cities")
+}
+
+/// "City learning" fuzzy-match memory. When a staff member manually confirms
+/// a suggested/corrected city (e.g. "Karaci" → "Karachi"), the mapping is
+/// saved here so it auto-resolves next time. companyId is nullable:
+/// NULL = org-wide, set = company-specific (priority).
+model CourierCityAlias {
+  id                String   @id @default(cuid())
+  providerKey       String
+  typedCityText     String   // Lowercased/normalized text the user typed
+  resolvedCityName  String   // Confirmed city name from courier_operational_cities
+  companyId         String?  // NULL = org-wide; set = company-specific (FK → Company)
+  company           Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now())
+
+  @@unique([providerKey, typedCityText, companyId])
+  @@index([providerKey, typedCityText])
+  @@map("courier_city_aliases")
+}
+
+/// Pickup/return address book per company_integration. PostEx's API returns
+/// addressType="Pickup/Return Address" (one address serves both), so we do
+/// NOT build separate pickup vs return concepts. Only one row per
+/// companyIntegrationId may have isDefault=true (enforced in app logic).
+model CourierPickupAddress {
+  id                    String   @id @default(cuid())
+  companyIntegrationId  String
+  companyIntegration    CompanyIntegration @relation(fields: [companyIntegrationId], references: [id], onDelete: Cascade)
+
+  providerAddressCode   String   // Courier's own address code (TEXT always)
+  label                 String   // User-defined friendly name
+  address               String
+  cityName              String
+  contactPersonName     String
+  phone1                String
+  phone2                String?
+  isDefault             Boolean  @default(false)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([companyIntegrationId])
+  @@map("courier_pickup_addresses")
 }

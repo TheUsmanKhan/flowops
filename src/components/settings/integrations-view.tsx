@@ -36,9 +36,11 @@ import {
   Power,
   Zap,
   Info,
+  RefreshCw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getErrorMessage } from '@/components/orders/_shared'
+import { PickupAddressesSection } from '@/components/couriers/pickup-addresses-section'
 
 // ──────────────────────────────────────────────────────────────
 // Types
@@ -152,6 +154,22 @@ export function IntegrationsView() {
     onError: (err) => toast.error(getErrorMessage(err)),
   })
 
+  const syncCitiesMutation = useMutation({
+    mutationFn: (providerKey: string) =>
+      api.post<{ success: boolean; fetchedCount: number; upsertedCount: number; disabledCount: number; error?: string }>(
+        '/api/couriers/sync-cities',
+        { providerKey },
+      ),
+    onSuccess: (data) => {
+      if (data.success) {
+        toast.success(`Cities synced — ${data.upsertedCount} cached, ${data.disabledCount} disabled.`)
+      } else {
+        toast.error(data.error || 'City sync failed.')
+      }
+    },
+    onError: (err) => toast.error(getErrorMessage(err)),
+  })
+
   if (query.isLoading) {
     return (
       <div className="space-y-6">
@@ -223,6 +241,8 @@ export function IntegrationsView() {
             onTest={(id) => testMutation.mutate(id)}
             onDisconnect={(id) => disconnectMutation.mutate(id)}
             onSetDefault={(id) => setDefaultMutation.mutate(id)}
+            onSyncCities={(providerKey) => syncCitiesMutation.mutate(providerKey)}
+            syncingCities={syncCitiesMutation.isPending}
             testing={testMutation.isPending}
           />
         </TabsContent>
@@ -263,6 +283,8 @@ function IntegrationsSection({
   onTest,
   onDisconnect,
   onSetDefault,
+  onSyncCities,
+  syncingCities,
   testing,
 }: {
   integrations: Integration[]
@@ -271,6 +293,8 @@ function IntegrationsSection({
   onTest: (id: string) => void
   onDisconnect: (id: string) => void
   onSetDefault: (id: string) => void
+  onSyncCities?: (providerKey: string) => void
+  syncingCities?: boolean
   testing: boolean
 }) {
   return (
@@ -331,6 +355,19 @@ function IntegrationsSection({
                     <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onTest(i.id)} disabled={testing}>
                       <Zap className="h-3 w-3" /> Test
                     </Button>
+                    {i.isActive && onSyncCities && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-7 text-xs"
+                        onClick={() => onSyncCities(i.provider.providerKey)}
+                        disabled={syncingCities}
+                        title="Sync operational cities from courier API"
+                      >
+                        {syncingCities ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                        {' '}Sync Cities
+                      </Button>
+                    )}
                     {i.isActive && (
                       <Button
                         size="sm"
@@ -342,6 +379,14 @@ function IntegrationsSection({
                       </Button>
                     )}
                   </div>
+
+                  {/* Pickup & Return Addresses section — only for courier integrations */}
+                  {i.isActive && i.provider.category === 'courier' && (
+                    <PickupAddressesSection
+                      companyIntegrationId={i.id}
+                      providerKey={i.provider.providerKey}
+                    />
+                  )}
                 </CardContent>
               </Card>
             ))}

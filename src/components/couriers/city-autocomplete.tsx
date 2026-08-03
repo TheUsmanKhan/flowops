@@ -1,0 +1,180 @@
+'use client'
+
+/**
+ * CityAutocomplete — reusable courier city search input.
+ *
+ * Text input with live suggestions dropdown, sourced from
+ * courier_operational_cities for the given provider via
+ * GET /api/couriers/[providerKey]/cities?q=search_term.
+ *
+ * GENERIC — not hardcoded into any specific form. Will be reused in:
+ *   - Order Create (Prompt 5)
+ *   - Exchange Shipment forms (Prompt 5)
+ *   - Booking Workbench (Prompt 5)
+ *   - Pickup Address Book form (this prompt)
+ *
+ * Usage:
+ *   <CityAutocomplete
+ *     providerKey="postex"
+ *     value={city}
+ *     onChange={setCity}
+ *     placeholder="Search city..."
+ *   />
+ */
+
+import { useState, useRef, useEffect } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '@/lib/api-client'
+import { Input } from '@/components/ui/input'
+import { cn } from '@/lib/utils'
+import { Loader2, MapPin } from 'lucide-react'
+
+interface CityOption {
+  id: string
+  cityName: string
+  cityId: string | null
+  isPickupCity: boolean
+  isDeliveryCity: boolean
+}
+
+interface CitySearchResponse {
+  cities: CityOption[]
+}
+
+export interface CityAutocompleteProps {
+  providerKey: string
+  value: string
+  onChange: (cityName: string) => void
+  onBlur?: () => void
+  placeholder?: string
+  className?: string
+  disabled?: boolean
+  /** Optional: show only pickup cities (for address book forms) */
+  pickupOnly?: boolean
+}
+
+export function CityAutocomplete({
+  providerKey,
+  value,
+  onChange,
+  onBlur,
+  placeholder = 'Search city...',
+  className,
+  disabled = false,
+  pickupOnly = false,
+}: CityAutocompleteProps) {
+  const [inputValue, setInputValue] = useState(value)
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const [debouncedQuery, setDebouncedQuery] = useState('')
+  const containerRef = useRef<HTMLDivElement>(null)
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Sync external value changes into the input
+  useEffect(() => {
+    setInputValue(value)
+  }, [value])
+
+  // Debounce the search query
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current)
+    debounceRef.current = setTimeout(() => {
+      setDebouncedQuery(inputValue.trim())
+    }, 200)
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current)
+    }
+  }, [inputValue])
+
+  // Fetch city suggestions (only when there's a query and dropdown is open)
+  const { data, isLoading } = useQuery<CitySearchResponse>({
+    queryKey: ['courier-cities', providerKey, debouncedQuery],
+    queryFn: () =>
+      api.get<CitySearchResponse>(
+        `/api/couriers/${providerKey}/cities?q=${encodeURIComponent(debouncedQuery)}&limit=10`,
+      ),
+    enabled: debouncedQuery.length >= 1 && showSuggestions,
+    staleTime: 30_000,
+  })
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setShowSuggestions(false)
+        onBlur?.()
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [onBlur])
+
+  function handleSelect(city: CityOption) {
+    if (pickupOnly && !city.isPickupCity) return
+    setInputValue(city.cityName)
+    onChange(city.cityName)
+    setShowSuggestions(false)
+  }
+
+  const suggestions = data?.cities ?? []
+  const filteredSuggestions = pickupOnly
+    ? suggestions.filter((s) => s.isPickupCity)
+    : suggestions
+
+  return (
+    <div ref={containerRef} className={cn('relative', className)}>
+      <div className="relative">
+        <MapPin className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
+        <Input
+          type="text"
+          value={inputValue}
+          onChange={(e) => {
+            setInputValue(e.target.value)
+            onChange(e.target.value)
+            setShowSuggestions(true)
+          }}
+          onFocus={() => setShowSuggestions(true)}
+          placeholder={placeholder}
+          disabled={disabled}
+          className="pl-8"
+          autoComplete="off"
+        />
+        {isLoading && showSuggestions && (
+          <Loader2 className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground animate-spin" />
+        )}
+      </div>
+
+      {showSuggestions && debouncedQuery.length >= 1 && (
+        <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
+          {filteredSuggestions.length === 0 && !isLoading ? (
+            <div className="px-3 py-2 text-xs text-muted-foreground">
+              No cities found. Try a different spelling or sync cities first.
+            </div>
+          ) : (
+            filteredSuggestions.map((city) => (
+              <button
+                key={city.id}
+                type="button"
+                className="w-full text-left px-3 py-2 text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2"
+                onClick={() => handleSelect(city)}
+              >
+                <span className="font-medium">{city.cityName}</span>
+                <div className="flex items-center gap-1">
+                  {city.isPickupCity && (
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200">
+                      Pickup
+                    </span>
+                  )}
+                  {city.isDeliveryCity && (
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      Delivery
+                    </span>
+                  )}
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  )
+}

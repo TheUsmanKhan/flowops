@@ -3229,3 +3229,128 @@ FILES NOT TOUCHED:
 - All costPrice/salePrice/comparePrice cascade logic — completely unaffected.
 - inventory_pools, OMS order creation, RLS policies — untouched.
 - All other modules (orders, inventory, CRM, integrations) — untouched.
+
+---
+Task ID: CITY-ADDRESS-BOOK-SYSTEM
+Agent: main
+Task: Build courier-agnostic city caching/validation system and pickup/return address book, scoped per company-integration. Foundational infrastructure for all courier adapters.
+
+Work Log:
+
+PHASE 1 — Schema (migration 007):
+- Created supabase/migrations/007_city_address_book_schema.sql with 3 new tables:
+  * courier_operational_cities — global, provider-level cache (providerKey, cityName, cityId, isPickupCity, isDeliveryCity, lastSyncedAt). Unique on (providerKey, cityName). NOT company-scoped.
+  * courier_city_aliases — "city learning" fuzzy-match memory (providerKey, typedCityText, resolvedCityName, companyId nullable). Unique on (providerKey, typedCityText, companyId) treating NULL as its own bucket.
+  * courier_pickup_addresses — per-company-integration address book (companyIntegrationId FK, providerAddressCode TEXT, label, address, cityName, contactPersonName, phone1, phone2, isDefault). One address serves both pickup and return (PostEx API confirms this).
+- Added Order.courierCityStatus TEXT column with CHECK ('matched', 'unresolved', 'not_applicable'), default 'not_applicable'. Left unused until Prompt 4/5.
+- RLS enabled on all 3 tables: SELECT for authenticated users; INSERT/UPDATE/DELETE denied by default (managed through server actions via postgres role).
+- Triggers for updatedAt on courier_operational_cities + courier_pickup_addresses.
+- Applied migration via pg client (psql not available in environment).
+- Added 3 Prisma models (CourierOperationalCity, CourierCityAlias, CourierPickupAddress) + back-relations on CompanyIntegration and Company.
+- Ran `bun run db:push` to sync Prisma schema.
+
+PHASE 2 — City Sync Job (Provider-Agnostic):
+- Added optional methods to CourierAdapter interface in src/lib/integrations/types.ts:
+  * fetchOperationalCities?(): Promise<OperationalCity[]> — optional capability
+  * createPickupAddress?(input): Promise<PickupAddressResult> — for address creation
+  * fetchExistingPickupAddresses?() — for fetch-only adapters
+  Added OperationalCity, PickupAddressInput, PickupAddressResult interfaces.
+- Created src/lib/actions/city-sync.actions.ts:
+  * syncCourierOperationalCities(providerKey) — looks up ANY active company_integration for that provider, gets adapter, calls fetchOperationalCities(), upserts into courier_operational_cities. Cities no longer in fresh response are soft-disabled (isPickupCity=false, isDeliveryCity=false) — NOT deleted.
+  * syncAllCourierCities() — syncs all providers with active integrations. Entry point for the scheduled 3-hour job.
+  * SCHEDULING NOTE documented: infrastructure-level scheduling still needs to be connected (same pattern as PostEx bulk-tracking poll).
+  * All API calls go through executeLoggedIntegrationAction() wrapper.
+  * Audit log + metric event emitted on sync.
+
+PHASE 3 — City Matching Logic (src/lib/integrations/city-matcher.ts):
+- matchCity(providerKey, typedCity, companyId?) — 3-tier resolver:
+  1. Learned aliases (courier_city_aliases) — company-specific takes priority over org-wide.
+  2. Exact case-insensitive match against delivery cities.
+  3. Fuzzy Levenshtein-distance similarity (inline implementation, no new npm dependency) — top 3 suggestions above 70% threshold.
+  Returns { status: 'matched', cityName } or { status: 'unresolved', suggestions: string[] }.
+- saveCityAlias(providerKey, typedCity, resolvedCityName, companyId?) — persists confirmed mapping. Uses findFirst+create/update pattern (Prisma upsert can't handle nullable compound unique directly).
+- revalidateCityAtBookingTime(providerKey, cityName) — final authoritative check at booking moment. Guards against 3-hour sync window where a city could have been disabled.
+- Levenshtein distance implemented inline (~30 lines, well-understood algorithm) — no new npm dependency needed.
+
+PHASE 4 — Pickup Address Book Server Actions + API:
+- Created src/lib/actions/courier-address-book.actions.ts with 4 server actions:
+  * listPickupAddresses(companyIntegrationId) — company-scoped list.
+  * addPickupAddress(companyIntegrationId, input) — calls adapter.createPickupAddress() if supported, falls back to fetchExistingPickupAddresses flow, or stores locally for stub adapters. First address auto-default.
+  * setDefaultPickupAddress(companyIntegrationId, addressId) — transaction-wrapped (same pattern as setDefaultIntegration).
+  * deletePickupAddress(addressId) — deletes + promotes next address to default if deleted was default.
+  * fetchExistingPickupAddresses(companyIntegrationId) — for fetch-only adapters.
+  All actions use getWorkspace() + isElevated() + verifyIntegrationOwnership().
+- Created 6 API routes (thin HTTP wrappers):
+  * GET /api/couriers/[providerKey]/cities?q= — lightweight city search for CityAutocomplete.
+  * POST /api/couriers/sync-cities — manual city sync trigger (elevated-only).
+  * POST /api/couriers/match-city — resolve typed city against cache.
+  * POST /api/couriers/save-city-alias — persist confirmed mapping.
+  * GET/POST /api/integrations/[id]/pickup-addresses — list/add addresses.
+  * PATCH/DELETE /api/integrations/[id]/pickup-addresses/[addressId] — set-default/delete.
+
+PHASE 5 — Frontend:
+- Created src/components/couriers/city-autocomplete.tsx:
+  * Reusable <CityAutocomplete providerKey={} value={} onChange={} /> component.
+  * Text input with live suggestions dropdown, debounced search (200ms).
+  * Sources from GET /api/couriers/[providerKey]/cities?q=.
+  * Shows Pickup/Delivery badges per city.
+  * pickupOnly prop for address book forms.
+  * GENERIC — not hardcoded into any specific form. Ready for reuse in Order Create, Exchange Shipment, Booking Workbench (Prompt 5).
+- Created src/components/couriers/city-mismatch-resolver.tsx:
+  * <CityMismatchResolver> inline component shown when matchCity() returns 'unresolved'.
+  * Displays suggestions as clickable buttons + manual search fallback (CityAutocomplete).
+  * On selection, calls saveCityAlias() and returns resolved city name to parent via onResolved().
+- Created src/components/couriers/pickup-addresses-section.tsx:
+  * Embedded in Integrations view per courier integration card.
+  * Shows saved addresses with Set Default + Delete actions.
+  * Add Address dialog with CityAutocomplete (pickupOnly) for city field.
+- Modified src/components/settings/integrations-view.tsx:
+  * Added PickupAddressesSection inside each connected courier integration card.
+  * Added "Sync Cities" button per courier integration (elevated-only, triggers syncCourierOperationalCities).
+  * Added syncCitiesMutation + passed onSyncCities handler to IntegrationsSection.
+  * Imported RefreshCw icon.
+
+VERIFICATION:
+- Migration 007 applied to Supabase: ✅ 3 new tables + Order.courierCityStatus column verified via direct pg query.
+- `bun run db:push`: ✅ Prisma schema synced.
+- `bun run lint`: ✅ 0 errors, 10 pre-existing warnings (React Hook Form watch() — none from this task).
+- `npx tsc --noEmit`: ✅ 0 errors in src/.
+- Dev server: ✅ compiled successfully, GET / returned HTTP 200 in 31s (first compile), no runtime errors in dev.log.
+- Existing Order/Product logic: UNAFFECTED — Order.courierCityStatus column added but no business logic touches it. No existing API routes modified. No existing components modified except integrations-view.tsx (additive only — new section + new button).
+
+Stage Summary:
+- City & Address Book System fully implemented as courier-agnostic foundation.
+- 3 new DB tables + Order column (all with RLS + triggers).
+- 3 optional adapter methods added to CourierAdapter interface (fetchOperationalCities, createPickupAddress, fetchExistingPickupAddresses).
+- City sync job ready (syncCourierOperationalCities + syncAllCourierCities) — scheduling infrastructure needs to be connected.
+- City matching with 3-tier resolver (aliases → exact → fuzzy Levenshtein) — no new npm dependency.
+- Pickup address book CRUD with adapter integration (create via courier API or store locally for stubs).
+- 6 new API routes + 3 new frontend components.
+- "Sync Cities" button in Integrations UI for manual sync trigger.
+- Zero regressions to existing Order/Product/Integration logic — all changes additive.
+
+FILES CREATED:
+- supabase/migrations/007_city_address_book_schema.sql
+- src/lib/actions/city-sync.actions.ts
+- src/lib/actions/courier-address-book.actions.ts
+- src/lib/integrations/city-matcher.ts
+- src/app/api/couriers/[providerKey]/cities/route.ts
+- src/app/api/couriers/sync-cities/route.ts
+- src/app/api/couriers/match-city/route.ts
+- src/app/api/couriers/save-city-alias/route.ts
+- src/app/api/integrations/[id]/pickup-addresses/route.ts
+- src/app/api/integrations/[id]/pickup-addresses/[addressId]/route.ts
+- src/components/couriers/city-autocomplete.tsx
+- src/components/couriers/city-mismatch-resolver.tsx
+- src/components/couriers/pickup-addresses-section.tsx
+
+FILES MODIFIED:
+- prisma/schema.prisma — added 3 new models + Order.courierCityStatus + back-relations on CompanyIntegration and Company
+- src/lib/integrations/types.ts — added 3 optional methods to CourierAdapter + 3 new interfaces
+- src/components/settings/integrations-view.tsx — added PickupAddressesSection + Sync Cities button + syncCitiesMutation
+
+FILES NOT TOUCHED:
+- All existing adapter stubs (tcs, leopard, postex, shopify, daraz) — unchanged.
+- integration_action_logs — unchanged.
+- All Order/Product/OMS business logic — unchanged.
+- RLS on unrelated tables — unchanged.

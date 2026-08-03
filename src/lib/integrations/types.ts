@@ -65,6 +65,32 @@ export interface ParseStatusWebhookResult {
   lastUpdateAt?: string
 }
 
+// ──────────────────────────────────────────────────────────────
+// Operational Cities (optional capability — Phase 2 of City & Address Book)
+// ──────────────────────────────────────────────────────────────
+
+export interface OperationalCity {
+  cityName: string
+  cityId?: string
+  isPickupCity: boolean
+  isDeliveryCity: boolean
+}
+
+export interface PickupAddressInput {
+  label: string
+  address: string
+  cityName: string
+  contactPersonName: string
+  phone1: string
+  phone2?: string
+}
+
+export interface PickupAddressResult {
+  success: boolean
+  providerAddressCode?: string
+  error?: string
+}
+
 export interface CourierAdapter {
   bookShipment(input: BookShipmentInput): Promise<BookShipmentResult>
   trackShipment(trackingNumber: string): Promise<TrackShipmentResult>
@@ -84,6 +110,40 @@ export interface CourierAdapter {
    * verification per the provider's documentation.
    */
   verifyWebhookSignature(rawBody: string, signatureHeader: string | null, webhookSecret: string): Promise<boolean>
+
+  /**
+   * OPTIONAL: Fetch the list of operational cities this courier serves.
+   * Only implemented by adapters whose provider exposes a cities endpoint
+   * (e.g. PostEx). Adapters that don't support this simply omit the method
+   * — the sync job checks for its existence before calling.
+   *
+   * Used by syncCourierOperationalCities() to populate the global
+   * courier_operational_cities cache.
+   */
+  fetchOperationalCities?(): Promise<OperationalCity[]>
+
+  /**
+   * OPTIONAL: Create a pickup/return address on the courier's side.
+   * Returns the courier's own addressCode which we store locally.
+   * Only implemented by adapters whose provider supports address creation
+   * (e.g. PostEx's Create Pickup Address API).
+   */
+  createPickupAddress?(input: PickupAddressInput): Promise<PickupAddressResult>
+
+  /**
+   * OPTIONAL: Fetch existing pickup addresses already on the courier's side.
+   * Used by adapters whose provider requires addresses to pre-exist (fetch-only
+   * model) rather than supporting creation.
+   */
+  fetchExistingPickupAddresses?(): Promise<Array<{
+    providerAddressCode: string
+    label?: string
+    address: string
+    cityName: string
+    contactPersonName: string
+    phone1: string
+    phone2?: string
+  }>>
 }
 
 // ──────────────────────────────────────────────────────────────
