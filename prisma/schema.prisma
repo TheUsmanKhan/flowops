@@ -1859,6 +1859,10 @@ model Order {
   // order goes through courier city validation (Prompt 4/5). Left unused in
   // this foundational prompt — no business logic touches Order here.
   courierCityStatus           String   @default("not_applicable") // 'matched' | 'unresolved' | 'not_applicable' (CHECK in SQL)
+  lastPolledAt                DateTime? // last time this order was polled for courier status
+  courierSubStatus            String? // PostEx sub-status (e.g. 'picked_up', 'out_for_delivery')
+  needsShipperAdvice          Boolean  @default(false) // true if status requires shipper advice (Attempted, Delivery Under Review)
+  unrecognizedCourierStatus   Boolean  @default(false) // true if courier returned an unrecognized status
   dispatchLocationId          String?
   dispatchLocation            InventoryLocation? @relation("OrderDispatchLocation", fields: [dispatchLocationId], references: [id])
   notesForCourier             String?
@@ -2062,6 +2066,7 @@ model ExchangeShipment {
   needsShipperAdvice            Boolean  @default(false)
   unrecognizedCourierStatus     Boolean  @default(false)
   courierCityStatus             String   @default("not_applicable") // matched | unresolved | not_applicable (CHECK in SQL)
+  lastPolledAt                  DateTime? // last time this shipment was polled for courier status
 
   // Lifecycle timestamps
   confirmedAt                   DateTime?

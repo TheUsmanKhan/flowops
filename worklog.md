@@ -3455,3 +3455,105 @@ FILES NOT TOUCHED:
 - order_exchanges state machine (9-state CHECK) — unchanged.
 - order_exchanges.newOrderId/newOrderItemId columns — unchanged (legacy, for old records).
 - RLS on unrelated tables — unchanged.
+
+---
+Task ID: POSTEX-REAL-ADAPTER
+Agent: main
+Task: Replace PostEx stub adapter with real implementation — status mapping, order-type decision logic, real API methods, load sheet generation, and polling job.
+
+Work Log:
+
+PHASE 1 — Status Mapping (src/lib/integrations/couriers/postex.status-map.ts):
+- Created mapPostExStatus(postexStatus: string) pure function with exact 12-status mapping:
+  * Unbooked → no_change, subStatus=null
+  * Booked → no_change, subStatus='pickup_requested'
+  * Picked By PostEx → dispatched, subStatus='picked_up', triggerDispatch=true
+  * PostEx WareHouse → no_change, subStatus='at_warehouse'
+  * En-Route to PostEx warehouse → no_change, subStatus='en_route'
+  * Out For Delivery → no_change, subStatus='out_for_delivery'
+  * Delivered → delivered, triggerDelivered=true
+  * Returned → rto, triggerRto=true
+  * Out For Return → no_change, subStatus='out_for_return'
+  * Attempted → no_change, subStatus='attempted', needsShipperAdvice=true
+  * Delivery Under Review → no_change, subStatus='under_review', needsShipperAdvice=true
+  * ANY OTHER (including "Expired", "Un-Assigned By Me") → unrecognized=true, console.warn tagged [PostEx Adapter]
+- Returns PostExStatusMapping with: orderStatus, courierSubStatus, triggerDispatch, triggerDelivered, triggerRto, needsShipperAdvice, unrecognized.
+- Pure and stateless — the "never re-poll delivered/rto" rule is enforced in the polling job, not here.
+
+PHASE 2 — Order Type Decision (src/lib/integrations/couriers/postex.order-type.ts):
+- Created determinePostExOrderType(totalWeightKg, hasMissingWeight, isExchangeReplacement) pure function.
+- Logic: isExchangeReplacement → 'Replacement'; hasMissingWeight → 'Overland'; totalWeightKg > 1.0 → 'Overland'; else → 'Normal'.
+- 'Reversed' is NEVER returned under any input (confirmed via grep — only appears in comments).
+- Designed to consume calculateOrderWeightKg() from Prompt 1 (calling code comes in Prompt 5).
+
+PHASE 3 — Real Adapter (src/lib/integrations/couriers/postex.adapter.ts):
+- Replaced the stub with a full implementation of all CourierAdapter methods:
+  * bookShipment(): POST v3/create-order. Calls revalidateCityAtBookingTime() before sending (throws clear error if city no longer available). Converts phone from +92XX to 03XX format. Sends ONLY confirmed fields (NO weight/handling/itemsQty/paymentMethod/orderTags). Returns trackingNumber + providerStatus='Unbooked'.
+  * trackShipment(): GET v1/track-order/{trackingNumber}. Parses transactionStatus via mapPostExStatus(). Includes transactionStatusHistory in raw response.
+  * trackBulkShipments(): GET v1/track-bulk-order. Chunks into groups of 50. Maps each result through mapPostExStatus().
+  * cancelShipment(): PUT v1/cancel-order. Thin wrapper — caller checks cancel-window.
+  * calculateRate(): throws "PostEx does not provide a rate calculation API".
+  * parseStatusWebhook() / verifyWebhookSignature(): throw "PostEx does not support webhooks — use polling instead."
+  * fetchOperationalCities(): GET v2/get-operational-city. Maps to OperationalCity[] shape.
+  * createPickupAddress(): POST v2/create-merchant-address. addressTypeId=2 (Pickup).
+  * fetchExistingPickupAddresses(): GET v1/get-merchant-address. Maps to the shared interface shape.
+  * generateLoadSheet(): POST v2/generate-load-sheet. Returns metadata (PostEx returns PDF binary).
+- Phone conversion helper: convertToPostExPhone() handles +92→0, 92→0, 3XX→03XX formats.
+- Extended BookShipmentInput interface with optional: pickupAddressCode, orderType, quantity, transactionNotes, autoGenerateLoadSheet.
+- Added trackBulkShipments?() and generateLoadSheet?() as optional methods on CourierAdapter interface.
+
+PHASE 3 — Seed Data Fix (supabase/migrations/009_postex_seed_fix.sql):
+- Updated integration_providers for PostEx:
+  * supportsWebhook = FALSE (confirmed: PostEx does NOT support webhooks)
+  * capabilities = removed 'calculate_rate', added 'track_shipment_bulk', 'generate_load_sheet', 'fetch_operational_cities', 'create_pickup_address', 'fetch_existing_pickup_addresses'
+  * configSchema key changed from 'api_token' to 'token' (matches adapter)
+- Applied via pg client.
+
+PHASE 4 — Load Sheet + Polling (src/lib/actions/postex-status-poll.actions.ts):
+- generatePostExLoadSheet(companyIntegrationId, trackingNumbers, pickupAddress?): standalone batch action. Calls adapter.generateLoadSheet() via executeLoggedIntegrationAction(). Audit: postex.load_sheet_generated.
+- pollPostExOrderStatuses(): polling job that:
+  * Queries ALL active PostEx company integrations.
+  * Fetches Orders (status NOT IN delivered/rto/cancelled/refunded) + Exchange Shipments (status NOT IN delivered/cancelled) with PostEx tracking numbers.
+  * Batches tracking numbers, calls trackBulkShipments() via executeLoggedIntegrationAction(actionType='track_shipment_bulk').
+  * For each result: maps via mapPostExStatus(), compares to stored courierSubStatus. If changed → triggers markOrderDelivered() / processOrderReturn() / markExchangeShipmentDelivered(). If unchanged → only updates lastPolledAt.
+  * IDEMPOTENT: no duplicate audit/metric entries on unchanged status.
+  * SCHEDULING NOTE: needs to run every 30 minutes — infrastructure-level scheduling still needs to be connected.
+- Created 2 API routes: POST /api/couriers/postex/poll (elevated-only trigger), POST /api/couriers/postex/load-sheet (batch load sheet generation).
+
+SCHEMA ADDITIONS:
+- Migration 010: lastPolledAt TIMESTAMPTZ on Order + exchange_shipments.
+- Migration 011: courierSubStatus TEXT, needsShipperAdvice BOOLEAN, unrecognizedCourierStatus BOOLEAN on Order (mirroring exchange_shipments).
+- Prisma models updated for both tables.
+- db:push applied successfully.
+
+VERIFICATION:
+- bun run lint: ✅ 0 errors, 10 pre-existing warnings.
+- npx tsc --noEmit: ✅ 0 errors in src/.
+- Dev server: ✅ compiled successfully, GET / returned HTTP 200 in 18s, no runtime errors.
+- 'Reversed' never returned by determinePostExOrderType() (grep confirms only in comments).
+- 0 other adapters touched (TCS/Leopard/Shopify/Daraz unchanged).
+- supportsWebhook=false confirmed in DB for PostEx.
+- capabilities excludes calculate_rate confirmed in DB for PostEx.
+
+FILES CREATED:
+- src/lib/integrations/couriers/postex.status-map.ts
+- src/lib/integrations/couriers/postex.order-type.ts
+- src/lib/actions/postex-status-poll.actions.ts
+- src/app/api/couriers/postex/poll/route.ts
+- src/app/api/couriers/postex/load-sheet/route.ts
+- supabase/migrations/009_postex_seed_fix.sql
+- supabase/migrations/010_last_polled_at.sql
+- supabase/migrations/011_order_courier_tracking_fields.sql
+
+FILES MODIFIED:
+- src/lib/integrations/couriers/postex.adapter.ts — replaced stub with real implementation
+- src/lib/integrations/types.ts — extended BookShipmentInput + BookShipmentResult + added trackBulkShipments/generateLoadSheet optional methods to CourierAdapter
+- prisma/schema.prisma — added lastPolledAt/courierSubStatus/needsShipperAdvice/unrecognizedCourierStatus to Order model + lastPolledAt to ExchangeShipment model
+
+FILES NOT TOUCHED:
+- TCS adapter, Leopard adapter, Shopify adapter, Daraz adapter — unchanged.
+- Adapter registry — unchanged.
+- executeLoggedIntegrationAction wrapper — unchanged.
+- Prompt 1's weight cascade logic — unchanged.
+- Prompt 2's city-matcher/address-book logic — unchanged (reused via import).
+- Prompt 3's exchange_shipments logic — unchanged (this prompt only builds the adapter).

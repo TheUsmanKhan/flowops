@@ -25,11 +25,34 @@ export interface BookShipmentInput {
   weightGrams: number
   codAmount: number
   itemDescription: string
+
+  // Extended fields for couriers that need additional booking parameters.
+  // These are optional — couriers that don't use them simply ignore them.
+
+  /** Courier-specific address code from the address book (e.g. PostEx's pickupAddressCode). */
+  pickupAddressCode?: string
+
+  /** Courier-specific order type (e.g. PostEx's "Normal" | "Replacement" | "Overland"). */
+  orderType?: string
+
+  /** Number of pieces/items in the shipment (for couriers that require an `items` field). */
+  quantity?: number
+
+  /** Additional notes for the courier (maps to PostEx's transactionNotes). */
+  transactionNotes?: string
+
+  /**
+   * If true, automatically generate a load sheet after successful booking
+   * (PostEx-specific). Default false — the caller decides whether to chain.
+   */
+  autoGenerateLoadSheet?: boolean
 }
 
 export interface BookShipmentResult {
   success: boolean
   trackingNumber?: string
+  /** Courier's initial status string (e.g. PostEx returns "Unbooked"). */
+  providerStatus?: string
   error?: string
   rawResponse?: unknown
 }
@@ -144,6 +167,20 @@ export interface CourierAdapter {
     phone1: string
     phone2?: string
   }>>
+
+  /**
+   * OPTIONAL: Track multiple shipments in a single bulk API call.
+   * Used by the polling job (Phase 4) for couriers that support bulk tracking
+   * (e.g. PostEx's track-bulk-order API). Returns one result per tracking number.
+   */
+  trackBulkShipments?(trackingNumbers: string[]): Promise<Array<TrackShipmentResult>>
+
+  /**
+   * OPTIONAL: Generate a load sheet (pickup manifest) for a batch of tracking numbers.
+   * Used by couriers that require a load sheet before pickup (e.g. PostEx).
+   * Returns the raw response (may be a PDF binary or a URL).
+   */
+  generateLoadSheet?(trackingNumbers: string[], pickupAddress?: string): Promise<{ success: boolean; rawResponse?: unknown; error?: string }>
 }
 
 // ──────────────────────────────────────────────────────────────
