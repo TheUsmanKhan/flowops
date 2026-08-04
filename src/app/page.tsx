@@ -63,6 +63,7 @@ import { ExchangeDetailView } from '@/components/orders/exchange-detail-view'
 import { CustomersView } from '@/components/orders/customers-view'
 import { CustomerDetailView } from '@/components/orders/customer-detail-view'
 import { OrderWorkflowSettingsView } from '@/components/orders/order-workflow-settings-view'
+import { BookingWorkbenchView } from '@/components/orders/booking-workbench-view'
 import { IntegrationsView } from '@/components/settings/integrations-view'
 import { IntegrationLogsView } from '@/components/settings/integration-logs-view'
 import { DraftsView } from '@/components/shared/drafts-view'
@@ -332,6 +333,8 @@ function renderRoute(
       return <CustomerDetailView customerId={route.id} />
     case 'order-workflow-settings':
       return <OrderWorkflowSettingsView />
+    case 'booking-workbench':
+      return <BookingWorkbenchView />
     case 'integrations':
       return <IntegrationsView />
     case 'integration-logs':

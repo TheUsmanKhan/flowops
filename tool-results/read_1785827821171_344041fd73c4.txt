@@ -1,0 +1,726 @@
+     1→'use client'
+     2→
+     3→import { useMemo, useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import { api, FetchError } from '@/lib/api-client'
+     7→import { useAppStore } from '@/stores/app-store'
+     8→import { PageHeader } from '@/components/layout/dashboard-shell'
+     9→import { Button } from '@/components/ui/button'
+    10→import { Input } from '@/components/ui/input'
+    11→import { Label } from '@/components/ui/label'
+    12→import { Textarea } from '@/components/ui/textarea'
+    13→import { Badge } from '@/components/ui/badge'
+    14→import { Card, CardContent } from '@/components/ui/card'
+    15→import { Skeleton } from '@/components/ui/skeleton'
+    16→import {
+    17→  Select,
+    18→  SelectContent,
+    19→  SelectItem,
+    20→  SelectTrigger,
+    21→  SelectValue,
+    22→} from '@/components/ui/select'
+    23→import {
+    24→  Table,
+    25→  TableBody,
+    26→  TableCell,
+    27→  TableHead,
+    28→  TableHeader,
+    29→  TableRow,
+    30→} from '@/components/ui/table'
+    31→import {
+    32→  Dialog,
+    33→  DialogContent,
+    34→  DialogDescription,
+    35→  DialogFooter,
+    36→  DialogHeader,
+    37→  DialogTitle,
+    38→} from '@/components/ui/dialog'
+    39→import {
+    40→  RefreshCw,
+    41→  Truck,
+    42→  UserCheck,
+    43→  Package,
+    44→  CheckCircle2,
+    45→  XCircle,
+    46→  AlertTriangle,
+    47→  Clock,
+    48→  Banknote,
+    49→  Loader2,
+    50→  Eye,
+    51→} from 'lucide-react'
+    52→import { cn } from '@/lib/utils'
+    53→import { formatPKR, formatDate, getErrorMessage } from './_shared'
+    54→import { VerifyOldItemDialog } from './verify-old-item-dialog'
+    55→
+    56→// ──────────────────────────────────────────────────────────────
+    57→// Types
+    58→// ──────────────────────────────────────────────────────────────
+    59→
+    60→interface ExchangeRow {
+    61→  id: string
+    62→  exchangeMethod: 'courier_replacement' | 'customer_self_return'
+    63→  status: string
+    64→  reason: string
+    65→  oldItemPrice: number
+    66→  newItemPrice: number
+    67→  priceDifference: number
+    68→  priceDifferenceStatus: string
+    69→  requestedAt: string
+    70→  completedAt: string | null
+    71→  originalOrderId: string
+    72→  originalOrder: { flowopsOrderNumber: string }
+    73→  newOrderId: string | null
+    74→  newOrder: { flowopsOrderNumber: string } | null
+    75→}
+    76→
+    77→interface ExchangesResponse {
+    78→  exchanges: ExchangeRow[]
+    79→  total: number
+    80→}
+    81→
+    82→interface OverdueResponse {
+    83→  exchanges: Array<{ id: string; daysWaiting: number }>
+    84→}
+    85→
+    86→// ──────────────────────────────────────────────────────────────
+    87→// Status + method badges
+    88→// ──────────────────────────────────────────────────────────────
+    89→
+    90→const STATUS_BADGE: Record<string, { label: string; className: string }> = {
+    91→  requested: { label: 'Requested', className: 'bg-gray-100 text-gray-700 border-gray-200' },
+    92→  new_item_dispatched: { label: 'New Item Dispatched', className: 'bg-violet-50 text-violet-700 border-violet-200' },
+    93→  awaiting_old_item_return: { label: 'Awaiting Old Item', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+    94→  awaiting_customer_to_ship_old_item: { label: 'Awaiting Customer Ship', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+    95→  customer_confirmed_shipped: { label: 'Customer Shipped', className: 'bg-sky-50 text-sky-700 border-sky-200' },
+    96→  old_item_manually_verified: { label: 'Old Item Verified', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+    97→  completed: { label: 'Completed', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+    98→  customer_did_not_return: { label: 'Not Returned', className: 'bg-rose-50 text-rose-700 border-rose-200' },
+    99→  cancelled: { label: 'Cancelled', className: 'bg-slate-100 text-slate-500 border-slate-200' },
+   100→}
+   101→
+   102→const METHOD_BADGE: Record<string, { label: string; className: string; icon: typeof Truck }> = {
+   103→  courier_replacement: { label: 'Courier Replacement', className: 'bg-violet-50 text-violet-700 border-violet-200', icon: Truck },
+   104→  customer_self_return: { label: 'Customer Self-Return', className: 'bg-sky-50 text-sky-700 border-sky-200', icon: UserCheck },
+   105→}
+   106→
+   107→// ──────────────────────────────────────────────────────────────
+   108→// Main view
+   109→// ──────────────────────────────────────────────────────────────
+   110→
+   111→export function ExchangesView() {
+   112→  const navigate = useAppStore((s) => s.navigate)
+   113→  const queryClient = useQueryClient()
+   114→
+   115→  const [statusFilter, setStatusFilter] = useState<string>('')
+   116→  const [methodFilter, setMethodFilter] = useState<string>('')
+   117→
+   118→  // Verify dialog state
+   119→  const [verifyTarget, setVerifyTarget] = useState<ExchangeRow | null>(null)
+   120→  // Confirm shipped dialog
+   121→  const [confirmShippedTarget, setConfirmShippedTarget] = useState<ExchangeRow | null>(null)
+   122→  // Mark not returned dialog
+   123→  const [notReturnedTarget, setNotReturnedTarget] = useState<ExchangeRow | null>(null)
+   124→  // Settle payment dialog
+   125→  const [settleTarget, setSettleTarget] = useState<ExchangeRow | null>(null)
+   126→
+   127→  const query = useQuery<ExchangesResponse>({
+   128→    queryKey: ['exchanges', statusFilter, methodFilter],
+   129→    queryFn: () => {
+   130→      const params = new URLSearchParams()
+   131→      if (statusFilter) params.set('status', statusFilter)
+   132→      if (methodFilter) params.set('exchange_method', methodFilter)
+   133→      const qs = params.toString()
+   134→      return api.get<ExchangesResponse>(`/api/exchanges${qs ? `?${qs}` : ''}`)
+   135→    },
+   136→    staleTime: 15_000,
+   137→  })
+   138→
+   139→  const overdueQuery = useQuery<OverdueResponse>({
+   140→    queryKey: ['exchanges-overdue'],
+   141→    queryFn: () => api.get<OverdueResponse>('/api/exchanges/overdue?days_threshold=7'),
+   142→    staleTime: 60_000,
+   143→  })
+   144→
+   145→  const exchanges = query.data?.exchanges ?? []
+   146→  const overdueIds = useMemo(() => new Set(overdueQuery.data?.exchanges.map((e) => e.id) ?? []), [overdueQuery.data])
+   147→
+   148→  // Stats
+   149→  const activeCount = exchanges.filter((e) => !['completed', 'customer_did_not_return', 'cancelled'].includes(e.status)).length
+   150→  const awaitingVerification = exchanges.filter((e) =>
+   151→    ['awaiting_old_item_return', 'customer_confirmed_shipped', 'awaiting_customer_to_ship_old_item'].includes(e.status),
+   152→  )
+   153→  const overdueCount = awaitingVerification.filter((e) => overdueIds.has(e.id)).length
+   154→  const now = new Date()
+   155→  const completedThisMonth = exchanges.filter((e) => {
+   156→    if (e.status !== 'completed' || !e.completedAt) return false
+   157→    const d = new Date(e.completedAt)
+   158→    return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
+   159→  }).length
+   160→  const notReturned = exchanges.filter((e) => e.status === 'customer_did_not_return')
+   161→  const notReturnedValue = notReturned.reduce((s, e) => s + e.oldItemPrice, 0)
+   162→
+   163→  const invalidate = () => {
+   164→    queryClient.invalidateQueries({ queryKey: ['exchanges'] })
+   165→    queryClient.invalidateQueries({ queryKey: ['exchanges-overdue'] })
+   166→    queryClient.invalidateQueries({ queryKey: ['inventory-pools'] })
+   167→  }
+   168→
+   169→  // Mutations
+   170→  const confirmShippedMutation = useMutation({
+   171→    mutationFn: (data: { id: string; tracking: string; courier: string }) =>
+   172→      api.post(`/api/exchanges/${data.id}/confirm-shipped`, {
+   173→        customer_return_tracking_number: data.tracking || undefined,
+   174→        customer_return_courier: data.courier || undefined,
+   175→      }),
+   176→    onSuccess: () => {
+   177→      toast.success('Customer shipment confirmed.')
+   178→      setConfirmShippedTarget(null)
+   179→      invalidate()
+   180→    },
+   181→    onError: (err) => toast.error(getErrorMessage(err)),
+   182→  })
+   183→
+   184→  const notReturnedMutation = useMutation({
+   185→    mutationFn: (data: { id: string; reason: string; recoveryStatus: string; recoveryAmount: number }) =>
+   186→      api.post(`/api/exchanges/${data.id}/mark-not-returned`, {
+   187→        not_returned_reason: data.reason,
+   188→        recovery_status: data.recoveryStatus,
+   189→        recovery_amount: data.recoveryAmount || undefined,
+   190→      }),
+   191→    onSuccess: () => {
+   192→      toast.success('Marked as not returned. Customer flagged for follow-up.')
+   193→      setNotReturnedTarget(null)
+   194→      invalidate()
+   195→    },
+   196→    onError: (err) => toast.error(getErrorMessage(err)),
+   197→  })
+   198→
+   199→  const settleMutation = useMutation({
+   200→    mutationFn: (data: { id: string; amount: number; type: string }) =>
+   201→      api.post(`/api/exchanges/${data.id}/settle-price-difference`, {
+   202→        settled_amount: data.amount,
+   203→        settlement_type: data.type,
+   204→      }),
+   205→    onSuccess: () => {
+   206→      toast.success('Price difference settled.')
+   207→      setSettleTarget(null)
+   208→      invalidate()
+   209→    },
+   210→    onError: (err) => toast.error(getErrorMessage(err)),
+   211→  })
+   212→
+   213→  return (
+   214→    <div className="space-y-6">
+   215→      <PageHeader
+   216→        title="Exchanges"
+   217→        description="Manage item exchanges — courier replacement and customer self-return flows."
+   218→        actions={
+   219→          <Button variant="outline" size="sm" onClick={() => query.refetch()} disabled={query.isFetching}>
+   220→            <RefreshCw className={query.isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+   221→            Refresh
+   222→          </Button>
+   223→        }
+   224→      />
+   225→
+   226→      {/* Stats cards */}
+   227→      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+   228→        <Card>
+   229→          <CardContent className="p-4">
+   230→            <div className="flex items-center justify-between">
+   231→              <p className="text-xs uppercase tracking-wide text-muted-foreground">Active Exchanges</p>
+   232→              <RefreshCw className="h-4 w-4 text-muted-foreground" />
+   233→            </div>
+   234→            <p className="text-xl font-semibold tabular-nums mt-1">{activeCount}</p>
+   235→          </CardContent>
+   236→        </Card>
+   237→        <Card>
+   238→          <CardContent className="p-4">
+   239→            <div className="flex items-center justify-between">
+   240→              <p className="text-xs uppercase tracking-wide text-muted-foreground">Awaiting Verification</p>
+   241→              <Clock className="h-4 w-4 text-muted-foreground" />
+   242→            </div>
+   243→            <p className="text-xl font-semibold tabular-nums mt-1">{awaitingVerification.length}</p>
+   244→            {overdueCount > 0 && (
+   245→              <p className="text-xs text-rose-600 font-medium mt-0.5">{overdueCount} overdue (7+ days)</p>
+   246→            )}
+   247→          </CardContent>
+   248→        </Card>
+   249→        <Card>
+   250→          <CardContent className="p-4">
+   251→            <div className="flex items-center justify-between">
+   252→              <p className="text-xs uppercase tracking-wide text-muted-foreground">Completed This Month</p>
+   253→              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+   254→            </div>
+   255→            <p className="text-xl font-semibold tabular-nums mt-1">{completedThisMonth}</p>
+   256→          </CardContent>
+   257→        </Card>
+   258→        <Card>
+   259→          <CardContent className="p-4">
+   260→            <div className="flex items-center justify-between">
+   261→              <p className="text-xs uppercase tracking-wide text-muted-foreground">Not Returned (loss)</p>
+   262→              <AlertTriangle className="h-4 w-4 text-rose-600" />
+   263→            </div>
+   264→            <p className="text-xl font-semibold tabular-nums mt-1 text-rose-700">{notReturned.length}</p>
+   265→            {notReturnedValue > 0 && (
+   266→              <p className="text-xs text-muted-foreground mt-0.5">{formatPKR(notReturnedValue)}</p>
+   267→            )}
+   268→          </CardContent>
+   269→        </Card>
+   270→      </div>
+   271→
+   272→      {/* Filters */}
+   273→      <div className="flex flex-col sm:flex-row gap-2">
+   274→        <Select value={statusFilter} onValueChange={(v) => setStatusFilter(v === 'all' ? '' : v)}>
+   275→          <SelectTrigger className="sm:w-52">
+   276→            <SelectValue placeholder="All statuses" />
+   277→          </SelectTrigger>
+   278→          <SelectContent>
+   279→            <SelectItem value="all">All statuses</SelectItem>
+   280→            <SelectItem value="requested">Requested</SelectItem>
+   281→            <SelectItem value="awaiting_customer_to_ship_old_item">Awaiting Customer Ship</SelectItem>
+   282→            <SelectItem value="customer_confirmed_shipped">Customer Shipped</SelectItem>
+   283→            <SelectItem value="awaiting_old_item_return">Awaiting Old Item</SelectItem>
+   284→            <SelectItem value="completed">Completed</SelectItem>
+   285→            <SelectItem value="customer_did_not_return">Not Returned</SelectItem>
+   286→            <SelectItem value="cancelled">Cancelled</SelectItem>
+   287→          </SelectContent>
+   288→        </Select>
+   289→        <Select value={methodFilter} onValueChange={(v) => setMethodFilter(v === 'all' ? '' : v)}>
+   290→          <SelectTrigger className="sm:w-48">
+   291→            <SelectValue placeholder="All methods" />
+   292→          </SelectTrigger>
+   293→          <SelectContent>
+   294→            <SelectItem value="all">All methods</SelectItem>
+   295→            <SelectItem value="courier_replacement">Courier Replacement</SelectItem>
+   296→            <SelectItem value="customer_self_return">Customer Self-Return</SelectItem>
+   297→          </SelectContent>
+   298→        </Select>
+   299→      </div>
+   300→
+   301→      {/* Table */}
+   302→      {query.isLoading ? (
+   303→        <Card>
+   304→          <CardContent className="p-3 space-y-2">
+   305→            {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-12" />)}
+   306→          </CardContent>
+   307→        </Card>
+   308→      ) : query.isError ? (
+   309→        <Card>
+   310→          <CardContent className="p-10 text-center">
+   311→            <p className="text-sm text-muted-foreground mb-4">Couldn&apos;t load exchanges. {getErrorMessage(query.error)}</p>
+   312→            <Button variant="outline" onClick={() => query.refetch()}>Try again</Button>
+   313→          </CardContent>
+   314→        </Card>
+   315→      ) : exchanges.length === 0 ? (
+   316→        <Card>
+   317→          <CardContent className="p-10 sm:p-14 text-center">
+   318→            <div className="mx-auto h-14 w-14 rounded-full bg-primary/10 flex items-center justify-center mb-4">
+   319→              <RefreshCw className="h-7 w-7 text-primary" />
+   320→            </div>
+   321→            <h3 className="text-lg font-semibold">No exchanges yet</h3>
+   322→            <p className="text-sm text-muted-foreground mt-1 max-w-sm mx-auto">
+   323→              Exchanges are created from delivered order detail pages. Click an order item&apos;s [Request Exchange] button to start one.
+   324→            </p>
+   325→          </CardContent>
+   326→        </Card>
+   327→      ) : (
+   328→        <Card>
+   329→          <CardContent className="p-0">
+   330→            <div className="overflow-x-auto">
+   331→              <Table>
+   332→                <TableHeader>
+   333→                  <TableRow>
+   334→                    <TableHead>Original Order</TableHead>
+   335→                    <TableHead>Items</TableHead>
+   336→                    <TableHead>Method</TableHead>
+   337→                    <TableHead>Status</TableHead>
+   338→                    <TableHead className="text-right">Price Diff</TableHead>
+   339→                    <TableHead>Age</TableHead>
+   340→                    <TableHead className="text-right">Actions</TableHead>
+   341→                  </TableRow>
+   342→                </TableHeader>
+   343→                <TableBody>
+   344→                  {exchanges.map((e) => {
+   345→                    const statusBadge = STATUS_BADGE[e.status] ?? { label: e.status, className: 'bg-gray-100 text-gray-700 border-gray-200' }
+   346→                    const methodBadge = METHOD_BADGE[e.exchangeMethod]
+   347→                    const MethodIcon = methodBadge.icon
+   348→                    const isOverdue = overdueIds.has(e.id)
+   349→                    const daysSince = Math.floor((Date.now() - new Date(e.requestedAt).getTime()) / 86400000)
+   350→                    const isTerminal = ['completed', 'customer_did_not_return', 'cancelled'].includes(e.status)
+   351→                    const needsSettlement = e.priceDifferenceStatus === 'customer_owes' || e.priceDifferenceStatus === 'refund_due'
+   352→
+   353→                    return (
+   354→                      <TableRow
+   355→                        key={e.id}
+   356→                        className="cursor-pointer hover:bg-muted/40"
+   357→                        onClick={() => navigate({ name: 'exchange-detail', id: e.id })}
+   358→                      >
+   359→                        <TableCell>
+   360→                          <p className="text-sm font-medium font-mono">{e.originalOrder.flowopsOrderNumber}</p>
+   361→                          <p className="text-xs text-muted-foreground">{formatDate(e.requestedAt)}</p>
+   362→                        </TableCell>
+   363→                        <TableCell>
+   364→                          <div className="text-xs space-y-0.5">
+   365→                            <p className="text-muted-foreground">Old: Rs. {e.oldItemPrice.toLocaleString('en-PK')}</p>
+   366→                            <p className="font-medium">New: Rs. {e.newItemPrice.toLocaleString('en-PK')}</p>
+   367→                          </div>
+   368→                        </TableCell>
+   369→                        <TableCell>
+   370→                          <Badge variant="outline" className={cn('text-[10px]', methodBadge.className)}>
+   371→                            <MethodIcon className="h-2.5 w-2.5 mr-0.5" /> {methodBadge.label}
+   372→                          </Badge>
+   373→                        </TableCell>
+   374→                        <TableCell>
+   375→                          <Badge variant="outline" className={cn('text-[10px]', statusBadge.className)}>
+   376→                            {statusBadge.label}
+   377→                          </Badge>
+   378→                        </TableCell>
+   379→                        <TableCell className="text-right tabular-nums text-xs">
+   380→                          {e.priceDifference > 0 ? (
+   381→                            <span className="text-amber-700">+{formatPKR(e.priceDifference)}</span>
+   382→                          ) : e.priceDifference < 0 ? (
+   383→                            <span className="text-sky-700">−{formatPKR(Math.abs(e.priceDifference))}</span>
+   384→                          ) : (
+   385→                            <span className="text-muted-foreground">—</span>
+   386→                          )}
+   387→                          {needsSettlement && (
+   388→                            <Badge variant="outline" className="ml-1 text-[9px] bg-amber-50 text-amber-700 border-amber-200">
+   389→                              {e.priceDifferenceStatus === 'customer_owes' ? 'owes' : 'due'}
+   390→                            </Badge>
+   391→                          )}
+   392→                        </TableCell>
+   393→                        <TableCell>
+   394→                          <span className={cn('text-xs tabular-nums', isOverdue ? 'text-rose-600 font-medium' : 'text-muted-foreground')}>
+   395→                            {daysSince}d
+   396→                          </span>
+   397→                          {isOverdue && <AlertTriangle className="inline ml-1 h-3 w-3 text-rose-600" />}
+   398→                        </TableCell>
+   399→                        <TableCell className="text-right" onClick={(ev) => ev.stopPropagation()}>
+   400→                          <div className="flex items-center justify-end gap-1 flex-wrap">
+   401→                            {/* Context-aware row actions */}
+   402→                            {e.status === 'awaiting_customer_to_ship_old_item' && (
+   403→                              <Button
+   404→                                size="sm"
+   405→                                variant="outline"
+   406→                                className="h-7 text-xs"
+   407→                                onClick={() => setConfirmShippedTarget(e)}
+   408→                              >
+   409→                                <UserCheck className="h-3 w-3" /> Confirm Shipped
+   410→                              </Button>
+   411→                            )}
+   412→                            {(e.status === 'customer_confirmed_shipped' || e.status === 'awaiting_old_item_return') && (
+   413→                              <Button
+   414→                                size="sm"
+   415→                                variant="default"
+   416→                                className="h-7 text-xs"
+   417→                                onClick={() => setVerifyTarget(e)}
+   418→                              >
+   419→                                <Package className="h-3 w-3" /> Verify Old Item
+   420→                              </Button>
+   421→                            )}
+   422→                            {needsSettlement && (
+   423→                              <Button
+   424→                                size="sm"
+   425→                                variant="outline"
+   426→                                className="h-7 text-xs"
+   427→                                onClick={() => setSettleTarget(e)}
+   428→                              >
+   429→                                <Banknote className="h-3 w-3" /> Settle
+   430→                              </Button>
+   431→                            )}
+   432→                            {!isTerminal && (
+   433→                              <Button
+   434→                                size="sm"
+   435→                                variant="ghost"
+   436→                                className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+   437→                                onClick={() => setNotReturnedTarget(e)}
+   438→                              >
+   439→                                <XCircle className="h-3 w-3" /> Not Returned
+   440→                              </Button>
+   441→                            )}
+   442→                            <Button
+   443→                              size="sm"
+   444→                              variant="ghost"
+   445→                              className="h-7"
+   446→                              onClick={() => navigate({ name: 'exchange-detail', id: e.id })}
+   447→                            >
+   448→                              <Eye className="h-3.5 w-3.5" />
+   449→                            </Button>
+   450→                          </div>
+   451→                        </TableCell>
+   452→                      </TableRow>
+   453→                    )
+   454→                  })}
+   455→                </TableBody>
+   456→              </Table>
+   457→            </div>
+   458→            <p className="text-xs text-muted-foreground p-3">{exchanges.length} exchange{exchanges.length === 1 ? '' : 's'}</p>
+   459→          </CardContent>
+   460→        </Card>
+   461→      )}
+   462→
+   463→      {/* Verify dialog */}
+   464→      {verifyTarget && (
+   465→        <VerifyOldItemDialog
+   466→          open={!!verifyTarget}
+   467→          onOpenChange={(v) => !v && setVerifyTarget(null)}
+   468→          exchangeId={verifyTarget.id}
+   469→          exchangeMethod={verifyTarget.exchangeMethod}
+   470→          onVerified={() => invalidate()}
+   471→        />
+   472→      )}
+   473→
+   474→      {/* Confirm shipped dialog */}
+   475→      {confirmShippedTarget && (
+   476→        <ConfirmShippedDialog
+   477→          exchange={confirmShippedTarget}
+   478→          open={!!confirmShippedTarget}
+   479→          onOpenChange={(v) => !v && setConfirmShippedTarget(null)}
+   480→          loading={confirmShippedMutation.isPending}
+   481→          onConfirm={(tracking, courier) =>
+   482→            confirmShippedMutation.mutate({ id: confirmShippedTarget.id, tracking, courier })
+   483→          }
+   484→        />
+   485→      )}
+   486→
+   487→      {/* Mark not returned dialog */}
+   488→      {notReturnedTarget && (
+   489→        <NotReturnedDialog
+   490→          exchange={notReturnedTarget}
+   491→          open={!!notReturnedTarget}
+   492→          onOpenChange={(v) => !v && setNotReturnedTarget(null)}
+   493→          loading={notReturnedMutation.isPending}
+   494→          onConfirm={(reason, recoveryStatus, recoveryAmount) =>
+   495→            notReturnedMutation.mutate({
+   496→              id: notReturnedTarget.id,
+   497→              reason,
+   498→              recoveryStatus,
+   499→              recoveryAmount,
+   500→            })
+   501→          }
+   502→        />
+   503→      )}
+   504→
+   505→      {/* Settle payment dialog */}
+   506→      {settleTarget && (
+   507→        <SettlePaymentDialog
+   508→          exchange={settleTarget}
+   509→          open={!!settleTarget}
+   510→          onOpenChange={(v) => !v && setSettleTarget(null)}
+   511→          loading={settleMutation.isPending}
+   512→          onConfirm={(amount, type) =>
+   513→            settleMutation.mutate({ id: settleTarget.id, amount, type })
+   514→          }
+   515→        />
+   516→      )}
+   517→    </div>
+   518→  )
+   519→}
+   520→
+   521→// ──────────────────────────────────────────────────────────────
+   522→// Confirm Shipped dialog
+   523→// ──────────────────────────────────────────────────────────────
+   524→
+   525→function ConfirmShippedDialog({
+   526→  exchange,
+   527→  open,
+   528→  onOpenChange,
+   529→  loading,
+   530→  onConfirm,
+   531→}: {
+   532→  exchange: ExchangeRow
+   533→  open: boolean
+   534→  onOpenChange: (open: boolean) => void
+   535→  loading: boolean
+   536→  onConfirm: (tracking: string, courier: string) => void
+   537→}) {
+   538→  const [tracking, setTracking] = useState('')
+   539→  const [courier, setCourier] = useState('')
+   540→
+   541→  return (
+   542→    <Dialog open={open} onOpenChange={onOpenChange}>
+   543→      <DialogContent className="sm:max-w-md">
+   544→        <DialogHeader>
+   545→          <DialogTitle>Confirm Customer Shipped Old Item</DialogTitle>
+   546→          <DialogDescription>
+   547→            Mark that the customer has confirmed they shipped the old item back. This does NOT dispatch the new item — that happens only after you verify the old item is received.
+   548→          </DialogDescription>
+   549→        </DialogHeader>
+   550→        <div className="space-y-3 py-2">
+   551→          <div className="space-y-1.5">
+   552→            <Label className="text-xs">Customer&apos;s Tracking Number (optional)</Label>
+   553→            <Input
+   554→              placeholder="e.g. LEOPARD-12345"
+   555→              value={tracking}
+   556→              onChange={(e) => setTracking(e.target.value)}
+   557→              autoFocus
+   558→            />
+   559→          </div>
+   560→          <div className="space-y-1.5">
+   561→            <Label className="text-xs">Courier (optional)</Label>
+   562→            <Input
+   563→              placeholder="e.g. Leopard, TCS"
+   564→              value={courier}
+   565→              onChange={(e) => setCourier(e.target.value)}
+   566→            />
+   567→          </div>
+   568→        </div>
+   569→        <DialogFooter>
+   570→          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+   571→          <Button disabled={loading} onClick={() => onConfirm(tracking, courier)}>
+   572→            {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Confirming…</> : 'Confirm Shipped'}
+   573→          </Button>
+   574→        </DialogFooter>
+   575→      </DialogContent>
+   576→    </Dialog>
+   577→  )
+   578→}
+   579→
+   580→// ──────────────────────────────────────────────────────────────
+   581→// Mark Not Returned dialog
+   582→// ──────────────────────────────────────────────────────────────
+   583→
+   584→function NotReturnedDialog({
+   585→  exchange,
+   586→  open,
+   587→  onOpenChange,
+   588→  loading,
+   589→  onConfirm,
+   590→}: {
+   591→  exchange: ExchangeRow
+   592→  open: boolean
+   593→  onOpenChange: (open: boolean) => void
+   594→  loading: boolean
+   595→  onConfirm: (reason: string, recoveryStatus: string, recoveryAmount: number) => void
+   596→}) {
+   597→  const [reason, setReason] = useState('')
+   598→  const [recoveryStatus, setRecoveryStatus] = useState('pending')
+   599→  const [recoveryAmount, setRecoveryAmount] = useState(exchange.oldItemPrice.toString())
+   600→
+   601→  return (
+   602→    <Dialog open={open} onOpenChange={onOpenChange}>
+   603→      <DialogContent className="sm:max-w-md">
+   604→        <DialogHeader>
+   605→          <DialogTitle className="flex items-center gap-2 text-rose-700">
+   606→            <XCircle className="h-4 w-4" /> Mark as Not Returned
+   607→          </DialogTitle>
+   608→          <DialogDescription>
+   609→            This is a terminal outcome. The customer will be flagged with reason &quot;Exchange item not returned&quot; and the old item&apos;s value becomes a recoverable amount.
+   610→          </DialogDescription>
+   611→        </DialogHeader>
+   612→        <div className="space-y-3 py-2">
+   613→          <div className="space-y-1.5">
+   614→            <Label className="text-xs">Reason *</Label>
+   615→            <Textarea
+   616→              placeholder="e.g. Customer never shipped the item back after 2 weeks of follow-up"
+   617→              value={reason}
+   618→              onChange={(e) => setReason(e.target.value)}
+   619→              rows={2}
+   620→              autoFocus
+   621→            />
+   622→          </div>
+   623→          <div className="space-y-1.5">
+   624→            <Label className="text-xs">Recovery Status</Label>
+   625→            <Select value={recoveryStatus} onValueChange={setRecoveryStatus}>
+   626→              <SelectTrigger><SelectValue /></SelectTrigger>
+   627→              <SelectContent>
+   628→                <SelectItem value="pending">Pending (follow up later)</SelectItem>
+   629→                <SelectItem value="recovered">Recovered (collected)</SelectItem>
+   630→                <SelectItem value="written_off">Written Off (loss accepted)</SelectItem>
+   631→              </SelectContent>
+   632→            </Select>
+   633→          </div>
+   634→          <div className="space-y-1.5">
+   635→            <Label className="text-xs">Recovery Amount (Rs.)</Label>
+   636→            <Input
+   637→              type="number"
+   638→              min="0"
+   639→              value={recoveryAmount}
+   640→              onChange={(e) => setRecoveryAmount(e.target.value)}
+   641→            />
+   642→            <p className="text-[10px] text-muted-foreground">Defaults to the old item&apos;s value: Rs. {exchange.oldItemPrice.toLocaleString('en-PK')}</p>
+   643→          </div>
+   644→        </div>
+   645→        <DialogFooter>
+   646→          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+   647→          <Button
+   648→            variant="destructive"
+   649→            disabled={loading || reason.trim().length < 3}
+   650→            onClick={() => onConfirm(reason.trim(), recoveryStatus, Number(recoveryAmount) || 0)}
+   651→          >
+   652→            {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Marking…</> : 'Mark as Not Returned'}
+   653→          </Button>
+   654→        </DialogFooter>
+   655→      </DialogContent>
+   656→    </Dialog>
+   657→  )
+   658→}
+   659→
+   660→// ──────────────────────────────────────────────────────────────
+   661→// Settle Payment dialog
+   662→// ──────────────────────────────────────────────────────────────
+   663→
+   664→function SettlePaymentDialog({
+   665→  exchange,
+   666→  open,
+   667→  onOpenChange,
+   668→  loading,
+   669→  onConfirm,
+   670→}: {
+   671→  exchange: ExchangeRow
+   672→  open: boolean
+   673→  onOpenChange: (open: boolean) => void
+   674→  loading: boolean
+   675→  onConfirm: (amount: number, type: string) => void
+   676→}) {
+   677→  const isCustomerOwes = exchange.priceDifference > 0
+   678→  const [amount, setAmount] = useState(Math.abs(exchange.priceDifference).toString())
+   679→  const [type, setType] = useState(isCustomerOwes ? 'collected_from_customer' : 'refunded_to_customer')
+   680→
+   681→  return (
+   682→    <Dialog open={open} onOpenChange={onOpenChange}>
+   683→      <DialogContent className="sm:max-w-md">
+   684→        <DialogHeader>
+   685→          <DialogTitle className="flex items-center gap-2">
+   686→            <Banknote className="h-4 w-4" /> Settle Price Difference
+   687→          </DialogTitle>
+   688→          <DialogDescription>
+   689→            {isCustomerOwes
+   690→              ? `Customer owes Rs. ${Math.abs(exchange.priceDifference).toLocaleString('en-PK')} for the price difference.`
+   691→              : `Rs. ${Math.abs(exchange.priceDifference).toLocaleString('en-PK')} is due as a refund to the customer.`}
+   692→          </DialogDescription>
+   693→        </DialogHeader>
+   694→        <div className="space-y-3 py-2">
+   695→          <div className="space-y-1.5">
+   696→            <Label className="text-xs">Amount (Rs.)</Label>
+   697→            <Input
+   698→              type="number"
+   699→              min="0"
+   700→              value={amount}
+   701→              onChange={(e) => setAmount(e.target.value)}
+   702→              autoFocus
+   703→            />
+   704→          </div>
+   705→          <div className="space-y-1.5">
+   706→            <Label className="text-xs">Settlement Type</Label>
+   707→            <Select value={type} onValueChange={setType}>
+   708→              <SelectTrigger><SelectValue /></SelectTrigger>
+   709→              <SelectContent>
+   710→                <SelectItem value="collected_from_customer">Collected from customer</SelectItem>
+   711→                <SelectItem value="refunded_to_customer">Refunded to customer</SelectItem>
+   712→              </SelectContent>
+   713→            </Select>
+   714→          </div>
+   715→        </div>
+   716→        <DialogFooter>
+   717→          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+   718→          <Button disabled={loading} onClick={() => onConfirm(Number(amount) || 0, type)}>
+   719→            {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Settling…</> : 'Settle Payment'}
+   720→          </Button>
+   721→        </DialogFooter>
+   722→      </DialogContent>
+   723→    </Dialog>
+   724→  )
+   725→}
+   726→

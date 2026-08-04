@@ -60,9 +60,11 @@ import {
   PackageCheck,
   Boxes,
   ExternalLink,
+  AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { RequestExchangeDialog } from './request-exchange-dialog'
+import { CityMismatchResolver } from '@/components/couriers/city-mismatch-resolver'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types — match GET /api/orders/[id] response shape
@@ -123,6 +125,9 @@ interface OrderDetail {
     deliveryCity: string | null
     courierName: string | null
     trackingNumber: string | null
+    courierCityStatus?: string
+    courierSubStatus?: string | null
+    needsShipperAdvice?: boolean
     notesForCourier: string | null
     dispatchLocationId: string | null
     dispatchLocation: { id: string; name: string; city: string } | null
@@ -1031,6 +1036,44 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                 value={order.deliveryAddress ?? '—'}
               />
               <InfoRow label="City" value={order.deliveryCity ?? '—'} />
+              {order.courierCityStatus === 'unresolved' && order.deliveryCity && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-2 mt-1">
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+                    <span className="text-xs font-medium text-amber-900">City mismatch</span>
+                  </div>
+                  <p className="text-[11px] text-amber-700 mb-2">
+                    The delivery city &quot;{order.deliveryCity}&quot; doesn&apos;t match any cached courier city. Resolve it below to enable booking.
+                  </p>
+                  <CityMismatchResolver
+                    providerKey="postex"
+                    typedCity={order.deliveryCity}
+                    suggestions={[]}
+                    onResolved={async (resolvedCity) => {
+                      try {
+                        await api.patch(`/api/orders/${orderId}`, {
+                          delivery_city: resolvedCity,
+                          courier_city_status: 'matched',
+                        })
+                        toast.success(`City resolved to "${resolvedCity}"`)
+                        invalidateAll()
+                      } catch {
+                        toast.error('Failed to update city')
+                      }
+                    }}
+                    onCancelled={() => {}}
+                  />
+                </div>
+              )}
+              {order.courierSubStatus && (
+                <InfoRow label="Courier Status" value={order.courierSubStatus} />
+              )}
+              {order.needsShipperAdvice && (
+                <div className="rounded-lg border border-rose-300 bg-rose-50 p-2 mt-1 flex items-center gap-1.5">
+                  <AlertCircle className="h-3.5 w-3.5 text-rose-600" />
+                  <span className="text-xs text-rose-800">Courier status requires shipper advice</span>
+                </div>
+              )}
               <InfoRow label="Courier" value={order.courierName ?? '—'} />
               {order.trackingNumber && (
                 <InfoRow

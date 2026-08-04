@@ -643,22 +643,27 @@ export async function verifyOldItemReceived(
       },
     })
 
-    // 8. IF customer_self_return: THIS IS THE GATING POINT — create + dispatch
-    //    the new item order NOW (was blocked until verification completed).
-    //    For courier_replacement, the new item was already dispatched in Part 3.
-    if (exchange.exchangeMethod === 'customer_self_return') {
-      await createAndDispatchExchangeOrder(d.exchange_id, ctx)
+    // 8. IF customer_self_return: THIS IS THE GATING POINT.
+    //    PROMPT 5 CHANGE: verification now STOPS at 'old_item_manually_verified'.
+    //    The actual shipment creation + dispatch is a separate explicit step,
+    //    triggered by the "Send Replacement Order" button in the Exchange Detail UI.
+    //    This lets staff select a courier, address, and city before dispatching.
+    //    For courier_replacement, the new item was already dispatched in Part 3
+    //    (via dispatchExchangeNewItem), so we mark as completed here.
+    if (exchange.exchangeMethod === 'courier_replacement') {
+      // For courier_replacement: the new item was already dispatched earlier,
+      // so we can mark the exchange as completed now.
+      await db.orderExchange.update({
+        where: { id: d.exchange_id },
+        data: {
+          status: 'completed',
+          completedAt: new Date(),
+        },
+      })
     }
-
-    // 9. Mark as completed (for both methods — courier_replacement's new item
-    //    was dispatched earlier, self_return's was just dispatched above)
-    await db.orderExchange.update({
-      where: { id: d.exchange_id },
-      data: {
-        status: 'completed',
-        completedAt: new Date(),
-      },
-    })
+    // For customer_self_return: status stays at 'old_item_manually_verified'.
+    // The "Send Replacement Order" button (Prompt 5 Phase 1) calls
+    // dispatchReplacementForSelfReturnExchange() to create + dispatch the shipment.
 
     // 10. Audit log
     await insertAuditLog({
@@ -690,20 +695,31 @@ export async function verifyOldItemReceived(
       },
     }).catch(() => {})
 
-    // Also fire exchange.completed metric
-    await insertMetricEvent({
-      companyId: ctx.company.id,
-      entityType: 'order_exchange',
-      entityId: d.exchange_id,
-      metricKey: 'exchange.completed',
-      numericValue: Number(exchange.newItemPrice) - Number(exchange.oldItemPrice),
-      dimensions: {
-        exchange_method: exchange.exchangeMethod,
-        condition: d.condition,
-      },
-    }).catch(() => {})
+    // Also fire exchange.completed metric — ONLY for courier_replacement
+    // (customer_self_return no longer auto-completes; completion happens when
+    // the "Send Replacement Order" button is clicked and the shipment is dispatched)
+    if (exchange.exchangeMethod === 'courier_replacement') {
+      await insertMetricEvent({
+        companyId: ctx.company.id,
+        entityType: 'order_exchange',
+        entityId: d.exchange_id,
+        metricKey: 'exchange.completed',
+        numericValue: Number(exchange.newItemPrice) - Number(exchange.oldItemPrice),
+        dimensions: {
+          exchange_method: exchange.exchangeMethod,
+          condition: d.condition,
+        },
+      }).catch(() => {})
+    }
 
-    return { success: true, data: { exchangeStatus: 'completed' } }
+    return {
+      success: true,
+      data: {
+        exchangeStatus: exchange.exchangeMethod === 'courier_replacement'
+          ? 'completed'
+          : 'old_item_manually_verified',
+      },
+    }
   } catch (err) {
     return {
       success: false,
@@ -1217,5 +1233,71 @@ export async function listOverdueExchanges(
       success: false,
       error: err instanceof Error ? err.message : 'Failed to list overdue exchanges',
     }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// PART 11: DISPATCH REPLACEMENT FOR SELF-RETURN EXCHANGE (Prompt 5)
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * Dispatch the replacement shipment for a customer_self_return exchange
+ * AFTER old item verification is complete (status='old_item_manually_verified').
+ *
+ * This is the explicit "Send Replacement Order" action — it creates an
+ * ExchangeShipment, reserves stock, and dispatches it.
+ *
+ * PROMPT 5 CHANGE: Previously, verifyOldItemReceived() auto-dispatched
+ * for customer_self_return. Now verification stops at 'old_item_manually_verified'
+ * and this function is the separate explicit dispatch step.
+ */
+export async function dispatchReplacementForSelfReturnExchange(
+  exchangeId: string,
+): Promise<ActionResult<{
+  newExchangeShipmentId: string
+  exchangeShipmentNumber: string
+}>> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+
+    const exchange = await db.orderExchange.findFirst({
+      where: { id: exchangeId, companyId: ctx.company.id },
+      select: { exchangeMethod: true, status: true, newItemPrice: true, oldItemPrice: true },
+    })
+    if (!exchange) {
+      return { success: false, error: 'Exchange not found.' }
+    }
+
+    // Guard: only for customer_self_return at status='old_item_manually_verified'
+    if (exchange.exchangeMethod !== 'customer_self_return') {
+      return { success: false, error: 'This action is only for customer_self_return exchanges.' }
+    }
+    if (exchange.status !== 'old_item_manually_verified') {
+      return { success: false, error: `Cannot dispatch replacement for an exchange with status '${exchange.status}'. Expected 'old_item_manually_verified'.` }
+    }
+
+    // Use the internal helper to create + dispatch the ExchangeShipment
+    const result = await createAndDispatchExchangeOrder(exchangeId, ctx)
+
+    // Mark the exchange as completed
+    await db.orderExchange.update({
+      where: { id: exchangeId },
+      data: { status: 'completed', completedAt: new Date() },
+    })
+
+    // Fire exchange.completed metric
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order_exchange',
+      entityId: exchangeId,
+      metricKey: 'exchange.completed',
+      numericValue: Number(exchange.newItemPrice) - Number(exchange.oldItemPrice),
+      dimensions: { exchange_method: exchange.exchangeMethod },
+    }).catch(() => {})
+
+    return { success: true, data: result }
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : 'Failed to dispatch replacement' }
   }
 }

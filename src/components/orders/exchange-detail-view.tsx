@@ -47,6 +47,8 @@ import {
 import { cn } from '@/lib/utils'
 import { formatPKR, formatDateTime, getErrorMessage, badgeForStatus } from './_shared'
 import { VerifyOldItemDialog } from './verify-old-item-dialog'
+import { SendExchangeShipmentModal } from './send-exchange-shipment-modal'
+import { ShipmentTrackingCard } from './shipment-tracking-card'
 
 interface ExchangeDetail {
   id: string
@@ -101,6 +103,18 @@ interface ExchangeDetail {
     deliveredAt: string | null
   } | null
   newOrderItem: { id: string; fulfillmentStatus: string } | null
+  // Exchange Shipments (Prompt 3) — replaces the legacy newOrder for new exchanges
+  exchangeShipments: Array<{
+    id: string
+    exchangeShipmentNumber: string
+    status: string
+    quantity: number
+    invoiceAmount: number
+    trackingNumber: string | null
+    dispatchedAt: string | null
+    deliveredAt: string | null
+    createdAt: string
+  }>
   requestedByEmployee: { id: string; user: { fullName: string } }
   oldItemVerifiedByEmployee: { id: string; user: { fullName: string } } | null
 }
@@ -129,6 +143,7 @@ export function ExchangeDetailView({ exchangeId }: { exchangeId: string }) {
   const [verifyOpen, setVerifyOpen] = useState(false)
   const [settleOpen, setSettleOpen] = useState(false)
   const [notReturnedOpen, setNotReturnedOpen] = useState(false)
+  const [sendShipmentOpen, setSendShipmentOpen] = useState(false)
 
   const query = useQuery<ExchangeDetail>({
     queryKey: ['exchange', exchangeId],
@@ -422,6 +437,20 @@ export function ExchangeDetailView({ exchangeId }: { exchangeId: string }) {
             </Card>
           )}
 
+          {/* Shipment Tracking — shows exchange shipments (Prompt 3/5) */}
+          {e.exchangeShipments && e.exchangeShipments.length > 0 && (
+            <Card>
+              <CardHeader><CardTitle className="text-base flex items-center gap-2">
+                <Truck className="h-4 w-4 text-primary" /> Shipment Tracking
+              </CardTitle></CardHeader>
+              <CardContent className="space-y-3">
+                {e.exchangeShipments.map((shipment) => (
+                  <ShipmentTrackingCard key={shipment.id} shipment={shipment} />
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
           {/* Actions */}
           <Card>
             <CardHeader><CardTitle className="text-base">Actions</CardTitle></CardHeader>
@@ -446,8 +475,13 @@ export function ExchangeDetailView({ exchangeId }: { exchangeId: string }) {
                 </Button>
               )}
               {e.status === 'requested' && e.exchangeMethod === 'courier_replacement' && (
-                <Button className="w-full" variant="outline" onClick={() => navigate({ name: 'exchanges' })}>
-                  <Truck className="h-3.5 w-3.5" /> Dispatch New Item (from list)
+                <Button className="w-full" onClick={() => setSendShipmentOpen(true)}>
+                  <Truck className="h-3.5 w-3.5" /> Dispatch Replacement
+                </Button>
+              )}
+              {e.status === 'old_item_manually_verified' && e.exchangeMethod === 'customer_self_return' && (
+                <Button className="w-full" onClick={() => setSendShipmentOpen(true)}>
+                  <Package className="h-3.5 w-3.5" /> Send Replacement Order
                 </Button>
               )}
             </CardContent>
@@ -485,12 +519,23 @@ export function ExchangeDetailView({ exchangeId }: { exchangeId: string }) {
           }
         />
       )}
+      {sendShipmentOpen && (
+        <SendExchangeShipmentModal
+          open={sendShipmentOpen}
+          onOpenChange={setSendShipmentOpen}
+          exchangeId={exchangeId}
+          exchangeMethod={e.exchangeMethod}
+          isExchangeReplacement={e.exchangeMethod === 'courier_replacement'}
+          defaultCustomerId={e.originalOrder.customer.id}
+          defaultVariantId={e.newOrgVariant.id}
+          defaultQuantity={1}
+          defaultInvoiceAmount={e.priceDifferenceStatus === 'customer_owes' ? e.priceDifference : 0}
+          onSuccess={() => invalidate()}
+        />
+      )}
     </div>
   )
 }
-
-// ──────────────────────────────────────────────────────────────
-// Settle dialog
 // ──────────────────────────────────────────────────────────────
 
 function SettleDialog({

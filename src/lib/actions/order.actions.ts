@@ -1494,9 +1494,6 @@ export async function listOrders(
           courierCharges: o.courierCharges ? Number(o.courierCharges) : null,
           totalOrderValue: Number(o.totalOrderValue),
           advanceAmount: o.advanceAmount ? Number(o.advanceAmount) : null,
-          // remainingCodAmount is NOT a GENERATED column — if it wasn't
-          // persisted (legacy rows), compute it on the fly so the OMS list
-          // always shows the correct outstanding COD amount.
           remainingCodAmount: o.remainingCodAmount
             ? Number(o.remainingCodAmount)
             : Math.max(
@@ -1506,6 +1503,10 @@ export async function listOrders(
           codCollected: o.codCollected,
           courierName: o.courierName,
           trackingNumber: o.trackingNumber,
+          courierCompanyIntegrationId: o.courierCompanyIntegrationId,
+          courierCityStatus: o.courierCityStatus,
+          courierSubStatus: o.courierSubStatus,
+          needsShipperAdvice: o.needsShipperAdvice,
           dispatchLocationId: o.dispatchLocationId,
           customerId: o.customerId,
           deliveryCity: o.deliveryCity,

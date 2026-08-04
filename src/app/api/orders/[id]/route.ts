@@ -97,6 +97,11 @@ export async function GET(
         deliveryCity: order.deliveryCity,
         courierName: order.courierName,
         trackingNumber: order.trackingNumber,
+        courierCompanyIntegrationId: order.courierCompanyIntegrationId,
+        courierCityStatus: order.courierCityStatus,
+        courierSubStatus: order.courierSubStatus,
+        needsShipperAdvice: order.needsShipperAdvice,
+        unrecognizedCourierStatus: order.unrecognizedCourierStatus,
         notesForCourier: order.notesForCourier,
         dispatchLocationId: order.dispatchLocationId,
         dispatchLocation: order.dispatchLocation

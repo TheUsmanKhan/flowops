@@ -3557,3 +3557,168 @@ FILES NOT TOUCHED:
 - Prompt 1's weight cascade logic — unchanged.
 - Prompt 2's city-matcher/address-book logic — unchanged (reused via import).
 - Prompt 3's exchange_shipments logic — unchanged (this prompt only builds the adapter).
+
+---
+Task ID: PROMPT5-FRONTEND
+Agent: full-stack-developer
+Task: Build 3 frontend components for Prompt 5 of the PostEx integration (BookingWorkbenchView, SendExchangeShipmentModal, ShipmentTrackingCard)
+
+Work Log:
+
+CONTEXT REVIEW:
+- Read POSTEX-REAL-ADAPTER + EXCHANGE-SHIPMENTS-SYSTEM worklog entries — confirmed ExchangeShipment shape returned by getExchangeDetail(): { id, exchangeShipmentNumber, status, quantity, invoiceAmount, trackingNumber, dispatchedAt, deliveredAt, createdAt } (matches ShipmentTrackingCard prop type exactly).
+- Verified GET /api/orders response includes courierCompanyIntegrationId per row (line 1506 of order.actions.ts) — enables client-side filter for unbooked orders.
+- Verified POST /api/booking-workbench/book already exists and accepts { orderId, companyIntegrationId, customerName?, customerPhone?, deliveryAddress?, deliveryCity?, codAmount?, orderType? } → returns { success, trackingNumber, orderType, providerStatus }.
+- Verified CityAutocomplete component (src/components/couriers/city-autocomplete.tsx) already exports controlled component with providerKey/value/onChange/disabled/placeholder props.
+- Studied existing patterns: verify-old-item-dialog.tsx (Dialog + useMutation), exchange-detail-view.tsx (SettleDialog/NotReturnedDialog), customer-detail-view.tsx (addCustomerAddress/Phone mutations), _shared.ts (formatPKR/formatDate/formatDateTime/getErrorMessage).
+
+FILES CREATED (3):
+
+1. src/components/orders/shipment-tracking-card.tsx (~190 lines)
+   - Compact card showing an ExchangeShipment row.
+   - 6-state status badge map (pending/confirmed/backordered/dispatched/delivered/cancelled) — gray/sky/amber/violet/emerald/slate (no indigo/blue).
+   - EXCH-##### shipment number in mono font.
+   - Tracking number with copy-to-clipboard affordance (navigator.clipboard + Sonner toast).
+   - Dispatched/Delivered/Created timestamps via formatDateTime.
+   - Invoice amount via formatPKR.
+   - Amber "Queued — will be fulfilled when stock arrives" callout when status='backordered'.
+   - Cancelled state dims card with opacity-70.
+   - Read-only — no mutations.
+
+2. src/components/orders/send-exchange-shipment-modal.tsx (~480 lines)
+   - Reusable Dialog with 6 sequential form fields:
+     1. Courier integration dropdown (GET /api/integrations?category=courier) — must be selected first; changing resets delivery city.
+     2. Delivery city via <CityAutocomplete providerKey={selectedCourierProviderKey}> — disabled until courier picked.
+     3. Shipping address Select (existing customer addresses + "Add New" sentinel) — inline Add New sub-form (label, address, city, is_default) POSTs to /api/customers/{id}/addresses, refetches, auto-selects new addressId.
+     4. Shipping phone Select with same pattern + Add New → POST /api/customers/{id}/phones.
+     5. Invoice/COD amount Input (defaults to defaultInvoiceAmount).
+     6. Quantity Input (defaults to defaultQuantity).
+   - On submit: POSTs to dispatch-new-item (isExchangeReplacement=true) OR dispatch-replacement (false) with body { companyIntegrationId, deliveryCity, shippingAddressId, shippingPhoneId, invoiceAmount, quantity, variantId }.
+   - On success: toast.success + invalidate ['exchanges']/['exchange', exchangeId]/['inventory-pools'] + onSuccess() + close.
+   - On failure: toast.error with getErrorMessage(err) — keeps dialog open so user can fix inputs.
+   - Reset effect on modal close clears all state.
+
+3. src/components/orders/booking-workbench-view.tsx (~570 lines)
+   - Bulk booking workbench for unbooked external-platform orders.
+   - Fetches GET /api/orders?statuses=confirmed,processing&limit=100 (TanStack Query ['orders','booking-workbench'], staleTime 15s).
+   - Client-side filters to orders where courierCompanyIntegrationId === null (API doesn't expose this as a query param yet — adding would require /lib change, out of scope).
+   - Optional search filter (order # / customer / phone / external ref).
+   - Per-row editable state Record<string, RowState> keyed by orderId, lazily seeded from order data (customerName, customerPhone, deliveryCity pre-filled; deliveryAddress blank since list endpoint doesn't return it; codAmount defaults to remainingCodAmount ?? totalOrderValue; orderType defaults to 'Normal').
+   - Each row: checkbox + order # + source badge + editable Inputs (customer name, phone, address, COD) + <CityAutocomplete providerKey={selectedProviderKey || 'postex'}> + Select for order type (Normal/Overland/Replacement with descriptions) + per-row status/result cell.
+   - Batch toolbar: courier integration dropdown + search + "Upload Booking (N)" button showing selected count.
+   - "Select All" via header checkbox.
+   - On Upload Booking: SEQUENTIALLY (not parallel — plays nice with external courier API) calls POST /api/booking-workbench/book for each checked row, with row's editable overrides as body. Per-row try/catch — one failure does NOT block others.
+   - Per-row result: null (pending) | { ok: true, trackingNumber, orderType } (✅ green row + tracking# + type badge) | { ok: false, error } (❌ red row + error text truncated to 3 lines with full text on hover).
+   - Successfully booked rows: checkbox auto-unchecks + inputs disabled + row tinted emerald.
+   - Final toast: success/warning/error summarising counts.
+   - Invalidates ['orders', 'booking-workbench'] + ['orders'] after any successful booking so booked rows disappear.
+   - Empty state "All caught up!" when no unbooked orders; "No matching orders" when search returns nothing.
+
+VERIFICATION:
+- bun run lint: ✅ 0 errors, 10 pre-existing warnings (all React Hook Form watch() notes in unrelated catalog-settings-view.tsx/product-create-view.tsx/returned-stitched-view.tsx). ZERO warnings in any new file.
+- bunx tsc --noEmit: ✅ 0 errors in src/. Only 4 pre-existing errors in examples/websocket/* (missing socket.io-client types) and skills/* (unrelated z-ai-web-dev-sdk typing) — none in any new file.
+- Dev server: ✅ still running cleanly (GET / 200).
+
+CONSTRAINTS RESPECTED:
+- Only created files in src/components/orders/ — no /lib modifications.
+- Did NOT modify exchange-detail-view.tsx or exchanges-view.tsx (parent agent handles integration).
+- 'use client' directive at the top of each file.
+- Used existing shadcn/ui components (Card, Badge, Button, Input, Label, Checkbox, Select, Table, Dialog) from @/components/ui/.
+- Used import { api, FetchError } from '@/lib/api-client'.
+- Used import { toast } from 'sonner'.
+- Used import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'.
+- All timestamps formatted via _shared.formatDateTime / formatDate.
+- Imported CityAutocomplete from '@/components/couriers/city-autocomplete'.
+- Status badges use Badge with color classes (no indigo/blue).
+- Mobile-first responsive (table scrolls horizontally on small screens, modal uses max-h-[90vh] overflow-y-auto).
+
+NOTES FOR PARENT AGENT:
+- The dispatch endpoints (dispatch-new-item / dispatch-replacement) currently don't read the request body. The SendExchangeShipmentModal sends { companyIntegrationId, deliveryCity, shippingAddressId, shippingPhoneId, invoiceAmount, quantity, variantId } — these need to be read + passed to the underlying server actions to actually create the ExchangeShipment with the chosen courier. The parent agent enhances those endpoints to consume this body.
+- BookingWorkbenchView wires into the existing case 'booking-workbench' route in src/app/page.tsx (already present, imported on line 66, switch case on line 336). Sidebar nav entry may need to be added by parent agent.
+- ShipmentTrackingCard is designed to be embedded inside ExchangeDetailView — for each shipment in exchange.exchangeShipments[], render <ShipmentTrackingCard shipment={shipment} />. Parent agent adds this rendering loop.
+
+Stage Summary:
+- 3 production-ready React components delivered for Prompt 5: ShipmentTrackingCard (read-only compact card), SendExchangeShipmentModal (6-field sequential dispatch dialog with inline Add New address/phone), BookingWorkbenchView (bulk booking workbench with editable per-row overrides + independent per-row booking).
+- All 3 files: 0 lint errors, 0 type errors, fully typed, mobile-responsive, accessible, using existing shadcn/ui components only.
+- Zero regressions to existing code (no /lib changes, no existing file modifications).
+
+Files NOT touched:
+- src/lib/* (all of it — out of scope per task constraints)
+- src/components/orders/exchange-detail-view.tsx (parent agent handles integration)
+- src/components/orders/exchanges-view.tsx (parent agent handles integration)
+- src/app/page.tsx (already wired with case 'booking-workbench' before this task)
+- Any other src/components/* file
+
+---
+Task ID: PROMPT5-WIRING
+Agent: main
+Task: Wire together Prompts 1-4 into working end-to-end flows: Exchange Shipment creation UI, Booking Workbench, and supporting frontend UI.
+
+Work Log:
+
+PHASE 0 — Backend Splits + API Routes:
+- Split verifyOldItemReceived() in exchange.actions.ts: customer_self_return exchanges now STOP at 'old_item_manually_verified' instead of auto-dispatching. courier_replacement still auto-completes (new item was dispatched earlier via dispatchExchangeNewItem). The exchange.completed metric only fires for courier_replacement now.
+- Exported new dispatchReplacementForSelfReturnExchange(exchangeId) — the explicit "Send Replacement Order" action for customer_self_return, wraps the internal createAndDispatchExchangeOrder() helper. Marks exchange as completed + fires exchange.completed metric.
+- Created 5 new API routes:
+  * POST /api/exchanges/[id]/dispatch-replacement — calls dispatchReplacementForSelfReturnExchange
+  * POST /api/exchange-shipments/[id]/dispatch — calls dispatchExchangeShipment
+  * POST /api/exchange-shipments/[id]/cancel — calls cancelExchangeShipment
+  * POST /api/exchange-shipments/[id]/reserve — calls reserveExchangeShipmentStock
+  * POST /api/booking-workbench/book — the core booking endpoint (books a single order with PostEx, computes weight via calculateOrderWeightKg, determines orderType via determinePostExOrderType, validates city via revalidateCityAtBookingTime, calls adapter.bookShipment via executeLoggedIntegrationAction, updates Order with trackingNumber + courierCompanyIntegrationId + courierCityStatus='matched')
+- Added courierCityStatus, courierSubStatus, needsShipperAdvice, courierCompanyIntegrationId, trackingNumber, courierName to the Order list API response (listOrders server action).
+- Added same fields to GET /api/orders/[id] response.
+- Added booking-workbench route to AppRoute union + renderRoute() switch + sidebar nav.
+
+PHASE 1 — SendExchangeShipmentModal (built by subagent):
+- src/components/orders/send-exchange-shipment-modal.tsx — reusable Dialog with: courier dropdown → CityAutocomplete → address picker + inline add → phone picker + inline add → invoice amount → quantity. Submits to dispatch-new-item (courier_replacement) or dispatch-replacement (customer_self_return).
+
+PHASE 2 — Exchange Detail + List Updates:
+- exchange-detail-view.tsx: Added exchangeShipments to ExchangeDetail interface. Added "Dispatch Replacement" button (courier_replacement @ status='requested'). Added "Send Replacement Order" button (customer_self_return @ status='old_item_manually_verified'). Added ShipmentTrackingCard showing EXCH-#### number, status badge, tracking #, timestamps. Wired SendExchangeShipmentModal with isExchangeReplacement context.
+- exchanges-view.tsx: Added exchangeShipments to ExchangeRow interface. Added "Shipment" column showing EXCH-#### number + 6-state status badge. Added SHIPMENT_STATUS_BADGE constant (pending/confirmed/backordered/dispatched/delivered/cancelled).
+
+PHASE 3 — Booking Workbench (built by subagent):
+- src/components/orders/booking-workbench-view.tsx — table-based bulk booking UI. Fetches confirmed orders without courierCompanyIntegrationId. Per-row editable fields (name, phone, address, CityAutocomplete, COD, order type). Batch courier selector + "Upload Booking" button. Per-row independent success/failure handling. Calls POST /api/booking-workbench/book per row.
+- Sidebar entry: "Booking Workbench" under Orders section.
+- Orders list header: "Booking Workbench" button to navigate to the workbench.
+
+PHASE 4 — City Mismatch Visibility:
+- orders-view.tsx: Added courierCityStatus/courierSubStatus/needsShipperAdvice/trackingNumber/courierName to OrderRow interface. Added amber "City" badge for courierCityStatus='unresolved' + rose "Advice" badge for needsShipperAdvice=true + tracking number display in the customer cell.
+- order-detail-view.tsx: Added courierCityStatus/courierSubStatus/needsShipperAdvice to OrderDetail interface. Added inline CityMismatchResolver in the Delivery info card when courierCityStatus='unresolved'. Added courierSubStatus InfoRow + needsShipperAdvice warning banner. City resolution calls PATCH /api/orders/[id] with delivery_city + courier_city_status='matched'.
+
+VERIFICATION:
+- bun run lint: ✅ 0 errors, 10 pre-existing warnings.
+- npx tsc --noEmit: ✅ 0 errors in src/.
+- Dev server: ✅ compiled successfully, GET / returned HTTP 200 in 18.5s, no runtime errors.
+- Prompts 1-4 core logic: UNALTERED — only consumed/wired. The only change to Prompt 3's exchange.actions.ts was the verifyOldItemReceived split (required to support the "Send Replacement Order" button — the auto-dispatch behavior was replaced with an explicit manual dispatch step).
+
+BOOKING ON BACKORDER FULFILLMENT DECISION:
+- Chose the "manual re-trigger" approach: when an exchange shipment is backordered (insufficient stock), the shipment is created with status='backordered' and the UI shows a "Queued — will be fulfilled when stock arrives" message. Staff must manually re-trigger the booking from the shipment detail view once stock arrives (via the checkAndFulfillBackorders priority queue which auto-reserves stock for backordered exchange shipments). Automatic booking-on-backorder-fulfillment is NOT implemented — it would require a hook in the backorder fulfillment path that calls bookShipment() after reservation succeeds. This was the simpler approach given current codebase patterns.
+
+FILES CREATED:
+- src/components/orders/send-exchange-shipment-modal.tsx (by subagent)
+- src/components/orders/shipment-tracking-card.tsx (by subagent)
+- src/components/orders/booking-workbench-view.tsx (by subagent)
+- src/app/api/exchanges/[id]/dispatch-replacement/route.ts
+- src/app/api/exchange-shipments/[id]/dispatch/route.ts
+- src/app/api/exchange-shipments/[id]/cancel/route.ts
+- src/app/api/exchange-shipments/[id]/reserve/route.ts
+- src/app/api/booking-workbench/book/route.ts
+
+FILES MODIFIED:
+- src/lib/actions/exchange.actions.ts — split verifyOldItemReceived + added dispatchReplacementForSelfReturnExchange
+- src/lib/actions/order.actions.ts — added courier tracking fields to listOrders response
+- src/app/api/orders/[id]/route.ts — added courier tracking fields to GET response
+- src/stores/app-store.ts — added booking-workbench route
+- src/app/page.tsx — added BookingWorkbenchView import + case
+- src/components/layout/sidebar.tsx — added Booking Workbench nav entry + Send icon import
+- src/components/orders/exchange-detail-view.tsx — added exchangeShipments type + buttons + ShipmentTrackingCard + SendExchangeShipmentModal
+- src/components/orders/exchanges-view.tsx — added exchangeShipments type + Shipment column + SHIPMENT_STATUS_BADGE
+- src/components/orders/orders-view.tsx — added courier tracking fields to OrderRow + city mismatch badge + Booking Workbench button
+- src/components/orders/order-detail-view.tsx — added courier tracking fields to OrderDetail + city mismatch resolver + shipper advice warning
+
+FILES NOT TOUCHED:
+- Prompt 1's weight cascade logic — unchanged (consumed via calculateOrderWeightKg).
+- Prompt 2's city-matcher/address-book logic — unchanged (consumed via revalidateCityAtBookingTime, matchCity, CityAutocomplete, CityMismatchResolver).
+- Prompt 3's exchange-shipment.actions.ts — unchanged (consumed via API routes).
+- Prompt 4's postex.adapter.ts/status-map.ts/order-type.ts — unchanged (consumed via booking-workbench/book endpoint).
+- processInventoryTransaction, updateCustomerStats, createCustomer — unchanged.

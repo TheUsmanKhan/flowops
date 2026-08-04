@@ -66,6 +66,8 @@ import {
   Percent,
   CalendarDays,
   RotateCcw,
+  AlertTriangle,
+  Truck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -90,6 +92,12 @@ interface OrderRow {
   customerId: string
   deliveryCity: string | null
   createdAt: string
+  // Courier tracking fields (Prompt 4/5)
+  courierCityStatus?: string
+  courierSubStatus?: string | null
+  needsShipperAdvice?: boolean
+  trackingNumber?: string | null
+  courierName?: string | null
 }
 
 interface OrdersListResponse {
@@ -643,6 +651,10 @@ export function OrdersView() {
               <RefreshCw className={isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
               Refresh
             </Button>
+            <Button variant="outline" size="sm" onClick={() => navigate({ name: 'booking-workbench' })}>
+              <Truck className="h-4 w-4" />
+              Booking Workbench
+            </Button>
             {canCreate && (
               <Button size="sm" onClick={() => navigate({ name: 'order-create' })}>
                 <Plus className="h-4 w-4" />
@@ -1050,10 +1062,27 @@ export function OrdersView() {
                         </TableCell>
                         <TableCell>
                           <div className="flex flex-col">
-                            <span className="font-medium text-sm">{order.customerName}</span>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-medium text-sm">{order.customerName}</span>
+                              {order.courierCityStatus === 'unresolved' && (
+                                <span title="City mismatch — needs resolution before booking" className="inline-flex items-center gap-0.5 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5">
+                                  <AlertTriangle className="h-2.5 w-2.5" /> City
+                                </span>
+                              )}
+                              {order.needsShipperAdvice && (
+                                <span title="Courier status requires shipper advice" className="inline-flex items-center gap-0.5 text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-1 py-0.5">
+                                  <AlertCircle className="h-2.5 w-2.5" /> Advice
+                                </span>
+                              )}
+                            </div>
                             <span className="text-xs text-muted-foreground font-mono">
                               {order.customerPhone}
                             </span>
+                            {order.trackingNumber && (
+                              <span className="text-[10px] text-muted-foreground">
+                                {order.courierName ?? 'Courier'}: {order.trackingNumber}
+                              </span>
+                            )}
                           </div>
                         </TableCell>
                         <TableCell className="text-right tabular-nums font-medium">

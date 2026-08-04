@@ -35,6 +35,7 @@ import {
   SlidersHorizontal,
   Clock,
   XCircle,
+  Send,
   type LucideIcon,
 } from 'lucide-react'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -99,6 +100,7 @@ const NAV: NavItem[] = [
       { route: { name: 'orders-backordered' }, label: 'Backordered', icon: AlertTriangle, matchPrefixes: ['orders-backordered'] },
       { route: { name: 'orders-awaiting-production' }, label: 'Awaiting Production', icon: Factory, matchPrefixes: ['orders-awaiting'] },
       { route: { name: 'orders-ready-to-dispatch' }, label: 'Ready to Dispatch', icon: Truck, matchPrefixes: ['orders-ready'] },
+      { route: { name: 'booking-workbench' }, label: 'Booking Workbench', icon: Send, matchPrefixes: ['booking-workbench'] },
       { route: { name: 'orders-returns' }, label: 'Returns & RTO', icon: Undo2, matchPrefixes: ['orders-returns'] },
       { route: { name: 'exchanges' }, label: 'Exchanges', icon: RefreshCw, matchPrefixes: ['exchanges', 'exchange-detail'] },
       { route: { name: 'orders-cancelled' }, label: 'Cancelled', icon: XCircle, matchPrefixes: ['orders-cancelled'] },

@@ -72,6 +72,12 @@ interface ExchangeRow {
   originalOrder: { flowopsOrderNumber: string }
   newOrderId: string | null
   newOrder: { flowopsOrderNumber: string } | null
+  // Exchange Shipments (Prompt 3)
+  exchangeShipments: Array<{
+    id: string
+    exchangeShipmentNumber: string
+    status: string
+  }>
 }
 
 interface ExchangesResponse {
@@ -102,6 +108,16 @@ const STATUS_BADGE: Record<string, { label: string; className: string }> = {
 const METHOD_BADGE: Record<string, { label: string; className: string; icon: typeof Truck }> = {
   courier_replacement: { label: 'Courier Replacement', className: 'bg-violet-50 text-violet-700 border-violet-200', icon: Truck },
   customer_self_return: { label: 'Customer Self-Return', className: 'bg-sky-50 text-sky-700 border-sky-200', icon: UserCheck },
+}
+
+// Shipment status badges (6-state simplified lifecycle for exchange_shipments)
+const SHIPMENT_STATUS_BADGE: Record<string, { label: string; className: string }> = {
+  pending: { label: 'Pending', className: 'bg-gray-100 text-gray-700 border-gray-200' },
+  confirmed: { label: 'Confirmed', className: 'bg-sky-50 text-sky-700 border-sky-200' },
+  backordered: { label: 'Backordered', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+  dispatched: { label: 'Dispatched', className: 'bg-violet-50 text-violet-700 border-violet-200' },
+  delivered: { label: 'Delivered', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  cancelled: { label: 'Cancelled', className: 'bg-slate-100 text-slate-500 border-slate-200' },
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -335,6 +351,7 @@ export function ExchangesView() {
                     <TableHead>Items</TableHead>
                     <TableHead>Method</TableHead>
                     <TableHead>Status</TableHead>
+                    <TableHead>Shipment</TableHead>
                     <TableHead className="text-right">Price Diff</TableHead>
                     <TableHead>Age</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
@@ -375,6 +392,20 @@ export function ExchangesView() {
                           <Badge variant="outline" className={cn('text-[10px]', statusBadge.className)}>
                             {statusBadge.label}
                           </Badge>
+                        </TableCell>
+                        <TableCell>
+                          {e.exchangeShipments && e.exchangeShipments.length > 0 ? (
+                            <div className="space-y-0.5">
+                              <p className="text-[10px] font-mono text-muted-foreground">
+                                {e.exchangeShipments[0].exchangeShipmentNumber}
+                              </p>
+                              <Badge variant="outline" className={cn('text-[9px]', SHIPMENT_STATUS_BADGE[e.exchangeShipments[0].status]?.className ?? 'bg-gray-100 text-gray-700 border-gray-200')}>
+                                {SHIPMENT_STATUS_BADGE[e.exchangeShipments[0].status]?.label ?? e.exchangeShipments[0].status}
+                              </Badge>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
                         </TableCell>
                         <TableCell className="text-right tabular-nums text-xs">
                           {e.priceDifference > 0 ? (
