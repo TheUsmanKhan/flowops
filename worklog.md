@@ -4109,3 +4109,43 @@ BROWSER TEST RESULTS:
 Stage Summary:
 - The disconnect→reconnect flow is now fully functional. Disconnect properly deactivates the integration, wipes credentials, clears the default courier FK, and shows a "Disconnected" badge. Reconnect opens a credential form, re-encrypts new credentials, reactivates the integration, and shows a "Pending" badge. The user can now disconnect and reconnect with new credentials as requested.
 - All 29 audit bugs addressed. tsc 0 errors, lint 0 errors.
+
+---
+Task ID: 19
+Agent: main
+Task: Change disconnect→reconnect flow to disconnect→connect (user wants "Connect" not "Reconnect")
+
+Work Log:
+- User feedback: "when we disconnect it should back to state connect not reconnect. when we click connect we will see to add token as we had connection in start"
+- The previous implementation used a "Reconnect" button on disconnected cards + a separate ReconnectDialog. The user wants the SAME flow as the initial connection: disconnect → provider appears in "Available to Connect" → click "Connect" → enter token → connected.
+
+FIX 1 — connectIntegration action (integration.actions.ts):
+- REWROTE to use find-or-reactivate pattern. When POST /api/integrations is called:
+  - If an existing integration (active OR disconnected) exists for this provider + company: reactivate it with new credentials (set isActive=true, connectionStatus='pending', new credentialsEncrypted, new webhook endpoint if applicable). Audit log action = 'integration.reconnected' (if was disconnected) or 'integration.credentials_updated' (if was active).
+  - If no existing integration: create a fresh one (same as before). Audit log action = 'integration.connected'.
+- This means the UI's "Connect" button works for BOTH initial connection AND reconnection after disconnect — the backend handles the find-or-reactivate logic transparently.
+
+FIX 2 — integrations-view.tsx:
+- Removed ReconnectDialog component entirely (was ~90 lines).
+- Removed "Reconnect" button from disconnected cards.
+- Removed reconnectIntegration state + onReconnect prop.
+- Removed RotateCcw icon import.
+- "Connected" section now only shows active integrations (filtered via activeIntegrations = integrations.filter(i => i.isActive)). Disconnected cards are hidden from the "Connected" section entirely.
+- "Available to Connect" filter already excludes providers with active integrations (i.isActive check from previous task). So when an integration is disconnected, its provider automatically reappears in "Available to Connect" with a standard "Connect" button.
+- Simplified the card rendering: removed all `i.isActive` conditionals on buttons/badges/sections since the card only renders for active integrations now.
+- Removed the `i.isActive` guard on `lastError`, `webhookUrl`, `Default` badge, `PickupAddressesSection` — all always rendered for active integrations.
+
+BROWSER TEST RESULTS:
+1. ✅ PostEx shows as "Connected" (green badge) in "CONNECTED" section
+2. ✅ Clicked "Disconnect" → confirmation dialog → confirmed
+3. ✅ Toast: "Integration disconnected. Credentials wiped."
+4. ✅ PostEx card DISAPPEARED from "CONNECTED" section (no disconnected card shown)
+5. ✅ PostEx appeared in "AVAILABLE TO CONNECT" section with a standard "Connect" button
+6. ✅ No "Reconnect" button anywhere — just "Connect" (same as initial connection flow)
+7. ✅ Clicked "Connect" → ConnectDialog opened with "Connect PostEx" heading + Connection Name + API Token inputs (same form as initial connection)
+8. ✅ Typed connection name + token → "Connect" button enabled
+9. ✅ Clicked "Connect" → toast: "Integration connected." → PostEx card reappeared in "CONNECTED" section with "Pending" badge
+10. ✅ DB verified: SAME row ID reactivated (not a duplicate) — isActive=true, connectionStatus='pending', credentialsEncrypted=set with new token
+
+Stage Summary:
+- The disconnect→connect flow now works exactly as the user requested. Disconnecting hides the integration from "Connected" and shows the provider in "Available to Connect" with a "Connect" button. Clicking "Connect" opens the same token-entry form as the initial connection. The backend reactivates the existing integration row (preserving audit history) instead of creating a duplicate. No "Reconnect" button or separate dialog needed.

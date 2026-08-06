@@ -208,43 +208,99 @@ export async function connectIntegration(input: {
     // Encrypt credentials
     const credentialsEncrypted = encryptCredentials(input.credentials)
 
-    // Generate webhook endpoint ID + secret if the provider supports webhooks
-    let webhookEndpointId: string | null = null
-    let webhookSecret: string | null = null
-    if (provider.supportsWebhook) {
-      webhookEndpointId = generateWebhookEndpointId()
-      webhookSecret = generateWebhookSecret()
-    }
+    // ── Find-or-reactivate ──
+    // If there's an EXISTING integration for this provider + company
+    // (including disconnected ones), reactivate it with the new credentials.
+    // This gives users a clean "connect from scratch" experience after
+    // disconnecting — the provider appears in "Available to Connect",
+    // they click Connect, enter new credentials, and the old row is
+    // reactivated (preserving audit history) instead of creating a duplicate.
+    const existing = await db.companyIntegration.findFirst({
+      where: { companyId: ctx.company.id, providerId: input.providerId },
+      select: { id: true, isActive: true },
+    })
 
-    // INSERT company_integrations row
-    const integration = await db.companyIntegration.create({
-      data: {
+    let integration: { id: string }
+    let webhookEndpointId: string | null = null
+    let isNewConnection = false
+
+    if (existing) {
+      // Reactivate the existing integration with new credentials.
+      // Generate new webhook endpoint ID + secret if the provider supports
+      // webhooks and the old ones were wiped on disconnect.
+      let webhookSecret: string | null = null
+      if (provider.supportsWebhook) {
+        webhookEndpointId = generateWebhookEndpointId()
+        webhookSecret = generateWebhookSecret()
+      }
+
+      integration = await db.companyIntegration.update({
+        where: { id: existing.id },
+        data: {
+          connectionName: input.connectionName,
+          credentialsEncrypted,
+          isActive: true,
+          connectionStatus: 'pending',
+          lastError: null,
+          webhookEndpointId,
+          webhookSecret,
+        },
+        select: { id: true },
+      })
+
+      await insertAuditLog({
+        action: existing.isActive ? 'integration.credentials_updated' : 'integration.reconnected',
+        entityType: 'company_integration',
+        entityId: integration.id,
         companyId: ctx.company.id,
         organizationId: ctx.company.organizationId,
-        providerId: input.providerId,
-        connectionName: input.connectionName,
-        credentialsEncrypted,
-        webhookEndpointId,
-        webhookSecret,
-        connectionStatus: 'pending',
-        createdBy: ctx.employee.id,
-      },
-    })
+        userId: ctx.user.id,
+        employeeId: ctx.employee.id,
+        newValues: {
+          provider: provider.providerKey,
+          connectionName: input.connectionName,
+          supportsWebhook: provider.supportsWebhook,
+        },
+      })
+    } else {
+      // No existing integration — create a fresh one.
+      let webhookSecret: string | null = null
+      if (provider.supportsWebhook) {
+        webhookEndpointId = generateWebhookEndpointId()
+        webhookSecret = generateWebhookSecret()
+      }
 
-    await insertAuditLog({
-      action: 'integration.connected',
-      entityType: 'company_integration',
-      entityId: integration.id,
-      companyId: ctx.company.id,
-      organizationId: ctx.company.organizationId,
-      userId: ctx.user.id,
-      employeeId: ctx.employee.id,
-      newValues: {
-        provider: provider.providerKey,
-        connectionName: input.connectionName,
-        supportsWebhook: provider.supportsWebhook,
-      },
-    })
+      integration = await db.companyIntegration.create({
+        data: {
+          companyId: ctx.company.id,
+          organizationId: ctx.company.organizationId,
+          providerId: input.providerId,
+          connectionName: input.connectionName,
+          credentialsEncrypted,
+          webhookEndpointId,
+          webhookSecret,
+          connectionStatus: 'pending',
+          createdBy: ctx.employee.id,
+        },
+        select: { id: true },
+      })
+      isNewConnection = true
+
+      await insertAuditLog({
+        action: 'integration.connected',
+        entityType: 'company_integration',
+        entityId: integration.id,
+        companyId: ctx.company.id,
+        organizationId: ctx.company.organizationId,
+        userId: ctx.user.id,
+        employeeId: ctx.employee.id,
+        newValues: {
+          provider: provider.providerKey,
+          connectionName: input.connectionName,
+          supportsWebhook: provider.supportsWebhook,
+        },
+      })
+    }
 
     const appUrl = process.env.APP_URL || 'http://localhost:3000'
     const webhookUrl = webhookEndpointId

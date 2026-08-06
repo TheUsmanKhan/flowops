@@ -37,7 +37,6 @@ import {
   Zap,
   Info,
   RefreshCw,
-  RotateCcw,
 } from 'lucide-react'
 import {
   AlertDialog,
@@ -147,7 +146,6 @@ export function IntegrationsView() {
   const navigate = useAppStore((s) => s.navigate)
   const queryClient = useQueryClient()
   const [connectProvider, setConnectProvider] = useState<Provider | null>(null)
-  const [reconnectIntegration, setReconnectIntegration] = useState<Integration | null>(null)
   const [confirmDisconnect, setConfirmDisconnect] = useState<Integration | null>(null)
 
   const query = useQuery<ApiResponse>({
@@ -273,7 +271,6 @@ export function IntegrationsView() {
             onConnect={setConnectProvider}
             onTest={(id) => testMutation.mutate(id)}
             onDisconnect={(i) => setConfirmDisconnect(i)}
-            onReconnect={(i) => setReconnectIntegration(i)}
             onSetDefault={(id) => setDefaultMutation.mutate(id)}
             onSyncCities={(providerKey) => syncCitiesMutation.mutate(providerKey)}
             syncingCities={syncCitiesMutation.isPending}
@@ -290,7 +287,6 @@ export function IntegrationsView() {
             onConnect={setConnectProvider}
             onTest={(id) => testMutation.mutate(id)}
             onDisconnect={(i) => setConfirmDisconnect(i)}
-            onReconnect={(i) => setReconnectIntegration(i)}
             onSetDefault={(id) => setDefaultMutation.mutate(id)}
             testing={testMutation.isPending}
           />
@@ -303,15 +299,6 @@ export function IntegrationsView() {
           open={!!connectProvider}
           onOpenChange={(v) => !v && setConnectProvider(null)}
           onConnected={() => { setConnectProvider(null); invalidate() }}
-        />
-      )}
-
-      {reconnectIntegration && (
-        <ReconnectDialog
-          integration={reconnectIntegration}
-          open={!!reconnectIntegration}
-          onOpenChange={(v) => !v && setReconnectIntegration(null)}
-          onReconnected={() => { setReconnectIntegration(null); invalidate() }}
         />
       )}
 
@@ -356,7 +343,6 @@ function IntegrationsSection({
   onConnect,
   onTest,
   onDisconnect,
-  onReconnect,
   onSetDefault,
   onSyncCities,
   syncingCities,
@@ -367,27 +353,31 @@ function IntegrationsSection({
   onConnect: (p: Provider) => void
   onTest: (id: string) => void
   onDisconnect: (i: Integration) => void
-  onReconnect: (i: Integration) => void
   onSetDefault: (id: string) => void
   onSyncCities?: (providerKey: string) => void
   syncingCities?: boolean
   testing: boolean
 }) {
+  // Only show ACTIVE integrations in the "Connected" section.
+  // Disconnected integrations are hidden — the provider reappears in
+  // "Available to Connect" so the user can connect fresh.
+  const activeIntegrations = integrations.filter((i) => i.isActive)
+
   return (
     <>
       {/* Connected */}
-      {integrations.length > 0 && (
+      {activeIntegrations.length > 0 && (
         <div className="space-y-3">
           <p className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Connected</p>
           <div className="grid gap-3 sm:grid-cols-2">
-            {integrations.map((i) => (
+            {activeIntegrations.map((i) => (
               <Card key={i.id}>
                 <CardContent className="p-4 space-y-3">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <p className="text-sm font-medium truncate">{i.provider.providerName}</p>
-                        {i.isDefault && i.isActive && (
+                        {i.isDefault && (
                           <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[10px]">
                             <Star className="h-2.5 w-2.5 mr-0.5 fill-current" /> Default
                           </Badge>
@@ -398,11 +388,11 @@ function IntegrationsSection({
                     <StatusBadge status={i.connectionStatus} isActive={i.isActive} />
                   </div>
 
-                  {i.lastError && i.isActive && (
+                  {i.lastError && (
                     <p className="text-xs text-rose-600 bg-rose-50 rounded p-2">{i.lastError}</p>
                   )}
 
-                  {i.webhookUrl && i.isActive && (
+                  {i.webhookUrl && (
                     <div className="space-y-1">
                       <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Webhook URL</p>
                       <div className="flex items-center gap-1">
@@ -423,28 +413,15 @@ function IntegrationsSection({
                   )}
 
                   <div className="flex items-center gap-1 flex-wrap pt-1">
-                    {/* Reconnect button — only on disconnected cards */}
-                    {!i.isActive && (
-                      <Button
-                        size="sm"
-                        variant="default"
-                        className="h-7 text-xs"
-                        onClick={() => onReconnect(i)}
-                      >
-                        <RotateCcw className="h-3 w-3" /> Reconnect
-                      </Button>
-                    )}
-                    {!i.isDefault && i.isActive && (
+                    {!i.isDefault && (
                       <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onSetDefault(i.id)}>
                         <Star className="h-3 w-3" /> Set Default
                       </Button>
                     )}
-                    {i.isActive && (
-                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onTest(i.id)} disabled={testing}>
-                        <Zap className="h-3 w-3" /> Test
-                      </Button>
-                    )}
-                    {i.isActive && onSyncCities && (
+                    <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onTest(i.id)} disabled={testing}>
+                      <Zap className="h-3 w-3" /> Test
+                    </Button>
+                    {onSyncCities && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -457,20 +434,18 @@ function IntegrationsSection({
                         {' '}Sync Cities
                       </Button>
                     )}
-                    {i.isActive && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50"
-                        onClick={() => onDisconnect(i)}
-                      >
-                        <Power className="h-3 w-3" /> Disconnect
-                      </Button>
-                    )}
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+                      onClick={() => onDisconnect(i)}
+                    >
+                      <Power className="h-3 w-3" /> Disconnect
+                    </Button>
                   </div>
 
                   {/* Pickup & Return Addresses section — only for courier integrations */}
-                  {i.isActive && i.provider.category === 'courier' && (
+                  {i.provider.category === 'courier' && (
                     <PickupAddressesSection
                       companyIntegrationId={i.id}
                       providerKey={i.provider.providerKey}
@@ -507,7 +482,7 @@ function IntegrationsSection({
         </div>
       )}
 
-      {integrations.length === 0 && availableProviders.length === 0 && (
+      {activeIntegrations.length === 0 && availableProviders.length === 0 && (
         <Card><CardContent className="p-10 text-center">
           <Plug className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
           <p className="text-sm text-muted-foreground">No providers available in this category.</p>
@@ -665,102 +640,6 @@ function ConnectDialog({
             </Button>
           </DialogFooter>
         )}
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Reconnect dialog — for reactivating a disconnected integration with new credentials
-// ─────────────────────────────────────────────────────────────────────────────
-
-function ReconnectDialog({
-  integration,
-  open,
-  onOpenChange,
-  onReconnected,
-}: {
-  integration: Integration
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  onReconnected: () => void
-}) {
-  const [credentials, setCredentials] = useState<Record<string, string>>({})
-
-  // Parse config_schema dynamically from the provider
-  let fields: ConfigField[] = []
-  try {
-    fields = JSON.parse(integration.provider.configSchema)
-  } catch {
-    fields = []
-  }
-
-  const reconnectMutation = useMutation({
-    mutationFn: () =>
-      api.patch(`/api/integrations/${integration.id}/credentials`, { credentials }),
-    onSuccess: () => {
-      toast.success(`${integration.provider.providerName} reconnected successfully. Connection status is now "Pending" — run a Test to verify.`)
-      onReconnected()
-    },
-    onError: (err) => {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to reconnect')
-    },
-  })
-
-  const canSubmit = fields.every((f) => !f.required || (credentials[f.key] && credentials[f.key].trim()))
-
-  return (
-    <Dialog open={open} onOpenChange={(v) => !v && onOpenChange(v)}>
-      <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto scrollbar-thin">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <RotateCcw className="h-4 w-4" /> Reconnect {integration.provider.providerName}
-          </DialogTitle>
-          <DialogDescription>
-            Enter new {integration.provider.providerName} credentials to reactivate this
-            integration. The old credentials were wiped when it was disconnected.
-            After reconnecting, the status will be &quot;Pending&quot; — run a Test to verify
-            the connection works.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="space-y-4 py-2">
-          <div className="rounded-md bg-muted/50 p-2.5 text-xs text-muted-foreground">
-            <p><strong>Connection:</strong> {integration.connectionName}</p>
-            <p><strong>Provider:</strong> {integration.provider.providerName}</p>
-          </div>
-
-          {/* Dynamic credential fields from config_schema */}
-          {fields.map((field) => (
-            <div key={field.key} className="space-y-1.5">
-              <Label className="text-xs">
-                {field.label}
-                {field.required && <span className="text-rose-600 ml-0.5">*</span>}
-              </Label>
-              <Input
-                type={field.type === 'password' ? 'password' : 'text'}
-                placeholder={field.type === 'password' ? '••••••••' : `Enter ${field.label}`}
-                value={credentials[field.key] ?? ''}
-                onChange={(e) => setCredentials((p) => ({ ...p, [field.key]: e.target.value }))}
-                autoFocus={field === fields[0]}
-              />
-            </div>
-          ))}
-        </div>
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button
-            disabled={!canSubmit || reconnectMutation.isPending}
-            onClick={() => reconnectMutation.mutate()}
-          >
-            {reconnectMutation.isPending ? (
-              <><Loader2 className="h-4 w-4 animate-spin" /> Reconnecting…</>
-            ) : (
-              <><RotateCcw className="h-4 w-4" /> Reconnect</>
-            )}
-          </Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   )
