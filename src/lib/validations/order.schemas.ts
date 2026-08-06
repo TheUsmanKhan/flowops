@@ -83,6 +83,10 @@ export const createManualOrderSchema = z
     discount_amount: z.number().min(0).optional(),
     discount_reason: z.string().max(200).optional().or(z.literal('')),
     courier_charges: z.number().min(0).optional(),
+    // Delivery charge + tax (migration 012)
+    estimated_delivery_charge: z.number().min(0).optional(),
+    tax_amount: z.number().min(0).optional(),
+    tax_label: z.string().max(100).optional().or(z.literal('')),
     // Step 3 frontend flag: when true AND a new one-off address was typed
     // (i.e. used_customer_address_id is null), persist delivery_address as
     // a new customer_addresses row after order creation.

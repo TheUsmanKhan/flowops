@@ -591,4 +591,79 @@ export class PostExAdapter implements CourierAdapter {
       error: `PostEx load-sheet API returned HTTP ${response.status}`,
     }
   }
+
+  // ──────────────────────────────────────────────────────────────
+  // 11. fetchPaymentStatus — GET v1/payment-status/{trackingNumber}
+  // ──────────────────────────────────────────────────────────────
+
+  /**
+   * Fetch the payment/settlement status for a tracking number.
+   *
+   * PostEx's Payment Status API response:
+   *   { statusCode, statusMessage, dist: { orderRefNumber, trackingNumber,
+   *     settle (boolean), settlementDate, upfrontPaymentDate,
+   *     cprNumber_1, reservePaymentDate, cprNumber_2 } }
+   *
+   * IMPORTANT: PostEx's Payment Status API does NOT break out delivery charge
+   * as a separate field. It only provides settlement status (boolean), dates,
+   * and CPR numbers. The `actualDeliveryCharge` field on Order/exchange_shipments
+   * CANNOT be auto-populated from this API — it would need to come from a
+   * different source (e.g. manual entry or a reconciliation report).
+   */
+  async fetchPaymentStatus(trackingNumber: string): Promise<{
+    success: boolean
+    settled: boolean
+    settlementDate: string | null
+    upfrontPaymentDate: string | null
+    cprNumber1: string | null
+    cprNumber2: string | null
+    error?: string
+  }> {
+    const response = await fetch(
+      `${POSTEX_BASE_URL}/v1/payment-status/${encodeURIComponent(trackingNumber)}`,
+      {
+        method: 'GET',
+        headers: {
+          token: this.token,
+        },
+      },
+    )
+
+    if (response.status === 404) {
+      return { success: false, settled: false, settlementDate: null, upfrontPaymentDate: null, cprNumber1: null, cprNumber2: null, error: 'Order not found on PostEx.' }
+    }
+
+    const json: PostExApiResponse<{
+      orderRefNumber: string
+      trackingNumber: string
+      settle: boolean
+      settlementDate: string
+      upfrontPaymentDate: string
+      cprNumber_1: string
+      reservePaymentDate: string
+      cprNumber_2: string
+    }> = await response.json()
+
+    if (json.statusCode === 200 || json.statusCode === '200') {
+      const dist = json.dist
+      return {
+        success: true,
+        settled: dist?.settle ?? false,
+        settlementDate: dist?.settlementDate ?? null,
+        upfrontPaymentDate: dist?.upfrontPaymentDate ?? null,
+        cprNumber1: dist?.cprNumber_1 ?? null,
+        cprNumber2: dist?.cprNumber_2 ?? null,
+      }
+    }
+
+    return {
+      success: false,
+      settled: false,
+      settlementDate: null,
+      upfrontPaymentDate: null,
+      cprNumber1: null,
+      cprNumber2: null,
+      error: json.statusMessage || `PostEx payment-status API returned statusCode ${json.statusCode}`,
+    }
+  }
 }

@@ -287,6 +287,65 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                 })
               }
             }
+
+            // ── Payment Status lookup (Phase 3 — migration 012) ──
+            // For orders that have reached delivered/rto, also check payment
+            // settlement status. Non-fatal — failure doesn't break the main poll.
+            // NOTE: PostEx's Payment Status API does NOT break out delivery charge
+            // separately — actualDeliveryCharge CANNOT be auto-populated.
+            // We still call it to record settlement metadata for audit purposes.
+            if (result.status === 'delivered' || result.status === 'returned') {
+              try {
+                const paymentStatus = await executeLoggedIntegrationAction<{
+                  success: boolean
+                  settled: boolean
+                  settlementDate: string | null
+                  error?: string
+                }>({
+                  companyIntegrationId: integration.id,
+                  organizationId: integration.organizationId,
+                  actionType: 'fetch_payment_status',
+                  direction: 'outbound',
+                  relatedEntityType: 'order',
+                  relatedEntityId: entry.id,
+                  fn: async () => {
+                    // fetchPaymentStatus is not on the CourierAdapter interface —
+                    // it's a PostEx-specific method. Cast to access it.
+                    const postexAdapter = adapter as unknown as {
+                      fetchPaymentStatus: (tn: string) => Promise<{
+                        success: boolean
+                        settled: boolean
+                        settlementDate: string | null
+                        error?: string
+                      }>
+                    }
+                    if (typeof postexAdapter.fetchPaymentStatus === 'function') {
+                      return postexAdapter.fetchPaymentStatus(entry.trackingNumber)
+                    }
+                    return { success: false, settled: false, settlementDate: null }
+                  },
+                })
+
+                // If settled, record it in an audit log (non-fatal)
+                if (paymentStatus?.settled) {
+                  await insertAuditLog({
+                    action: 'postex.payment_settled',
+                    entityType: 'order',
+                    entityId: entry.id,
+                    companyId: integration.companyId,
+                    organizationId: integration.organizationId,
+                    newValues: {
+                      trackingNumber: entry.trackingNumber,
+                      settlementDate: paymentStatus.settlementDate,
+                    },
+                  }).catch(() => {})
+                }
+                // NOTE: actualDeliveryCharge is NOT populated here because
+                // PostEx's Payment Status API does not break out delivery charge.
+              } catch {
+                // Non-fatal — payment status lookup failure doesn't break the poll
+              }
+            }
           } else {
             // Exchange shipment
             await db.exchangeShipment.update({

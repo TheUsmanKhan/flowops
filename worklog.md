@@ -3722,3 +3722,96 @@ FILES NOT TOUCHED:
 - Prompt 3's exchange-shipment.actions.ts — unchanged (consumed via API routes).
 - Prompt 4's postex.adapter.ts/status-map.ts/order-type.ts — unchanged (consumed via booking-workbench/book endpoint).
 - processInventoryTransaction, updateCustomerStats, createCustomer — unchanged.
+
+---
+Task ID: DELIVERY-CHARGE-TAX-TRACKING
+Agent: main
+Task: Add delivery charge and tax tracking to the core Order system + exchange_shipments. Foundational data for per-order profitability and tax records.
+
+Work Log:
+
+PHASE 1 — Schema (migration 012):
+- Created supabase/migrations/012_delivery_charge_tax.sql adding 4 fields to both Order and exchange_shipments:
+  * estimatedDeliveryCharge DECIMAL(14,2) — staff-entered or courier-default at booking
+  * actualDeliveryCharge DECIMAL(14,2) — populated from courier Payment Status API (if available)
+  * taxAmount DECIMAL(14,2) — staff-entered (e.g. GST)
+  * taxLabel TEXT — free text (e.g. "GST 17%")
+- All fields nullable — existing orders have NULL and are unaffected.
+- Added fields to Prisma schema for both Order and ExchangeShipment models.
+- Ran db:push successfully.
+
+PHASE 2 — Order Creation Form:
+- Added estimated_delivery_charge, tax_amount, tax_label to createManualOrderSchema (Zod).
+- Updated createManualOrder() server action:
+  * Total calculation changed from: subtotal + courierCharges - discountAmount
+    TO: subtotal + courierCharges + estimatedDeliveryCharge + taxAmount - discountAmount
+  * New fields persisted to db.order.create().
+- Updated Order Create form (order-create-view.tsx):
+  * Added deliveryCharge, taxAmount, taxLabel state variables.
+  * Updated total calculation to include delivery + tax.
+  * Added "Delivery Charge" and "Tax Amount" + "Tax Label" input fields in PaymentSection.
+  * Updated live total summary to show Delivery Charge (+), Tax (+), Discount (−) as separate line items.
+  * Updated buildPayload() to include estimated_delivery_charge, tax_amount, tax_label.
+  * Passed new props to PaymentSection component.
+- Updated Order Detail page (order-detail-view.tsx):
+  * Added estimatedDeliveryCharge, actualDeliveryCharge, taxAmount, taxLabel to OrderDetail interface.
+  * Added PaymentRow entries in the payment breakdown for:
+    - "Delivery charge (est.)" — sky blue
+    - "Delivery charge (actual)" — emerald (if populated)
+    - Tax label (e.g. "GST 17%") — sky blue
+- Updated GET /api/orders list response to include the 4 new fields.
+- Updated GET /api/orders/[id] detail response to include the 4 new fields.
+
+PHASE 3 — Courier Polling Integration (Payment Status API):
+- Added fetchPaymentStatus(trackingNumber) method to PostExAdapter:
+  * GET v1/payment-status/{trackingNumber}
+  * Returns: { success, settled (boolean), settlementDate, upfrontPaymentDate, cprNumber1, cprNumber2 }
+  * IMPORTANT: PostEx's Payment Status API does NOT break out delivery charge as a separate field.
+    It only provides settlement status (boolean), dates, and CPR numbers.
+    The `actualDeliveryCharge` field CANNOT be auto-populated from this API.
+- Extended pollPostExOrderStatuses() to call fetchPaymentStatus for orders that have reached
+  delivered/rto state. Non-fatal — failure doesn't break the main tracking poll.
+- When settled=true, records an audit log entry (postex.payment_settled) with settlement date.
+- actualDeliveryCharge is NOT populated (PostEx API limitation noted in code comments).
+
+PHASE 4 — List/Report Visibility:
+- Added "Delivery" and "Tax" columns to Orders list table (orders-view.tsx).
+- Added estimatedDeliveryCharge, taxAmount, taxLabel to OrderRow interface.
+- Columns show "—" when NULL/zero, formatted PKR when populated.
+- Tax column shows the taxLabel as a tooltip when hovering.
+
+VERIFICATION:
+- bun run lint: ✅ 0 errors, 10 pre-existing warnings.
+- npx tsc --noEmit: ✅ 0 errors in src/.
+- Dev server: ✅ compiled successfully, GET / returned HTTP 200 in 17s, no runtime errors.
+- Existing order totals: UNAFFECTED when fields are NULL/zero — totalOrderValue calculation
+  is additive (subtotal + courierCharges + estimatedDeliveryCharge + taxAmount - discountAmount),
+  and when the new fields are 0/null, the result is identical to the old formula
+  (subtotal + courierCharges - discountAmount).
+- Polling job: Payment Status lookup is non-fatal — wrapped in try/catch, failures logged but
+  don't break the main tracking status updates.
+
+KEY FINDING — PostEx Payment Status API Limitation:
+PostEx's Payment Status API (GET v1/payment-status/{trackingNumber}) returns:
+  { settle (boolean), settlementDate, upfrontPaymentDate, cprNumber_1, reservePaymentDate, cprNumber_2 }
+It does NOT include a delivery charge, transaction fee, or reversal fee field. The API only
+confirms whether settlement has occurred (settle=true/false) and when. Therefore, the
+`actualDeliveryCharge` field on Order/exchange_shipments CANNOT be auto-populated from
+PostEx's API. It would need to come from:
+  1. Manual staff entry after receiving PostEx's settlement report, OR
+  2. A different API endpoint (if PostEx adds one in the future), OR
+  3. A reconciliation report import (CSV/upload).
+
+FILES CREATED:
+- supabase/migrations/012_delivery_charge_tax.sql
+
+FILES MODIFIED:
+- prisma/schema.prisma — added 4 fields to Order + ExchangeShipment models
+- src/lib/validations/order.schemas.ts — added estimated_delivery_charge, tax_amount, tax_label to createManualOrderSchema
+- src/lib/actions/order.actions.ts — updated total calculation + db.order.create + listOrders response
+- src/app/api/orders/[id]/route.ts — added 4 fields to GET response
+- src/components/orders/order-create-view.tsx — added state + inputs + total calculation + payload + PaymentSection props
+- src/components/orders/order-detail-view.tsx — added fields to OrderDetail interface + PaymentRow entries
+- src/components/orders/orders-view.tsx — added fields to OrderRow + Delivery/Tax columns
+- src/lib/integrations/couriers/postex.adapter.ts — added fetchPaymentStatus method
+- src/lib/actions/postex-status-poll.actions.ts — added Payment Status API lookup for delivered/rto orders

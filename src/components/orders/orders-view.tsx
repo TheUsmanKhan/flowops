@@ -98,6 +98,9 @@ interface OrderRow {
   needsShipperAdvice?: boolean
   trackingNumber?: string | null
   courierName?: string | null
+  estimatedDeliveryCharge?: number | null
+  taxAmount?: number | null
+  taxLabel?: string | null
 }
 
 interface OrdersListResponse {
@@ -1023,6 +1026,8 @@ export function OrdersView() {
                     <TableHead>Payment</TableHead>
                     <TableHead className="text-right">To Collect</TableHead>
                     <TableHead>Created</TableHead>
+                    <TableHead className="text-right">Delivery</TableHead>
+                    <TableHead className="text-right">Tax</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -1127,6 +1132,20 @@ export function OrdersView() {
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
                           {formatDate(order.createdAt)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-xs">
+                          {order.estimatedDeliveryCharge != null && order.estimatedDeliveryCharge > 0
+                            ? formatPKR(order.estimatedDeliveryCharge)
+                            : <span className="text-muted-foreground">—</span>}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums text-xs">
+                          {order.taxAmount != null && order.taxAmount > 0 ? (
+                            <span title={order.taxLabel || ''}>
+                              {formatPKR(order.taxAmount)}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
                         </TableCell>
                         <TableCell className="text-right">
                           <Button

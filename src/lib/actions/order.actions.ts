@@ -469,7 +469,11 @@ export async function createManualOrder(
     // 5. Compute totals
     const discountAmount = d.discount_amount ?? 0
     const courierCharges = d.courier_charges ?? 0
-    const totalOrderValue = subtotal + courierCharges - discountAmount
+    const estimatedDeliveryCharge = d.estimated_delivery_charge ?? 0
+    const taxAmount = d.tax_amount ?? 0
+    // Total = subtotal + courier charges + delivery charge + tax - discount
+    // (delivery charge and tax are ADDITIVE — not absorbed into subtotal)
+    const totalOrderValue = subtotal + courierCharges + estimatedDeliveryCharge + taxAmount - discountAmount
 
     // 6. Determine payment status + source
     let paymentStatus: string = 'cod_pending'
@@ -548,6 +552,9 @@ export async function createManualOrder(
         discountAmount: discountAmount || null,
         discountReason: d.discount_reason || null,
         courierCharges: courierCharges || null,
+        estimatedDeliveryCharge: estimatedDeliveryCharge || null,
+        taxAmount: taxAmount || null,
+        taxLabel: d.tax_label?.trim() || null,
         totalOrderValue,
         advanceAmount,
         advancePaymentMethod,
@@ -1492,6 +1499,10 @@ export async function listOrders(
           subtotal: Number(o.subtotal),
           discountAmount: o.discountAmount ? Number(o.discountAmount) : null,
           courierCharges: o.courierCharges ? Number(o.courierCharges) : null,
+          estimatedDeliveryCharge: o.estimatedDeliveryCharge ? Number(o.estimatedDeliveryCharge) : null,
+          actualDeliveryCharge: o.actualDeliveryCharge ? Number(o.actualDeliveryCharge) : null,
+          taxAmount: o.taxAmount ? Number(o.taxAmount) : null,
+          taxLabel: o.taxLabel ?? null,
           totalOrderValue: Number(o.totalOrderValue),
           advanceAmount: o.advanceAmount ? Number(o.advanceAmount) : null,
           remainingCodAmount: o.remainingCodAmount

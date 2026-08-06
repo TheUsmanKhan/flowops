@@ -239,6 +239,9 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   const [notesForCourier, setNotesForCourier] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
   const [discountReason, setDiscountReason] = useState('')
+  const [deliveryCharge, setDeliveryCharge] = useState('')
+  const [taxAmount, setTaxAmount] = useState('')
+  const [taxLabel, setTaxLabel] = useState('')
 
   // Validation errors — keyed by Zod issue path (joined with '.')
   const [errors, setErrors] = useState<Record<string, string>>({})
@@ -403,7 +406,9 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     [cart],
   )
   const discount = parsePrice(discountAmount)
-  const total = Math.max(0, subtotal - discount)
+  const delivery = parsePrice(deliveryCharge)
+  const tax = parsePrice(taxAmount)
+  const total = Math.max(0, subtotal + delivery + tax - discount)
 
   const remainingCod =
     paymentType === 'fully_prepaid'
@@ -561,6 +566,9 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       notes_for_courier: notesForCourier.trim() || undefined,
       discount_amount: discount > 0 ? discount : undefined,
       discount_reason: discountReason.trim() || undefined,
+      estimated_delivery_charge: delivery > 0 ? delivery : undefined,
+      tax_amount: tax > 0 ? tax : undefined,
+      tax_label: taxLabel.trim() || undefined,
     }
 
     if (paymentType === 'partial_advance' || paymentType === 'fully_prepaid') {
@@ -825,6 +833,12 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
               subtotal={subtotal}
               total={total}
               discount={discount}
+              deliveryCharge={deliveryCharge}
+              setDeliveryCharge={setDeliveryCharge}
+              taxAmount={taxAmount}
+              setTaxAmount={setTaxAmount}
+              taxLabel={taxLabel}
+              setTaxLabel={setTaxLabel}
               remainingCod={remainingCod}
               paymentProofFile={paymentProofFile}
               paymentProofPreview={paymentProofPreview}
@@ -1537,6 +1551,12 @@ function PaymentSection({
   subtotal,
   total,
   discount,
+  deliveryCharge,
+  setDeliveryCharge,
+  taxAmount,
+  setTaxAmount,
+  taxLabel,
+  setTaxLabel,
   remainingCod,
   paymentProofFile,
   paymentProofPreview,
@@ -1556,6 +1576,12 @@ function PaymentSection({
   subtotal: number
   total: number
   discount: number
+  deliveryCharge: string
+  setDeliveryCharge: (v: string) => void
+  taxAmount: string
+  setTaxAmount: (v: string) => void
+  taxLabel: string
+  setTaxLabel: (v: string) => void
   remainingCod: number
   paymentProofFile: File | null
   paymentProofPreview: string
@@ -1675,12 +1701,68 @@ function PaymentSection({
           </div>
         )}
 
+        {/* Delivery charge + tax (optional) */}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="delivery-charge" className="text-xs">
+              Delivery Charge (Rs.) — Optional
+            </Label>
+            <Input
+              id="delivery-charge"
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="0"
+              value={deliveryCharge}
+              onChange={(e) => setDeliveryCharge(e.target.value)}
+              className="h-9 text-sm tabular-nums"
+            />
+            <p className="text-[10px] text-muted-foreground">
+              Estimated courier delivery charge. Actual charge is confirmed after settlement.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="tax-amount" className="text-xs">
+              Tax Amount (Rs.) — Optional
+            </Label>
+            <Input
+              id="tax-amount"
+              type="number"
+              min="0"
+              step="0.01"
+              placeholder="0"
+              value={taxAmount}
+              onChange={(e) => setTaxAmount(e.target.value)}
+              className="h-9 text-sm tabular-nums"
+            />
+            <Input
+              type="text"
+              placeholder="Tax label (e.g. GST 17%)"
+              value={taxLabel}
+              onChange={(e) => setTaxLabel(e.target.value)}
+              className="h-8 text-xs mt-1"
+            />
+          </div>
+        </div>
+
         {/* Live total summary */}
         <div className="rounded-md bg-muted/40 p-3 space-y-1 text-sm">
           <div className="flex items-center justify-between">
             <span className="text-muted-foreground">Subtotal</span>
             <span className="tabular-nums">{formatPKR(subtotal)}</span>
           </div>
+          {deliveryCharge && Number(deliveryCharge) > 0 && (
+            <div className="flex items-center justify-between text-sky-700">
+              <span>Delivery Charge</span>
+              <span className="tabular-nums">+{formatPKR(Number(deliveryCharge))}</span>
+            </div>
+          )}
+          {taxAmount && Number(taxAmount) > 0 && (
+            <div className="flex items-center justify-between text-sky-700">
+              <span>{taxLabel || 'Tax'}</span>
+              <span className="tabular-nums">+{formatPKR(Number(taxAmount))}</span>
+            </div>
+          )}
           {discount > 0 && (
             <div className="flex items-center justify-between text-rose-600">
               <span>Discount</span>

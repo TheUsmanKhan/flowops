@@ -108,6 +108,10 @@ interface OrderDetail {
     discountAmount: number | null
     discountReason: string | null
     courierCharges: number | null
+    estimatedDeliveryCharge?: number | null
+    actualDeliveryCharge?: number | null
+    taxAmount?: number | null
+    taxLabel?: string | null
     totalOrderValue: number
 
     advanceAmount: number | null
@@ -849,6 +853,27 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                 )}
                 {order.courierCharges !== null && order.courierCharges > 0 && (
                   <PaymentRow label="Courier charges" value={formatPKR(order.courierCharges)} />
+                )}
+                {order.estimatedDeliveryCharge !== null && order.estimatedDeliveryCharge !== undefined && order.estimatedDeliveryCharge > 0 && (
+                  <PaymentRow
+                    label="Delivery charge (est.)"
+                    value={formatPKR(order.estimatedDeliveryCharge)}
+                    valueClassName="text-sky-700"
+                  />
+                )}
+                {order.actualDeliveryCharge !== null && order.actualDeliveryCharge !== undefined && order.actualDeliveryCharge > 0 && (
+                  <PaymentRow
+                    label="Delivery charge (actual)"
+                    value={formatPKR(order.actualDeliveryCharge)}
+                    valueClassName="text-emerald-700"
+                  />
+                )}
+                {order.taxAmount !== null && order.taxAmount !== undefined && order.taxAmount > 0 && (
+                  <PaymentRow
+                    label={order.taxLabel || 'Tax'}
+                    value={formatPKR(order.taxAmount)}
+                    valueClassName="text-sky-700"
+                  />
                 )}
                 <Separator />
                 <div className="flex items-center justify-between pt-1">

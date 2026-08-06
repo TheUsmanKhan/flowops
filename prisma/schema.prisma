@@ -1828,6 +1828,12 @@ model Order {
   courierCharges              Decimal? @db.Decimal(14, 2)
   totalOrderValue             Decimal  @default(0) @db.Decimal(14, 2)
 
+  // Delivery charge + tax tracking (migration 012)
+  estimatedDeliveryCharge     Decimal? @db.Decimal(14, 2) // staff-entered or courier-default at booking
+  actualDeliveryCharge        Decimal? @db.Decimal(14, 2) // populated from courier Payment Status API
+  taxAmount                   Decimal? @db.Decimal(14, 2) // staff-entered (e.g. GST)
+  taxLabel                    String?  // free text (e.g. "GST 17%")
+
   advanceAmount               Decimal? @db.Decimal(14, 2)
   advancePaymentMethod        String?
   advancePaymentReference     String?
@@ -2057,6 +2063,12 @@ model ExchangeShipment {
   backorderedAt                 DateTime?
 
   invoiceAmount                 Decimal  @default(0) @db.Decimal(14, 2)
+
+  // Delivery charge + tax tracking (migration 012 — same as Order)
+  estimatedDeliveryCharge       Decimal? @db.Decimal(14, 2)
+  actualDeliveryCharge          Decimal? @db.Decimal(14, 2)
+  taxAmount                     Decimal? @db.Decimal(14, 2)
+  taxLabel                      String?
 
   // Courier integration (nullable until courier chosen)
   courierCompanyIntegrationId   String?

@@ -76,6 +76,10 @@ export async function GET(
         discountAmount: order.discountAmount ? Number(order.discountAmount) : null,
         discountReason: order.discountReason,
         courierCharges: order.courierCharges ? Number(order.courierCharges) : null,
+        estimatedDeliveryCharge: order.estimatedDeliveryCharge ? Number(order.estimatedDeliveryCharge) : null,
+        actualDeliveryCharge: order.actualDeliveryCharge ? Number(order.actualDeliveryCharge) : null,
+        taxAmount: order.taxAmount ? Number(order.taxAmount) : null,
+        taxLabel: order.taxLabel ?? null,
         totalOrderValue: Number(order.totalOrderValue),
 
         advanceAmount: order.advanceAmount ? Number(order.advanceAmount) : null,
