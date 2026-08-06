@@ -42,11 +42,71 @@ export async function GET(req: Request) {
     const detailed = url.searchParams.get('detailed') === '1'
 
     if (detailed && search) {
-      const result = await searchCustomerByPhone(search)
-      if (!result.success) {
-        throw new ApiError(400, result.error ?? 'Failed to search customer')
+      // Try phone-based search first (normalize_phone + exact match on
+      // customer_phones.phoneNormalized). If the input isn't phone-like,
+      // normalizePhone returns null and searchCustomerByPhone returns
+      // { found: false } — then we fall back to name-based search below.
+      const phoneResult = await searchCustomerByPhone(search)
+      if (phoneResult.success && phoneResult.data?.found) {
+        return Response.json(phoneResult.data)
       }
-      return Response.json(result.data)
+
+      // Fallback: name-based search via listCustomers (searches customer.name
+      // case-insensitively). Return the FIRST match in detailed format
+      // (with phones + addresses) so the order-create form can populate.
+      const listResult = await listCustomers({ search, limit: 1 })
+      if (listResult.success && listResult.data && listResult.data.customers.length > 0) {
+        const match = listResult.data.customers[0]
+        // Fetch the full customer record with phones + addresses
+        const { db } = await import('@/lib/db')
+        const full = await db.customer.findFirst({
+          where: { id: match.id },
+          include: {
+            phones: { orderBy: { isPrimary: 'desc' } },
+            addresses: {
+              orderBy: [
+                { isDefault: 'desc' },
+                { lastUsedAt: { sort: 'desc', nulls: 'last' } },
+              ],
+            },
+          },
+        })
+        if (full) {
+          return Response.json({
+            found: true,
+            customer: {
+              id: full.id,
+              name: full.name,
+              email: full.email,
+              totalOrdersCount: full.totalOrdersCount,
+              totalRtoCount: full.totalRtoCount,
+              isFlagged: full.isFlagged,
+              flaggedReason: full.flaggedReason,
+              phones: full.phones.map((p) => ({
+                id: p.id,
+                phoneRaw: p.phoneRaw,
+                phoneNormalized: p.phoneNormalized,
+                label: p.label,
+                isPrimary: p.isPrimary,
+                createdAt: p.createdAt.toISOString(),
+              })),
+              addresses: full.addresses.map((a) => ({
+                id: a.id,
+                label: a.label,
+                address: a.address,
+                city: a.city,
+                isDefault: a.isDefault,
+                lastUsedAt: a.lastUsedAt?.toISOString() ?? null,
+                createdAt: a.createdAt.toISOString(),
+                updatedAt: a.updatedAt.toISOString(),
+              })),
+            },
+          })
+        }
+      }
+
+      // No match by phone or name
+      return Response.json({ found: false })
     }
 
     const result = await listCustomers({
