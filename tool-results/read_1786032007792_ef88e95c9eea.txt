@@ -1892,111 +1892,111 @@
   1892→  // step. Survives navigation so the user can see WHY booking failed from the
   1893→  // order detail page or the Booking Workbench without re-attempting.
   1894→  courierBookingFailureReason String?
-  1895→  recommendedCourierCompanyIntegrationId String?
-  1896→  recommendedCourierIntegration CompanyIntegration? @relation("OrderRecommendedCourier", fields: [recommendedCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
-  1897→  // City validation state for courier booking. 'not_applicable' until the
-  1898→  // order goes through courier city validation (Prompt 4/5). Left unused in
-  1899→  // this foundational prompt — no business logic touches Order here.
-  1900→  courierCityStatus           String   @default("not_applicable") // 'matched' | 'unresolved' | 'not_applicable' (CHECK in SQL)
-  1901→  lastPolledAt                DateTime? // last time this order was polled for courier status
-  1902→  courierSubStatus            String? // PostEx sub-status (e.g. 'picked_up', 'out_for_delivery')
-  1903→  needsShipperAdvice          Boolean  @default(false) // true if status requires shipper advice (Attempted, Delivery Under Review)
-  1904→  unrecognizedCourierStatus   Boolean  @default(false) // true if courier returned an unrecognized status
-  1905→  dispatchLocationId          String?
-  1906→  dispatchLocation            InventoryLocation? @relation("OrderDispatchLocation", fields: [dispatchLocationId], references: [id])
-  1907→  notesForCourier             String?
-  1908→
-  1909→  // ─── Universal courier reference fields (migration 015) ───────────────
-  1910→  // orderRefNumber is the universal "reference" passed to ANY courier at
-  1911→  // booking time. Defaults to flowopsOrderNumber at creation but is editable
-  1912→  // — staff can type a custom PO/channel reference that the courier should
-  1913→  // print on the airway bill. Almost every courier (PostEx, TCS, Leopard…)
-  1914→  // has a "reference" / "order ref" field, so this is a core OMS field, not
-  1915→  // a PostEx-specific one. The booking adapter maps it to the courier's own
-  1916→  // ref field (PostEx → orderRefNumber, TCS → consigneeRef, etc.).
-  1917→  orderRefNumber              String?
-  1918→  // orderDetail is the human-readable item description string passed to the
-  1919→  // courier (e.g. "Silk Kurta (SKU-001, Size: L, Color: Blue) ×2, …").
-  1920→  // Auto-generated from the cart at creation but editable so staff can
-  1921→  // replace it with a more courier-friendly summary when needed.
-  1922→  orderDetail                 String?
-  1923→
-  1924→  skippedConfirmation         Boolean  @default(false)
-  1925→  skippedPacking              Boolean  @default(false)
-  1926→
-  1927→  confirmedAt                 DateTime?
-  1928→  packedAt                    DateTime?
-  1929→  dispatchedAt                DateTime?
-  1930→  deliveredAt                 DateTime?
-  1931→  cancelledAt                 DateTime?
-  1932→  cancellationReason          String?
-  1933→  returnedAt                  DateTime?
-  1934→
-  1935→  createdBy                   String?
-  1936→  createdByEmployee           Employee? @relation("OrderCreator", fields: [createdBy], references: [id])
-  1937→  createdAt                   DateTime @default(now())
-  1938→  updatedAt                   DateTime @updatedAt
+  1895→  // Per-order pickup address override (nullable). When set, booking uses
+  1896→  // this address instead of the integration's default. Falls back to the
+  1897→  // default when null.
+  1898→  pickupAddressId              String?
+  1899→  pickupAddress                CourierPickupAddress? @relation("OrderPickupAddress", fields: [pickupAddressId], references: [id], onDelete: SetNull)
+  1900→  recommendedCourierCompanyIntegrationId String?
+  1901→  recommendedCourierIntegration CompanyIntegration? @relation("OrderRecommendedCourier", fields: [recommendedCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  1902→  // City validation state for courier booking. 'not_applicable' until the
+  1903→  // order goes through courier city validation (Prompt 4/5). Left unused in
+  1904→  // this foundational prompt — no business logic touches Order here.
+  1905→  courierCityStatus           String   @default("not_applicable") // 'matched' | 'unresolved' | 'not_applicable' (CHECK in SQL)
+  1906→  lastPolledAt                DateTime? // last time this order was polled for courier status
+  1907→  courierSubStatus            String? // PostEx sub-status (e.g. 'picked_up', 'out_for_delivery')
+  1908→  needsShipperAdvice          Boolean  @default(false) // true if status requires shipper advice (Attempted, Delivery Under Review)
+  1909→  unrecognizedCourierStatus   Boolean  @default(false) // true if courier returned an unrecognized status
+  1910→  dispatchLocationId          String?
+  1911→  dispatchLocation            InventoryLocation? @relation("OrderDispatchLocation", fields: [dispatchLocationId], references: [id])
+  1912→  notesForCourier             String?
+  1913→
+  1914→  // ─── Universal courier reference fields (migration 015) ───────────────
+  1915→  // orderRefNumber is the universal "reference" passed to ANY courier at
+  1916→  // booking time. Defaults to flowopsOrderNumber at creation but is editable
+  1917→  // — staff can type a custom PO/channel reference that the courier should
+  1918→  // print on the airway bill. Almost every courier (PostEx, TCS, Leopard…)
+  1919→  // has a "reference" / "order ref" field, so this is a core OMS field, not
+  1920→  // a PostEx-specific one. The booking adapter maps it to the courier's own
+  1921→  // ref field (PostEx → orderRefNumber, TCS → consigneeRef, etc.).
+  1922→  orderRefNumber              String?
+  1923→  // orderDetail is the human-readable item description string passed to the
+  1924→  // courier (e.g. "Silk Kurta (SKU-001, Size: L, Color: Blue) ×2, …").
+  1925→  // Auto-generated from the cart at creation but editable so staff can
+  1926→  // replace it with a more courier-friendly summary when needed.
+  1927→  orderDetail                 String?
+  1928→
+  1929→  skippedConfirmation         Boolean  @default(false)
+  1930→  skippedPacking              Boolean  @default(false)
+  1931→
+  1932→  confirmedAt                 DateTime?
+  1933→  packedAt                    DateTime?
+  1934→  dispatchedAt                DateTime?
+  1935→  deliveredAt                 DateTime?
+  1936→  cancelledAt                 DateTime?
+  1937→  cancellationReason          String?
+  1938→  returnedAt                  DateTime?
   1939→
-  1940→  items                       OrderItem[]
-  1941→  inventoryTransactions       InventoryTransaction[]
-  1942→
-  1943→  // Item Exchange System back-relations (migration 003)
-  1944→  exchangesAsOriginalOrder    OrderExchange[] @relation("ExchangeOriginalOrder")
-  1945→  exchangesAsNewOrder         OrderExchange[] @relation("ExchangeNewOrder")
-  1946→
-  1947→  @@unique([companyId, flowopsOrderNumber])
-  1948→  @@index([companyId, status])
-  1949→  @@index([companyId, createdAt])
-  1950→  @@index([externalOrderId])
-  1951→  @@index([customerId])
-  1952→  @@index([usedCustomerAddressId])
-  1953→  @@index([usedCustomerPhoneId])
-  1954→  @@index([courierCompanyIntegrationId])
-  1955→}
-  1956→
-  1957→/// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
-  1958→/// the variant's fulfillmentType — a stock_based item can be 'backordered'
-  1959→/// while a made_to_order item can be 'reserved' or 'dispatched'.
-  1960→/// fulfillmentTypeSnapshot captures the variant's type AT ORDER TIME.
-  1961→model OrderItem {
-  1962→  id                          String   @id @default(cuid())
-  1963→  orderId                     String
-  1964→  order                       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  1965→  orgVariantId                String
-  1966→  orgVariant                  OrgProductVariant @relation(fields: [orgVariantId], references: [id])
-  1967→  organizationId              String
-  1968→  organization                Organization @relation(fields: [organizationId], references: [id])
-  1969→
-  1970→  quantity                    Int
-  1971→  unitPrice                   Decimal  @db.Decimal(12, 2)
-  1972→  // lineTotal is GENERATED ALWAYS AS (quantity * unitPrice) STORED in the DB
-  1973→  lineTotal                   Decimal  @db.Decimal(14, 2)
+  1940→  createdBy                   String?
+  1941→  createdByEmployee           Employee? @relation("OrderCreator", fields: [createdBy], references: [id])
+  1942→  createdAt                   DateTime @default(now())
+  1943→  updatedAt                   DateTime @updatedAt
+  1944→
+  1945→  items                       OrderItem[]
+  1946→  inventoryTransactions       InventoryTransaction[]
+  1947→
+  1948→  // Item Exchange System back-relations (migration 003)
+  1949→  exchangesAsOriginalOrder    OrderExchange[] @relation("ExchangeOriginalOrder")
+  1950→  exchangesAsNewOrder         OrderExchange[] @relation("ExchangeNewOrder")
+  1951→
+  1952→  @@unique([companyId, flowopsOrderNumber])
+  1953→  @@index([companyId, status])
+  1954→  @@index([companyId, createdAt])
+  1955→  @@index([externalOrderId])
+  1956→  @@index([customerId])
+  1957→  @@index([usedCustomerAddressId])
+  1958→  @@index([usedCustomerPhoneId])
+  1959→  @@index([courierCompanyIntegrationId])
+  1960→}
+  1961→
+  1962→/// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
+  1963→/// the variant's fulfillmentType — a stock_based item can be 'backordered'
+  1964→/// while a made_to_order item can be 'reserved' or 'dispatched'.
+  1965→/// fulfillmentTypeSnapshot captures the variant's type AT ORDER TIME.
+  1966→model OrderItem {
+  1967→  id                          String   @id @default(cuid())
+  1968→  orderId                     String
+  1969→  order                       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  1970→  orgVariantId                String
+  1971→  orgVariant                  OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  1972→  organizationId              String
+  1973→  organization                Organization @relation(fields: [organizationId], references: [id])
   1974→
-  1975→  fulfillmentStatus           String   @default("reserved") // reserved | backordered | dispatched
-  1976→  fulfillmentTypeSnapshot     String   // stock_based | made_to_order
-  1977→
-  1978→  backorderedAt               DateTime?
-  1979→  fulfilledAt                 DateTime?
-  1980→
-  1981→  productionOrderId           String?
-  1982→  productionOrder             ProductionOrder? @relation("OrderItemProduction")
-  1983→  returnedStitchedUsed        Boolean  @default(false)
-  1984→
-  1985→  autoProcessedAsPerfect      Boolean  @default(false)
-  1986→  needsReview                 Boolean  @default(false)
-  1987→
-  1988→  reservedLocationId          String?
-  1989→  reservedLocation            InventoryLocation? @relation("OrderItemReservedLocation", fields: [reservedLocationId], references: [id])
-  1990→
-  1991→  createdAt                   DateTime @default(now())
-  1992→  updatedAt                   DateTime @updatedAt
-  1993→
-  1994→  stockLossRecords            StockLossRecord[]
+  1975→  quantity                    Int
+  1976→  unitPrice                   Decimal  @db.Decimal(12, 2)
+  1977→  // lineTotal is GENERATED ALWAYS AS (quantity * unitPrice) STORED in the DB
+  1978→  lineTotal                   Decimal  @db.Decimal(14, 2)
+  1979→
+  1980→  fulfillmentStatus           String   @default("reserved") // reserved | backordered | dispatched
+  1981→  fulfillmentTypeSnapshot     String   // stock_based | made_to_order
+  1982→
+  1983→  backorderedAt               DateTime?
+  1984→  fulfilledAt                 DateTime?
+  1985→
+  1986→  productionOrderId           String?
+  1987→  productionOrder             ProductionOrder? @relation("OrderItemProduction")
+  1988→  returnedStitchedUsed        Boolean  @default(false)
+  1989→
+  1990→  autoProcessedAsPerfect      Boolean  @default(false)
+  1991→  needsReview                 Boolean  @default(false)
+  1992→
+  1993→  reservedLocationId          String?
+  1994→  reservedLocation            InventoryLocation? @relation("OrderItemReservedLocation", fields: [reservedLocationId], references: [id])
   1995→
-  1996→  // Item Exchange System back-relations (migration 003)
-  1997→  exchangesAsOriginalItem     OrderExchange[] @relation("ExchangeOriginalOrderItem")
-  1998→  exchangesAsNewItem          OrderExchange[] @relation("ExchangeNewOrderItem")
-  1999→
-  2000→  @@index([orderId])
+  1996→  createdAt                   DateTime @default(now())
+  1997→  updatedAt                   DateTime @updatedAt
+  1998→
+  1999→  stockLossRecords            StockLossRecord[]
+  2000→
 
-[showing lines 1-2000 of 2159; use offset=2001 with limit to continue reading]
+[showing lines 1-2000 of 2167; use offset=2001 with limit to continue reading]

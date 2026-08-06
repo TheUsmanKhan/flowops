@@ -51,11 +51,14 @@ export interface PostExStatusMapping {
  *   ANY OTHER VALUE                 → unrecognized=true, orderStatus='no_change'
  */
 export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
-  // Normalize: trim + case-insensitive comparison
-  const status = postexStatus.trim()
+  // Normalize: trim + lowercase for case-insensitive comparison.
+  // PostEx's API returns inconsistent casing (e.g. "UnBooked" vs "Unbooked",
+  // "Picked By PostEx" vs "Picked by PostEx"). We lowercase everything
+  // before comparing.
+  const status = postexStatus.trim().toLowerCase()
 
   switch (status) {
-    case 'Unbooked':
+    case 'unbooked':
       return {
         orderStatus: 'no_change',
         courierSubStatus: null,
@@ -66,7 +69,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'Booked':
+    case 'booked':
       return {
         orderStatus: 'no_change',
         courierSubStatus: 'pickup_requested',
@@ -77,7 +80,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'Picked By PostEx':
+    case 'picked by postex':
       return {
         orderStatus: 'dispatched',
         courierSubStatus: 'picked_up',
@@ -88,7 +91,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'PostEx WareHouse':
+    case 'postex warehouse':
       return {
         orderStatus: 'no_change',
         courierSubStatus: 'at_warehouse',
@@ -99,7 +102,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'En-Route to PostEx warehouse':
+    case 'en-route to postex warehouse':
       return {
         orderStatus: 'no_change',
         courierSubStatus: 'en_route',
@@ -110,7 +113,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'Out For Delivery':
+    case 'out for delivery':
       return {
         orderStatus: 'no_change',
         courierSubStatus: 'out_for_delivery',
@@ -121,7 +124,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'Delivered':
+    case 'delivered':
       return {
         orderStatus: 'delivered',
         courierSubStatus: 'delivered',
@@ -132,7 +135,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'Returned':
+    case 'returned':
       return {
         orderStatus: 'rto',
         courierSubStatus: 'returned',
@@ -143,7 +146,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'Out For Return':
+    case 'out for return':
       return {
         orderStatus: 'no_change',
         courierSubStatus: 'out_for_return',
@@ -154,7 +157,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'Attempted':
+    case 'attempted':
       return {
         orderStatus: 'no_change',
         courierSubStatus: 'attempted',
@@ -165,7 +168,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         unrecognized: false,
       }
 
-    case 'Delivery Under Review':
+    case 'delivery under review':
       return {
         orderStatus: 'no_change',
         courierSubStatus: 'under_review',

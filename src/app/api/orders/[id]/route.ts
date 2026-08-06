@@ -108,6 +108,7 @@ export async function GET(
         courierSubStatus: order.courierSubStatus,
         needsShipperAdvice: order.needsShipperAdvice,
         unrecognizedCourierStatus: order.unrecognizedCourierStatus,
+        lastPolledAt: order.lastPolledAt?.toISOString() ?? null,
         notesForCourier: order.notesForCourier,
         // Universal courier reference fields (migration 015)
         orderRefNumber: order.orderRefNumber,

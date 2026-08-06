@@ -135,6 +135,8 @@ interface OrderDetail {
     courierCityStatus?: string
     courierSubStatus?: string | null
     needsShipperAdvice?: boolean
+    unrecognizedCourierStatus?: boolean
+    lastPolledAt?: string | null
     notesForCourier: string | null
     // Universal courier reference fields (migration 015)
     orderRefNumber?: string | null
@@ -1108,13 +1110,30 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                 </div>
               )}
               {order.courierSubStatus && (
-                <InfoRow label="Courier Status" value={order.courierSubStatus} />
+                <InfoRow label="Courier Status" value={COURIER_SUBSTATUS_LABELS[order.courierSubStatus] ?? order.courierSubStatus} />
+              )}
+              {order.lastPolledAt && (
+                <InfoRow label="Last Polled" value={formatDateTime(order.lastPolledAt)} muted />
+              )}
+              {order.unrecognizedCourierStatus && (
+                <div className="rounded-md border border-amber-300 bg-amber-50 p-2 mt-1">
+                  <p className="text-xs text-amber-800">
+                    ⚠️ Courier returned an unrecognized status. The raw value is stored but may need manual review.
+                  </p>
+                </div>
               )}
               {order.needsShipperAdvice && (
                 <div className="rounded-lg border border-rose-300 bg-rose-50 p-2 mt-1 flex items-center gap-1.5">
                   <AlertCircle className="h-3.5 w-3.5 text-rose-600" />
-                  <span className="text-xs text-rose-800">Courier status requires shipper advice</span>
+                  <span className="text-xs text-rose-800">Courier status requires shipper advice (Attempted / Under Review)</span>
                 </div>
+              )}
+              {/* Refresh courier status button — triggers PostEx polling for this order */}
+              {order.trackingNumber && order.courierCompanyIntegrationId && (
+                <RefreshCourierStatusButton
+                  orderId={order.id}
+                  onSuccess={() => invalidateAll()}
+                />
               )}
               <InfoRow label="Courier" value={order.courierName ?? '—'} />
               {order.courierBookingStatus && (
@@ -1893,6 +1912,63 @@ function CodCollectedDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Courier sub-status human-friendly labels
+// ─────────────────────────────────────────────────────────────────────────────
+
+const COURIER_SUBSTATUS_LABELS: Record<string, string> = {
+  pickup_requested: 'Pickup Requested',
+  picked_up: 'Picked Up',
+  at_warehouse: 'At Courier Warehouse',
+  en_route: 'En Route to Warehouse',
+  out_for_delivery: 'Out For Delivery',
+  delivered: 'Delivered',
+  returned: 'Returned (RTO)',
+  out_for_return: 'Out For Return',
+  attempted: 'Delivery Attempted',
+  under_review: 'Delivery Under Review',
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RefreshCourierStatusButton — manually trigger PostEx status polling
+// ─────────────────────────────────────────────────────────────────────────────
+
+function RefreshCourierStatusButton({
+  orderId,
+  onSuccess,
+}: {
+  orderId: string
+  onSuccess: () => void
+}) {
+  const [isRefreshing, setIsRefreshing] = useState(false)
+
+  async function handleRefresh() {
+    setIsRefreshing(true)
+    try {
+      // Trigger the global polling endpoint (polls all active orders).
+      // A per-order endpoint would be more efficient, but the global poll
+      // is fast enough (skips orders without tracking numbers).
+      await api.post('/api/couriers/postex/poll')
+      toast.success('Courier status refreshed.')
+      onSuccess()
+    } catch (err) {
+      toast.error(err instanceof FetchError ? err.message : 'Failed to refresh courier status')
+    } finally {
+      setIsRefreshing(false)
+    }
+  }
+
+  return (
+    <Button size="sm" variant="outline" onClick={handleRefresh} disabled={isRefreshing} className="mt-2">
+      {isRefreshing ? (
+        <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Refreshing…</>
+      ) : (
+        <><RefreshCw className="h-3.5 w-3.5" /> Refresh Courier Status</>
+      )}
+    </Button>
   )
 }
 

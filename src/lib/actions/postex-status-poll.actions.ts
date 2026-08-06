@@ -241,10 +241,14 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
           if (!result || !result.success) {
             // Tracking failed for this number — update lastPolledAt only
             if (entry.type === 'order') {
-              await db.order.update({ where: { id: entry.id }, data: { lastPolledAt: now } }).catch(() => {})
+              await db.order.update({ where: { id: entry.id }, data: { lastPolledAt: now } }).catch((e) => {
+                console.error(`[poll] Failed to update lastPolledAt for order ${entry.id}:`, e)
+              })
               polledOrders++
             } else {
-              await db.exchangeShipment.update({ where: { id: entry.id }, data: { lastPolledAt: now } }).catch(() => {})
+              await db.exchangeShipment.update({ where: { id: entry.id }, data: { lastPolledAt: now } }).catch((e) => {
+                console.error(`[poll] Failed to update lastPolledAt for shipment ${entry.id}:`, e)
+              })
               polledShipments++
             }
             continue
@@ -261,39 +265,121 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
 
           if (entry.type === 'order') {
             // Update lastPolledAt + courierSubStatus + flags
+            // NOTE: we also persist unrecognizedCourierStatus on Order (was
+            // previously only persisted on ExchangeShipment — bug fix).
             await db.order.update({
               where: { id: entry.id },
               data: {
                 lastPolledAt: now,
-                courierSubStatus: mappedSubStatus, // reuse the existing column
-                needsShipperAdvice: needsShipperAdvice, // Note: this column doesn't exist on Order yet — see note below
+                courierSubStatus: mappedSubStatus,
+                needsShipperAdvice: needsShipperAdvice,
+                unrecognizedCourierStatus: unrecognized,
               },
-            }).catch(() => {})
+            }).catch((e) => {
+              console.error(`[poll] Failed to update courier status for order ${entry.id}:`, e)
+            })
             polledOrders++
 
             if (subStatusChanged) {
               statusChanges++
-              // Trigger OMS functions if the mapped status requires it
+
+              // ── "Picked By PostEx" → auto-dispatch ──
+              // When PostEx picks up the package, transition the order from
+              // confirmed/processing to dispatched. This is critical because
+              // markOrderDelivered requires the order to be in 'dispatched'
+              // status first — without this auto-dispatch, delivered/rto
+              // transitions would silently fail.
+              if (result.status === 'in_transit') {
+                try {
+                  // Fetch the order to check its current status
+                  const order = await db.order.findUnique({
+                    where: { id: entry.id },
+                    select: { status: true, flowopsOrderNumber: true },
+                  })
+                  if (order && (order.status === 'confirmed' || order.status === 'processing')) {
+                    // Auto-dispatch: the package has physically left the warehouse
+                    await db.order.update({
+                      where: { id: entry.id },
+                      data: {
+                        status: 'dispatched',
+                        dispatchedAt: new Date(),
+                      },
+                    })
+                    console.log(`[poll] Auto-dispatched ${order.flowopsOrderNumber} (PostEx picked up package)`)
+                  }
+                } catch (e) {
+                  console.error(`[poll] Failed to auto-dispatch order ${entry.id}:`, e)
+                  errors.push(`Failed to auto-dispatch order ${entry.id}: ${e}`)
+                }
+              }
+
+              // ── "Delivered" → mark as delivered ──
               if (result.status === 'delivered') {
-                // Dynamic import to avoid circular dependency
-                const { markOrderDelivered } = await import('./order.actions')
-                await markOrderDelivered(entry.id).catch((e) => {
+                try {
+                  // First ensure the order is dispatched (auto-dispatch if needed)
+                  const order = await db.order.findUnique({
+                    where: { id: entry.id },
+                    select: { status: true },
+                  })
+                  if (order && (order.status === 'confirmed' || order.status === 'processing')) {
+                    // Auto-dispatch first, then mark delivered
+                    await db.order.update({
+                      where: { id: entry.id },
+                      data: { status: 'dispatched', dispatchedAt: new Date() },
+                    })
+                  }
+                  if (order && order.status !== 'delivered' && order.status !== 'cancelled' && order.status !== 'refunded') {
+                    // Mark as delivered directly (bypass markOrderDelivered's
+                    // getWorkspace() which breaks multi-tenant polling)
+                    await db.order.update({
+                      where: { id: entry.id },
+                      data: {
+                        status: 'delivered',
+                        deliveredAt: new Date(),
+                      },
+                    })
+                    console.log(`[poll] Marked order ${entry.id} as delivered (PostEx confirmed delivery)`)
+                  }
+                } catch (e) {
+                  console.error(`[poll] Failed to mark order ${entry.id} as delivered:`, e)
                   errors.push(`Failed to mark order ${entry.id} as delivered: ${e}`)
-                })
-              } else if (result.status === 'returned') {
-                const { processOrderReturn } = await import('./order-return.actions')
-                await processOrderReturn(entry.id, 'Courier returned (RTO) — detected via PostEx polling').catch((e) => {
-                  errors.push(`Failed to process RTO for order ${entry.id}: ${e}`)
-                })
+                }
+              }
+
+              // ── "Returned" → mark as RTO ──
+              if (result.status === 'returned') {
+                try {
+                  const order = await db.order.findUnique({
+                    where: { id: entry.id },
+                    select: { status: true },
+                  })
+                  if (order && order.status !== 'rto' && order.status !== 'cancelled' && order.status !== 'refunded') {
+                    // Ensure dispatched first (for consistency)
+                    if (order.status === 'confirmed' || order.status === 'processing') {
+                      await db.order.update({
+                        where: { id: entry.id },
+                        data: { status: 'dispatched', dispatchedAt: new Date() },
+                      })
+                    }
+                    // Mark as RTO directly (bypass processOrderReturn's
+                    // getWorkspace() which breaks multi-tenant polling)
+                    await db.order.update({
+                      where: { id: entry.id },
+                      data: {
+                        status: 'rto',
+                        returnedAt: new Date(),
+                      },
+                    })
+                    console.log(`[poll] Marked order ${entry.id} as RTO (PostEx returned)`)
+                  }
+                } catch (e) {
+                  console.error(`[poll] Failed to mark order ${entry.id} as RTO:`, e)
+                  errors.push(`Failed to mark order ${entry.id} as RTO: ${e}`)
+                }
               }
             }
 
             // ── Payment Status lookup (Phase 3 — migration 012) ──
-            // For orders that have reached delivered/rto, also check payment
-            // settlement status. Non-fatal — failure doesn't break the main poll.
-            // NOTE: PostEx's Payment Status API does NOT break out delivery charge
-            // separately — actualDeliveryCharge CANNOT be auto-populated.
-            // We still call it to record settlement metadata for audit purposes.
             if (result.status === 'delivered' || result.status === 'returned') {
               try {
                 const paymentStatus = await executeLoggedIntegrationAction<{
@@ -309,8 +395,6 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                   relatedEntityType: 'order',
                   relatedEntityId: entry.id,
                   fn: async () => {
-                    // fetchPaymentStatus is not on the CourierAdapter interface —
-                    // it's a PostEx-specific method. Cast to access it.
                     const postexAdapter = adapter as unknown as {
                       fetchPaymentStatus: (tn: string) => Promise<{
                         success: boolean
@@ -326,7 +410,6 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                   },
                 })
 
-                // If settled, record it in an audit log (non-fatal)
                 if (paymentStatus?.settled) {
                   await insertAuditLog({
                     action: 'postex.payment_settled',
@@ -338,12 +421,10 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                       trackingNumber: entry.trackingNumber,
                       settlementDate: paymentStatus.settlementDate,
                     },
-                  }).catch(() => {})
+                  }).catch((e) => console.error(`[poll] Failed to log payment settlement for ${entry.id}:`, e))
                 }
-                // NOTE: actualDeliveryCharge is NOT populated here because
-                // PostEx's Payment Status API does not break out delivery charge.
-              } catch {
-                // Non-fatal — payment status lookup failure doesn't break the poll
+              } catch (e) {
+                console.error(`[poll] Payment status lookup failed for ${entry.id}:`, e)
               }
             }
           } else {
@@ -356,20 +437,58 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                 needsShipperAdvice: needsShipperAdvice,
                 unrecognizedCourierStatus: unrecognized,
               },
-            }).catch(() => {})
+            }).catch((e) => {
+              console.error(`[poll] Failed to update courier status for shipment ${entry.id}:`, e)
+            })
             polledShipments++
 
             if (subStatusChanged) {
               statusChanges++
-              if (result.status === 'delivered') {
-                const { markExchangeShipmentDelivered } = await import('./exchange-shipment.actions')
-                await markExchangeShipmentDelivered(entry.id).catch((e) => {
-                  errors.push(`Failed to mark exchange shipment ${entry.id} as delivered: ${e}`)
-                })
+
+              // Auto-dispatch exchange shipment when picked up
+              if (result.status === 'in_transit') {
+                try {
+                  const shipment = await db.exchangeShipment.findUnique({
+                    where: { id: entry.id },
+                    select: { status: true },
+                  })
+                  if (shipment && shipment.status === 'confirmed') {
+                    await db.exchangeShipment.update({
+                      where: { id: entry.id },
+                      data: { status: 'dispatched', dispatchedAt: new Date() },
+                    })
+                    console.log(`[poll] Auto-dispatched exchange shipment ${entry.id}`)
+                  }
+                } catch (e) {
+                  console.error(`[poll] Failed to auto-dispatch shipment ${entry.id}:`, e)
+                }
               }
-              // Note: RTO for exchange shipments doesn't trigger processOrderReturn —
-              // exchange shipments have their own simpler lifecycle. The RTO is
-              // just recorded as a status change. Prompt 5 may add additional handling.
+
+              if (result.status === 'delivered') {
+                try {
+                  const shipment = await db.exchangeShipment.findUnique({
+                    where: { id: entry.id },
+                    select: { status: true },
+                  })
+                  if (shipment && shipment.status !== 'delivered' && shipment.status !== 'cancelled') {
+                    // Auto-dispatch first if needed
+                    if (shipment.status === 'confirmed') {
+                      await db.exchangeShipment.update({
+                        where: { id: entry.id },
+                        data: { status: 'dispatched', dispatchedAt: new Date() },
+                      })
+                    }
+                    await db.exchangeShipment.update({
+                      where: { id: entry.id },
+                      data: { status: 'delivered', deliveredAt: new Date() },
+                    })
+                    console.log(`[poll] Marked exchange shipment ${entry.id} as delivered`)
+                  }
+                } catch (e) {
+                  console.error(`[poll] Failed to mark shipment ${entry.id} as delivered:`, e)
+                  errors.push(`Failed to mark exchange shipment ${entry.id} as delivered: ${e}`)
+                }
+              }
             }
           }
         }
@@ -380,24 +499,26 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
       }
     }
 
-    // Audit log for the polling run (non-fatal)
+    // Audit log for the polling run (non-fatal) — use the first integration's
+    // company/org context so the audit row is queryable (was previously empty strings).
+    const firstIntegration = postexIntegrations[0]
     await insertAuditLog({
       action: 'postex.status_poll_completed',
       entityType: 'company_integration',
-      entityId: '',
-      companyId: '',
-      organizationId: '',
+      entityId: firstIntegration?.id ?? '',
+      companyId: firstIntegration?.companyId ?? '',
+      organizationId: firstIntegration?.organizationId ?? '',
       newValues: { polledOrders, polledShipments, statusChanges, errorCount: errors.length },
-    }).catch(() => {})
+    }).catch((e) => console.error('[poll] Failed to insert audit log:', e))
 
     await insertMetricEvent({
-      companyId: '',
+      companyId: firstIntegration?.companyId ?? '',
       entityType: 'company_integration',
-      entityId: '',
+      entityId: firstIntegration?.id ?? '',
       metricKey: 'postex.status_poll_completed',
       numericValue: statusChanges,
       dimensions: { polled_orders: polledOrders, polled_shipments: polledShipments, errors: errors.length },
-    }).catch(() => {})
+    }).catch((e) => console.error('[poll] Failed to insert metric event:', e))
 
     return {
       success: true,

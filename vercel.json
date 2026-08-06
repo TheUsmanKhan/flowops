@@ -3,6 +3,10 @@
     {
       "path": "/api/cron/sync-cities",
       "schedule": "0 */3 * * *"
+    },
+    {
+      "path": "/api/cron/poll-postex",
+      "schedule": "*/30 * * * *"
     }
   ]
 }
