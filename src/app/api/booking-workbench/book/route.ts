@@ -188,7 +188,7 @@ export async function POST(req: NextRequest) {
       }, { status: 400 })
     }
 
-    // Update the Order with tracking + courier info
+    // Update the Order with tracking + courier info + booking status
     await db.order.update({
       where: { id: body.orderId },
       data: {
@@ -197,6 +197,7 @@ export async function POST(req: NextRequest) {
         courierCityStatus: 'matched',
         courierSubStatus: bookResult.providerStatus ?? null,
         courierName: integration.provider.providerName,
+        courierBookingStatus: 'booked',
       },
     })
 

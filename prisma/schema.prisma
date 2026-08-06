@@ -1698,9 +1698,11 @@ model CompanyIntegration {
 
   actionLogs                IntegrationActionLog[]
   ordersBooked              Order[]  @relation("OrderCourierIntegration")
+  ordersRecommended         Order[]  @relation("OrderRecommendedCourier")
   companyOrderSettingsDefault CompanyOrderSetting[] @relation("CompanyOrderSettingsDefaultCourier")
   pickupAddresses           CourierPickupAddress[]
   exchangeShipmentsBooked   ExchangeShipment[] @relation("ExchangeShipmentCourierIntegration")
+  exchangeShipmentsRecommended ExchangeShipment[] @relation("ExchangeShipmentRecommendedCourier")
 
   @@index([companyId, isActive])
   @@map("company_integrations")
@@ -1861,6 +1863,10 @@ model Order {
   // back to the actual integration/credentials used.
   courierCompanyIntegrationId String?
   courierCompanyIntegration   CompanyIntegration? @relation("OrderCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  // Booking Workbench fields (migration 013)
+  courierBookingStatus        String   @default("not_booked") // 'not_booked' | 'booked' | 'failed' (CHECK in SQL)
+  recommendedCourierCompanyIntegrationId String?
+  recommendedCourierIntegration CompanyIntegration? @relation("OrderRecommendedCourier", fields: [recommendedCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
   // City validation state for courier booking. 'not_applicable' until the
   // order goes through courier city validation (Prompt 4/5). Left unused in
   // this foundational prompt — no business logic touches Order here.
@@ -2073,6 +2079,10 @@ model ExchangeShipment {
   // Courier integration (nullable until courier chosen)
   courierCompanyIntegrationId   String?
   courierCompanyIntegration     CompanyIntegration? @relation("ExchangeShipmentCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  // Booking Workbench fields (migration 013)
+  courierBookingStatus          String   @default("not_booked") // 'not_booked' | 'booked' | 'failed' (CHECK in SQL)
+  recommendedCourierCompanyIntegrationId String?
+  recommendedCourierIntegration CompanyIntegration? @relation("ExchangeShipmentRecommendedCourier", fields: [recommendedCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
   trackingNumber                String?
   courierSubStatus              String?
   needsShipperAdvice            Boolean  @default(false)
