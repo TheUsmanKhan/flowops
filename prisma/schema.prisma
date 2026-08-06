@@ -1892,6 +1892,11 @@ model Order {
   // step. Survives navigation so the user can see WHY booking failed from the
   // order detail page or the Booking Workbench without re-attempting.
   courierBookingFailureReason String?
+  // Per-order pickup address override (nullable). When set, booking uses
+  // this address instead of the integration's default. Falls back to the
+  // default when null.
+  pickupAddressId              String?
+  pickupAddress                CourierPickupAddress? @relation("OrderPickupAddress", fields: [pickupAddressId], references: [id], onDelete: SetNull)
   recommendedCourierCompanyIntegrationId String?
   recommendedCourierIntegration CompanyIntegration? @relation("OrderRecommendedCourier", fields: [recommendedCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
   // City validation state for courier booking. 'not_applicable' until the
@@ -2062,6 +2067,9 @@ model CourierPickupAddress {
   isDefault             Boolean  @default(false)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
+
+  // Back-relation: orders that use this address as a per-order override
+  ordersUsedIn          Order[] @relation("OrderPickupAddress")
 
   @@index([companyIntegrationId])
   @@map("courier_pickup_addresses")

@@ -112,6 +112,7 @@ export async function GET(
         // Universal courier reference fields (migration 015)
         orderRefNumber: order.orderRefNumber,
         orderDetail: order.orderDetail,
+        pickupAddressId: order.pickupAddressId,
         dispatchLocationId: order.dispatchLocationId,
         dispatchLocation: order.dispatchLocation
           ? {

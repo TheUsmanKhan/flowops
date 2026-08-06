@@ -33,6 +33,7 @@ import {
   Loader2,
   User,
   Phone,
+  RefreshCw,
 } from 'lucide-react'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 import { getErrorMessage } from '@/components/orders/_shared'
@@ -94,6 +95,18 @@ export function PickupAddressesSection({
     onError: (err) => toast.error(getErrorMessage(err)),
   })
 
+  const syncMutation = useMutation({
+    mutationFn: () =>
+      api.post<{ fetched: number; upserted: number }>(
+        `/api/integrations/${companyIntegrationId}/pickup-addresses/sync`,
+      ),
+    onSuccess: (data) => {
+      toast.success(`Synced ${data.upserted} address(es) from courier.`)
+      invalidate()
+    },
+    onError: (err) => toast.error(getErrorMessage(err)),
+  })
+
   const addresses = query.data?.addresses ?? []
 
   return (
@@ -102,14 +115,31 @@ export function PickupAddressesSection({
         <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground flex items-center gap-1">
           <MapPin className="h-3 w-3" /> Pickup &amp; Return Addresses
         </p>
-        <Button
-          size="sm"
-          variant="ghost"
-          className="h-6 text-[10px] px-2"
-          onClick={() => setShowAddDialog(true)}
-        >
-          <Plus className="h-3 w-3" /> Add
-        </Button>
+        <div className="flex items-center gap-1">
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 text-[10px] px-2"
+            onClick={() => syncMutation.mutate()}
+            disabled={syncMutation.isPending}
+            title="Fetch all addresses from courier API"
+          >
+            {syncMutation.isPending ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3 w-3" />
+            )}
+            {' '}Sync
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-6 text-[10px] px-2"
+            onClick={() => setShowAddDialog(true)}
+          >
+            <Plus className="h-3 w-3" /> Add
+          </Button>
+        </div>
       </div>
 
       {query.isLoading && (

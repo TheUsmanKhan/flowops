@@ -81,6 +81,8 @@ export const createManualOrderSchema = z
     courier_company_integration_id: z.string().optional().or(z.literal('')),
     dispatch_location_id: z.string().min(1, 'Dispatch location is required'),
     notes_for_courier: z.string().max(500).optional().or(z.literal('')),
+    // Per-order pickup address override (null = use integration default)
+    pickup_address_id: z.string().optional().or(z.literal('')),
     order_ref_number: z.string().max(200).optional().or(z.literal('')),
     order_detail: z.string().max(1000).optional().or(z.literal('')),
     discount_amount: z.number().min(0).optional(),

@@ -245,6 +245,9 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   const [courierIntegrationId, setCourierIntegrationId] = useState('')
   const [dispatchLocationId, setDispatchLocationId] = useState('')
   const [notesForCourier, setNotesForCourier] = useState('')
+  // Per-order pickup address override. When empty, booking uses the
+  // integration's default pickup address. When set, overrides the default.
+  const [pickupAddressId, setPickupAddressId] = useState('')
   const [orderRefNumber, setOrderRefNumber] = useState('')
   const [orderDetail, setOrderDetail] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
@@ -414,6 +417,23 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       setCourierIntegrationId(orderSettingsQuery.data.settings.defaultCourierCompanyIntegrationId)
     }
   }, [orderSettingsQuery.data, courierIntegrationId])
+
+  // Fetch pickup addresses for the selected courier integration.
+  // Used to populate the per-order pickup address override dropdown.
+  interface PickupAddressOption {
+    id: string
+    label: string
+    address: string
+    cityName: string
+    isDefault: boolean
+  }
+  const pickupAddressesQuery = useQuery<{ addresses: PickupAddressOption[] }>({
+    queryKey: ['pickup-addresses', courierIntegrationId],
+    queryFn: () => api.get(`/api/integrations/${courierIntegrationId}/pickup-addresses`),
+    enabled: !!courierIntegrationId,
+    staleTime: 30_000,
+  })
+  const pickupAddresses = pickupAddressesQuery.data?.addresses ?? []
 
   // Auto-compute order detail from cart items (moved after variantOptions declaration)
   const productsQuery = useQuery<ProductsResponse>({
@@ -652,6 +672,8 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       courier_name: courierName.trim() || undefined,
       courier_company_integration_id: courierIntegrationId || undefined,
       dispatch_location_id: dispatchLocationId,
+      // Per-order pickup address override (null = use integration default)
+      pickup_address_id: pickupAddressId || undefined,
       notes_for_courier: notesForCourier.trim() || undefined,
       // orderRefNumber (universal courier reference, migration 015):
       // only send if the user typed a custom value — otherwise the server
@@ -955,6 +977,10 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
               courierIntegrationId={courierIntegrationId}
               setCourierIntegrationId={setCourierIntegrationId}
               courierIntegrations={courierIntegrations}
+              pickupAddressId={pickupAddressId}
+              setPickupAddressId={setPickupAddressId}
+              pickupAddresses={pickupAddresses}
+              pickupAddressesLoading={pickupAddressesQuery.isLoading}
               dispatchLocationId={dispatchLocationId}
               setDispatchLocationId={setDispatchLocationId}
               notesForCourier={notesForCourier}
@@ -1168,6 +1194,10 @@ function CustomerSection({
   courierIntegrationId,
   setCourierIntegrationId,
   courierIntegrations,
+  pickupAddressId,
+  setPickupAddressId,
+  pickupAddresses,
+  pickupAddressesLoading,
   dispatchLocationId,
   setDispatchLocationId,
   notesForCourier,
@@ -1205,6 +1235,10 @@ function CustomerSection({
   courierIntegrationId: string
   setCourierIntegrationId: (v: string) => void
   courierIntegrations: Array<{ id: string; connectionName: string; provider: { providerKey: string; providerName: string } }>
+  pickupAddressId: string
+  setPickupAddressId: (v: string) => void
+  pickupAddresses: Array<{ id: string; label: string; address: string; cityName: string; isDefault: boolean }>
+  pickupAddressesLoading: boolean
   dispatchLocationId: string
   setDispatchLocationId: (v: string) => void
   notesForCourier: string
@@ -1390,8 +1424,10 @@ function CustomerSection({
                       if (v === '__none__') {
                         setCourierIntegrationId('')
                         setCourierName('')
+                        setPickupAddressId('')
                       } else {
                         setCourierIntegrationId(v)
+                        setPickupAddressId('') // reset pickup address when courier changes
                         const ci = courierIntegrations.find((c) => c.id === v)
                         if (ci) setCourierName(ci.provider.providerName)
                       }
@@ -1413,6 +1449,44 @@ function CustomerSection({
                     </p>
                   )}
                 </div>
+                {/* Pickup address override — only shown when a courier is selected.
+                    Defaults to the integration's default address (marked with ★).
+                    User can override to use a different address for this order. */}
+                {courierIntegrationId && (
+                  <div className="space-y-1">
+                    <Label className="text-xs">Pickup / Return Address</Label>
+                    {pickupAddressesLoading ? (
+                      <Skeleton className="h-9" />
+                    ) : pickupAddresses.length === 0 ? (
+                      <p className="text-[10px] text-amber-700">
+                        No pickup addresses synced. Go to Integrations → PostEx →
+                        Sync to import addresses from the courier.
+                      </p>
+                    ) : (
+                      <Select
+                        value={pickupAddressId || '__default__'}
+                        onValueChange={(v) => setPickupAddressId(v === '__default__' ? '' : v)}
+                      >
+                        <SelectTrigger><SelectValue placeholder="Default (from courier settings)" /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default__">
+                            Default (use courier&apos;s default address)
+                          </SelectItem>
+                          {pickupAddresses.map((addr) => (
+                            <SelectItem key={addr.id} value={addr.id}>
+                              {addr.label} — {addr.cityName}
+                              {addr.isDefault ? ' ★' : ''}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    )}
+                    <p className="text-[10px] text-muted-foreground">
+                      Overrides the pickup/return address for this order. Leave as
+                      &quot;Default&quot; to use the courier&apos;s default address.
+                    </p>
+                  </div>
+                )}
                 <div className="space-y-1">
                   <Label className="text-xs">Dispatch Location *</Label>
                   {isLoadingLocations ? (

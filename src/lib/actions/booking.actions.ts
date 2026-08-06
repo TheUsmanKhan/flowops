@@ -208,8 +208,20 @@ export async function bookOrderWithCourier(
     )
 
     // ── Get pickup address code ──
+    // Priority: per-call override > order's persisted pickupAddressId >
+    // integration's default. This allows per-order pickup address override
+    // set in the order creation form.
     let pickupAddressCode = options.pickupAddressCode
+    if (!pickupAddressCode && order.pickupAddressId) {
+      // Use the per-order override
+      const orderAddr = await db.courierPickupAddress.findFirst({
+        where: { id: order.pickupAddressId, companyIntegrationId: integration.id },
+        select: { providerAddressCode: true },
+      })
+      pickupAddressCode = orderAddr?.providerAddressCode
+    }
     if (!pickupAddressCode) {
+      // Fall back to the integration's default address
       const defaultAddr = await db.courierPickupAddress.findFirst({
         where: { companyIntegrationId: integration.id, isDefault: true },
         select: { providerAddressCode: true },

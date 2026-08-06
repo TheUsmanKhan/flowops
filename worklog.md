@@ -4215,3 +4215,58 @@ TEST RESULT:
 
 Stage Summary:
 - The auto-booking pipeline now works correctly: it fires when courierBookingMode=automatic, uses the order's selected courier (falling back to the company default), calls PostEx's API, and persists the result. The user will see clear feedback (success toast with tracking number, or warning toast with the failure reason + inline Retry button). The remaining "INVALID MERCHANT STORE ADDRESS CODE" error is a data issue — the user needs to create a real pickup address via PostEx's API (or the Pickup Addresses section in the Integrations page).
+
+---
+Task ID: 22
+Agent: main
+Task: Sync pickup/return addresses from PostEx + per-order pickup address override + fix auto-booking
+
+Work Log:
+- Audited the pickup address system. Found: PostEx address creation always failed (API doesn't return addressCode), no "Sync from PostEx" button, no per-order pickup address override, and storeAddressCode was being sent as empty string causing "INVALID MERCHANT STORE ADDRESS CODE" error.
+
+FIX 1 — addPickupAddress (courier-address-book.actions.ts):
+- Fixed PostEx address creation bug. PostEx's create-merchant-address returns success but NO addressCode. Now after creating, we call fetchExistingPickupAddresses() to find the newly-created address by matching address + city, and use that code. Previously the function rejected all PostEx address creations with "Courier API did not return an address code."
+
+FIX 2 — syncPickupAddresses (courier-address-book.actions.ts):
+- NEW function: fetches all addresses from the courier's API and upserts them locally. On first sync (no local addresses), auto-sets the first address as default. Returns { fetched, upserted } counts.
+
+FIX 3 — Sync API route (api/integrations/[id]/pickup-addresses/sync/route.ts):
+- NEW route: POST /api/integrations/[id]/pickup-addresses/sync — calls syncPickupAddresses().
+
+FIX 4 — PickupAddressesSection (pickup-addresses-section.tsx):
+- Added "Sync" button (RefreshCw icon) next to "Add" button. Calls the sync API, shows toast with count, invalidates the addresses query.
+
+FIX 5 — Order model (schema.prisma):
+- Added Order.pickupAddressId (String?, nullable FK to CourierPickupAddress). When set, booking uses this address instead of the integration default. Falls back to default when null.
+- Added back-relation on CourierPickupAddress: ordersUsedIn Order[] @relation("OrderPickupAddress").
+- Ran db:push — schema synced.
+
+FIX 6 — Order create form (order-create-view.tsx):
+- Added pickupAddressId state. Reset when courier changes.
+- Added pickupAddressesQuery — fetches addresses for the selected courier integration via GET /api/integrations/[id]/pickup-addresses.
+- Added "Pickup / Return Address" dropdown UI (shows when a courier is selected). Defaults to "Default (use courier's default address)". Lists all synced addresses with ★ on the default one.
+- Added pickup_address_id to the create-order payload.
+- Passed pickupAddressId, setPickupAddressId, pickupAddresses, pickupAddressesLoading as props through CustomerSection.
+
+FIX 7 — bookOrderWithCourier (booking.actions.ts):
+- Updated pickup address resolution to 3-tier priority: per-call override > order.pickupAddressId (per-order override) > integration default. This makes the per-order pickup address override actually work at booking time.
+
+FIX 8 — PostEx adapter (postex.adapter.ts):
+- CRITICAL FIX: Removed storeAddressCode from the create-order request body entirely. PostEx validates this field when present (even as empty string) and rejects with "INVALID MERCHANT STORE ADDRESS CODE". When omitted, PostEx uses its own default. This was the root cause of ALL booking failures — every create-order call was rejected because storeAddressCode="" was sent.
+- Changed body type to Record<string, unknown> to allow conditional field omission.
+
+FIX 9 — Validations + API (order.schemas.ts, order.actions.ts, api/orders/[id]/route.ts):
+- Added pickup_address_id to the Zod schema.
+- Added pickupAddressId to db.order.create() data.
+- Added pickupAddressId to the GET /api/orders/[id] response.
+
+TEST RESULT — FULLY WORKING AUTO-BOOKING:
+- Synced 7 real PostEx addresses from the courier API.
+- Set address code "001" as default.
+- Created order ORD-2026-00027 with PostEx selected + automatic mode.
+- Auto-booking SUCCEEDED: bookingSucceeded=true, bookingTrackingNumber="23150830016001".
+- DB verified: courierBookingStatus='booked', trackingNumber='23150830016001', courierName='PostEx', courierCityStatus='matched'.
+- The order does NOT appear in the Booking Workbench (it's already booked).
+
+Stage Summary:
+- The full auto-booking pipeline is now WORKING end-to-end: order creation → auto-booking fires → PostEx API called → tracking number returned and stored. The pickup address system supports syncing from PostEx, setting a default, and per-order override. The root cause of all previous booking failures was storeAddressCode="" being sent to PostEx, which PostEx rejected. Omitting the field entirely fixes it.

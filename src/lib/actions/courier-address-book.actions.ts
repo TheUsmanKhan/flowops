@@ -134,24 +134,57 @@ export async function addPickupAddress(
         fn: async () => adapter.createPickupAddress!(input),
       })
 
-      if (!createResult.success || !createResult.providerAddressCode) {
+      if (!createResult.success) {
         return {
           success: false,
-          error: createResult.error || 'Courier API did not return an address code.',
+          error: createResult.error || 'Courier API address creation failed.',
         }
       }
-      providerAddressCode = createResult.providerAddressCode
+
+      if (createResult.providerAddressCode) {
+        // Courier returned an address code directly — use it
+        providerAddressCode = createResult.providerAddressCode
+      } else if (adapter.fetchExistingPickupAddresses) {
+        // PostEx quirk: create-merchant-address returns success but NO
+        // addressCode. We need to fetch the full list and find the newly-
+        // created address by matching address + city. This is the only
+        // way to get the code PostEx assigned.
+        const existingAddresses = await executeLoggedIntegrationAction<Array<{
+          providerAddressCode: string
+          address: string
+          cityName: string
+        }>>({
+          companyIntegrationId,
+          organizationId: integration.organizationId,
+          actionType: 'fetch_existing_pickup_addresses',
+          direction: 'outbound',
+          fn: async () => adapter.fetchExistingPickupAddresses!(),
+        })
+
+        // Find the matching address by address text + city (case-insensitive)
+        const matched = existingAddresses.find(
+          (a) =>
+            a.address.trim().toLowerCase() === input.address.trim().toLowerCase() &&
+            a.cityName.trim().toLowerCase() === input.cityName.trim().toLowerCase(),
+        )
+
+        if (!matched) {
+          return {
+            success: false,
+            error: 'Address was created on the courier side, but we could not find it in the address list to get its code. Try syncing addresses instead.',
+          }
+        }
+        providerAddressCode = matched.providerAddressCode
+      } else {
+        // No way to get the code — store with a local prefix
+        providerAddressCode = `local-${Date.now()}`
+      }
     } else if (adapter.fetchExistingPickupAddresses) {
-      // Adapter requires addresses to pre-exist (fetch-only model).
-      // In this flow, the user should have selected from fetched addresses
-      // via a separate UI — but if they reach here, return a clear error.
       return {
         success: false,
-        error: `Provider '${providerKey}' requires addresses to pre-exist. Use the fetch-and-select flow instead of direct creation.`,
+        error: `Provider '${providerKey}' requires addresses to pre-exist. Use the "Sync from Courier" button to import addresses.`,
       }
     } else {
-      // Adapter supports neither — store locally without a courier-side address.
-      // This allows the address book to work even for stub adapters.
       providerAddressCode = `local-${Date.now()}`
     }
 
@@ -371,6 +404,119 @@ export async function deletePickupAddress(addressId: string): Promise<ActionResu
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Failed to delete pickup address',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// syncPickupAddresses — fetch all from courier + upsert locally
+// ──────────────────────────────────────────────────────────────
+
+export async function syncPickupAddresses(
+  companyIntegrationId: string,
+): Promise<ActionResult<{
+  fetched: number
+  upserted: number
+}>> {
+  try {
+    const ctx = await getWorkspace()
+    if (!isElevated(ctx)) {
+      return { success: false, error: 'Only elevated roles can sync pickup addresses.' }
+    }
+
+    const integration = await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+    const providerKey = integration.provider.providerKey
+
+    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+    const adapter = getCourierAdapter(providerKey, credentials)
+
+    if (!adapter.fetchExistingPickupAddresses) {
+      return {
+        success: false,
+        error: `Provider '${providerKey}' does not support fetching existing addresses.`,
+      }
+    }
+
+    // Fetch all addresses from the courier
+    const remoteAddresses = await executeLoggedIntegrationAction<Array<{
+      providerAddressCode: string
+      label?: string
+      address: string
+      cityName: string
+      contactPersonName: string
+      phone1: string
+      phone2?: string
+    }>>({
+      companyIntegrationId,
+      organizationId: integration.organizationId,
+      actionType: 'fetch_existing_pickup_addresses',
+      direction: 'outbound',
+      fn: async () => adapter.fetchExistingPickupAddresses!(),
+    })
+
+    // Fetch existing local addresses for this integration (to detect new vs existing)
+    const existingLocal = await db.courierPickupAddress.findMany({
+      where: { companyIntegrationId },
+      select: { id: true, providerAddressCode: true, isDefault: true },
+    })
+    const existingCodes = new Set(existingLocal.map((a) => a.providerAddressCode))
+    const isFirstSync = existingLocal.length === 0
+
+    // Upsert each remote address locally
+    let upserted = 0
+    for (const remote of remoteAddresses) {
+      if (existingCodes.has(remote.providerAddressCode)) {
+        // Update existing address (keep isDefault as-is)
+        await db.courierPickupAddress.updateMany({
+          where: { companyIntegrationId, providerAddressCode: remote.providerAddressCode },
+          data: {
+            label: remote.label || remote.address.substring(0, 50),
+            address: remote.address,
+            cityName: remote.cityName,
+            contactPersonName: remote.contactPersonName,
+            phone1: remote.phone1,
+            phone2: remote.phone2 ?? null,
+          },
+        })
+      } else {
+        // Create new address
+        await db.courierPickupAddress.create({
+          data: {
+            companyIntegrationId,
+            providerAddressCode: remote.providerAddressCode,
+            label: remote.label || remote.address.substring(0, 50),
+            address: remote.address,
+            cityName: remote.cityName,
+            contactPersonName: remote.contactPersonName,
+            phone1: remote.phone1,
+            phone2: remote.phone2 ?? null,
+            // Auto-default the first address on initial sync
+            isDefault: isFirstSync && upserted === 0,
+          },
+        })
+      }
+      upserted++
+    }
+
+    await insertAuditLog({
+      action: 'courier_pickup_addresses_synced',
+      entityType: 'company_integration',
+      entityId: companyIntegrationId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      newValues: { fetched: remoteAddresses.length, upserted },
+    })
+
+    return {
+      success: true,
+      data: { fetched: remoteAddresses.length, upserted },
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to sync pickup addresses',
     }
   }
 }

@@ -608,6 +608,8 @@ export async function createManualOrder(
         recommendedCourierCompanyIntegrationId: d.courier_company_integration_id || null,
         dispatchLocationId: d.dispatch_location_id,
         notesForCourier: d.notes_for_courier || null,
+        // Per-order pickup address override (null = use integration default at booking time)
+        pickupAddressId: d.pickup_address_id || null,
         // Universal courier reference fields (migration 015)
         orderRefNumber,
         orderDetail,

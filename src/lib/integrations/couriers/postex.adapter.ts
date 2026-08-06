@@ -166,7 +166,7 @@ export class PostExAdapter implements CourierAdapter {
 
     // Build the request body — ONLY fields that exist in the confirmed API.
     // NO weight/handling/itemsQty/paymentMethod/orderTags fields.
-    const body = {
+    const body: Record<string, unknown> = {
       cityName: input.deliveryCity,
       customerName: input.recipientName,
       customerPhone: convertToPostExPhone(input.recipientPhone),
@@ -179,8 +179,11 @@ export class PostExAdapter implements CourierAdapter {
       orderType: input.orderType ?? 'Normal',
       transactionNotes: input.transactionNotes ?? '',
       pickupAddressCode: input.pickupAddressCode ?? '',
-      storeAddressCode: '', // not used currently
     }
+    // NOTE: storeAddressCode is intentionally OMITTED. Sending it (even as
+    // empty string) causes PostEx to validate it and reject with
+    // "INVALID MERCHANT STORE ADDRESS CODE". PostEx uses its default store
+    // address when the field is absent.
 
     const response = await fetch(`${POSTEX_BASE_URL}/v3/create-order`, {
       method: 'POST',
