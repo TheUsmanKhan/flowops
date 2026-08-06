@@ -726,14 +726,21 @@ export async function createManualOrder(
           bookingAttempted = true
           bookingSucceeded = true
           bookingTrackingNumber = bookResult.data.trackingNumber
-        } else if (bookResult.error && !bookResult.error.includes('skipped')) {
-          // "skipped" = mode is semi_manual or no default courier — not an error
-          bookingAttempted = true
+        } else if (bookResult.error) {
+          // Distinguish between "skipped" (intentional — mode is semi_manual,
+          // or no courier selected and no default) vs genuine errors (inactive
+          // integration, API failure, city not recognized).
+          // - "skipped" messages: NOT surfaced as errors (the user is in
+          //   semi-manual mode or didn't select a courier — that's fine).
+          // - Other messages: surfaced as warnings so the user knows WHY
+          //   auto-booking failed and can fix it.
+          const isSkipped = bookResult.error.includes('skipped')
+          bookingAttempted = !isSkipped // skipped = not really "attempted"
           bookingSucceeded = false
-          bookingError = bookResult.error
+          if (!isSkipped) {
+            bookingError = bookResult.error
+          }
         }
-        // If the error contains "skipped", bookingAttempted stays false —
-        // the company is in semi_manual mode or has no default courier
       } catch (err) {
         // Auto-booking threw — log but don't fail the order creation
         console.error('[createManualOrder] Auto-booking failed:', err)

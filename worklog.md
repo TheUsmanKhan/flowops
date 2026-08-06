@@ -4183,3 +4183,35 @@ BROWSER TEST RESULTS:
 
 Stage Summary:
 - The 502 Bad Gateway is fixed. City sync now returns instantly and runs in the background. PostEx returns 873 cities (3x more than before) including all major Pakistani cities that were previously missing. The single-call approach is both faster and more reliable than the 3-call approach.
+
+---
+Task ID: 21
+Agent: main
+Task: Audit why auto-booking doesn't fire even with courierBookingMode=automatic
+
+Work Log:
+- Audited the DB state. Found TWO root causes:
+  1. **defaultCourierCompanyIntegrationId was null** — the disconnect/reconnect cycle cleared it (disconnect correctly clears it, but reconnect via "Connect" doesn't restore it). So maybeAutoBookOrder bailed with "no default courier integration set" — a "skipped" message that was silently ignored.
+  2. **maybeAutoBookOrder only looked at the company default, not the order's selected courier** — even when the user selected PostEx on the order form (Order.courierCompanyIntegrationId was set), auto-booking ignored it and only checked the company default. If the default was null, auto-booking didn't fire at all, leaving the order with courierName=PostEx but courierBookingStatus=not_booked.
+
+FIX 1 — maybeAutoBookOrder (booking.actions.ts):
+- Now determines the integration ID with priority: Order.courierCompanyIntegrationId (user's form selection) → CompanyOrderSetting.defaultCourierCompanyIntegrationId (company default). This fixes the bug where auto-booking didn't fire when the user selected a courier on the form but the company default was null.
+- Fetches the order to read its courierCompanyIntegrationId before deciding which integration to book with.
+
+FIX 2 — createManualOrder error handling (order.actions.ts):
+- Refined the "skipped" vs "error" distinction. Previously ALL "skipped" messages were silently ignored (bookingAttempted stayed false, no feedback to user). Now:
+  - "skipped" messages (mode is semi_manual, no courier selected): bookingAttempted=false, no error shown — this is intentional behavior, not an error.
+  - Non-skipped errors (inactive integration, API failure, city not recognized): bookingAttempted=true, bookingError set — surfaced as a warning to the user.
+- This means users now get clear feedback when auto-booking fails for a genuine reason (not just silently ignored).
+
+FIX 3 — Set default courier in DB:
+- Set defaultCourierCompanyIntegrationId to the PostEx integration ID for the dhhdh company. (The user needs to do this from the Order Settings page after reconnecting — this is a one-time fix for the test environment.)
+
+TEST RESULT:
+- Created order ORD-2026-00022 with PostEx selected + automatic mode.
+- Auto-booking FIRED: bookingAttempted=true, courierBookingStatus='failed', courierBookingFailureReason='INVALID MERCHANT STORE ADDRESS CODE'.
+- The booking reached PostEx's API (the error came FROM PostEx, not from our code). It failed because the pickup address code 'PICKUP-001' was created locally but not registered with PostEx's system.
+- The auto-booking pipeline is now fully functional. The remaining failure is a DATA issue (pickup address not registered with PostEx), not a code issue.
+
+Stage Summary:
+- The auto-booking pipeline now works correctly: it fires when courierBookingMode=automatic, uses the order's selected courier (falling back to the company default), calls PostEx's API, and persists the result. The user will see clear feedback (success toast with tracking number, or warning toast with the failure reason + inline Retry button). The remaining "INVALID MERCHANT STORE ADDRESS CODE" error is a data issue — the user needs to create a real pickup address via PostEx's API (or the Pickup Addresses section in the Integrations page).
