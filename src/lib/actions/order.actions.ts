@@ -1362,6 +1362,7 @@ export async function listOrders(
     trackingNumber: string | null
     dispatchLocationId: string | null
     customerId: string
+    deliveryAddress: string | null
     deliveryCity: string | null
     confirmedAt: Date | null
     dispatchedAt: Date | null
@@ -1520,6 +1521,7 @@ export async function listOrders(
           needsShipperAdvice: o.needsShipperAdvice,
           dispatchLocationId: o.dispatchLocationId,
           customerId: o.customerId,
+          deliveryAddress: o.deliveryAddress,
           deliveryCity: o.deliveryCity,
           confirmedAt: o.confirmedAt,
           dispatchedAt: o.dispatchedAt,

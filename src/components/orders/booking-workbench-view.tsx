@@ -84,6 +84,7 @@ interface OrderRow {
   remainingCodAmount: number | null
   courierCompanyIntegrationId: string | null
   customerId: string
+  deliveryAddress: string | null
   deliveryCity: string | null
   customerName: string
   customerPhone: string | null
@@ -250,7 +251,7 @@ export function BookingWorkbenchView() {
     return {
       customerName: order.customerName ?? '',
       customerPhone: order.customerPhone ?? '',
-      deliveryAddress: '', // not returned by listOrders endpoint — user fills in
+      deliveryAddress: order.deliveryAddress ?? '',
       deliveryCity: order.deliveryCity ?? '',
       codAmount: String(
         order.remainingCodAmount ?? order.totalOrderValue ?? 0,
@@ -283,7 +284,7 @@ export function BookingWorkbenchView() {
       return {
         customerName: order.customerName ?? '',
         customerPhone: order.customerPhone ?? '',
-        deliveryAddress: '',
+        deliveryAddress: order.deliveryAddress ?? '',
         deliveryCity: order.deliveryCity ?? '',
         codAmount: String(
           order.remainingCodAmount ?? order.totalOrderValue ?? 0,
