@@ -12,7 +12,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params
-    const body = await readBody<{ collected_amount?: number }>(req).catch(() => ({}))
+    const body = await readBody<{ collected_amount?: number }>(req).catch(() => ({ collected_amount: undefined }))
     const result = await markExchangeShipmentCodCollected(id, body.collected_amount)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

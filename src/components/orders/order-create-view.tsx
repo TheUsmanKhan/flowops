@@ -621,7 +621,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       fd.append('file', paymentProofFile)
       const uploadRes = await fetch(
         `/api/upload?type=payment-proofs&id=${orderId}`,
-        { method: 'POST', body: fd },
+        { method: 'POST', body: fd, credentials: 'include' },
       )
       const uploadText = await uploadRes.text()
       let uploadBody: unknown = null

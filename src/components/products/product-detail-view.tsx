@@ -1576,6 +1576,7 @@ function ImagesTab({
       const res = await fetch(`/api/products/${productId}/images`, {
         method: 'POST',
         body: fd,
+        credentials: 'include',
         cache: 'no-store',
       })
       const text = await res.text()

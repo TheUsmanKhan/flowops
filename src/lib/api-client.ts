@@ -8,12 +8,25 @@ export class FetchError extends Error {
   }
 }
 
+/**
+ * Centralized fetch wrapper.
+ *
+ * CRITICAL: `credentials: 'include'` is REQUIRED for the session cookie to
+ * be sent with every request. Without it, browsers in cross-origin contexts
+ * (iframes, preview panels, different port numbers) do NOT send cookies
+ * automatically even with SameSite=none. This is the #1 cause of
+ * "You must be signed in" errors across the app.
+ *
+ * `cache: 'no-store'` prevents Next.js from caching API responses, which
+ * would otherwise serve stale data to different users.
+ */
 async function request<T>(
   url: string,
   options?: RequestInit,
 ): Promise<T> {
   const res = await fetch(url, {
     ...options,
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
       ...(options?.headers ?? {}),

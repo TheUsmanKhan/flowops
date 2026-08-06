@@ -54,6 +54,7 @@ export function LogoUpload({
       const res = await fetch(`/api/upload?type=${type}&id=${id}`, {
         method: 'POST',
         body: fd,
+        credentials: 'include',
       })
 
       const text = await res.text()
