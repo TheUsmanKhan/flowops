@@ -61,6 +61,18 @@ export interface CreateExchangeShipmentInput {
   invoiceAmount?: number
   /** Optional: override the variant (defaults to order_exchanges.newOrgVariantId) */
   newOrgVariantId?: string
+  /**
+   * Universal courier reference field (migration 015). Optional — defaults
+   * to the generated exchangeShipmentNumber (EXCH-YYYY-NNNNN) when blank.
+   * Mapped to the courier's own reference field at booking time.
+   */
+  orderRefNumber?: string
+  /**
+   * Universal courier item-description string (migration 015). Optional —
+   * auto-generated from the variant (product title + SKU + attributes + qty)
+   * when blank. Mapped to the courier's itemDescription / orderDetail field.
+   */
+  orderDetail?: string
 }
 
 export async function createExchangeShipment(
@@ -84,7 +96,14 @@ export async function createExchangeShipment(
           select: { customerId: true, dispatchLocationId: true },
         },
         newOrgVariant: {
-          select: { id: true, fulfillmentType: true, costPrice: true },
+          select: {
+            id: true,
+            fulfillmentType: true,
+            costPrice: true,
+            sku: true,
+            attributeValues: true,
+            product: { select: { title: true } },
+          },
         },
       },
     })
@@ -115,7 +134,13 @@ export async function createExchangeShipment(
       ? exchange.newOrgVariant
       : await db.orgProductVariant.findUnique({
           where: { id: variantId },
-          select: { id: true, fulfillmentType: true },
+          select: {
+            id: true,
+            fulfillmentType: true,
+            sku: true,
+            attributeValues: true,
+            product: { select: { title: true } },
+          },
         })
     if (!variant) {
       return { success: false, error: 'Variant not found.' }
@@ -135,6 +160,28 @@ export async function createExchangeShipment(
     // Generate the exchange shipment number
     const exchangeShipmentNumber = await generateExchangeShipmentNumber()
 
+    // ── Universal courier reference fields (migration 015) ──────────────
+    // orderRefNumber: caller-provided takes precedence, otherwise default
+    // to the freshly-generated exchangeShipmentNumber.
+    const orderRefNumber =
+      (input.orderRefNumber && input.orderRefNumber.trim()) || exchangeShipmentNumber
+    // orderDetail: caller-provided takes precedence, otherwise auto-generate
+    // from the variant: "Product Title (SKU, Size: M, Color: Blue) ×N"
+    let orderDetail = (input.orderDetail && input.orderDetail.trim()) || ''
+    if (!orderDetail) {
+      const attrParts: string[] = []
+      try {
+        const attrs = JSON.parse(variant.attributeValues || '{}') as Record<string, string>
+        for (const [k, v] of Object.entries(attrs)) {
+          if (v) attrParts.push(`${k}: ${v}`)
+        }
+      } catch {
+        // ignore parse errors
+      }
+      const inner = [variant.sku, ...attrParts].filter(Boolean).join(', ')
+      orderDetail = `${variant.product.title}${inner ? ` (${inner})` : ''} ×${input.quantity}`
+    }
+
     // Create the shipment — status='confirmed' (no pending step needed)
     const shipment = await db.exchangeShipment.create({
       data: {
@@ -152,6 +199,9 @@ export async function createExchangeShipment(
         status: 'confirmed',
         isPriorityBackorder: true, // ALL exchange shipments get priority
         invoiceAmount,
+        // Universal courier reference fields (migration 015)
+        orderRefNumber,
+        orderDetail,
         confirmedAt: new Date(),
         createdBy: ctx.employee.id,
       },
@@ -784,6 +834,9 @@ export async function listExchangeShipments(
     isPriorityBackorder: boolean
     backorderedAt: Date | null
     createdAt: Date
+    // Universal courier reference fields (migration 015)
+    orderRefNumber: string | null
+    orderDetail: string | null
     customer: { id: string; name: string }
     newOrgVariant: { id: string; sku: string; product: { title: string } }
     orderExchange: { id: string; exchangeMethod: string; status: string }
@@ -842,6 +895,9 @@ export async function listExchangeShipments(
           isPriorityBackorder: s.isPriorityBackorder,
           backorderedAt: s.backorderedAt,
           createdAt: s.createdAt,
+          // Universal courier reference fields (migration 015)
+          orderRefNumber: s.orderRefNumber,
+          orderDetail: s.orderDetail,
           customer: s.customer,
           newOrgVariant: s.newOrgVariant,
           orderExchange: s.orderExchange,

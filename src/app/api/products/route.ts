@@ -72,6 +72,7 @@ export async function GET(req: Request) {
               fulfillmentType: true,
               stitchingType: true,
               isDefault: true,
+              attributeValues: true,
               companyPricing: {
                 where: { companyId },
                 select: { salePrice: true, comparePrice: true },
@@ -113,6 +114,16 @@ export async function GET(req: Request) {
           fulfillmentType: v.fulfillmentType,
           stitchingType: v.stitchingType,
           isDefault: v.isDefault,
+          // Parse attributeValues JSONB (e.g. {"Size":"M","Color":"Blue"}) —
+          // used by the order-create form to auto-build the orderDetail
+          // preview string with variant attributes.
+          attributeValues: (() => {
+            try {
+              return JSON.parse(v.attributeValues || '{}') as Record<string, string>
+            } catch {
+              return {}
+            }
+          })(),
           salePrice: v.companyPricing[0] ? Number(v.companyPricing[0].salePrice) : null,
           comparePrice: v.companyPricing[0]?.comparePrice ? Number(v.companyPricing[0].comparePrice) : null,
         })),

@@ -66,6 +66,8 @@ import {
   Package,
   CheckCircle2,
   AlertCircle,
+  Hash,
+  FileText,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
@@ -166,6 +168,12 @@ export function SendExchangeShipmentModal({
   const [quantity, setQuantity] = useState<string>(
     String(defaultQuantity ?? 1),
   )
+  // Universal courier reference fields (migration 015). Both are optional —
+  // the backend defaults orderRefNumber to the generated EXCH-YYYY-NNNNN
+  // and auto-builds orderDetail from the variant (product title + SKU +
+  // attributes + qty). Editing here overrides those defaults.
+  const [orderRefNumber, setOrderRefNumber] = useState<string>('')
+  const [orderDetail, setOrderDetail] = useState<string>('')
 
   // Inline "Add New" sub-forms
   const [addingAddress, setAddingAddress] = useState(false)
@@ -188,6 +196,8 @@ export function SendExchangeShipmentModal({
       setPhoneId('')
       setInvoiceAmount(String(defaultInvoiceAmount ?? 0))
       setQuantity(String(defaultQuantity ?? 1))
+      setOrderRefNumber('')
+      setOrderDetail('')
       setAddingAddress(false)
       setAddingPhone(false)
       setNewAddressLabel('')
@@ -311,6 +321,11 @@ export function SendExchangeShipmentModal({
         invoiceAmount: Number(invoiceAmount) || 0,
         quantity: Number(quantity) || 1,
         variantId: defaultVariantId,
+        // Universal courier reference fields (migration 015) — optional;
+        // backend defaults orderRefNumber to the EXCH-##### number and
+        // auto-builds orderDetail from the variant when these are blank.
+        orderRefNumber: orderRefNumber.trim() || undefined,
+        orderDetail: orderDetail.trim() || undefined,
       })
     },
     onSuccess: () => {
@@ -726,6 +741,42 @@ export function SendExchangeShipmentModal({
               onChange={(e) => setQuantity(e.target.value)}
               placeholder="1"
             />
+          </div>
+
+          {/* 7. Order Reference — universal courier reference field (migration 015) */}
+          <div className="space-y-1.5">
+            <Label className="text-xs flex items-center gap-1">
+              <Hash className="h-3 w-3" /> 7. Order Reference
+              <span className="text-[10px] text-amber-700">(for courier)</span>
+            </Label>
+            <Input
+              value={orderRefNumber}
+              onChange={(e) => setOrderRefNumber(e.target.value)}
+              placeholder="Defaults to EXCH-##### — type to override"
+            />
+            <p className="text-xs text-muted-foreground">
+              Universal courier reference. Almost every courier (PostEx, TCS,
+              Leopard…) has a reference field — we map this to the courier's
+              own field at booking time. Leave blank to use the auto-generated
+              Exchange Shipment number.
+            </p>
+          </div>
+
+          {/* 8. Order Detail — item description for the courier */}
+          <div className="space-y-1.5">
+            <Label className="text-xs flex items-center gap-1">
+              <FileText className="h-3 w-3" /> 8. Order Detail
+              <span className="text-[10px] text-amber-700">(item summary)</span>
+            </Label>
+            <Input
+              value={orderDetail}
+              onChange={(e) => setOrderDetail(e.target.value)}
+              placeholder="Auto-filled from variant (title + SKU + attributes × qty)"
+            />
+            <p className="text-xs text-muted-foreground">
+              Human-readable item description passed to the courier. Leave
+              blank to auto-generate from the variant.
+            </p>
           </div>
 
           {/* Summary footer note */}

@@ -24,7 +24,7 @@ interface ExecuteLoggedParams {
   organizationId: string
   actionType: string
   direction: 'outbound' | 'inbound'
-  relatedEntityType?: 'order' | 'product'
+  relatedEntityType?: 'order' | 'product' | 'exchange_shipment'
   relatedEntityId?: string
   /** The function to execute (the actual adapter call) */
   fn: () => Promise<unknown>

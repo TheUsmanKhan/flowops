@@ -95,6 +95,7 @@ interface VariantOption {
   salePrice: number | null
   fulfillmentType: string
   primaryImage: string | null
+  attributeValues: Record<string, string>
 }
 
 interface ProductsResponse {
@@ -108,6 +109,7 @@ interface ProductsResponse {
       costPrice: number
       salePrice: number | null
       fulfillmentType: string
+      attributeValues: Record<string, string>
     }>
   }>
 }
@@ -417,6 +419,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
           salePrice: v.salePrice,
           fulfillmentType: v.fulfillmentType,
           primaryImage: p.primaryImage,
+          attributeValues: v.attributeValues ?? {},
         })
       }
     }
@@ -428,20 +431,36 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     variantOptionsRef.current = variantOptions
   }, [variantOptions])
 
-  // Auto-compute order detail from cart items
+  // Track whether the user has manually edited the Order Detail field.
+  // If they have, we DON'T clobber their edit when the cart changes —
+  // the auto-computed preview only writes to the field while it remains
+  // untouched. On submit, if the user hasn't edited, we send `undefined`
+  // so the server generates the canonical version (same format, sourced
+  // from the DB — guarantees consistency even if the products list is stale).
+  const [orderDetailUserEdited, setOrderDetailUserEdited] = useState(false)
+
+  // Auto-compute order detail preview from cart items.
+  // Format mirrors the server's canonical version:
+  //   "Product Title (SKU-001, Size: M, Color: Blue) ×2, ..."
   useEffect(() => {
+    if (orderDetailUserEdited) return // don't clobber manual edits
     if (cart.length > 0) {
       const details = cart.map((i) => {
         const variant = variantOptions.find((v) => v.variantId === i.variantId)
         const sku = variant?.sku ?? ''
         const title = variant?.productTitle ?? ''
-        return `${title} (${sku}) ×${i.quantity}`
+        const attrs = variant?.attributeValues ?? {}
+        const attrParts = Object.entries(attrs)
+          .filter(([, v]) => v)
+          .map(([k, v]) => `${k}: ${v}`)
+        const inner = [sku, ...attrParts].filter(Boolean).join(', ')
+        return `${title}${inner ? ` (${inner})` : ''} ×${i.quantity}`
       })
       setOrderDetail(details.join(', '))
     } else {
       setOrderDetail('')
     }
-  }, [cart, variantOptions])
+  }, [cart, variantOptions, orderDetailUserEdited])
 
   const variantSearchResults = useMemo(() => {
     if (!variantSearch.trim()) return []
@@ -618,8 +637,14 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       courier_company_integration_id: courierIntegrationId || undefined,
       dispatch_location_id: dispatchLocationId,
       notes_for_courier: notesForCourier.trim() || undefined,
+      // orderRefNumber (universal courier reference, migration 015):
+      // only send if the user typed a custom value — otherwise the server
+      // defaults to the freshly-generated ORD-YYYY-NNNNN flowopsOrderNumber.
       order_ref_number: orderRefNumber.trim() || undefined,
-      order_detail: orderDetail.trim() || undefined,
+      // orderDetail: only send if the user manually edited the auto-computed
+      // preview. If they didn't, let the server generate the canonical
+      // version (same format, sourced from the DB so it's always accurate).
+      order_detail: orderDetailUserEdited ? (orderDetail.trim() || undefined) : undefined,
       discount_amount: discount > 0 ? discount : undefined,
       discount_reason: discountReason.trim() || undefined,
       estimated_delivery_charge: delivery > 0 ? delivery : undefined,
@@ -855,7 +880,10 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
               orderRefNumber={orderRefNumber}
               setOrderRefNumber={setOrderRefNumber}
               orderDetail={orderDetail}
-              setOrderDetail={setOrderDetail}
+              setOrderDetail={(v) => {
+                setOrderDetail(v)
+                setOrderDetailUserEdited(true)
+              }}
               discountAmount={discountAmount}
               setDiscountAmount={setDiscountAmount}
               discountReason={discountReason}
@@ -1277,25 +1305,30 @@ function CustomerSection({
                   />
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs">Reference (Order Ref Number)</Label>
+                  <Label className="text-xs">Order Reference (for courier)</Label>
                   <Input
-                    placeholder="Auto-generated if left blank"
+                    placeholder="Defaults to ORD-YYYY-NNNNN — type to override"
                     value={orderRefNumber}
                     onChange={(e) => setOrderRefNumber(e.target.value)}
                   />
                   <p className="text-[10px] text-muted-foreground">
-                    Defaults to the FlowOps order number (ORD-XXXX). Editable.
+                    Universal courier reference field. Almost every courier
+                    (PostEx, TCS, Leopard…) has a reference field — we map
+                    this to the courier's own field at booking time. Leave
+                    blank to use the auto-generated FlowOps order number.
                   </p>
                 </div>
                 <div className="space-y-1">
-                  <Label className="text-xs">Order Detail</Label>
+                  <Label className="text-xs">Order Detail (item summary)</Label>
                   <Input
                     placeholder="Auto-filled from cart items"
                     value={orderDetail}
                     onChange={(e) => setOrderDetail(e.target.value)}
                   />
                   <p className="text-[10px] text-muted-foreground">
-                    Auto-generated from selected products (SKU + name + qty). Editable.
+                    Auto-generated from selected products (title + SKU +
+                    variant attributes + qty). Edit to override — otherwise
+                    the canonical version is generated server-side at submit.
                   </p>
                 </div>
               </div>

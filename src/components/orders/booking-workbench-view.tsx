@@ -44,6 +44,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
 import {
   RefreshCw, Loader2, CheckCircle2, XCircle, Upload, Inbox,
   AlertCircle, Search, AlertTriangle, Truck, ArrowRight,
+  ChevronDown, ChevronRight, StickyNote, FileText, Hash,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
@@ -78,6 +79,11 @@ interface BookableRow {
   codAmount: number
   recommendedCourierCompanyIntegrationId: string | null
   courierBookingStatus: string
+  // Universal courier reference fields (migration 015) — pre-fill the
+  // per-row inputs from the stored values so staff can see/edit them.
+  orderRefNumber: string
+  orderDetail: string
+  notesForCourier: string
   createdAt: string
   exchangeMethod?: string
   originalOrderNumber?: string
@@ -116,6 +122,10 @@ interface BookRequest {
   deliveryCity?: string
   codAmount?: number
   orderType?: string
+  // Universal courier reference fields (migration 015) — per-row overrides
+  transactionNotes?: string
+  itemDescription?: string
+  orderRefNumber?: string
 }
 interface BookSuccess {
   success: true
@@ -153,6 +163,12 @@ interface RowState {
   hasMissingWeight: boolean
   totalWeightKg: number
   companyIntegrationId: string
+  // Universal courier reference fields (migration 015) — editable per-row
+  orderRefNumber: string
+  orderDetail: string
+  transactionNotes: string
+  // Toggle to expand/collapse the per-row courier-reference fields
+  showAdvanced: boolean
   checked: boolean
   result: BookResult | null
   isBooking: boolean
@@ -216,6 +232,11 @@ function defaultRowState(row: BookableRow): RowState {
     hasMissingWeight: computed.hasMissingWeight,
     totalWeightKg: computed.totalWeightKg,
     companyIntegrationId: row.recommendedCourierCompanyIntegrationId ?? '',
+    // Seed from the stored universal courier reference fields (migration 015)
+    orderRefNumber: row.orderRefNumber ?? row.referenceNumber ?? '',
+    orderDetail: row.orderDetail ?? '',
+    transactionNotes: row.notesForCourier ?? '',
+    showAdvanced: false,
     checked: false,
     result: null,
     isBooking: false,
@@ -381,6 +402,12 @@ export function BookingWorkbenchView() {
         deliveryCity: state.deliveryCity.trim() || undefined,
         codAmount: Number(state.codAmount) || 0,
         orderType: state.orderType,
+        // Universal courier reference fields (migration 015) — only send if
+        // the user overrode the seeded value (the backend falls back to the
+        // stored value when these are undefined).
+        orderRefNumber: state.orderRefNumber.trim() || undefined,
+        itemDescription: state.orderDetail.trim() || undefined,
+        transactionNotes: state.transactionNotes.trim() || undefined,
       }
       if (row.type === 'order') body.orderId = row.id
       else body.shipmentId = row.id
@@ -739,17 +766,35 @@ function BookableTableRow({
   const integration = integrationById.get(state.companyIntegrationId)
   const providerKey = integration?.provider?.providerKey ?? 'postex'
 
+  // Total columns in the main row (must match <TableHeader>)
+  // checkbox + reference + customer + address + city + COD + courier + type + result = 9
+  const COL_SPAN = 9
+
   return (
-    <TableRow className={cn(booked && 'bg-emerald-50/40', failed && 'bg-rose-50/40')}>
-      {/* Checkbox */}
-      <TableCell>
-        <Checkbox
-          checked={state.checked}
-          onCheckedChange={(v) => patch({ checked: v === true })}
-          disabled={disabled}
-          aria-label={`Select ${row.referenceNumber}`}
-        />
-      </TableCell>
+    <>
+      <TableRow className={cn(booked && 'bg-emerald-50/40', failed && 'bg-rose-50/40')}>
+        {/* Checkbox + expand toggle */}
+        <TableCell>
+          <div className="flex items-center gap-1">
+            <Checkbox
+              checked={state.checked}
+              onCheckedChange={(v) => patch({ checked: v === true })}
+              disabled={disabled}
+              aria-label={`Select ${row.referenceNumber}`}
+            />
+            <button
+              type="button"
+              onClick={() => patch({ showAdvanced: !state.showAdvanced })}
+              className="text-muted-foreground hover:text-foreground transition-colors p-0.5"
+              aria-label={state.showAdvanced ? 'Hide courier reference fields' : 'Show courier reference fields'}
+              title={state.showAdvanced ? 'Hide courier reference fields' : 'Show courier reference fields (reference, detail, notes)'}
+            >
+              {state.showAdvanced
+                ? <ChevronDown className="h-3.5 w-3.5" />
+                : <ChevronRight className="h-3.5 w-3.5" />}
+            </button>
+          </div>
+        </TableCell>
 
       {/* Reference + source + date + weight */}
       <TableCell>
@@ -912,7 +957,76 @@ function BookableTableRow({
           <span className="text-xs text-muted-foreground">—</span>
         )}
       </TableCell>
-    </TableRow>
+      </TableRow>
+
+      {/* ── Collapsible second row: courier reference fields (migration 015) ──
+          These are universal OMS fields that get mapped to whatever courier
+          field the active adapter uses (PostEx → orderRefNumber, future TCS
+          → consigneeRef, etc.). Pre-filled from the stored Order/ExchangeShipment
+          values; editing here overrides per-booking only (does NOT write back
+          to the Order). */}
+      {state.showAdvanced && (
+        <TableRow className={cn('bg-muted/20', booked && 'bg-emerald-50/20')}>
+          <TableCell colSpan={COL_SPAN} className="py-3">
+            <div className="grid sm:grid-cols-3 gap-3">
+              {/* Order Reference — universal courier reference field */}
+              <div className="space-y-1">
+                <Label className="text-[10px] flex items-center gap-1 text-muted-foreground">
+                  <Hash className="h-3 w-3" /> Order Reference
+                  <span className="text-amber-700">(for courier)</span>
+                </Label>
+                <Input
+                  value={state.orderRefNumber}
+                  onChange={(e) => patch({ orderRefNumber: e.target.value })}
+                  disabled={disabled}
+                  className="h-8 text-xs"
+                  placeholder={row.referenceNumber}
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Maps to the courier's reference field. Defaults to {row.referenceNumber}.
+                </p>
+              </div>
+
+              {/* Order Detail — item description string */}
+              <div className="space-y-1">
+                <Label className="text-[10px] flex items-center gap-1 text-muted-foreground">
+                  <FileText className="h-3 w-3" /> Order Detail
+                  <span className="text-amber-700">(item summary)</span>
+                </Label>
+                <Input
+                  value={state.orderDetail}
+                  onChange={(e) => patch({ orderDetail: e.target.value })}
+                  disabled={disabled}
+                  className="h-8 text-xs"
+                  placeholder="Auto-generated from items"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Item summary passed to the courier (e.g. "Silk Kurta (SKU-001) ×2").
+                </p>
+              </div>
+
+              {/* Transaction Notes — courier instructions */}
+              <div className="space-y-1">
+                <Label className="text-[10px] flex items-center gap-1 text-muted-foreground">
+                  <StickyNote className="h-3 w-3" /> Transaction Notes
+                  <span className="text-amber-700">(courier instructions)</span>
+                </Label>
+                <Input
+                  value={state.transactionNotes}
+                  onChange={(e) => patch({ transactionNotes: e.target.value })}
+                  disabled={disabled}
+                  className="h-8 text-xs"
+                  placeholder="Optional notes for the courier"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Free-text instructions appended to the courier booking.
+                </p>
+              </div>
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
+    </>
   )
 }
 

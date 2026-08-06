@@ -14,8 +14,10 @@ import type { BookShipmentInput, BookShipmentResult } from '@/lib/integrations/t
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-interface BookOrderRequest {
-  orderId: string
+interface BookRequest {
+  // One of these must be provided
+  orderId?: string
+  shipmentId?: string
   companyIntegrationId: string
   // Editable overrides from the Workbench UI
   customerName?: string
@@ -26,17 +28,31 @@ interface BookOrderRequest {
   orderType?: string // if not provided, auto-computed
   transactionNotes?: string
   itemDescription?: string
+  orderRefNumber?: string // universal courier reference (migration 015)
   pickupAddressCode?: string
 }
 
 /**
  * POST /api/booking-workbench/book
  *
- * Books a single order with the selected courier (currently PostEx only).
- * Called per-row from the Booking Workbench UI — each row submits independently.
+ * Books a single order OR exchange shipment with the selected courier
+ * (currently PostEx only). Called per-row from the Booking Workbench UI —
+ * each row submits independently.
  *
- * On success: updates the Order record with courierCompanyIntegrationId,
- * trackingNumber, courierCityStatus='matched', and courierSubStatus.
+ * Universal courier reference fields (migration 015):
+ *   - orderRefNumber: defaults to flowopsOrderNumber / exchangeShipmentNumber,
+ *     but the order/shipment stores a custom value (editable from the order
+ *     create form). The Workbench UI can also override per-row.
+ *   - itemDescription (a.k.a. orderDetail): defaults to the stored
+ *     orderDetail string on the Order/ExchangeShipment; falls back to an
+ *     auto-generated summary from the items.
+ *   - transactionNotes: defaults to the stored notesForCourier on the
+ *     Order (exchange shipments don't have notesForCourier, so '' is the
+ *     fallback); the Workbench UI can override per-row.
+ *
+ * On success: updates the Order/ExchangeShipment with courierCompanyIntegrationId,
+ * trackingNumber, courierCityStatus='matched', courierSubStatus, and
+ * courierBookingStatus='booked'.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -59,9 +75,12 @@ export async function POST(req: NextRequest) {
       })) > 0
     if (!allowed) throw new ApiError(403, 'You lack permission to fulfill orders.')
 
-    const body = await readBody<BookOrderRequest>(req)
-    if (!body.orderId || !body.companyIntegrationId) {
-      return Response.json({ error: 'orderId and companyIntegrationId are required' }, { status: 400 })
+    const body = await readBody<BookRequest>(req)
+    if (!body.companyIntegrationId) {
+      return Response.json({ error: 'companyIntegrationId is required' }, { status: 400 })
+    }
+    if (!body.orderId && !body.shipmentId) {
+      return Response.json({ error: 'Either orderId or shipmentId is required' }, { status: 400 })
     }
 
     // Fetch the integration
@@ -78,32 +97,150 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: `Booking not yet implemented for provider '${providerKey}'.` }, { status: 400 })
     }
 
-    // Fetch the order with items + variant weights
-    const order = await db.order.findFirst({
-      where: { id: body.orderId, companyId },
-      include: {
-        customer: { select: { id: true, name: true, phones: { select: { id: true, phoneRaw: true, isPrimary: true } } } },
-        items: {
-          include: {
-            orgVariant: {
-              select: { id: true, sku: true, weightKg: true, product: { select: { title: true } } },
+    // ── Resolve the row (Order or ExchangeShipment) ────────────────────────
+    // We normalize to a common shape so the rest of the booking flow can be
+    // identical for both. Universal courier reference fields (migration 015):
+    //   - storedRefNumber: Order.orderRefNumber or ExchangeShipment.orderRefNumber
+    //   - storedDetail: Order.orderDetail or ExchangeShipment.orderDetail
+    //   - storedNotes: Order.notesForCourier (ExchangeShipment has no notes field)
+    //   - defaultOrderNumber: flowopsOrderNumber or exchangeShipmentNumber
+    //     (used as the orderRefNumber fallback when neither the stored value
+    //      nor the per-row override is set)
+    let rowType: 'order' | 'exchange_shipment'
+    let rowId: string
+    let defaultOrderNumber: string
+    let storedRefNumber: string | null
+    let storedDetail: string | null
+    let storedNotes: string | null
+    let customerNameDefault: string
+    let customerPhoneDefault: string
+    let deliveryAddressDefault: string
+    let deliveryCityDefault: string
+    let codAmountDefault: number
+    let itemRows: Array<{
+      quantity: number
+      weightKg: number | null
+      sku: string
+      productTitle: string
+    }>
+    let isExchangeReplacement = false
+
+    if (body.orderId) {
+      rowType = 'order'
+      rowId = body.orderId
+      const order = await db.order.findFirst({
+        where: { id: body.orderId, companyId },
+        include: {
+          customer: {
+            select: {
+              id: true, name: true,
+              phones: { select: { id: true, phoneRaw: true, isPrimary: true }, orderBy: { isPrimary: 'desc' } },
+            },
+          },
+          items: {
+            include: {
+              orgVariant: {
+                select: { id: true, sku: true, weightKg: true, product: { select: { title: true } } },
+              },
             },
           },
         },
-      },
-    })
-    if (!order) {
-      return Response.json({ error: 'Order not found.' }, { status: 404 })
+      })
+      if (!order) {
+        return Response.json({ error: 'Order not found.' }, { status: 404 })
+      }
+      defaultOrderNumber = order.flowopsOrderNumber
+      storedRefNumber = order.orderRefNumber
+      storedDetail = order.orderDetail
+      storedNotes = order.notesForCourier
+      customerNameDefault = order.customer?.name || 'Customer'
+      customerPhoneDefault =
+        order.customer?.phones.find((p) => p.isPrimary)?.phoneRaw ||
+        order.customer?.phones[0]?.phoneRaw || ''
+      deliveryAddressDefault = order.deliveryAddress || ''
+      deliveryCityDefault = order.deliveryCity || ''
+      codAmountDefault = Number(order.remainingCodAmount ?? order.totalOrderValue ?? 0)
+      itemRows = order.items.map((i) => ({
+        quantity: i.quantity,
+        weightKg: i.orgVariant.weightKg ? Number(i.orgVariant.weightKg) : null,
+        sku: i.orgVariant.sku,
+        productTitle: i.orgVariant.product.title,
+      }))
+    } else {
+      rowType = 'exchange_shipment'
+      rowId = body.shipmentId!
+      const shipment = await db.exchangeShipment.findFirst({
+        where: { id: body.shipmentId, companyId },
+        include: {
+          customer: {
+            select: {
+              id: true, name: true,
+              phones: { select: { id: true, phoneRaw: true, isPrimary: true }, orderBy: { isPrimary: 'desc' } },
+            },
+          },
+          shippingAddress: { select: { address: true, city: true } },
+          shippingPhone: { select: { phoneRaw: true } },
+          newOrgVariant: {
+            select: {
+              id: true, sku: true, weightKg: true,
+              product: { select: { title: true } },
+            },
+          },
+          orderExchange: {
+            select: {
+              id: true, exchangeMethod: true,
+              originalOrder: { select: { flowopsOrderNumber: true } },
+            },
+          },
+        },
+      })
+      if (!shipment) {
+        return Response.json({ error: 'Exchange shipment not found.' }, { status: 404 })
+      }
+      defaultOrderNumber = shipment.exchangeShipmentNumber
+      storedRefNumber = shipment.orderRefNumber
+      storedDetail = shipment.orderDetail
+      storedNotes = null // ExchangeShipment has no notesForCourier field
+      customerNameDefault = shipment.customer?.name || 'Customer'
+      customerPhoneDefault =
+        shipment.shippingPhone?.phoneRaw ||
+        shipment.customer?.phones.find((p) => p.isPrimary)?.phoneRaw ||
+        shipment.customer?.phones[0]?.phoneRaw || ''
+      deliveryAddressDefault = shipment.shippingAddress?.address || ''
+      deliveryCityDefault = shipment.shippingAddress?.city || shipment.shippingCityOverride || ''
+      codAmountDefault = Number(shipment.invoiceAmount)
+      itemRows = [{
+        quantity: shipment.quantity,
+        weightKg: shipment.newOrgVariant.weightKg ? Number(shipment.newOrgVariant.weightKg) : null,
+        sku: shipment.newOrgVariant.sku,
+        productTitle: shipment.newOrgVariant.product.title,
+      }]
+      // courier_replacement exchanges map to PostEx's "Replacement" order type
+      isExchangeReplacement = shipment.orderExchange.exchangeMethod === 'courier_replacement'
     }
 
-    // Use overrides from the Workbench or fall back to order data
-    const customerName = body.customerName?.trim() || order.customer?.name || 'Customer'
-    const customerPhone = body.customerPhone?.trim() || order.customer?.phones.find((p) => p.isPrimary)?.phoneRaw || order.customer?.phones[0]?.phoneRaw || ''
-    const deliveryAddress = body.deliveryAddress?.trim() || order.deliveryAddress || ''
-    const deliveryCity = body.deliveryCity?.trim() || order.deliveryCity || ''
-    const codAmount = body.codAmount ?? Number(order.remainingCodAmount ?? order.totalOrderValue ?? 0)
-    const itemDescription = body.itemDescription || order.items.map((i) => `${i.orgVariant.product.title} (${i.orgVariant.sku}) ×${i.quantity}`).join(', ')
-    const transactionNotes = body.transactionNotes || ''
+    // ── Apply overrides + fallbacks (universal courier reference fields) ──
+    const customerName = body.customerName?.trim() || customerNameDefault
+    const customerPhone = body.customerPhone?.trim() || customerPhoneDefault
+    const deliveryAddress = body.deliveryAddress?.trim() || deliveryAddressDefault
+    const deliveryCity = body.deliveryCity?.trim() || deliveryCityDefault
+    const codAmount = body.codAmount ?? codAmountDefault
+    // orderRefNumber: per-row override > stored value > flowops/exch number
+    const orderRefNumber =
+      body.orderRefNumber?.trim() ||
+      (storedRefNumber && storedRefNumber.trim()) ||
+      defaultOrderNumber
+    // itemDescription (a.k.a. orderDetail): per-row override > stored value >
+    // auto-generated from items
+    const itemDescription =
+      body.itemDescription?.trim() ||
+      (storedDetail && storedDetail.trim()) ||
+      itemRows
+        .map((i) => `${i.productTitle} (${i.sku}) ×${i.quantity}`)
+        .join(', ')
+    // transactionNotes: per-row override > stored notesForCourier (orders only)
+    const transactionNotes =
+      body.transactionNotes?.trim() || (storedNotes && storedNotes.trim()) || ''
 
     if (!deliveryCity) {
       return Response.json({ error: 'Delivery city is required.' }, { status: 400 })
@@ -115,11 +252,18 @@ export async function POST(req: NextRequest) {
     // Revalidate city at booking time (Prompt 2)
     const cityValid = await revalidateCityAtBookingTime(providerKey, deliveryCity)
     if (!cityValid) {
-      // Update the order's courierCityStatus to 'unresolved'
-      await db.order.update({
-        where: { id: body.orderId },
-        data: { courierCityStatus: 'unresolved' },
-      })
+      // Update the row's courierCityStatus to 'unresolved'
+      if (rowType === 'order') {
+        await db.order.update({
+          where: { id: rowId },
+          data: { courierCityStatus: 'unresolved' },
+        })
+      } else {
+        await db.exchangeShipment.update({
+          where: { id: rowId },
+          data: { courierCityStatus: 'unresolved' },
+        })
+      }
       return Response.json({
         error: `City "${deliveryCity}" is not available for delivery with ${integration.provider.providerName}. Please resolve the city and try again.`,
       }, { status: 400 })
@@ -127,16 +271,16 @@ export async function POST(req: NextRequest) {
 
     // Compute weight + orderType (Prompt 1 + Prompt 4)
     const weightResult = calculateOrderWeightKg(
-      order.items.map((i) => ({
+      itemRows.map((i) => ({
         quantity: i.quantity,
-        variant: { weightKg: i.orgVariant.weightKg as { toNumber: () => number } | number | null },
+        variant: { weightKg: i.weightKg },
       })),
     )
 
     const orderType = body.orderType || determinePostExOrderType(
       weightResult.totalWeightKg,
       weightResult.hasMissingWeight,
-      false, // isExchangeReplacement=false for regular orders
+      isExchangeReplacement,
     )
 
     // Get pickup address code from the integration's default pickup address
@@ -151,7 +295,7 @@ export async function POST(req: NextRequest) {
 
     // Build the BookShipmentInput
     const bookInput: BookShipmentInput = {
-      orderNumber: order.flowopsOrderNumber,
+      orderNumber: orderRefNumber, // PostEx maps this to orderRefNumber in its API
       recipientName: customerName,
       recipientPhone: customerPhone,
       deliveryAddress,
@@ -163,7 +307,7 @@ export async function POST(req: NextRequest) {
       itemDescription,
       pickupAddressCode,
       orderType,
-      quantity: order.items.reduce((sum, i) => sum + i.quantity, 0),
+      quantity: itemRows.reduce((sum, i) => sum + i.quantity, 0),
       transactionNotes,
     }
 
@@ -177,8 +321,8 @@ export async function POST(req: NextRequest) {
       organizationId: orgId,
       actionType: 'book_shipment',
       direction: 'outbound',
-      relatedEntityType: 'order',
-      relatedEntityId: body.orderId,
+      relatedEntityType: rowType,
+      relatedEntityId: rowId,
       fn: async () => adapter.bookShipment(bookInput),
     })
 
@@ -188,18 +332,20 @@ export async function POST(req: NextRequest) {
       }, { status: 400 })
     }
 
-    // Update the Order with tracking + courier info + booking status
-    await db.order.update({
-      where: { id: body.orderId },
-      data: {
-        courierCompanyIntegrationId: integration.id,
-        trackingNumber: bookResult.trackingNumber,
-        courierCityStatus: 'matched',
-        courierSubStatus: bookResult.providerStatus ?? null,
-        courierName: integration.provider.providerName,
-        courierBookingStatus: 'booked',
-      },
-    })
+    // Update the row with tracking + courier info + booking status
+    const updateData = {
+      courierCompanyIntegrationId: integration.id,
+      trackingNumber: bookResult.trackingNumber,
+      courierCityStatus: 'matched' as const,
+      courierSubStatus: bookResult.providerStatus ?? null,
+      courierName: integration.provider.providerName,
+      courierBookingStatus: 'booked' as const,
+    }
+    if (rowType === 'order') {
+      await db.order.update({ where: { id: rowId }, data: updateData })
+    } else {
+      await db.exchangeShipment.update({ where: { id: rowId }, data: updateData })
+    }
 
     return Response.json({
       success: true,

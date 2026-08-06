@@ -1,18 +1,42 @@
 import { NextRequest } from 'next/server'
-import { handleError } from '@/lib/workspace'
+import { handleError, readBody } from '@/lib/workspace'
 import { dispatchReplacementForSelfReturnExchange } from '@/lib/actions/exchange.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** POST /api/exchanges/[id]/dispatch-replacement — Send Replacement Order for customer_self_return */
+interface DispatchReplacementBody {
+  // Universal courier reference fields (migration 015) — optional overrides
+  orderRefNumber?: string
+  orderDetail?: string
+}
+
+/**
+ * POST /api/exchanges/[id]/dispatch-replacement
+ *
+ * customer_self_return path — dispatch the replacement shipment AFTER the
+ * old item has been manually verified as received.
+ *
+ * Body (all optional):
+ *   - orderRefNumber: overrides the default EXCH-##### reference
+ *   - orderDetail: overrides the auto-generated item summary
+ */
 export async function POST(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
     const { id } = await params
-    const result = await dispatchReplacementForSelfReturnExchange(id)
+    let body: DispatchReplacementBody = {}
+    try {
+      body = await readBody<DispatchReplacementBody>(req)
+    } catch {
+      // No JSON body — that's fine, use defaults
+    }
+    const result = await dispatchReplacementForSelfReturnExchange(id, {
+      orderRefNumber: body.orderRefNumber,
+      orderDetail: body.orderDetail,
+    })
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })
     }

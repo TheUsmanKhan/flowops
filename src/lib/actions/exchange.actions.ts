@@ -92,6 +92,18 @@ interface ActionResult<T = unknown> {
 async function createAndDispatchExchangeOrder(
   exchangeId: string,
   ctx: Awaited<ReturnType<typeof getWorkspace>>,
+  options?: {
+    /**
+     * Universal courier reference field (migration 015). When provided,
+     * overrides the default (which is the freshly-generated EXCH-#####).
+     */
+    orderRefNumber?: string
+    /**
+     * Universal courier item-description string (migration 015). When
+     * provided, overrides the auto-generated variant summary.
+     */
+    orderDetail?: string
+  },
 ): Promise<{ newExchangeShipmentId: string; exchangeShipmentNumber: string }> {
   // Fetch the exchange record (already validated by caller)
   const exchange = await db.orderExchange.findUniqueOrThrow({
@@ -110,6 +122,9 @@ async function createAndDispatchExchangeOrder(
           id: true,
           fulfillmentType: true,
           costPrice: true,
+          sku: true,
+          attributeValues: true,
+          product: { select: { title: true } },
         },
       },
     },
@@ -138,6 +153,31 @@ async function createAndDispatchExchangeOrder(
   // 1. Generate the EXCH-{YYYY}-{NNNNN} number (independent sequence)
   const exchangeShipmentNumber = await generateExchangeShipmentNumber()
 
+  // 1a. Universal courier reference fields (migration 015). For immediate-
+  // dispatch flows (courier_replacement, customer_self_return) we default
+  // orderRefNumber to the freshly-generated EXCH number, and auto-build
+  // orderDetail from the variant. Both can be overridden via the options
+  // argument (the SendExchangeShipmentModal collects them and the
+  // /dispatch-new-item + /dispatch-replacement routes pass them through).
+  const orderRefNumber =
+    (options?.orderRefNumber && options.orderRefNumber.trim()) || exchangeShipmentNumber
+  // orderDetail: caller-provided takes precedence, otherwise auto-generate
+  // from the variant: "Product Title (SKU, Size: M, Color: Blue) ×N"
+  let orderDetail = (options?.orderDetail && options.orderDetail.trim()) || ''
+  if (!orderDetail) {
+    const attrParts: string[] = []
+    try {
+      const attrs = JSON.parse(exchange.newOrgVariant.attributeValues || '{}') as Record<string, string>
+      for (const [k, v] of Object.entries(attrs)) {
+        if (v) attrParts.push(`${k}: ${v}`)
+      }
+    } catch {
+      // ignore parse errors
+    }
+    const inner = [exchange.newOrgVariant.sku, ...attrParts].filter(Boolean).join(', ')
+    orderDetail = `${exchange.newOrgVariant.product.title}${inner ? ` (${inner})` : ''} ×1`
+  }
+
   // 2. Create the exchange shipment (status='confirmed')
   const shipment = await db.exchangeShipment.create({
     data: {
@@ -154,6 +194,9 @@ async function createAndDispatchExchangeOrder(
       status: 'confirmed',
       isPriorityBackorder: true,
       invoiceAmount,
+      // Universal courier reference fields (migration 015)
+      orderRefNumber,
+      orderDetail,
       confirmedAt: new Date(),
       createdBy: ctx.employee.id,
     },
@@ -401,6 +444,12 @@ export async function createExchangeRequest(
 
 export async function dispatchExchangeNewItem(
   exchangeId: string,
+  options?: {
+    /** Universal courier reference field override (migration 015) */
+    orderRefNumber?: string
+    /** Universal courier item-description override (migration 015) */
+    orderDetail?: string
+  },
 ): Promise<ActionResult<{ newExchangeShipmentId: string; exchangeShipmentNumber: string }>> {
   try {
     const ctx = await getWorkspace()
@@ -427,7 +476,11 @@ export async function dispatchExchangeNewItem(
     }
 
     // Create + dispatch the new EXCHANGE SHIPMENT (courier collects old item during this delivery)
-    const { newExchangeShipmentId, exchangeShipmentNumber } = await createAndDispatchExchangeOrder(exchangeId, ctx)
+    const { newExchangeShipmentId, exchangeShipmentNumber } = await createAndDispatchExchangeOrder(
+      exchangeId,
+      ctx,
+      options,
+    )
 
     // Update exchange status to 'awaiting_old_item_return' (old item collection
     // happens during this delivery, but manual verification still needed)
@@ -1298,6 +1351,12 @@ export async function listOverdueExchanges(
  */
 export async function dispatchReplacementForSelfReturnExchange(
   exchangeId: string,
+  options?: {
+    /** Universal courier reference field override (migration 015) */
+    orderRefNumber?: string
+    /** Universal courier item-description override (migration 015) */
+    orderDetail?: string
+  },
 ): Promise<ActionResult<{
   newExchangeShipmentId: string
   exchangeShipmentNumber: string
@@ -1323,7 +1382,7 @@ export async function dispatchReplacementForSelfReturnExchange(
     }
 
     // Use the internal helper to create + dispatch the ExchangeShipment
-    const result = await createAndDispatchExchangeOrder(exchangeId, ctx)
+    const result = await createAndDispatchExchangeOrder(exchangeId, ctx, options)
 
     // Mark the exchange as completed
     await db.orderExchange.update({

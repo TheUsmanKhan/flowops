@@ -425,6 +425,7 @@ export async function createManualOrder(
     const variants = await db.orgProductVariant.findMany({
       where: { id: { in: variantIds }, organizationId: ctx.company.organizationId },
       include: {
+        product: { select: { title: true } },
         companyPricing: { where: { companyId: ctx.company.id } },
       },
     })
@@ -442,6 +443,13 @@ export async function createManualOrder(
       lineTotal: number
       fulfillmentTypeSnapshot: string
     }> = []
+
+    // Build the order_detail string as we iterate — universal courier
+    // reference field (migration 015). Format:
+    //   "Product Title (SKU-001, Size: M, Color: Blue) ×2, ..."
+    // Auto-generated but editable from the order-create form. If the caller
+    // supplies an explicit order_detail, we honour it verbatim.
+    const orderDetailParts: string[] = []
 
     for (const item of d.items) {
       const variant = variants.find((v) => v.id === item.org_variant_id)
@@ -464,6 +472,21 @@ export async function createManualOrder(
         lineTotal,
         fulfillmentTypeSnapshot: variant.fulfillmentType,
       })
+
+      // Append to orderDetail: "Product Title (SKU-001, Size: M) ×2"
+      const attrParts: string[] = []
+      try {
+        const attrs = JSON.parse(variant.attributeValues || '{}') as Record<string, string>
+        for (const [k, v] of Object.entries(attrs)) {
+          if (v) attrParts.push(`${k}: ${v}`)
+        }
+      } catch {
+        // ignore parse errors
+      }
+      const inner = [variant.sku, ...attrParts].filter(Boolean).join(', ')
+      orderDetailParts.push(
+        `${variant.product.title}${inner ? ` (${inner})` : ''} ×${item.quantity}`,
+      )
     }
 
     // 5. Compute totals
@@ -527,6 +550,18 @@ export async function createManualOrder(
     // 8. Generate order number
     const flowopsOrderNumber = await generateOrderNumber(ctx.company.id)
 
+    // 8a. Universal courier reference fields (migration 015).
+    // orderRefNumber: defaults to flowopsOrderNumber if the caller left it
+    // blank — every courier has a "reference" field so this is a core OMS
+    // field, mapped to the courier's own ref at booking time.
+    const orderRefNumber =
+      (d.order_ref_number && d.order_ref_number.trim()) || flowopsOrderNumber
+    // orderDetail: caller-provided takes precedence, otherwise use the
+    // auto-generated string from the cart items (product title + SKU +
+    // variant attributes + quantity).
+    const orderDetail =
+      (d.order_detail && d.order_detail.trim()) || orderDetailParts.join(', ')
+
     // 9. Create the order
     const order = await db.order.create({
       data: {
@@ -568,6 +603,9 @@ export async function createManualOrder(
         recommendedCourierCompanyIntegrationId: d.courier_company_integration_id || null,
         dispatchLocationId: d.dispatch_location_id,
         notesForCourier: d.notes_for_courier || null,
+        // Universal courier reference fields (migration 015)
+        orderRefNumber,
+        orderDetail,
         skippedConfirmation,
         confirmedAt,
         createdBy: ctx.employee.id,
@@ -856,6 +894,19 @@ export async function createOrderFromShopifyWebhook(
 
     const flowopsOrderNumber = await generateOrderNumber(companyId)
 
+    // Build orderDetail from Shopify line items for the universal courier
+    // reference field (migration 015). Shopify doesn't expose variant
+    // attributes cleanly in the webhook payload, so we use a simpler
+    // format: "Product Title (SKU) ×qty, ..." — matching the existing
+    // booking-workbench book route's itemDescription format.
+    const orderDetailParts: string[] = []
+    for (const li of d.line_items) {
+      const variant = variants.find((v) => v.sku === li.sku)
+      const title = variant?.sku ?? li.sku ?? 'Item'
+      orderDetailParts.push(`${title} ×${li.quantity}`)
+    }
+    const orderDetail = orderDetailParts.join(', ')
+
     const order = await db.order.create({
       data: {
         organizationId,
@@ -884,6 +935,12 @@ export async function createOrderFromShopifyWebhook(
         // default address's text (if any).
         deliveryAddress: shopifyAddress1 || customer.addresses[0]?.address || null,
         deliveryCity: shopifyCity || customer.addresses[0]?.city || null,
+        // Universal courier reference fields (migration 015):
+        // orderRefNumber defaults to the Shopify order name (e.g. "#1001")
+        // — staff can override post-creation if needed. orderDetail is the
+        // auto-generated item summary above.
+        orderRefNumber: d.name || flowopsOrderNumber,
+        orderDetail,
       },
     })
 
@@ -1525,6 +1582,10 @@ export async function listOrders(
           customerId: o.customerId,
           deliveryAddress: o.deliveryAddress,
           deliveryCity: o.deliveryCity,
+          // Universal courier reference fields (migration 015)
+          orderRefNumber: o.orderRefNumber,
+          orderDetail: o.orderDetail,
+          notesForCourier: o.notesForCourier,
           confirmedAt: o.confirmedAt,
           dispatchedAt: o.dispatchedAt,
           deliveredAt: o.deliveredAt,
@@ -1583,6 +1644,9 @@ export async function getOrderDetail(
     trackingNumber: string | null
     dispatchLocationId: string | null
     notesForCourier: string | null
+    // Universal courier reference fields (migration 015)
+    orderRefNumber: string | null
+    orderDetail: string | null
     skippedConfirmation: boolean
     skippedPacking: boolean
     confirmedAt: Date | null

@@ -86,6 +86,11 @@ export async function GET(_req: NextRequest) {
         : Number(o.totalOrderValue),
       recommendedCourierCompanyIntegrationId: o.recommendedCourierCompanyIntegrationId,
       courierBookingStatus: o.courierBookingStatus,
+      // Universal courier reference fields (migration 015) — pre-fill the
+      // Workbench per-row inputs so staff can see/edit the stored values.
+      orderRefNumber: o.orderRefNumber ?? o.flowopsOrderNumber,
+      orderDetail: o.orderDetail ?? '',
+      notesForCourier: o.notesForCourier ?? '',
       createdAt: o.createdAt.toISOString(),
       items: o.items.map((i) => ({
         variantId: i.orgVariant.id,
@@ -149,6 +154,12 @@ export async function GET(_req: NextRequest) {
       codAmount: Number(s.invoiceAmount),
       recommendedCourierCompanyIntegrationId: s.recommendedCourierCompanyIntegrationId,
       courierBookingStatus: s.courierBookingStatus,
+      // Universal courier reference fields (migration 015) — exchange shipments
+      // have no notesForCourier column, so we omit it (the book route will
+      // default transactionNotes to '' for exchange shipments).
+      orderRefNumber: s.orderRefNumber ?? s.exchangeShipmentNumber,
+      orderDetail: s.orderDetail ?? '',
+      notesForCourier: '',
       createdAt: s.createdAt.toISOString(),
       exchangeMethod: s.orderExchange.exchangeMethod,
       originalOrderNumber: s.orderExchange.originalOrder.flowopsOrderNumber,

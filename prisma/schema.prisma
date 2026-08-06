@@ -1890,6 +1890,21 @@ model Order {
   dispatchLocation            InventoryLocation? @relation("OrderDispatchLocation", fields: [dispatchLocationId], references: [id])
   notesForCourier             String?
 
+  // ─── Universal courier reference fields (migration 015) ───────────────
+  // orderRefNumber is the universal "reference" passed to ANY courier at
+  // booking time. Defaults to flowopsOrderNumber at creation but is editable
+  // — staff can type a custom PO/channel reference that the courier should
+  // print on the airway bill. Almost every courier (PostEx, TCS, Leopard…)
+  // has a "reference" / "order ref" field, so this is a core OMS field, not
+  // a PostEx-specific one. The booking adapter maps it to the courier's own
+  // ref field (PostEx → orderRefNumber, TCS → consigneeRef, etc.).
+  orderRefNumber              String?
+  // orderDetail is the human-readable item description string passed to the
+  // courier (e.g. "Silk Kurta (SKU-001, Size: L, Color: Blue) ×2, …").
+  // Auto-generated from the cart at creation but editable so staff can
+  // replace it with a more courier-friendly summary when needed.
+  orderDetail                 String?
+
   skippedConfirmation         Boolean  @default(false)
   skippedPacking              Boolean  @default(false)
 
@@ -2100,6 +2115,14 @@ model ExchangeShipment {
   unrecognizedCourierStatus     Boolean  @default(false)
   courierCityStatus             String   @default("not_applicable") // matched | unresolved | not_applicable (CHECK in SQL)
   lastPolledAt                  DateTime? // last time this shipment was polled for courier status
+
+  // ─── Universal courier reference fields (migration 015) ───────────────
+  // Same semantic as Order.orderRefNumber / Order.orderDetail — defaults to
+  // exchangeShipmentNumber at creation, editable. Mapped to the courier's
+  // own ref field at booking time so the EXCH-##### number can be overridden
+  // with a custom reference if needed.
+  orderRefNumber                String?
+  orderDetail                   String?
 
   // Lifecycle timestamps
   confirmedAt                   DateTime?
