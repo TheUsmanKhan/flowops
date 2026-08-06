@@ -63,7 +63,9 @@ import {
   AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { getCourierSubStatusLabel, isCancellableCourierStatus } from '@/lib/integrations/couriers/postex.status-labels'
 import { RequestExchangeDialog } from './request-exchange-dialog'
+import { CancelCourierBookingButton } from './cancel-courier-booking-button'
 import { CityMismatchResolver } from '@/components/couriers/city-mismatch-resolver'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1110,7 +1112,7 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                 </div>
               )}
               {order.courierSubStatus && (
-                <InfoRow label="Courier Status" value={COURIER_SUBSTATUS_LABELS[order.courierSubStatus] ?? order.courierSubStatus} />
+                <InfoRow label="Courier Status" value={getCourierSubStatusLabel(order.courierSubStatus)} />
               )}
               {order.lastPolledAt && (
                 <InfoRow label="Last Polled" value={formatDateTime(order.lastPolledAt)} muted />
@@ -1130,10 +1132,17 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
               )}
               {/* Refresh courier status button — triggers PostEx polling for this order */}
               {order.trackingNumber && order.courierCompanyIntegrationId && (
-                <RefreshCourierStatusButton
-                  orderId={order.id}
-                  onSuccess={() => invalidateAll()}
-                />
+                <div className="flex items-center gap-2 mt-2">
+                  <RefreshCourierStatusButton
+                    orderId={order.id}
+                    onSuccess={() => invalidateAll()}
+                  />
+                  <CancelCourierBookingButton
+                    entityType="order"
+                    entityId={order.id}
+                    courierSubStatus={order.courierSubStatus}
+                  />
+                </div>
               )}
               <InfoRow label="Courier" value={order.courierName ?? '—'} />
               {order.courierBookingStatus && (
@@ -1913,23 +1922,6 @@ function CodCollectedDialog({
       </DialogContent>
     </Dialog>
   )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Courier sub-status human-friendly labels
-// ─────────────────────────────────────────────────────────────────────────────
-
-const COURIER_SUBSTATUS_LABELS: Record<string, string> = {
-  pickup_requested: 'Pickup Requested',
-  picked_up: 'Picked Up',
-  at_warehouse: 'At Courier Warehouse',
-  en_route: 'En Route to Warehouse',
-  out_for_delivery: 'Out For Delivery',
-  delivered: 'Delivered',
-  returned: 'Returned (RTO)',
-  out_for_return: 'Out For Return',
-  attempted: 'Delivery Attempted',
-  under_review: 'Delivery Under Review',
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

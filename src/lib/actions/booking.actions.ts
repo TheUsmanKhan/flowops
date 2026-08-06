@@ -280,13 +280,21 @@ export async function bookOrderWithCourier(
     }
 
     // ── Update the order with tracking + booking status ──
+    // Map the PostEx providerStatus through the status map to get the
+    // canonical courierSubStatus (e.g. "Unbooked" → "slip_generated").
+    // Without this, the raw PostEx string would be stored directly.
+    const { mapPostExStatus } = await import('@/lib/integrations/couriers/postex.status-map')
+    const mappedBookingStatus = bookResult.providerStatus
+      ? mapPostExStatus(bookResult.providerStatus)
+      : null
+
     await db.order.update({
       where: { id: orderId },
       data: {
         courierCompanyIntegrationId: integration.id,
         trackingNumber: bookResult.trackingNumber,
         courierCityStatus: 'matched',
-        courierSubStatus: bookResult.providerStatus ?? null,
+        courierSubStatus: mappedBookingStatus?.courierSubStatus ?? null,
         courierName: integration.provider.providerName,
         courierBookingStatus: 'booked',
         // Clear any previous failure reason on success

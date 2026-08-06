@@ -248,13 +248,19 @@ async function bookExchangeShipment(
   // (courier is identified by courierCompanyIntegrationId + the provider name
   // is looked up via the relation). We set the integration ID + tracking +
   // booking status.
+  // Map the PostEx providerStatus through the status map for canonical subStatus
+  const { mapPostExStatus } = await import('@/lib/integrations/couriers/postex.status-map')
+  const mappedBookingStatus = bookResult.providerStatus
+    ? mapPostExStatus(bookResult.providerStatus)
+    : null
+
   await db.exchangeShipment.update({
     where: { id: shipment.id },
     data: {
       courierCompanyIntegrationId: integration.id,
       trackingNumber: bookResult.trackingNumber,
       courierCityStatus: 'matched',
-      courierSubStatus: bookResult.providerStatus ?? null,
+      courierSubStatus: mappedBookingStatus?.courierSubStatus ?? null,
       courierBookingStatus: 'booked',
     },
   })

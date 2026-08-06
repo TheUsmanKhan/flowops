@@ -53,6 +53,7 @@ import {
   determinePostExOrderType, type PostExOrderType,
 } from '@/lib/integrations/couriers/postex.order-type'
 import { formatPKR, formatDate, formatDateTime, getErrorMessage } from './_shared'
+import { CancelCourierBookingButton } from './cancel-courier-booking-button'
 
 // ── Types: bookable rows (GET /api/booking-workbench/bookable) ────────────────
 
@@ -145,6 +146,7 @@ interface ActivityRow {
   trackingNumber: string
   bookedAt: string
   bookedBy: string
+  courierSubStatus?: string | null
 }
 interface ActivityResponse {
   activity: ActivityRow[]
@@ -1159,6 +1161,7 @@ function BookingActivityTab() {
                       <TableHead className="min-w-[160px]">Tracking #</TableHead>
                       <TableHead className="min-w-[140px]">Booked At</TableHead>
                       <TableHead className="min-w-[120px]">Booked By</TableHead>
+                      <TableHead className="text-right">Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1188,6 +1191,13 @@ function BookingActivityTab() {
                           {a.bookedAt ? formatDateTime(a.bookedAt) : '—'}
                         </TableCell>
                         <TableCell className="text-xs">{a.bookedBy}</TableCell>
+                        <TableCell className="text-right">
+                          <CancelCourierBookingButton
+                            entityType={a.type}
+                            entityId={a.id}
+                            courierSubStatus={a.courierSubStatus}
+                          />
+                        </TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

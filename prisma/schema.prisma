@@ -1886,7 +1886,7 @@ model Order {
   courierCompanyIntegrationId String?
   courierCompanyIntegration   CompanyIntegration? @relation("OrderCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
   // Booking Workbench fields (migration 013)
-  courierBookingStatus        String   @default("not_booked") // 'not_booked' | 'booked' | 'failed' (CHECK in SQL)
+  courierBookingStatus        String   @default("not_booked") // 'not_booked' | 'booked' | 'failed' | 'cancelled' (CHECK in SQL)
   // Persisted booking failure reason (Phase 3/5). When courierBookingStatus='failed',
   // this holds the specific error message from the courier adapter or city-validation
   // step. Survives navigation so the user can see WHY booking failed from the

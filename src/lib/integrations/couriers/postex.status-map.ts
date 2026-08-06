@@ -37,7 +37,7 @@ export interface PostExStatusMapping {
  *
  * Exact mapping (confirmed via live Postman testing + PostEx Order Status API docs):
  *
- *   Unbooked                        → no_change (stays confirmed), subStatus=null
+ *   Unbooked                        → no_change (stays confirmed), subStatus='slip_generated'
  *   Booked                          → no_change, subStatus='pickup_requested'
  *   Picked By PostEx                → dispatched, subStatus='picked_up', triggerDispatch=true
  *   PostEx WareHouse                → no_change (already dispatched), subStatus='at_warehouse'
@@ -61,7 +61,7 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
     case 'unbooked':
       return {
         orderStatus: 'no_change',
-        courierSubStatus: null,
+        courierSubStatus: 'slip_generated',
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: false,

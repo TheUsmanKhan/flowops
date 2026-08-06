@@ -35,6 +35,7 @@ import { Card, CardContent } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
 import { toast } from 'sonner'
 import { formatPKR, formatDateTime } from './_shared'
+import { CancelCourierBookingButton } from './cancel-courier-booking-button'
 
 export interface ShipmentTrackingCardProps {
   shipment: {
@@ -47,6 +48,7 @@ export interface ShipmentTrackingCardProps {
     dispatchedAt: string | null
     deliveredAt: string | null
     createdAt: string
+    courierSubStatus?: string | null
   }
 }
 
@@ -230,6 +232,15 @@ export function ShipmentTrackingCard({ shipment }: ShipmentTrackingCardProps) {
             </p>
           </div>
         </div>
+
+        {/* Cancel courier booking button — only shown when cancellable (slip_generated / pickup_requested) */}
+        {shipment.trackingNumber && !isCancelled && (
+          <CancelCourierBookingButton
+            entityType="exchange_shipment"
+            entityId={shipment.id}
+            courierSubStatus={shipment.courierSubStatus}
+          />
+        )}
       </CardContent>
     </Card>
   )

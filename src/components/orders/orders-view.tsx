@@ -70,6 +70,7 @@ import {
   Truck,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { CancelCourierBookingButton } from './cancel-courier-booking-button'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types — match GET /api/orders response shape
@@ -1202,17 +1203,24 @@ export function OrdersView() {
                           )}
                         </TableCell>
                         <TableCell className="text-right">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={(e) => {
-                              e.stopPropagation()
-                              navigate({ name: 'order-detail', id: order.id })
-                            }}
-                          >
-                            View
-                            <ArrowRight className="h-3.5 w-3.5" />
-                          </Button>
+                          <div className="flex items-center justify-end gap-1">
+                            <CancelCourierBookingButton
+                              entityType="order"
+                              entityId={order.id}
+                              courierSubStatus={order.courierSubStatus}
+                            />
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                navigate({ name: 'order-detail', id: order.id })
+                              }}
+                            >
+                              View
+                              <ArrowRight className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     )

@@ -47,6 +47,7 @@ export async function GET(req: NextRequest) {
         trackingNumber: true,
         courierName: true,
         courierCompanyIntegrationId: true,
+        courierSubStatus: true,
         dispatchedAt: true,
         createdBy: true,
       },
@@ -67,6 +68,7 @@ export async function GET(req: NextRequest) {
         exchangeShipmentNumber: true,
         trackingNumber: true,
         courierCompanyIntegrationId: true,
+        courierSubStatus: true,
         dispatchedAt: true,
         createdBy: true,
       },
@@ -105,6 +107,7 @@ export async function GET(req: NextRequest) {
         trackingNumber: o.trackingNumber ?? '',
         bookedAt: o.dispatchedAt?.toISOString() ?? '',
         bookedBy: employeeMap.get(o.createdBy ?? '') ?? 'Unknown',
+        courierSubStatus: o.courierSubStatus,
       })),
       ...bookedShipments.map((s) => ({
         id: s.id,
@@ -114,6 +117,7 @@ export async function GET(req: NextRequest) {
         trackingNumber: s.trackingNumber ?? '',
         bookedAt: s.dispatchedAt?.toISOString() ?? '',
         bookedBy: employeeMap.get(s.createdBy ?? '') ?? 'Unknown',
+        courierSubStatus: s.courierSubStatus,
       })),
     ].sort((a, b) => new Date(b.bookedAt).getTime() - new Date(a.bookedAt).getTime())
 
