@@ -28,7 +28,8 @@ export async function POST(req: Request) {
     const store = await cookies()
     store.set(SESSION_COOKIE, token, {
       httpOnly: true,
-      sameSite: 'lax',
+      sameSite: 'none',
+      secure: false, // required for SameSite=none in dev (no HTTPS)
       path: '/',
       maxAge: SESSION_MAX_AGE,
     })
