@@ -129,10 +129,15 @@ interface OrderDetail {
     deliveryCity: string | null
     courierName: string | null
     trackingNumber: string | null
+    courierCompanyIntegrationId?: string | null
+    courierBookingStatus?: string | null
     courierCityStatus?: string
     courierSubStatus?: string | null
     needsShipperAdvice?: boolean
     notesForCourier: string | null
+    // Universal courier reference fields (migration 015)
+    orderRefNumber?: string | null
+    orderDetail?: string | null
     dispatchLocationId: string | null
     dispatchLocation: { id: string; name: string; city: string } | null
 
@@ -1100,11 +1105,38 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                 </div>
               )}
               <InfoRow label="Courier" value={order.courierName ?? '—'} />
+              {order.courierBookingStatus && (
+                <InfoRow
+                  label="Booking Status"
+                  value={
+                    order.courierBookingStatus === 'booked'
+                      ? 'Booked'
+                      : order.courierBookingStatus === 'failed'
+                        ? 'Failed'
+                        : 'Not booked'
+                  }
+                />
+              )}
               {order.trackingNumber && (
                 <InfoRow
                   label="Tracking #"
                   value={order.trackingNumber}
                   valueClassName="font-mono"
+                />
+              )}
+              {order.orderRefNumber && (
+                <InfoRow
+                  label="Order Reference"
+                  value={order.orderRefNumber}
+                  valueClassName="font-mono"
+                  muted
+                />
+              )}
+              {order.orderDetail && (
+                <InfoRow
+                  label="Order Detail"
+                  value={order.orderDetail}
+                  muted
                 />
               )}
               {order.dispatchLocation && (

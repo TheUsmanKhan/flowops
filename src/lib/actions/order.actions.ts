@@ -309,6 +309,8 @@ export async function createManualOrder(
   orderId: string
   flowopsOrderNumber: string
   orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
+  /** Auto-booking result (migration 015+). Present only if auto-booking was attempted. */
+  autoBooking?: { trackingNumber?: string; error?: string }
 }>> {
   try {
     const ctx = await getWorkspace()
@@ -697,6 +699,39 @@ export async function createManualOrder(
       await reserveOrderStock(order.id, ctx)
     }
 
+    // 14. AUTO-BOOKING (migration 015+): if the company's courierBookingMode
+    // is 'automatic' AND a default courier integration is set AND the order
+    // is confirmed, automatically book the courier right now. This fulfills
+    // the Order Settings UI promise: "Courier booking happens automatically
+    // when a manual order is confirmed."
+    //
+    // NON-BLOCKING: if auto-booking fails (city mismatch, courier API down,
+    // missing pickup address, etc.), the order is STILL created successfully
+    // — it just lands in the manual Booking Workbench with
+    // courierBookingStatus='failed' for retry. The error is returned in the
+    // autoBookingError field so the frontend can show a toast.
+    let autoBookingResult: { trackingNumber?: string; error?: string } | undefined
+    if (orderStatus === 'confirmed' && d.courier_company_integration_id) {
+      try {
+        const { maybeAutoBookOrder } = await import('./booking.actions')
+        const bookResult = await maybeAutoBookOrder(order.id, 'manual', orderStatus)
+        if (bookResult.success && bookResult.data) {
+          autoBookingResult = { trackingNumber: bookResult.data.trackingNumber }
+        } else if (bookResult.error) {
+          // Don't surface "skipped" messages (those are informational, not errors)
+          if (!bookResult.error.includes('skipped')) {
+            autoBookingResult = { error: bookResult.error }
+          }
+        }
+      } catch (err) {
+        // Auto-booking threw — log but don't fail the order creation
+        console.error('[createManualOrder] Auto-booking failed:', err)
+        autoBookingResult = {
+          error: err instanceof Error ? err.message : 'Auto-booking failed',
+        }
+      }
+    }
+
     await insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
@@ -708,7 +743,12 @@ export async function createManualOrder(
 
     return {
       success: true,
-      data: { orderId: order.id, flowopsOrderNumber, orderItems: createdItems },
+      data: {
+        orderId: order.id,
+        flowopsOrderNumber,
+        orderItems: createdItems,
+        autoBooking: autoBookingResult,
+      },
     }
   } catch (err) {
     return {
@@ -1575,6 +1615,7 @@ export async function listOrders(
           courierName: o.courierName,
           trackingNumber: o.trackingNumber,
           courierCompanyIntegrationId: o.courierCompanyIntegrationId,
+          courierBookingStatus: o.courierBookingStatus,
           courierCityStatus: o.courierCityStatus,
           courierSubStatus: o.courierSubStatus,
           needsShipperAdvice: o.needsShipperAdvice,

@@ -128,6 +128,8 @@ interface CreateOrderResponse {
   orderId: string
   flowopsOrderNumber: string
   orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
+  /** Auto-booking result (migration 015+). Present only if auto-booking was attempted. */
+  autoBooking?: { trackingNumber?: string; error?: string }
 }
 
 type PaymentType = 'full_cod' | 'partial_advance' | 'fully_prepaid'
@@ -782,7 +784,18 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
 
     try {
       const data = await api.post<CreateOrderResponse>('/api/orders', payload)
-      toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
+      // Show auto-booking result if the backend attempted it
+      if (data.autoBooking?.trackingNumber) {
+        toast.success(
+          `Order ${data.flowopsOrderNumber} created and auto-booked with courier. Tracking: ${data.autoBooking.trackingNumber}`,
+        )
+      } else if (data.autoBooking?.error) {
+        toast.warning(
+          `Order ${data.flowopsOrderNumber} created, but auto-booking failed: ${data.autoBooking.error}. You can book manually from the Booking Workbench.`,
+        )
+      } else {
+        toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
+      }
       setHasChanges(false) // Reset guard — no false-positive prompt after saving
       // Phase 10: Delete the draft now that the real order is created
       if (draftId) {
@@ -868,6 +881,9 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
               setRecipientName={setRecipientName}
               addressSelectorValue={addressSelectorValue}
               onAddressSelectorChange={handleAddressSelectorChange}
+              courierProviderKey={
+                courierIntegrations.find((c) => c.id === courierIntegrationId)?.provider?.providerKey ?? ''
+              }
               courierName={courierName}
               setCourierName={setCourierName}
               courierIntegrationId={courierIntegrationId}
@@ -1029,6 +1045,7 @@ function CustomerSection({
   setRecipientName,
   addressSelectorValue,
   onAddressSelectorChange,
+  courierProviderKey,
   courierName,
   setCourierName,
   courierIntegrationId,
@@ -1064,6 +1081,8 @@ function CustomerSection({
   setRecipientName: (v: string) => void
   addressSelectorValue: AddressSelectorValue
   onAddressSelectorChange: (v: AddressSelectorValue) => void
+  /** Optional: drives CityAutocomplete in AddressSelector (empty = plain text) */
+  courierProviderKey?: string
   courierName: string
   setCourierName: (v: string) => void
   courierIntegrationId: string
@@ -1236,6 +1255,7 @@ function CustomerSection({
                 onChange={onAddressSelectorChange}
                 addressError={fieldError('delivery_address')}
                 cityError={fieldError('delivery_city')}
+                courierProviderKey={courierProviderKey}
               />
             </div>
 

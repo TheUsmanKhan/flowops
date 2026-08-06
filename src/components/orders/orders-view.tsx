@@ -98,9 +98,15 @@ interface OrderRow {
   needsShipperAdvice?: boolean
   trackingNumber?: string | null
   courierName?: string | null
+  courierCompanyIntegrationId?: string | null
+  courierBookingStatus?: string
   estimatedDeliveryCharge?: number | null
   taxAmount?: number | null
   taxLabel?: string | null
+  // Universal courier reference fields (migration 015)
+  orderRefNumber?: string | null
+  orderDetail?: string | null
+  notesForCourier?: string | null
 }
 
 interface OrdersListResponse {
@@ -1025,6 +1031,9 @@ export function OrdersView() {
                     <TableHead>Status</TableHead>
                     <TableHead>Payment</TableHead>
                     <TableHead className="text-right">To Collect</TableHead>
+                    <TableHead>Courier</TableHead>
+                    <TableHead>Tracking #</TableHead>
+                    <TableHead>Reference</TableHead>
                     <TableHead>Created</TableHead>
                     <TableHead className="text-right">Delivery</TableHead>
                     <TableHead className="text-right">Tax</TableHead>
@@ -1083,11 +1092,6 @@ export function OrdersView() {
                             <span className="text-xs text-muted-foreground font-mono">
                               {order.customerPhone}
                             </span>
-                            {order.trackingNumber && (
-                              <span className="text-[10px] text-muted-foreground">
-                                {order.courierName ?? 'Courier'}: {order.trackingNumber}
-                              </span>
-                            )}
                           </div>
                         </TableCell>
                         <TableCell className="text-right tabular-nums font-medium">
@@ -1128,6 +1132,56 @@ export function OrdersView() {
                             >
                               {formatPKR(toCollect)}
                             </span>
+                          )}
+                        </TableCell>
+                        {/* Courier — name + booking status badge */}
+                        <TableCell>
+                          {order.courierName ? (
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-xs font-medium">{order.courierName}</span>
+                              {order.courierBookingStatus && order.courierBookingStatus !== 'booked' && (
+                                <span
+                                  title={order.courierBookingStatus}
+                                  className={cn(
+                                    'text-[9px] inline-flex items-center gap-0.5 px-1 py-0.5 rounded border w-fit',
+                                    order.courierBookingStatus === 'failed'
+                                      ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                      : 'bg-gray-50 text-gray-600 border-gray-200',
+                                  )}
+                                >
+                                  {order.courierBookingStatus === 'failed' ? 'Failed' : 'Not booked'}
+                                </span>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        {/* Tracking # — monospace, click to copy */}
+                        <TableCell>
+                          {order.trackingNumber ? (
+                            <span
+                              className="text-xs font-mono text-primary cursor-pointer hover:underline"
+                              title="Click to copy"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                navigator.clipboard?.writeText(order.trackingNumber!).catch(() => {})
+                              }}
+                            >
+                              {order.trackingNumber}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        {/* Reference — universal courier reference (migration 015) */}
+                        <TableCell>
+                          {order.orderRefNumber ? (
+                            <span className="text-xs font-mono" title={order.orderDetail ?? ''}>
+                              {order.orderRefNumber}
+                            </span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">—</span>
                           )}
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground whitespace-nowrap">

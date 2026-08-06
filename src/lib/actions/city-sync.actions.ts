@@ -100,52 +100,54 @@ export async function syncCourierOperationalCities(providerKey: string): Promise
     const existingMap = new Map(existingCities.map((c) => [c.cityName, c]))
     const freshCityNames = new Set(cities.map((c) => c.cityName))
 
-    // Upsert each fresh city
+    // Upsert each fresh city — batched in a single transaction for performance
+    // (270+ sequential upserts = 270 round-trips; a single transaction is ~10x faster)
     const now = new Date()
-    let upserted = 0
-    for (const city of cities) {
-      await db.courierOperationalCity.upsert({
-        where: {
-          providerKey_cityName: { providerKey, cityName: city.cityName },
-        },
-        update: {
-          cityId: city.cityId ?? null,
-          isPickupCity: city.isPickupCity,
-          isDeliveryCity: city.isDeliveryCity,
-          lastSyncedAt: now,
-        },
-        create: {
-          providerKey,
-          cityName: city.cityName,
-          cityId: city.cityId ?? null,
-          isPickupCity: city.isPickupCity,
-          isDeliveryCity: city.isDeliveryCity,
-          lastSyncedAt: now,
-        },
-      })
-      upserted++
-    }
-    result.upsertedCount = upserted
+    await db.$transaction(
+      cities.map((city) =>
+        db.courierOperationalCity.upsert({
+          where: {
+            providerKey_cityName: { providerKey, cityName: city.cityName },
+          },
+          update: {
+            cityId: city.cityId ?? null,
+            isPickupCity: city.isPickupCity,
+            isDeliveryCity: city.isDeliveryCity,
+            lastSyncedAt: now,
+          },
+          create: {
+            providerKey,
+            cityName: city.cityName,
+            cityId: city.cityId ?? null,
+            isPickupCity: city.isPickupCity,
+            isDeliveryCity: city.isDeliveryCity,
+            lastSyncedAt: now,
+          },
+        }),
+      ),
+    )
+    result.upsertedCount = cities.length
 
     // Disable cities that were cached but are no longer in the fresh response
-    let disabled = 0
-    for (const [cityName, existing] of existingMap) {
-      if (!freshCityNames.has(cityName)) {
-        // Only disable if currently active (avoid redundant writes)
-        if (existing.isPickupCity || existing.isDeliveryCity) {
-          await db.courierOperationalCity.update({
-            where: { id: existing.id },
+    // — also batched in a transaction
+    const toDisable = existingCities.filter(
+      (e) => !freshCityNames.has(e.cityName) && (e.isPickupCity || e.isDeliveryCity),
+    )
+    if (toDisable.length > 0) {
+      await db.$transaction(
+        toDisable.map((e) =>
+          db.courierOperationalCity.update({
+            where: { id: e.id },
             data: {
               isPickupCity: false,
               isDeliveryCity: false,
               lastSyncedAt: now,
             },
-          })
-          disabled++
-        }
-      }
+          }),
+        ),
+      )
     }
-    result.disabledCount = disabled
+    result.disabledCount = toDisable.length
 
     // Audit + metric (non-fatal)
     await insertAuditLog({

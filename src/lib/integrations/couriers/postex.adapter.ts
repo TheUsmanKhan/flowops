@@ -158,16 +158,11 @@ export class PostExAdapter implements CourierAdapter {
   // ──────────────────────────────────────────────────────────────
 
   async bookShipment(input: BookShipmentInput): Promise<BookShipmentResult> {
-    // Before sending, revalidate the city at booking time (Prompt 2's city-matcher).
-    // This is a dynamic import to avoid circular dependency issues at module load.
-    const { revalidateCityAtBookingTime } = await import('../city-matcher')
-    const cityValid = await revalidateCityAtBookingTime('postex', input.deliveryCity)
-    if (!cityValid) {
-      return {
-        success: false,
-        error: `City "${input.deliveryCity}" is no longer available for delivery — please re-verify the city before booking.`,
-      }
-    }
+    // NOTE: City validation is handled by the CALLER (booking-workbench/book
+    // route or the auto-booking server action) via revalidateCityAtBookingTime()
+    // with the companyIntegrationId — which enables the live PostEx fallback.
+    // The adapter doesn't have the integration ID, so it can't do the live
+    // fallback. We trust the caller's pre-validation.
 
     // Build the request body — ONLY fields that exist in the confirmed API.
     // NO weight/handling/itemsQty/paymentMethod/orderTags fields.
@@ -422,33 +417,102 @@ export class PostExAdapter implements CourierAdapter {
   // 7. fetchOperationalCities — GET v2/get-operational-city
   // ──────────────────────────────────────────────────────────────
 
+  /**
+   * Fetch ALL operational cities from PostEx.
+   *
+   * PostEx's v2/get-operational-city endpoint accepts an optional
+   * `operationalCityType` query param (Pickup | Delivery | null). Per the
+   * official docs, omitting it should return all cities — but in practice
+   * some merchants have reported receiving only a subset. To be safe, we
+   * call the endpoint THREE times (no filter, Pickup, Delivery) and union
+   * the results. This guarantees we capture every city even if PostEx's
+   * default response is incomplete.
+   *
+   * Each call has a 15-second timeout (AbortController) so a hung PostEx
+   * doesn't block the sync indefinitely.
+   */
   async fetchOperationalCities(): Promise<OperationalCity[]> {
-    const response = await fetch(
-      `${POSTEX_BASE_URL}/v2/get-operational-city`,
-      {
-        method: 'GET',
-        headers: {
-          token: this.token,
-        },
-      },
-    )
+    // Helper: call the endpoint with a given operationalCityType (or none)
+    const fetchBatch = async (
+      cityType: 'Pickup' | 'Delivery' | null,
+    ): Promise<PostExOperationalCity[]> => {
+      const url = new URL(`${POSTEX_BASE_URL}/v2/get-operational-city`)
+      if (cityType) url.searchParams.set('operationalCityType', cityType)
 
-    const json: PostExApiResponse<PostExOperationalCity[]> = await response.json()
-
-    if (json.statusCode === 200 || json.statusCode === '200') {
-      const dist = json.dist ?? []
-      return dist.map((c) => ({
-        cityName: c.operationalCityName,
-        // PostEx doesn't provide a cityId in the cities API — leave undefined
-        cityId: undefined,
-        isPickupCity: c.isPickupCity === true || c.isPickupCity === 'true',
-        isDeliveryCity: c.isDeliveryCity === true || c.isDeliveryCity === 'true',
-      }))
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 15_000)
+      try {
+        const response = await fetch(url.toString(), {
+          method: 'GET',
+          headers: { token: this.token },
+          signal: controller.signal,
+        })
+        const json: PostExApiResponse<PostExOperationalCity[]> = await response.json()
+        if (json.statusCode === 200 || json.statusCode === '200') {
+          return json.dist ?? []
+        }
+        // Non-200 — log but don't throw (the other calls might still succeed)
+        console.warn(
+          `[postex] fetchOperationalCities(cityType=${cityType}) returned statusCode ${json.statusCode}: ${json.statusMessage}`,
+        )
+        return []
+      } catch (err) {
+        // Network error / timeout — log and return empty (don't crash the whole sync)
+        console.warn(
+          `[postex] fetchOperationalCities(cityType=${cityType}) failed:`,
+          err instanceof Error ? err.message : err,
+        )
+        return []
+      } finally {
+        clearTimeout(timeout)
+      }
     }
 
-    throw new Error(
-      json.statusMessage || `PostEx cities API returned statusCode ${json.statusCode}`,
-    )
+    // Call all three variants in parallel, then union by cityName
+    const [all, pickup, delivery] = await Promise.all([
+      fetchBatch(null),
+      fetchBatch('Pickup'),
+      fetchBatch('Delivery'),
+    ])
+
+    // Union by cityName (case-sensitive — PostEx's casing is inconsistent
+    // but the same city won't appear with different casing within one call)
+    const cityMap = new Map<string, PostExOperationalCity>()
+    for (const c of [...all, ...pickup, ...delivery]) {
+      if (!c?.operationalCityName) continue
+      // Prefer the entry where both flags are true; otherwise OR them together
+      const existing = cityMap.get(c.operationalCityName)
+      if (existing) {
+        cityMap.set(c.operationalCityName, {
+          ...existing,
+          isPickupCity:
+            existing.isPickupCity === true ||
+            existing.isPickupCity === 'true' ||
+            c.isPickupCity === true ||
+            c.isPickupCity === 'true',
+          isDeliveryCity:
+            existing.isDeliveryCity === true ||
+            existing.isDeliveryCity === 'true' ||
+            c.isDeliveryCity === true ||
+            c.isDeliveryCity === 'true',
+        })
+      } else {
+        cityMap.set(c.operationalCityName, c)
+      }
+    }
+
+    if (cityMap.size === 0) {
+      throw new Error(
+        'PostEx cities API returned 0 cities across all three operationalCityType variants. Check the integration token.',
+      )
+    }
+
+    return Array.from(cityMap.values()).map((c) => ({
+      cityName: c.operationalCityName,
+      cityId: undefined,
+      isPickupCity: c.isPickupCity === true || c.isPickupCity === 'true',
+      isDeliveryCity: c.isDeliveryCity === true || c.isDeliveryCity === 'true',
+    }))
   }
 
   // ──────────────────────────────────────────────────────────────

@@ -3928,3 +3928,47 @@ Stage Summary:
 - `orderDetail` follows the same pattern: auto-generated from cart items (Product Title + SKU + variant attributes + qty), editable, mapped to the courier's itemDescription/orderDetail field at booking time.
 - `transactionNotes` (the existing `notesForCourier` column) is now also exposed in the Booking Workbench per-row UI so staff can edit it per-booking without going back to the order detail page.
 - Bonus fix: the /api/booking-workbench/book route now handles BOTH orderId AND shipmentId — previously the Booking Workbench UI sent shipmentId for exchange-shipment rows but the backend only looked up orderId, so exchange-shipment booking was silently broken. Now both row types book correctly through the same endpoint.
+
+---
+Task ID: 16
+Agent: main
+Task: Fix 4 issues — (1) PostEx city sync missing cities + no live fallback, (2) no city autocomplete in order create, (3) auto-booking mode ignored, (4) orders dashboard + detail missing courier/tracking/reference columns
+
+Work Log:
+- Ran two parallel Explore subagents to audit: (a) PostEx city sync + matcher, (b) auto-booking + order list/detail columns. Findings:
+  - City sync: 270 cities cached (synced once on 2026-08-04, never re-synced). fetchOperationalCities() makes a single GET with no pagination. revalidateCityAtBookingTime() only checks local DB — NO live fallback.
+  - Auto-booking: courierBookingMode='automatic' is stored + editable but NEVER read by createManualOrder. The UI promises "Courier booking happens automatically" — this is a lie. No bookOrder server action exists.
+  - Orders dashboard: 10 columns, no dedicated courier/tracking/reference columns (courier/tracking only as tiny sub-line under Customer). Order detail: shows courier/tracking/notes in Delivery card but NOT orderRefNumber/orderDetail. /api/orders/[id] route doesn't return orderRefNumber/orderDetail.
+
+PHASE 4 — Orders dashboard + detail columns:
+- src/components/orders/orders-view.tsx: extended OrderRow type with orderRefNumber, orderDetail, notesForCourier, courierCompanyIntegrationId, courierBookingStatus. Added 3 new <TableHead> columns: Courier, Tracking #, Reference. Moved courier/tracking out of the Customer cell into dedicated columns. Courier column shows name + booking status badge (Not booked/Failed). Tracking # is monospace + click-to-copy. Reference shows orderRefNumber (title attribute shows orderDetail on hover).
+- src/lib/actions/order.actions.ts → listOrders: added courierBookingStatus to the returned fields.
+- src/app/api/orders/[id]/route.ts: added courierBookingStatus, orderRefNumber, orderDetail to the JSON response.
+- src/components/orders/order-detail-view.tsx: extended Order type with courierCompanyIntegrationId, courierBookingStatus, orderRefNumber, orderDetail. Delivery card now shows: Courier, Booking Status, Tracking #, Order Reference, Order Detail, Dispatch from, Notes.
+
+PHASE 2 — City autocomplete in Order Create:
+- src/components/customers/AddressSelector.tsx: added optional courierProviderKey prop. When set, the city field uses <CityAutocomplete> (live suggestions from courier_operational_cities); when empty, falls back to plain text input.
+- src/components/orders/order-create-view.tsx: passes courierProviderKey (derived from the selected courier integration's provider.providerKey) through CustomerSection to AddressSelector. When a courier is selected, the city field becomes an autocomplete with live suggestions; when no courier, it's plain text.
+
+PHASE 1 — PostEx city sync + live fallback:
+- src/lib/integrations/couriers/postex.adapter.ts → fetchOperationalCities(): now calls the endpoint THREE times (no filter, Pickup, Delivery) in parallel and unions the results by cityName. This guarantees we capture every city even if PostEx's default response is incomplete. Each call has a 15-second AbortController timeout. Throws if ALL three return 0 cities. ORs the isPickupCity/isDeliveryCity flags across calls so a city that's delivery-only in one call and pickup-only in another gets both flags.
+- src/lib/integrations/city-matcher.ts → revalidateCityAtBookingTime(): added LIVE PostEx fallback. New signature: (providerKey, cityName, companyIntegrationId?). When the local cache lookup misses AND a companyIntegrationId is provided, queries PostEx live via adapter.fetchOperationalCities(), upserts ALL fetched cities into the cache (batched $transaction — bonus refresh), then re-checks. This ensures booking NEVER fails due to a stale/incomplete local cache — the courier is the source of truth. On failure (network error, bad credentials), logs and returns false (doesn't crash the booking).
+- src/lib/integrations/couriers/postex.adapter.ts → bookShipment(): removed the redundant revalidateCityAtBookingTime() call (the caller — booking route or auto-booking action — already does it with the integration ID, which enables the live fallback; the adapter doesn't have the integration ID so its check can't do the live fallback).
+- src/app/api/booking-workbench/book/route.ts: passes integration.id to revalidateCityAtBookingTime() so the live fallback works.
+- src/lib/actions/city-sync.actions.ts: batched the 270+ upserts in a single $transaction (was N+1 sequential round-trips). Same for the disable step.
+
+PHASE 3 — Auto-booking:
+- src/lib/actions/booking.actions.ts (NEW): created bookOrderWithCourier() server action — the single source of truth for order booking logic. Extracted from the /api/booking-workbench/book route. Handles: fetch order + items + customer, validate city (with live fallback), compute weight + orderType, get pickup address, build BookShipmentInput (using stored orderRefNumber/orderDetail/notesForCourier as defaults), call adapter.bookShipment() via executeLoggedIntegrationAction, update order with tracking + booking status. On failure: sets courierBookingStatus='failed' and returns error (doesn't throw).
+- src/lib/actions/booking.actions.ts → maybeAutoBookOrder(): reads companyOrderSetting.courierBookingMode + defaultCourierCompanyIntegrationId. Only fires when mode='automatic' AND integration set AND order source='manual' AND order confirmed. Returns skip reason when conditions aren't met (non-blocking).
+- src/lib/actions/order.actions.ts → createManualOrder(): after stock reservation (step 13), calls maybeAutoBookOrder() when the order is confirmed AND a courier integration was selected. NON-BLOCKING: if auto-booking fails, the order is still created successfully — it lands in the manual workbench with courierBookingStatus='failed'. Returns autoBooking result in the response.
+- src/components/orders/order-create-view.tsx: CreateOrderResponse type extended with autoBooking field. Submit success handler shows 3 different toasts: (a) "created and auto-booked" with tracking number, (b) "created but auto-booking failed" with error + "book manually from Workbench", (c) "created successfully" (no auto-booking attempted).
+- src/app/api/booking-workbench/book/route.ts: REWROTE to delegate ORDER booking to bookOrderWithCourier() server action (DRY). Exchange-shipment booking stays inline (not used by auto-booking). Fixed courierName not existing on ExchangeShipment model (removed from update data — courier is identified by courierCompanyIntegrationId).
+
+Stage Summary:
+- City sync: fetchOperationalCities() now calls 3 variants (all/Pickup/Delivery) in parallel + unions — captures every PostEx city. 15s timeout per call.
+- City fallback: revalidateCityAtBookingTime() now does a LIVE PostEx lookup on cache miss + upserts the result. Booking NEVER fails due to stale local cache.
+- City autocomplete: Order Create form now shows live city suggestions when a courier is selected (was plain text).
+- Auto-booking: courierBookingMode='automatic' now ACTUALLY auto-books when an order is created + confirmed + has a courier selected. Non-blocking on failure (order still created, lands in manual workbench for retry).
+- Orders dashboard: 3 new columns (Courier, Tracking #, Reference). Courier shows name + booking status badge. Tracking is click-to-copy. Reference shows orderRefNumber.
+- Order detail: Delivery card now shows Booking Status, Order Reference, Order Detail (in addition to existing Courier, Tracking #, Notes).
+- All 4 issues verified: tsc 0 errors, lint 0 errors, dev server runs, page loads 200.

@@ -102,11 +102,15 @@ export async function GET(
         courierName: order.courierName,
         trackingNumber: order.trackingNumber,
         courierCompanyIntegrationId: order.courierCompanyIntegrationId,
+        courierBookingStatus: order.courierBookingStatus,
         courierCityStatus: order.courierCityStatus,
         courierSubStatus: order.courierSubStatus,
         needsShipperAdvice: order.needsShipperAdvice,
         unrecognizedCourierStatus: order.unrecognizedCourierStatus,
         notesForCourier: order.notesForCourier,
+        // Universal courier reference fields (migration 015)
+        orderRefNumber: order.orderRefNumber,
+        orderDetail: order.orderDetail,
         dispatchLocationId: order.dispatchLocationId,
         dispatchLocation: order.dispatchLocation
           ? {

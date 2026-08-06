@@ -9,6 +9,7 @@ import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { MapPin, Star, Plus } from 'lucide-react'
 import { formatLastUsed, type AddressDTO } from './types'
+import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 
 export interface AddressSelectorValue {
   /** The selected saved address ID, or null if "new address" mode. */
@@ -32,6 +33,12 @@ export interface AddressSelectorProps {
   addressError?: string
   /** Show the field error for delivery_city (from form validation). */
   cityError?: string
+  /**
+   * Optional: when set, the city field uses CityAutocomplete (live suggestions
+   * from courier_operational_cities) instead of a plain text input. Pass the
+   * selected courier's providerKey (e.g. 'postex', 'tcs').
+   */
+  courierProviderKey?: string
 }
 
 /**
@@ -53,6 +60,7 @@ export function AddressSelector({
   onChange,
   addressError,
   cityError,
+  courierProviderKey,
 }: AddressSelectorProps) {
   const { usedCustomerAddressId, deliveryAddress, deliveryCity, saveAddressForNextTime } = value
   const isNewMode = usedCustomerAddressId === null
@@ -186,11 +194,20 @@ export function AddressSelector({
         </div>
         <div className="space-y-1">
           <Label className="text-xs">City *</Label>
-          <Input
-            placeholder="e.g. Lahore"
-            value={deliveryCity}
-            onChange={(e) => onChange({ ...value, deliveryCity: e.target.value })}
-          />
+          {courierProviderKey ? (
+            <CityAutocomplete
+              providerKey={courierProviderKey}
+              value={deliveryCity}
+              onChange={(city) => onChange({ ...value, deliveryCity: city })}
+              placeholder="Search city…"
+            />
+          ) : (
+            <Input
+              placeholder="e.g. Lahore"
+              value={deliveryCity}
+              onChange={(e) => onChange({ ...value, deliveryCity: e.target.value })}
+            />
+          )}
           {cityError && <p className="text-xs text-destructive">{cityError}</p>}
         </div>
       </div>
