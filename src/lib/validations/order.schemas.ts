@@ -78,8 +78,11 @@ export const createManualOrderSchema = z
     delivery_city: z.string().min(2, 'Delivery city is required'),
     // Logistics
     courier_name: z.string().max(100).optional().or(z.literal('')),
+    courier_company_integration_id: z.string().optional().or(z.literal('')),
     dispatch_location_id: z.string().min(1, 'Dispatch location is required'),
     notes_for_courier: z.string().max(500).optional().or(z.literal('')),
+    order_ref_number: z.string().max(200).optional().or(z.literal('')),
+    order_detail: z.string().max(1000).optional().or(z.literal('')),
     discount_amount: z.number().min(0).optional(),
     discount_reason: z.string().max(200).optional().or(z.literal('')),
     courier_charges: z.number().min(0).optional(),

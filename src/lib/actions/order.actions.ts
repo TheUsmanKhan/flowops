@@ -564,6 +564,8 @@ export async function createManualOrder(
         deliveryAddress: d.delivery_address,
         deliveryCity: d.delivery_city,
         courierName: d.courier_name || null,
+        courierCompanyIntegrationId: d.courier_company_integration_id || null,
+        recommendedCourierCompanyIntegrationId: d.courier_company_integration_id || null,
         dispatchLocationId: d.dispatch_location_id,
         notesForCourier: d.notes_for_courier || null,
         skippedConfirmation,

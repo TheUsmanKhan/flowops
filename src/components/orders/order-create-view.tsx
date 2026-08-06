@@ -235,8 +235,11 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   const [deliveryAddress, setDeliveryAddress] = useState('')
   const [deliveryCity, setDeliveryCity] = useState('')
   const [courierName, setCourierName] = useState('')
+  const [courierIntegrationId, setCourierIntegrationId] = useState('')
   const [dispatchLocationId, setDispatchLocationId] = useState('')
   const [notesForCourier, setNotesForCourier] = useState('')
+  const [orderRefNumber, setOrderRefNumber] = useState('')
+  const [orderDetail, setOrderDetail] = useState('')
   const [discountAmount, setDiscountAmount] = useState('')
   const [discountReason, setDiscountReason] = useState('')
   const [deliveryCharge, setDeliveryCharge] = useState('')
@@ -360,6 +363,41 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     staleTime: 30_000,
   })
 
+  // Fetch connected courier integrations for the courier dropdown
+  const couriersQuery = useQuery<{
+    integrations: Array<{
+      id: string
+      connectionName: string
+      isActive: boolean
+      provider: { providerKey: string; providerName: string }
+    }>
+  }>({
+    queryKey: ['integrations', 'courier'],
+    queryFn: () => api.get('/api/integrations?category=courier'),
+    staleTime: 60_000,
+  })
+  const courierIntegrations = (couriersQuery.data?.integrations ?? []).filter((i) => i.isActive)
+
+  // Fetch order settings to get default courier
+  const orderSettingsQuery = useQuery<{
+    settings: {
+      defaultCourierCompanyIntegrationId: string | null
+      courierBookingMode: string
+    }
+  }>({
+    queryKey: ['order-settings'],
+    queryFn: () => api.get('/api/order-settings'),
+    staleTime: 60_000,
+  })
+
+  // Set default courier from settings when data loads
+  useEffect(() => {
+    if (orderSettingsQuery.data?.settings?.defaultCourierCompanyIntegrationId && !courierIntegrationId) {
+      setCourierIntegrationId(orderSettingsQuery.data.settings.defaultCourierCompanyIntegrationId)
+    }
+  }, [orderSettingsQuery.data, courierIntegrationId])
+
+  // Auto-compute order detail from cart items (moved after variantOptions declaration)
   const productsQuery = useQuery<ProductsResponse>({
     queryKey: ['products', 'for-order-create'],
     queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100'),
@@ -389,6 +427,21 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   useEffect(() => {
     variantOptionsRef.current = variantOptions
   }, [variantOptions])
+
+  // Auto-compute order detail from cart items
+  useEffect(() => {
+    if (cart.length > 0) {
+      const details = cart.map((i) => {
+        const variant = variantOptions.find((v) => v.variantId === i.variantId)
+        const sku = variant?.sku ?? ''
+        const title = variant?.productTitle ?? ''
+        return `${title} (${sku}) ×${i.quantity}`
+      })
+      setOrderDetail(details.join(', '))
+    } else {
+      setOrderDetail('')
+    }
+  }, [cart, variantOptions])
 
   const variantSearchResults = useMemo(() => {
     if (!variantSearch.trim()) return []
@@ -562,8 +615,11 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       delivery_address: deliveryAddress.trim(),
       delivery_city: deliveryCity.trim(),
       courier_name: courierName.trim() || undefined,
+      courier_company_integration_id: courierIntegrationId || undefined,
       dispatch_location_id: dispatchLocationId,
       notes_for_courier: notesForCourier.trim() || undefined,
+      order_ref_number: orderRefNumber.trim() || undefined,
+      order_detail: orderDetail.trim() || undefined,
       discount_amount: discount > 0 ? discount : undefined,
       discount_reason: discountReason.trim() || undefined,
       estimated_delivery_charge: delivery > 0 ? delivery : undefined,
@@ -789,10 +845,17 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
               onAddressSelectorChange={handleAddressSelectorChange}
               courierName={courierName}
               setCourierName={setCourierName}
+              courierIntegrationId={courierIntegrationId}
+              setCourierIntegrationId={setCourierIntegrationId}
+              courierIntegrations={courierIntegrations}
               dispatchLocationId={dispatchLocationId}
               setDispatchLocationId={setDispatchLocationId}
               notesForCourier={notesForCourier}
               setNotesForCourier={setNotesForCourier}
+              orderRefNumber={orderRefNumber}
+              setOrderRefNumber={setOrderRefNumber}
+              orderDetail={orderDetail}
+              setOrderDetail={setOrderDetail}
               discountAmount={discountAmount}
               setDiscountAmount={setDiscountAmount}
               discountReason={discountReason}
@@ -940,10 +1003,17 @@ function CustomerSection({
   onAddressSelectorChange,
   courierName,
   setCourierName,
+  courierIntegrationId,
+  setCourierIntegrationId,
+  courierIntegrations,
   dispatchLocationId,
   setDispatchLocationId,
   notesForCourier,
   setNotesForCourier,
+  orderRefNumber,
+  setOrderRefNumber,
+  orderDetail,
+  setOrderDetail,
   discountAmount,
   setDiscountAmount,
   discountReason,
@@ -968,10 +1038,17 @@ function CustomerSection({
   onAddressSelectorChange: (v: AddressSelectorValue) => void
   courierName: string
   setCourierName: (v: string) => void
+  courierIntegrationId: string
+  setCourierIntegrationId: (v: string) => void
+  courierIntegrations: Array<{ id: string; connectionName: string; provider: { providerKey: string; providerName: string } }>
   dispatchLocationId: string
   setDispatchLocationId: (v: string) => void
   notesForCourier: string
   setNotesForCourier: (v: string) => void
+  orderRefNumber: string
+  setOrderRefNumber: (v: string) => void
+  orderDetail: string
+  setOrderDetail: (v: string) => void
   discountAmount: string
   setDiscountAmount: (v: string) => void
   discountReason: string
@@ -1142,11 +1219,34 @@ function CustomerSection({
               <div className="grid sm:grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label className="text-xs">Courier</Label>
-                  <Input
-                    placeholder="e.g. TCS"
-                    value={courierName}
-                    onChange={(e) => setCourierName(e.target.value)}
-                  />
+                  <Select
+                    value={courierIntegrationId || '__none__'}
+                    onValueChange={(v) => {
+                      if (v === '__none__') {
+                        setCourierIntegrationId('')
+                        setCourierName('')
+                      } else {
+                        setCourierIntegrationId(v)
+                        const ci = courierIntegrations.find((c) => c.id === v)
+                        if (ci) setCourierName(ci.provider.providerName)
+                      }
+                    }}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Select courier" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">No courier</SelectItem>
+                      {courierIntegrations.map((ci) => (
+                        <SelectItem key={ci.id} value={ci.id}>
+                          {ci.provider.providerName} — {ci.connectionName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {courierIntegrations.length === 0 && (
+                    <p className="text-[10px] text-amber-700">
+                      No couriers connected. Connect one in Settings → Integrations.
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1">
                   <Label className="text-xs">Dispatch Location *</Label>
@@ -1169,12 +1269,34 @@ function CustomerSection({
                   )}
                 </div>
                 <div className="space-y-1 sm:col-span-2">
-                  <Label className="text-xs">Notes for courier</Label>
+                  <Label className="text-xs">Transaction Notes (for courier)</Label>
                   <Input
-                    placeholder="Optional"
+                    placeholder="Optional notes for the courier"
                     value={notesForCourier}
                     onChange={(e) => setNotesForCourier(e.target.value)}
                   />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Reference (Order Ref Number)</Label>
+                  <Input
+                    placeholder="Auto-generated if left blank"
+                    value={orderRefNumber}
+                    onChange={(e) => setOrderRefNumber(e.target.value)}
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Defaults to the FlowOps order number (ORD-XXXX). Editable.
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Order Detail</Label>
+                  <Input
+                    placeholder="Auto-filled from cart items"
+                    value={orderDetail}
+                    onChange={(e) => setOrderDetail(e.target.value)}
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Auto-generated from selected products (SKU + name + qty). Editable.
+                  </p>
                 </div>
               </div>
 
