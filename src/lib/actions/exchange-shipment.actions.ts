@@ -581,6 +581,98 @@ export async function markExchangeShipmentDelivered(
 }
 
 // ──────────────────────────────────────────────────────────────
+// 4b. markExchangeShipmentCodCollected — record COD collection
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Record that COD was collected for an exchange shipment (customer paid
+ * the invoice amount on delivery). Mirrors markCodCollected() for orders.
+ *
+ * When the full invoiceAmount (price difference + delivery charge) is collected,
+ * updates the parent order_exchanges.priceDifferenceStatus to 'settled'.
+ */
+export async function markExchangeShipmentCodCollected(
+  exchangeShipmentId: string,
+  collectedAmount?: number,
+): Promise<ActionResult> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+
+    const shipment = await db.exchangeShipment.findFirst({
+      where: { id: exchangeShipmentId, companyId: ctx.company.id },
+      select: {
+        id: true,
+        invoiceAmount: true,
+        status: true,
+        orderExchangeId: true,
+      },
+    })
+    if (!shipment) {
+      return { success: false, error: 'Exchange shipment not found.' }
+    }
+
+    // Guard: must be delivered or dispatched
+    if (shipment.status !== 'delivered' && shipment.status !== 'dispatched') {
+      return {
+        success: false,
+        error: `Cannot collect COD for a shipment with status '${shipment.status}'. Expected 'delivered' or 'dispatched'.`,
+      }
+    }
+
+    const amount = collectedAmount ?? Number(shipment.invoiceAmount)
+
+    // Update the exchange shipment (no separate codCollected fields on exchange_shipments —
+    // we record this via the parent order_exchanges settlement)
+    await db.exchangeShipment.update({
+      where: { id: exchangeShipmentId },
+      data: {
+        // Mark the shipment as having its COD collected by transitioning to delivered
+        // if not already (the polling job may not have caught up yet)
+        ...(shipment.status === 'dispatched' ? { status: 'delivered', deliveredAt: new Date() } : {}),
+      },
+    })
+
+    // Settle the parent exchange's price difference
+    await db.orderExchange.update({
+      where: { id: shipment.orderExchangeId },
+      data: {
+        priceDifferenceStatus: 'settled',
+        priceDifferenceSettledAmount: amount,
+        priceDifferenceSettledAt: new Date(),
+        priceDifferenceSettledBy: ctx.employee.id,
+      },
+    })
+
+    await insertAuditLog({
+      action: 'exchange_shipment.cod_collected',
+      entityType: 'exchange_shipment',
+      entityId: exchangeShipmentId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      newValues: { collectedAmount: amount, invoiceAmount: Number(shipment.invoiceAmount) },
+    })
+
+    await insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'exchange_shipment',
+      entityId: exchangeShipmentId,
+      metricKey: 'exchange_shipment.cod_collected',
+      numericValue: amount,
+    }).catch(() => {})
+
+    return { success: true }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to mark COD as collected',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
 // 5. cancelExchangeShipment
 // ──────────────────────────────────────────────────────────────
 

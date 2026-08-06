@@ -50,7 +50,19 @@ export const settlePriceDifferenceSchema = z.object({
   exchange_id: z.string().min(1, 'Exchange ID is required'),
   settled_amount: z.number().min(0, 'Settled amount must be 0 or positive'),
   settlement_type: z.enum(['collected_from_customer', 'refunded_to_customer']),
-})
+  // Refund fields (required when settlement_type='refunded_to_customer')
+  refund_method: z.enum(['cash', 'bank_transfer', 'store_credit', 'other']).optional(),
+  refund_reference: z.string().max(500).optional().or(z.literal('')),
+}).refine(
+  (data) => {
+    // When refunding, refund_method and refund_reference are required
+    if (data.settlement_type === 'refunded_to_customer') {
+      return !!data.refund_method && !!data.refund_reference?.trim()
+    }
+    return true
+  },
+  { message: 'Refund method and reference are required for refunds', path: ['refund_method'] },
+)
 export type SettlePriceDifferenceInput = z.infer<typeof settlePriceDifferenceSchema>
 
 // ──────────────────────────────────────────────────────────────

@@ -44,6 +44,7 @@ interface OrderSettings {
   defaultDispatchLocationId: string | null
   courierBookingMode: string
   defaultCourierCompanyIntegrationId: string | null
+  deductDeliveryChargeFromRefund?: boolean
   updatedAt: string
 }
 
@@ -97,6 +98,7 @@ export function OrderWorkflowSettingsView() {
   const [defaultLocationId, setDefaultLocationId] = useState('')
   const [courierBookingMode, setCourierBookingMode] = useState<'automatic' | 'semi_manual'>('semi_manual')
   const [defaultCourierIntegrationId, setDefaultCourierIntegrationId] = useState('')
+  const [deductDeliveryFromRefund, setDeductDeliveryFromRefund] = useState(false)
   const [hydrated, setHydrated] = useState(false)
 
   // Hydrate local form state from the fetched settings
@@ -109,6 +111,7 @@ export function OrderWorkflowSettingsView() {
       setDefaultLocationId(s.defaultDispatchLocationId ?? '')
       setCourierBookingMode((s.courierBookingMode as 'automatic' | 'semi_manual') ?? 'semi_manual')
       setDefaultCourierIntegrationId(s.defaultCourierCompanyIntegrationId ?? '')
+      setDeductDeliveryFromRefund(s.deductDeliveryChargeFromRefund ?? false)
       setHydrated(true)
     }
   }, [settingsQuery.data, hydrated])
@@ -132,6 +135,7 @@ export function OrderWorkflowSettingsView() {
         default_dispatch_location_id: defaultLocationId,
         courier_booking_mode: courierBookingMode,
         default_courier_company_integration_id: defaultCourierIntegrationId,
+        deduct_delivery_charge_from_refund: deductDeliveryFromRefund,
       }),
     onSuccess: () => {
       toast.success('Order workflow settings saved.')
@@ -476,6 +480,29 @@ export function OrderWorkflowSettingsView() {
               <strong>Note:</strong> This setting only applies to orders created directly in FlowOps.
               Orders from Shopify, Daraz, or other external platforms always require manual courier
               booking, regardless of this setting.
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Exchange Refund Settings (migration 014) */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Exchange Refund Settings</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-0.5">
+                <Label className="text-sm font-medium">Deduct delivery charge from refund</Label>
+                <p className="text-xs text-muted-foreground">
+                  When enabled, the estimated delivery charge is subtracted from the customer&apos;s
+                  refund amount in a refund_due exchange. Default: off (business absorbs delivery cost).
+                </p>
+              </div>
+              <Switch
+                checked={deductDeliveryFromRefund}
+                onCheckedChange={setDeductDeliveryFromRefund}
+                disabled={mutation.isPending || !isElevated}
+              />
             </div>
           </CardContent>
         </Card>

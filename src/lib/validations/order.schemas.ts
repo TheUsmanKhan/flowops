@@ -179,6 +179,7 @@ export const updateCompanyOrderSettingsSchema = z.object({
   require_packing_step: z.boolean().optional(),
   default_courier: z.string().max(100).optional().or(z.literal('')),
   default_dispatch_location_id: z.string().optional().or(z.literal('')),
+  deduct_delivery_charge_from_refund: z.boolean().optional(),
 })
 export type UpdateCompanyOrderSettingsInput = z.infer<typeof updateCompanyOrderSettingsSchema>
 

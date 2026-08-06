@@ -158,10 +158,12 @@ export function ExchangeDetailView({ exchangeId }: { exchangeId: string }) {
   }
 
   const settleMutation = useMutation({
-    mutationFn: (data: { amount: number; type: string }) =>
+    mutationFn: (data: { amount: number; type: string; refundMethod?: string; refundReference?: string }) =>
       api.post(`/api/exchanges/${exchangeId}/settle-price-difference`, {
         settled_amount: data.amount,
         settlement_type: data.type,
+        refund_method: data.refundMethod,
+        refund_reference: data.refundReference,
       }),
     onSuccess: () => { toast.success('Price difference settled.'); setSettleOpen(false); invalidate() },
     onError: (err) => toast.error(getErrorMessage(err)),
@@ -505,7 +507,7 @@ export function ExchangeDetailView({ exchangeId }: { exchangeId: string }) {
           open={settleOpen}
           onOpenChange={setSettleOpen}
           loading={settleMutation.isPending}
-          onConfirm={(amount, type) => settleMutation.mutate({ amount, type })}
+          onConfirm={(amount, type, refundMethod, refundReference) => settleMutation.mutate({ amount, type, refundMethod, refundReference })}
         />
       )}
       {notReturnedOpen && (
@@ -549,11 +551,16 @@ function SettleDialog({
   open: boolean
   onOpenChange: (open: boolean) => void
   loading: boolean
-  onConfirm: (amount: number, type: string) => void
+  onConfirm: (amount: number, type: string, refundMethod?: string, refundReference?: string) => void
 }) {
   const isCustomerOwes = exchange.priceDifference > 0
   const [amount, setAmount] = useState(Math.abs(exchange.priceDifference).toString())
   const [type, setType] = useState(isCustomerOwes ? 'collected_from_customer' : 'refunded_to_customer')
+  const [refundMethod, setRefundMethod] = useState('')
+  const [refundReference, setRefundReference] = useState('')
+
+  const isRefund = type === 'refunded_to_customer'
+  const canSubmit = !isRefund || (refundMethod && refundReference.trim())
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -581,10 +588,38 @@ function SettleDialog({
               </SelectContent>
             </Select>
           </div>
+          {isRefund && (
+            <div className="space-y-3 rounded-md bg-amber-50 border border-amber-200 p-3">
+              <p className="text-xs text-amber-800 font-medium">Refund Details (Required)</p>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Refund Method</Label>
+                <Select value={refundMethod} onValueChange={setRefundMethod}>
+                  <SelectTrigger><SelectValue placeholder="Select method" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="cash">Cash</SelectItem>
+                    <SelectItem value="bank_transfer">Bank Transfer</SelectItem>
+                    <SelectItem value="store_credit">Store Credit</SelectItem>
+                    <SelectItem value="other">Other</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Reference (transaction ID, cheque #, etc.)</Label>
+                <Input
+                  value={refundReference}
+                  onChange={(e) => setRefundReference(e.target.value)}
+                  placeholder="Enter reference"
+                />
+              </div>
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button disabled={loading} onClick={() => onConfirm(Number(amount) || 0, type)}>
+          <Button
+            disabled={loading || !canSubmit}
+            onClick={() => onConfirm(Number(amount) || 0, type, refundMethod || undefined, refundReference.trim() || undefined)}
+          >
             {loading ? <><Loader2 className="h-4 w-4 animate-spin" /> Settling…</> : 'Settle Payment'}
           </Button>
         </DialogFooter>

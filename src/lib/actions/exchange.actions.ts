@@ -125,10 +125,16 @@ async function createAndDispatchExchangeOrder(
   const shippingAddressId = exchange.originalOrder.usedCustomerAddressId
   const shippingPhoneId = exchange.originalOrder.usedCustomerPhoneId
 
-  // Determine invoice amount from the exchange's priceDifference
+  // Determine invoice amount: when customer_owes, fold in the estimated delivery charge
+  // so the customer pays for delivery (no hidden business cost in collection case).
   const priceDiff = Number(exchange.priceDifference)
-  const invoiceAmount =
+  const baseInvoiceAmount =
     exchange.priceDifferenceStatus === 'customer_owes' && priceDiff > 0 ? priceDiff : 0
+  // Fetch estimated delivery charge from CompanyOrderSetting's default or the exchange shipment
+  // For now, use 0 as the default estimated delivery charge (staff can edit in the modal).
+  // The SendExchangeShipmentModal (Prompt 5) allows overriding invoiceAmount directly.
+  const estimatedDeliveryCharge = 0 // Will be set by the modal if the staff enters one
+  const invoiceAmount = baseInvoiceAmount + estimatedDeliveryCharge
 
   // 1. Generate the EXCH-{YYYY}-{NNNNN} number (independent sequence)
   const exchangeShipmentNumber = await generateExchangeShipmentNumber()
@@ -750,8 +756,38 @@ export async function settlePriceDifference(
 
     const exchange = await db.orderExchange.findFirst({
       where: { id: d.exchange_id, companyId: ctx.company.id },
+      include: {
+        exchangeShipments: {
+          select: { estimatedDeliveryCharge: true },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
     })
     if (!exchange) return { success: false, error: 'Exchange not found' }
+
+    // ── Compute refundAmount for refund_due case ──
+    let refundAmount: number | null = null
+    if (d.settlement_type === 'refunded_to_customer') {
+      const rawPriceDiff = Math.abs(Number(exchange.priceDifference))
+      const estimatedDeliveryCharge = exchange.exchangeShipments[0]?.estimatedDeliveryCharge
+        ? Number(exchange.exchangeShipments[0].estimatedDeliveryCharge)
+        : 0
+
+      // Check company setting
+      const orderSettings = await db.companyOrderSetting.findUnique({
+        where: { companyId: ctx.company.id },
+        select: { deductDeliveryChargeFromRefund: true },
+      })
+      const deductDelivery = orderSettings?.deductDeliveryChargeFromRefund ?? false
+
+      if (deductDelivery) {
+        refundAmount = Math.max(0, rawPriceDiff - estimatedDeliveryCharge)
+      } else {
+        // Default: customer gets full price difference back; delivery charge is business-absorbed
+        refundAmount = rawPriceDiff
+      }
+    }
 
     await db.orderExchange.update({
       where: { id: d.exchange_id },
@@ -760,6 +796,16 @@ export async function settlePriceDifference(
         priceDifferenceSettledAt: new Date(),
         priceDifferenceSettledBy: ctx.employee.id,
         priceDifferenceStatus: 'settled',
+        // Refund tracking (migration 014)
+        ...(d.settlement_type === 'refunded_to_customer'
+          ? {
+              refundMethod: d.refund_method ?? null,
+              refundReference: d.refund_reference?.trim() || null,
+              refundProcessedAt: new Date(),
+              refundProcessedBy: ctx.employee.id,
+              refundAmount,
+            }
+          : {}),
       },
     })
 
@@ -774,6 +820,7 @@ export async function settlePriceDifference(
       newValues: {
         settledAmount: d.settled_amount,
         settlementType: d.settlement_type,
+        ...(refundAmount !== null ? { refundAmount, refundMethod: d.refund_method } : {}),
       },
     })
 

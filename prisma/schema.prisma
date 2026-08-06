@@ -307,6 +307,7 @@ model Employee {
   exchangesOldItemVerified        OrderExchange[] @relation("ExchangeOldItemVerifier")
   exchangesCustomerShippedConfirmed OrderExchange[] @relation("ExchangeCustomerShippedConfirmer")
   exchangePriceDiffSettled        OrderExchange[] @relation("ExchangePriceDiffSettler")
+  exchangeRefundsProcessed        OrderExchange[] @relation("ExchangeRefundProcessor")
 
   // Universal Integration Framework back-relations (migration 004)
   integrationsCreated             CompanyIntegration[] @relation("IntegrationCreator")
@@ -1609,6 +1610,14 @@ model OrderExchange {
   priceDifferenceSettledBy      String?
   priceDifferenceSettledByEmployee Employee? @relation("ExchangePriceDiffSettler", fields: [priceDifferenceSettledBy], references: [id], onDelete: SetNull)
 
+  // Refund tracking (migration 014) — for refund_due settlements
+  refundMethod                  String?  // 'cash' | 'bank_transfer' | 'store_credit' | 'other' (CHECK in SQL)
+  refundReference               String?  // transaction ID / cheque number / free-text
+  refundProcessedAt             DateTime?
+  refundProcessedBy             String?
+  refundProcessedByEmployee     Employee? @relation("ExchangeRefundProcessor", fields: [refundProcessedBy], references: [id], onDelete: SetNull)
+  refundAmount                  Decimal? @db.Decimal(14, 2)
+
   // "Did not return" outcome
   markedAsNotReturned           Boolean  @default(false)
   notReturnedReason             String?
@@ -1779,6 +1788,8 @@ model CompanyOrderSetting {
   courierBookingMode          String   @default("semi_manual") // 'automatic' | 'semi_manual' (CHECK in SQL)
   defaultCourierCompanyIntegrationId String?
   defaultCourierCompanyIntegration CompanyIntegration? @relation("CompanyOrderSettingsDefaultCourier", fields: [defaultCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  // Exchange refund setting (migration 014)
+  deductDeliveryChargeFromRefund Boolean @default(false) // if true, delivery charge is deducted from customer refund
 
   updatedBy                   String?
   updatedByEmployee           Employee? @relation("CompanyOrderSettingsUpdater", fields: [updatedBy], references: [id])

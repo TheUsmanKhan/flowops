@@ -12,9 +12,9 @@ const updateSchema = z.object({
   require_packing_step: z.boolean().optional(),
   default_courier: z.string().max(100).optional().or(z.literal('')),
   default_dispatch_location_id: z.string().optional().or(z.literal('')),
-  // Integration Framework (migration 004)
   courier_booking_mode: z.enum(['automatic', 'semi_manual']).optional(),
   default_courier_company_integration_id: z.string().optional().or(z.literal('')),
+  deduct_delivery_charge_from_refund: z.boolean().optional(),
 })
 
 /** Get the active company's order workflow settings. */
@@ -39,6 +39,7 @@ export async function GET() {
         defaultDispatchLocationId: settings.defaultDispatchLocationId,
         courierBookingMode: settings.courierBookingMode,
         defaultCourierCompanyIntegrationId: settings.defaultCourierCompanyIntegrationId,
+        deductDeliveryChargeFromRefund: settings.deductDeliveryChargeFromRefund,
         updatedAt: settings.updatedAt.toISOString(),
       },
     })
@@ -87,6 +88,9 @@ export async function PUT(req: Request) {
     }
     if (d.default_courier_company_integration_id !== undefined) {
       updateData.defaultCourierCompanyIntegrationId = d.default_courier_company_integration_id || null
+    }
+    if (d.deduct_delivery_charge_from_refund !== undefined) {
+      updateData.deductDeliveryChargeFromRefund = d.deduct_delivery_charge_from_refund
     }
 
     await db.companyOrderSetting.update({
