@@ -118,7 +118,7 @@ export function OrderWorkflowSettingsView() {
 
   // Fetch connected courier integrations for the default courier dropdown
   const couriersQuery = useQuery<{
-    integrations: Array<{ id: string; connectionName: string; provider: { providerName: string } }>
+    integrations: Array<{ id: string; connectionName: string; isActive: boolean; provider: { providerName: string } }>
   }>({
     queryKey: ['integrations', 'courier'],
     queryFn: () => api.get('/api/integrations?category=courier'),
@@ -453,7 +453,7 @@ export function OrderWorkflowSettingsView() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">No default</SelectItem>
-                      {(couriersQuery.data?.integrations ?? []).map((ci) => (
+                      {(couriersQuery.data?.integrations ?? []).filter((ci) => ci.isActive).map((ci) => (
                         <SelectItem key={ci.id} value={ci.id}>
                           {ci.provider.providerName} — {ci.connectionName}
                         </SelectItem>
@@ -461,9 +461,9 @@ export function OrderWorkflowSettingsView() {
                     </SelectContent>
                   </Select>
                 )}
-                {(couriersQuery.data?.integrations ?? []).length === 0 && !couriersQuery.isLoading && (
+                {(couriersQuery.data?.integrations ?? []).filter((ci) => ci.isActive).length === 0 && !couriersQuery.isLoading && (
                   <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2 mt-1">
-                    No courier integrations connected. Connect one in the{' '}
+                    No active courier integrations. Connect one in the{' '}
                     <button
                       onClick={() => navigate({ name: 'integrations' })}
                       className="font-medium underline"

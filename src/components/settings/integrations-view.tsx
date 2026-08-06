@@ -37,7 +37,18 @@ import {
   Zap,
   Info,
   RefreshCw,
+  RotateCcw,
 } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { cn } from '@/lib/utils'
 import { getErrorMessage } from '@/components/orders/_shared'
 import { PickupAddressesSection } from '@/components/couriers/pickup-addresses-section'
@@ -84,6 +95,7 @@ interface Integration {
     logoUrl: string | null
     authType: string
     supportsWebhook: boolean
+    configSchema: string
   }
 }
 
@@ -96,7 +108,22 @@ interface ApiResponse {
 // Status badge helper
 // ──────────────────────────────────────────────────────────────
 
-function StatusBadge({ status }: { status: string }) {
+/**
+ * Status badge — checks `isActive` FIRST. A disconnected integration
+ * (isActive=false) always shows a muted "Disconnected" badge regardless
+ * of its connectionStatus field. This fixes the bug where disconnected
+ * integrations still showed a green "Connected" badge.
+ */
+function StatusBadge({ status, isActive }: { status: string; isActive: boolean }) {
+  // Disconnected integrations always show "Disconnected" — no matter what
+  // the connectionStatus column says.
+  if (!isActive) {
+    return (
+      <Badge variant="outline" className="text-[10px] bg-slate-100 text-slate-500 border-slate-300">
+        <Power className="h-2.5 w-2.5 mr-0.5" /> Disconnected
+      </Badge>
+    )
+  }
   const config: Record<string, { label: string; className: string; icon: typeof CheckCircle2 }> = {
     connected: { label: 'Connected', className: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: CheckCircle2 },
     pending: { label: 'Pending', className: 'bg-amber-50 text-amber-700 border-amber-200', icon: Clock },
@@ -120,6 +147,8 @@ export function IntegrationsView() {
   const navigate = useAppStore((s) => s.navigate)
   const queryClient = useQueryClient()
   const [connectProvider, setConnectProvider] = useState<Provider | null>(null)
+  const [reconnectIntegration, setReconnectIntegration] = useState<Integration | null>(null)
+  const [confirmDisconnect, setConfirmDisconnect] = useState<Integration | null>(null)
 
   const query = useQuery<ApiResponse>({
     queryKey: ['integrations'],
@@ -129,6 +158,8 @@ export function IntegrationsView() {
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ['integrations'] })
+    // Also invalidate order-settings (default courier may have been cleared)
+    queryClient.invalidateQueries({ queryKey: ['order-settings'] })
   }
 
   // Mutations
@@ -144,7 +175,7 @@ export function IntegrationsView() {
 
   const disconnectMutation = useMutation({
     mutationFn: (id: string) => api.post(`/api/integrations/${id}/disconnect`),
-    onSuccess: () => { toast.success('Integration disconnected.'); invalidate() },
+    onSuccess: () => { toast.success('Integration disconnected. Credentials wiped.'); invalidate() },
     onError: (err) => toast.error(getErrorMessage(err)),
   })
 
@@ -236,10 +267,13 @@ export function IntegrationsView() {
         <TabsContent value="courier" className="space-y-6 mt-4">
           <IntegrationsSection
             integrations={courierIntegrations}
-            availableProviders={courierProviders.filter((p) => !courierIntegrations.some((i) => i.provider.id === p.id))}
+            availableProviders={courierProviders.filter(
+              (p) => !courierIntegrations.some((i) => i.provider.id === p.id && i.isActive)
+            )}
             onConnect={setConnectProvider}
             onTest={(id) => testMutation.mutate(id)}
-            onDisconnect={(id) => disconnectMutation.mutate(id)}
+            onDisconnect={(i) => setConfirmDisconnect(i)}
+            onReconnect={(i) => setReconnectIntegration(i)}
             onSetDefault={(id) => setDefaultMutation.mutate(id)}
             onSyncCities={(providerKey) => syncCitiesMutation.mutate(providerKey)}
             syncingCities={syncCitiesMutation.isPending}
@@ -250,10 +284,13 @@ export function IntegrationsView() {
         <TabsContent value="ecommerce" className="space-y-6 mt-4">
           <IntegrationsSection
             integrations={ecommerceIntegrations}
-            availableProviders={ecommerceProviders.filter((p) => !ecommerceIntegrations.some((i) => i.provider.id === p.id))}
+            availableProviders={ecommerceProviders.filter(
+              (p) => !ecommerceIntegrations.some((i) => i.provider.id === p.id && i.isActive)
+            )}
             onConnect={setConnectProvider}
             onTest={(id) => testMutation.mutate(id)}
-            onDisconnect={(id) => disconnectMutation.mutate(id)}
+            onDisconnect={(i) => setConfirmDisconnect(i)}
+            onReconnect={(i) => setReconnectIntegration(i)}
             onSetDefault={(id) => setDefaultMutation.mutate(id)}
             testing={testMutation.isPending}
           />
@@ -268,6 +305,43 @@ export function IntegrationsView() {
           onConnected={() => { setConnectProvider(null); invalidate() }}
         />
       )}
+
+      {reconnectIntegration && (
+        <ReconnectDialog
+          integration={reconnectIntegration}
+          open={!!reconnectIntegration}
+          onOpenChange={(v) => !v && setReconnectIntegration(null)}
+          onReconnected={() => { setReconnectIntegration(null); invalidate() }}
+        />
+      )}
+
+      {/* Disconnect confirmation dialog */}
+      <AlertDialog open={!!confirmDisconnect} onOpenChange={(v) => !v && setConfirmDisconnect(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Disconnect {confirmDisconnect?.provider.providerName}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will deactivate the integration, wipe all stored credentials, and clear it
+              as the default courier if it was set. You can reconnect later with new credentials.
+              Any orders currently in the Booking Workbench will need to be booked manually.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-600 hover:bg-rose-700 text-white"
+              onClick={() => {
+                if (confirmDisconnect) {
+                  disconnectMutation.mutate(confirmDisconnect.id)
+                  setConfirmDisconnect(null)
+                }
+              }}
+            >
+              <Power className="h-3.5 w-3.5" /> Disconnect
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
@@ -282,6 +356,7 @@ function IntegrationsSection({
   onConnect,
   onTest,
   onDisconnect,
+  onReconnect,
   onSetDefault,
   onSyncCities,
   syncingCities,
@@ -291,7 +366,8 @@ function IntegrationsSection({
   availableProviders: Provider[]
   onConnect: (p: Provider) => void
   onTest: (id: string) => void
-  onDisconnect: (id: string) => void
+  onDisconnect: (i: Integration) => void
+  onReconnect: (i: Integration) => void
   onSetDefault: (id: string) => void
   onSyncCities?: (providerKey: string) => void
   syncingCities?: boolean
@@ -311,7 +387,7 @@ function IntegrationsSection({
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
                         <p className="text-sm font-medium truncate">{i.provider.providerName}</p>
-                        {i.isDefault && (
+                        {i.isDefault && i.isActive && (
                           <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[10px]">
                             <Star className="h-2.5 w-2.5 mr-0.5 fill-current" /> Default
                           </Badge>
@@ -319,14 +395,14 @@ function IntegrationsSection({
                       </div>
                       <p className="text-xs text-muted-foreground truncate">{i.connectionName}</p>
                     </div>
-                    <StatusBadge status={i.connectionStatus} />
+                    <StatusBadge status={i.connectionStatus} isActive={i.isActive} />
                   </div>
 
-                  {i.lastError && (
+                  {i.lastError && i.isActive && (
                     <p className="text-xs text-rose-600 bg-rose-50 rounded p-2">{i.lastError}</p>
                   )}
 
-                  {i.webhookUrl && (
+                  {i.webhookUrl && i.isActive && (
                     <div className="space-y-1">
                       <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Webhook URL</p>
                       <div className="flex items-center gap-1">
@@ -347,14 +423,27 @@ function IntegrationsSection({
                   )}
 
                   <div className="flex items-center gap-1 flex-wrap pt-1">
+                    {/* Reconnect button — only on disconnected cards */}
+                    {!i.isActive && (
+                      <Button
+                        size="sm"
+                        variant="default"
+                        className="h-7 text-xs"
+                        onClick={() => onReconnect(i)}
+                      >
+                        <RotateCcw className="h-3 w-3" /> Reconnect
+                      </Button>
+                    )}
                     {!i.isDefault && i.isActive && (
                       <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onSetDefault(i.id)}>
                         <Star className="h-3 w-3" /> Set Default
                       </Button>
                     )}
-                    <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onTest(i.id)} disabled={testing}>
-                      <Zap className="h-3 w-3" /> Test
-                    </Button>
+                    {i.isActive && (
+                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onTest(i.id)} disabled={testing}>
+                        <Zap className="h-3 w-3" /> Test
+                      </Button>
+                    )}
                     {i.isActive && onSyncCities && (
                       <Button
                         size="sm"
@@ -373,7 +462,7 @@ function IntegrationsSection({
                         size="sm"
                         variant="ghost"
                         className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50"
-                        onClick={() => onDisconnect(i.id)}
+                        onClick={() => onDisconnect(i)}
                       >
                         <Power className="h-3 w-3" /> Disconnect
                       </Button>
@@ -576,6 +665,102 @@ function ConnectDialog({
             </Button>
           </DialogFooter>
         )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reconnect dialog — for reactivating a disconnected integration with new credentials
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ReconnectDialog({
+  integration,
+  open,
+  onOpenChange,
+  onReconnected,
+}: {
+  integration: Integration
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onReconnected: () => void
+}) {
+  const [credentials, setCredentials] = useState<Record<string, string>>({})
+
+  // Parse config_schema dynamically from the provider
+  let fields: ConfigField[] = []
+  try {
+    fields = JSON.parse(integration.provider.configSchema)
+  } catch {
+    fields = []
+  }
+
+  const reconnectMutation = useMutation({
+    mutationFn: () =>
+      api.patch(`/api/integrations/${integration.id}/credentials`, { credentials }),
+    onSuccess: () => {
+      toast.success(`${integration.provider.providerName} reconnected successfully. Connection status is now "Pending" — run a Test to verify.`)
+      onReconnected()
+    },
+    onError: (err) => {
+      toast.error(err instanceof FetchError ? err.message : 'Failed to reconnect')
+    },
+  })
+
+  const canSubmit = fields.every((f) => !f.required || (credentials[f.key] && credentials[f.key].trim()))
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !v && onOpenChange(v)}>
+      <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto scrollbar-thin">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <RotateCcw className="h-4 w-4" /> Reconnect {integration.provider.providerName}
+          </DialogTitle>
+          <DialogDescription>
+            Enter new {integration.provider.providerName} credentials to reactivate this
+            integration. The old credentials were wiped when it was disconnected.
+            After reconnecting, the status will be &quot;Pending&quot; — run a Test to verify
+            the connection works.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 py-2">
+          <div className="rounded-md bg-muted/50 p-2.5 text-xs text-muted-foreground">
+            <p><strong>Connection:</strong> {integration.connectionName}</p>
+            <p><strong>Provider:</strong> {integration.provider.providerName}</p>
+          </div>
+
+          {/* Dynamic credential fields from config_schema */}
+          {fields.map((field) => (
+            <div key={field.key} className="space-y-1.5">
+              <Label className="text-xs">
+                {field.label}
+                {field.required && <span className="text-rose-600 ml-0.5">*</span>}
+              </Label>
+              <Input
+                type={field.type === 'password' ? 'password' : 'text'}
+                placeholder={field.type === 'password' ? '••••••••' : `Enter ${field.label}`}
+                value={credentials[field.key] ?? ''}
+                onChange={(e) => setCredentials((p) => ({ ...p, [field.key]: e.target.value }))}
+                autoFocus={field === fields[0]}
+              />
+            </div>
+          ))}
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button
+            disabled={!canSubmit || reconnectMutation.isPending}
+            onClick={() => reconnectMutation.mutate()}
+          >
+            {reconnectMutation.isPending ? (
+              <><Loader2 className="h-4 w-4 animate-spin" /> Reconnecting…</>
+            ) : (
+              <><RotateCcw className="h-4 w-4" /> Reconnect</>
+            )}
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   )

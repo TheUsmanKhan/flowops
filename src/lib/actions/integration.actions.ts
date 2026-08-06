@@ -125,6 +125,7 @@ export async function listCompanyIntegrations(category?: 'courier' | 'ecommerce'
             logoUrl: true,
             authType: true,
             supportsWebhook: true,
+            configSchema: true, // needed by ReconnectDialog to render credential fields
           },
         },
       },
@@ -297,17 +298,26 @@ export async function updateIntegrationCredentials(
 
     const credentialsEncrypted = encryptCredentials(credentials)
 
+    // Reactivate the integration if it was disconnected. This makes the
+    // credentials PATCH route double as the "reconnect" endpoint — the UI's
+    // Reconnect button calls this route with new credentials, and the
+    // integration flips back to isActive=true + connectionStatus='pending'.
+    // If the integration was already active, this is a no-op on isActive
+    // (just a credential refresh).
+    const wasDisconnected = !integration.isActive
+
     await db.companyIntegration.update({
       where: { id: companyIntegrationId },
       data: {
         credentialsEncrypted,
+        isActive: true, // reactivate if disconnected
         connectionStatus: 'pending', // reset to pending — needs re-test
         lastError: null,
       },
     })
 
     await insertAuditLog({
-      action: 'integration.credentials_updated',
+      action: wasDisconnected ? 'integration.reconnected' : 'integration.credentials_updated',
       entityType: 'company_integration',
       entityId: companyIntegrationId,
       companyId: ctx.company.id,
@@ -338,22 +348,67 @@ export async function disconnectIntegration(companyIntegrationId: string): Promi
 
     const integration = await db.companyIntegration.findFirst({
       where: { id: companyIntegrationId, companyId: ctx.company.id },
+      select: { id: true, isActive: true, provider: { select: { category: true } } },
     })
     if (!integration) return { success: false, error: 'Integration not found' }
 
-    await db.companyIntegration.update({
-      where: { id: companyIntegrationId },
-      data: { isActive: false, isDefault: false },
-    })
+    // Idempotency guard — if already disconnected, return success without
+    // inserting a duplicate audit log.
+    if (!integration.isActive) {
+      return { success: true }
+    }
 
-    await insertAuditLog({
-      action: 'integration.disconnected',
-      entityType: 'company_integration',
-      entityId: companyIntegrationId,
-      companyId: ctx.company.id,
-      organizationId: ctx.company.organizationId,
-      userId: ctx.user.id,
-      employeeId: ctx.employee.id,
+    // ── Full disconnect in a single transaction ──
+    // 1. Deactivate the integration + update connectionStatus to 'expired'
+    //    (the CHECK constraint allows 'pending' | 'connected' | 'error' | 'expired'
+    //    — 'expired' is the closest semantic to "disconnected" without a migration).
+    // 2. Wipe credentials + webhook info (security — no lingering API keys).
+    // 3. Clear lastError + lastSyncAt (stale state from before disconnect).
+    // 4. If this integration was the company's default courier, clear that FK
+    //    so auto-booking doesn't silently fail on future orders.
+    // 5. Audit log (in the same transaction so we never have a deactivation
+    //    without an audit trail).
+    await db.$transaction(async (tx) => {
+      await tx.companyIntegration.update({
+        where: { id: companyIntegrationId },
+        data: {
+          isActive: false,
+          isDefault: false,
+          connectionStatus: 'expired',
+          credentialsEncrypted: null,
+          webhookEndpointId: null,
+          webhookSecret: null,
+          lastError: null,
+          lastSyncAt: null,
+        },
+      })
+
+      // Clear the default courier FK if it points at this integration.
+      // This prevents auto-booking from silently failing with "integration
+      // not found or inactive" on every future manual order.
+      if (integration.provider.category === 'courier') {
+        await tx.companyOrderSetting.updateMany({
+          where: {
+            companyId: ctx.company.id,
+            defaultCourierCompanyIntegrationId: companyIntegrationId,
+          },
+          data: {
+            defaultCourierCompanyIntegrationId: null,
+          },
+        })
+      }
+
+      await tx.auditLog.create({
+        data: {
+          action: 'integration.disconnected',
+          entityType: 'company_integration',
+          entityId: companyIntegrationId,
+          companyId: ctx.company.id,
+          organizationId: ctx.company.organizationId,
+          userId: ctx.user.id,
+          employeeId: ctx.employee.id,
+        },
+      })
     })
 
     return { success: true }

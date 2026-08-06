@@ -374,6 +374,27 @@ export async function maybeAutoBookOrder(
       return { success: false, error: 'Auto-booking skipped: no default courier integration set in Order Settings.' }
     }
 
+    // ── Early bail: check if the default courier integration is still active ──
+    // This prevents a confusing "Courier integration not found or inactive"
+    // error from bookOrderWithCourier() — instead we return a clear message
+    // that tells the user exactly what to do.
+    const defaultIntegration = await db.companyIntegration.findFirst({
+      where: { id: integrationId, companyId: ctx.company.id },
+      select: { id: true, isActive: true, connectionName: true, provider: { select: { providerName: true } } },
+    })
+    if (!defaultIntegration) {
+      return {
+        success: false,
+        error: 'Default courier integration was deleted. Update Order Settings to select a new default courier.',
+      }
+    }
+    if (!defaultIntegration.isActive) {
+      return {
+        success: false,
+        error: `Default courier integration "${defaultIntegration.provider.providerName} — ${defaultIntegration.connectionName}" is disconnected. Reconnect it in Integrations settings or choose a different default courier in Order Settings.`,
+      }
+    }
+
     // Fire the booking
     const result = await bookOrderWithCourier({
       orderId,

@@ -4038,3 +4038,74 @@ Stage Summary:
 - PostEx "missing cities" issue confirmed as a PostEx API limitation (major cities not in their response), not an adapter bug.
 - Cron scheduler created at /api/cron/sync-cities with vercel.json config — external trigger still needs to be configured at the hosting level if not on Vercel.
 - No existing inventory, exchange, or RLS logic was altered beyond the additive changes described.
+
+---
+Task ID: 18
+Agent: main
+Task: Fix courier disconnect bugs — integration still showed "Connected" after disconnect, no reconnect flow
+
+Work Log:
+- Ran thorough audit subagent that found 29 bugs in the disconnect→reconnect flow. Root cause: disconnectIntegration only set isActive=false but never updated connectionStatus, didn't wipe credentials, didn't clear default courier FK, and there was no reconnect path.
+
+FIX 1 — disconnectIntegration action (integration.actions.ts):
+- REWROTE to use a $transaction that: sets isActive=false + connectionStatus='expired' (reuses existing CHECK constraint value), wipes credentialsEncrypted=null, clears webhookEndpointId + webhookSecret, clears lastError + lastSyncAt.
+- Clears CompanyOrderSetting.defaultCourierCompanyIntegrationId if it pointed at this integration (prevents auto-booking from silently failing on future orders).
+- Added idempotency guard (if already disconnected, returns success without duplicate audit log).
+- Audit log now created inside the transaction (no orphaned deactivation without audit trail).
+
+FIX 2 — updateIntegrationCredentials action (integration.actions.ts):
+- Now also sets isActive=true (reactivates disconnected integrations). This makes the PATCH /api/integrations/[id]/credentials route double as the reconnect endpoint.
+- Audit log action changes to 'integration.reconnected' when the integration was previously disconnected.
+
+FIX 3 — StatusBadge (integrations-view.tsx):
+- REWROTE to check isActive FIRST. A disconnected integration always shows a muted "Disconnected" badge (gray with Power icon) regardless of connectionStatus. Fixes the user's reported bug where disconnected integrations still showed green "Connected" badge.
+
+FIX 4 — Reconnect button + ReconnectDialog (integrations-view.tsx):
+- Added "Reconnect" button (RotateCcw icon, default variant) on disconnected cards — replaces the hidden Disconnect/Test/Sync Cities buttons.
+- Created ReconnectDialog component that: shows connection info, renders dynamic credential fields from provider.configSchema, calls PATCH /api/integrations/[id]/credentials with new credentials, shows success toast, invalidates query cache.
+- The dialog makes it clear that old credentials were wiped and status will be "Pending" after reconnect.
+
+FIX 5 — availableProviders filter (integrations-view.tsx):
+- Changed from `!courierIntegrations.some(i => i.provider.id === p.id)` to `!courierIntegrations.some(i => i.provider.id === p.id && i.isActive)`. Disconnected providers now reappear in "Available to Connect" so users can create a fresh connection if they prefer that over reconnecting.
+
+FIX 6 — Disconnect confirmation dialog (integrations-view.tsx):
+- Added AlertDialog that asks "Disconnect PostEx?" with a clear description: "This will deactivate the integration, wipe all stored credentials, and clear it as the default courier if it was set. You can reconnect later with new credentials." Prevents misclicks from destroying a working integration.
+
+FIX 7 — Missing /api/integrations/[id]/test/route.ts:
+- Created the route that was missing (the UI's "Test" button was calling a non-existent endpoint → 404). Wired to testIntegrationConnection server action.
+
+FIX 8 — order-workflow-settings-view.tsx:
+- Default courier dropdown now filters to `ci.isActive === true` only. Disconnected integrations can no longer be selected as the default courier. Updated the empty-state message to say "No active courier integrations" instead of "No courier integrations connected".
+
+FIX 9 — maybeAutoBookOrder (booking.actions.ts):
+- Added early bail: fetches the default integration and checks isActive BEFORE calling bookOrderWithCourier. If disconnected, returns a clear error: 'Default courier integration "PostEx — Muzammal Postex" is disconnected. Reconnect it in Integrations settings or choose a different default courier in Order Settings.' — instead of the confusing "Courier integration not found or inactive" message.
+
+FIX 10 — listCompanyIntegrations (integration.actions.ts):
+- Added configSchema to the provider select. The ReconnectDialog needs this to render dynamic credential fields. Previously it was excluded, causing the ReconnectDialog to show no input fields.
+
+FIX 11 — integrations-view.tsx invalidate():
+- Now also invalidates ['order-settings'] query key (the default courier may have been cleared on disconnect, and the Order Settings page needs to reflect that).
+
+ADDITIONAL FIXES:
+- Test button now gated on i.isActive (was always visible, even on disconnected cards).
+- Webhook URL section now gated on i.isActive (disconnected cards don't show stale webhook URLs).
+- lastError display now gated on i.isActive.
+- Default badge now gated on i.isActive (disconnected cards don't show "Default" badge).
+
+BROWSER TEST RESULTS:
+1. ✅ Navigated to Integrations page — PostEx card showed "Connected" (green badge)
+2. ✅ Clicked "Disconnect" → confirmation dialog appeared ("Disconnect PostEx?")
+3. ✅ Confirmed disconnect → toast: "Integration disconnected. Credentials wiped."
+4. ✅ Badge changed from "Connected" (green) to "Disconnected" (gray with Power icon)
+5. ✅ "Reconnect" button appeared (replaced Disconnect/Test/Sync Cities buttons)
+6. ✅ DB verified: isActive=false, connectionStatus='expired', credentialsEncrypted=null, webhookEndpointId=null, defaultCourierCompanyIntegrationId=null
+7. ✅ Clicked "Reconnect" → dialog appeared with token input field
+8. ✅ Typed test token → Reconnect button enabled
+9. ✅ Clicked "Reconnect" → toast: "PostEx reconnected successfully. Connection status is now 'Pending' — run a Test to verify."
+10. ✅ Badge changed from "Disconnected" to "Pending" (amber)
+11. ✅ DB verified: isActive=true, connectionStatus='pending', credentialsEncrypted=set (new credentials)
+12. ✅ Card now shows full active buttons: Set Default, Test, Sync Cities, Disconnect
+
+Stage Summary:
+- The disconnect→reconnect flow is now fully functional. Disconnect properly deactivates the integration, wipes credentials, clears the default courier FK, and shows a "Disconnected" badge. Reconnect opens a credential form, re-encrypts new credentials, reactivates the integration, and shows a "Pending" badge. The user can now disconnect and reconnect with new credentials as requested.
+- All 29 audit bugs addressed. tsc 0 errors, lint 0 errors.
