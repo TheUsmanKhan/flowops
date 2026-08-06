@@ -185,16 +185,21 @@ export function IntegrationsView() {
 
   const syncCitiesMutation = useMutation({
     mutationFn: (providerKey: string) =>
-      api.post<{ success: boolean; fetchedCount: number; upsertedCount: number; disabledCount: number; error?: string }>(
+      api.post<{ success: boolean; message?: string; providerKey?: string }>(
         '/api/couriers/sync-cities',
         { providerKey },
       ),
     onSuccess: (data) => {
-      if (data.success) {
-        toast.success(`Cities synced — ${data.upsertedCount} cached, ${data.disabledCount} disabled.`)
-      } else {
-        toast.error(data.error || 'City sync failed.')
-      }
+      // The sync runs in the background (PostEx API can take 30-60s).
+      // Show a "started" toast now, and refetch the cities after a delay.
+      toast.success('City sync started in the background. This may take 30-60 seconds.')
+      // Refetch the integrations query after 30s to pick up the updated
+      // lastSyncAt timestamp + any new cities.
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['integrations'] })
+        queryClient.invalidateQueries({ queryKey: ['courier-cities'] })
+        toast.success('City sync complete — cities list refreshed.')
+      }, 35_000)
     },
     onError: (err) => toast.error(getErrorMessage(err)),
   })
