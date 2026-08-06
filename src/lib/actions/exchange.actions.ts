@@ -53,7 +53,6 @@ import {
   type MarkNotReturnedInput,
   type CancelExchangeInput,
 } from '@/lib/validations/exchange.schemas'
-import type { Prisma } from '@prisma/client'
 
 // ──────────────────────────────────────────────────────────────
 // Exchange Shipments System (migration 008) — generate shipment number
@@ -344,12 +343,11 @@ export async function createExchangeRequest(
         status: initialStatus,
         oldItemPrice,
         newItemPrice,
+        priceDifference: newItemPrice - oldItemPrice,
         priceDifferenceStatus,
         reason: d.reason,
         requestedBy: ctx.employee.id,
-        // priceDifference is GENERATED ALWAYS AS (new-old) STORED in the DB —
-        // Prisma doesn't understand GENERATED columns, so we cast the input.
-      } as Prisma.OrderExchangeUncheckedCreateInput,
+      },
     })
 
     // 8. Audit log
@@ -1044,7 +1042,7 @@ export async function listExchanges(
     const limit = Math.min(filters.limit ?? 50, 100)
     const offset = filters.offset ?? 0
 
-    const where: Prisma.OrderExchangeWhereInput = {
+    const where: { companyId: string; status?: string; exchangeMethod?: string; requestedAt?: { gte?: Date; lte?: Date } } = {
       companyId: ctx.company.id,
     }
     if (filters.status) where.status = filters.status
