@@ -1489,6 +1489,17 @@ model CustomerAddress {
   isDefault         Boolean  @default(false)
   lastUsedAt        DateTime?
 
+  // ─── City validation (Phase 7 — early warning, not blocking) ──────────
+  // cityMatchedCouriers stores the providerKey list (e.g. ['postex', 'tcs'])
+  // of couriers whose cached operational cities include this address's city.
+  // Populated by validateCustomerAddressCity() after create/update. This is
+  // INFORMATIONAL only — the authoritative check is always
+  // revalidateCityAtBookingTime() at booking time (with its live fallback).
+  // An empty array means "no connected courier recognizes this city yet" —
+  // a soft warning, NOT a block.
+  cityMatchedCouriers String[] @default([])
+  cityValidatedAt    DateTime?
+
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -1876,6 +1887,11 @@ model Order {
   courierCompanyIntegration   CompanyIntegration? @relation("OrderCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
   // Booking Workbench fields (migration 013)
   courierBookingStatus        String   @default("not_booked") // 'not_booked' | 'booked' | 'failed' (CHECK in SQL)
+  // Persisted booking failure reason (Phase 3/5). When courierBookingStatus='failed',
+  // this holds the specific error message from the courier adapter or city-validation
+  // step. Survives navigation so the user can see WHY booking failed from the
+  // order detail page or the Booking Workbench without re-attempting.
+  courierBookingFailureReason String?
   recommendedCourierCompanyIntegrationId String?
   recommendedCourierIntegration CompanyIntegration? @relation("OrderRecommendedCourier", fields: [recommendedCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
   // City validation state for courier booking. 'not_applicable' until the

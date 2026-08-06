@@ -535,11 +535,12 @@ export function SendExchangeShipmentModal({
                   onChange={(e) => setNewAddressLine(e.target.value)}
                   className="text-xs h-8"
                 />
-                <Input
-                  placeholder="City *"
+                <CityAutocomplete
+                  providerKey={selectedProviderKey || 'all'}
                   value={newAddressCity}
-                  onChange={(e) => setNewAddressCity(e.target.value)}
-                  className="text-xs h-8"
+                  onChange={setNewAddressCity}
+                  placeholder="City *"
+                  disabled={!selectedProviderKey}
                 />
                 <Input
                   placeholder="Label (optional, e.g. Home, Office)"

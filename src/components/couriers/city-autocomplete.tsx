@@ -42,6 +42,12 @@ interface CitySearchResponse {
 }
 
 export interface CityAutocompleteProps {
+  /**
+   * The courier provider key (e.g. 'postex', 'tcs'). Use 'all' to search
+   * across ALL connected couriers' cities (union) — useful when no specific
+   * courier is selected yet but the user still needs city suggestions.
+   * Use '' (empty) to disable autocomplete entirely (plain text input).
+   */
   providerKey: string
   value: string
   onChange: (cityName: string) => void

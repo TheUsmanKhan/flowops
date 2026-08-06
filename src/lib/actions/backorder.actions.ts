@@ -289,6 +289,40 @@ export async function checkAndFulfillBackorders(
                 organizationId: entry.organizationId,
                 newValues: { status: 'confirmed' },
               })
+
+              // ── Phase 3.5: Deferred automatic booking ──
+              // When a previously-backordered order transitions to 'confirmed'
+              // (all items now reserved), if the company's courierBookingMode
+              // is 'automatic', fire the booking now. This is the case where an
+              // order was backordered at creation time and only becomes bookable
+              // once stock arrives later.
+              //
+              // NON-BLOCKING: if booking fails, the order stays 'confirmed' with
+              // courierBookingStatus='failed' — it lands in the manual Workbench
+              // for retry. The backorder fulfillment itself is NOT affected.
+              try {
+                const { maybeAutoBookOrder } = await import('./booking.actions')
+                const bookResult = await maybeAutoBookOrder(
+                  entry.orderId,
+                  'manual', // backorder-fulfilled orders retain their original source
+                  'confirmed',
+                )
+                if (bookResult.success) {
+                  console.log(
+                    `[backorder] Auto-booked order ${entry.orderId} after backorder fulfillment`,
+                  )
+                } else if (bookResult.error && !bookResult.error.includes('skipped')) {
+                  console.warn(
+                    `[backorder] Auto-booking failed for order ${entry.orderId}: ${bookResult.error}`,
+                  )
+                }
+              } catch (err) {
+                // Booking threw — log but don't fail the backorder fulfillment
+                console.error(
+                  `[backorder] Auto-booking threw for order ${entry.orderId}:`,
+                  err,
+                )
+              }
             }
           }
 

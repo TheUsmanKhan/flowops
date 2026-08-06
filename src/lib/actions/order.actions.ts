@@ -309,8 +309,11 @@ export async function createManualOrder(
   orderId: string
   flowopsOrderNumber: string
   orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
-  /** Auto-booking result (migration 015+). Present only if auto-booking was attempted. */
-  autoBooking?: { trackingNumber?: string; error?: string }
+  /** Phase 5: auto-booking result — distinct from order creation success. */
+  bookingAttempted: boolean
+  bookingSucceeded: boolean
+  bookingError?: string
+  bookingTrackingNumber?: string
 }>> {
   try {
     const ctx = await getWorkspace()
@@ -699,36 +702,44 @@ export async function createManualOrder(
       await reserveOrderStock(order.id, ctx)
     }
 
-    // 14. AUTO-BOOKING (migration 015+): if the company's courierBookingMode
-    // is 'automatic' AND a default courier integration is set AND the order
-    // is confirmed, automatically book the courier right now. This fulfills
-    // the Order Settings UI promise: "Courier booking happens automatically
-    // when a manual order is confirmed."
+    // 14. AUTO-BOOKING (Phase 3): if the company's courierBookingMode is
+    // 'automatic' AND the order is confirmed (NOT 'partially_backordered' —
+    // backordered orders are deferred to backorder fulfillment), automatically
+    // book the courier right now. maybeAutoBookOrder() reads the default courier
+    // from CompanyOrderSetting, so we attempt it regardless of whether the user
+    // explicitly selected a courier on the form.
     //
-    // NON-BLOCKING: if auto-booking fails (city mismatch, courier API down,
-    // missing pickup address, etc.), the order is STILL created successfully
-    // — it just lands in the manual Booking Workbench with
-    // courierBookingStatus='failed' for retry. The error is returned in the
-    // autoBookingError field so the frontend can show a toast.
-    let autoBookingResult: { trackingNumber?: string; error?: string } | undefined
-    if (orderStatus === 'confirmed' && d.courier_company_integration_id) {
+    // NON-BLOCKING: if auto-booking fails, the order is STILL created
+    // successfully — courierBookingStatus='failed' + courierBookingFailureReason
+    // are persisted on the order, and it lands in the manual Workbench for retry.
+    // The failure reason is returned in bookingError so the frontend can show a
+    // distinct warning (separate from the order-created success message).
+    let bookingAttempted = false
+    let bookingSucceeded = false
+    let bookingError: string | undefined
+    let bookingTrackingNumber: string | undefined
+    if (orderStatus === 'confirmed') {
       try {
         const { maybeAutoBookOrder } = await import('./booking.actions')
         const bookResult = await maybeAutoBookOrder(order.id, 'manual', orderStatus)
         if (bookResult.success && bookResult.data) {
-          autoBookingResult = { trackingNumber: bookResult.data.trackingNumber }
-        } else if (bookResult.error) {
-          // Don't surface "skipped" messages (those are informational, not errors)
-          if (!bookResult.error.includes('skipped')) {
-            autoBookingResult = { error: bookResult.error }
-          }
+          bookingAttempted = true
+          bookingSucceeded = true
+          bookingTrackingNumber = bookResult.data.trackingNumber
+        } else if (bookResult.error && !bookResult.error.includes('skipped')) {
+          // "skipped" = mode is semi_manual or no default courier — not an error
+          bookingAttempted = true
+          bookingSucceeded = false
+          bookingError = bookResult.error
         }
+        // If the error contains "skipped", bookingAttempted stays false —
+        // the company is in semi_manual mode or has no default courier
       } catch (err) {
         // Auto-booking threw — log but don't fail the order creation
         console.error('[createManualOrder] Auto-booking failed:', err)
-        autoBookingResult = {
-          error: err instanceof Error ? err.message : 'Auto-booking failed',
-        }
+        bookingAttempted = true
+        bookingSucceeded = false
+        bookingError = err instanceof Error ? err.message : 'Auto-booking failed'
       }
     }
 
@@ -747,7 +758,13 @@ export async function createManualOrder(
         orderId: order.id,
         flowopsOrderNumber,
         orderItems: createdItems,
-        autoBooking: autoBookingResult,
+        // Phase 5: booking result — distinct from order creation success.
+        // The frontend uses bookingAttempted + bookingSucceeded to show TWO
+        // separate messages: "Order created" + (if applicable) "Booking failed".
+        bookingAttempted,
+        bookingSucceeded,
+        bookingError,
+        bookingTrackingNumber,
       },
     }
   } catch (err) {
@@ -1616,6 +1633,7 @@ export async function listOrders(
           trackingNumber: o.trackingNumber,
           courierCompanyIntegrationId: o.courierCompanyIntegrationId,
           courierBookingStatus: o.courierBookingStatus,
+          courierBookingFailureReason: o.courierBookingFailureReason,
           courierCityStatus: o.courierCityStatus,
           courierSubStatus: o.courierSubStatus,
           needsShipperAdvice: o.needsShipperAdvice,

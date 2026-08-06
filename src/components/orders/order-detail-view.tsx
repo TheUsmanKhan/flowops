@@ -131,6 +131,7 @@ interface OrderDetail {
     trackingNumber: string | null
     courierCompanyIntegrationId?: string | null
     courierBookingStatus?: string | null
+    courierBookingFailureReason?: string | null
     courierCityStatus?: string
     courierSubStatus?: string | null
     needsShipperAdvice?: boolean
@@ -1117,6 +1118,21 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                   }
                 />
               )}
+              {order.courierBookingFailureReason && (
+                <div className="rounded-md border border-amber-300 bg-amber-50 p-2 mt-1">
+                  <p className="text-xs text-amber-800 font-medium">Booking failure reason:</p>
+                  <p className="text-xs text-amber-700 mt-0.5 font-mono">
+                    {order.courierBookingFailureReason}
+                  </p>
+                </div>
+              )}
+              {order.courierBookingStatus === 'failed' && order.courierCompanyIntegrationId && (
+                <RetryBookingButton
+                  orderId={order.id}
+                  integrationId={order.courierCompanyIntegrationId}
+                  onSuccess={() => invalidateAll()}
+                />
+              )}
               {order.trackingNumber && (
                 <InfoRow
                   label="Tracking #"
@@ -1866,5 +1882,51 @@ function CodCollectedDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RetryBookingButton — Phase 5: retry a failed booking from the Order Detail page
+// ─────────────────────────────────────────────────────────────────────────────
+
+function RetryBookingButton({
+  orderId,
+  integrationId,
+  onSuccess,
+}: {
+  orderId: string
+  integrationId: string
+  onSuccess: () => void
+}) {
+  const [isRetrying, setIsRetrying] = useState(false)
+
+  async function handleRetry() {
+    setIsRetrying(true)
+    try {
+      const result = await api.post<{ success: boolean; trackingNumber?: string; error?: string }>(
+        '/api/booking-workbench/book',
+        { orderId, companyIntegrationId: integrationId },
+      )
+      if (result.success && result.trackingNumber) {
+        toast.success(`Booking successful! Tracking #: ${result.trackingNumber}`)
+        onSuccess()
+      } else {
+        toast.error(`Retry failed: ${result.error ?? 'Unknown error'}`)
+      }
+    } catch (err) {
+      toast.error(err instanceof FetchError ? err.message : 'Retry failed')
+    } finally {
+      setIsRetrying(false)
+    }
+  }
+
+  return (
+    <Button size="sm" variant="outline" onClick={handleRetry} disabled={isRetrying} className="mt-2">
+      {isRetrying ? (
+        <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Retrying…</>
+      ) : (
+        <><RotateCcw className="h-3.5 w-3.5" /> Retry Booking</>
+      )}
+    </Button>
   )
 }

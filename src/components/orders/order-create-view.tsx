@@ -128,8 +128,11 @@ interface CreateOrderResponse {
   orderId: string
   flowopsOrderNumber: string
   orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
-  /** Auto-booking result (migration 015+). Present only if auto-booking was attempted. */
-  autoBooking?: { trackingNumber?: string; error?: string }
+  /** Phase 5: auto-booking result — distinct from order creation success. */
+  bookingAttempted: boolean
+  bookingSucceeded: boolean
+  bookingError?: string
+  bookingTrackingNumber?: string
 }
 
 type PaymentType = 'full_cod' | 'partial_advance' | 'fully_prepaid'
@@ -262,6 +265,17 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   // Track in-flight post-creation upload so we can render a "Saving proof…"
   // state on the submit button.
   const [uploadingProof, setUploadingProof] = useState(false)
+
+  // ── Phase 5: Booking failure state for inline Retry UI ──
+  // When auto-booking fails after order creation, the order is still saved
+  // but we stay on the create page to show an inline banner with a Retry
+  // button. This is SEPARATE from the order-created success toast.
+  const [bookingFailure, setBookingFailure] = useState<{
+    orderId: string
+    orderNumber: string
+    error: string
+  } | null>(null)
+  const [retryingBooking, setRetryingBooking] = useState(false)
 
   // ── Form Guard: dirty-state tracking + save-draft + guard hook ─────────
   const [hasChanges, setHasChanges] = useState(false)
@@ -784,25 +798,37 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
 
     try {
       const data = await api.post<CreateOrderResponse>('/api/orders', payload)
-      // Show auto-booking result if the backend attempted it
-      if (data.autoBooking?.trackingNumber) {
+
+      // ── Phase 5: Distinct success + failure messages ──
+      // The order itself is ALWAYS created successfully at this point.
+      // Booking success/failure is a SEPARATE concern — never conflate.
+      toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
+
+      if (data.bookingAttempted && data.bookingSucceeded && data.bookingTrackingNumber) {
         toast.success(
-          `Order ${data.flowopsOrderNumber} created and auto-booked with courier. Tracking: ${data.autoBooking.trackingNumber}`,
+          `Courier booked automatically. Tracking #: ${data.bookingTrackingNumber}`,
         )
-      } else if (data.autoBooking?.error) {
+      } else if (data.bookingAttempted && !data.bookingSucceeded && data.bookingError) {
+        // Distinct warning — the order is safe, but booking failed.
+        // Use a longer duration so the user has time to read the reason.
         toast.warning(
-          `Order ${data.flowopsOrderNumber} created, but auto-booking failed: ${data.autoBooking.error}. You can book manually from the Booking Workbench.`,
+          `Auto-booking failed: ${data.bookingError}`,
+          { duration: 8000 },
         )
-      } else {
-        toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
       }
+
       setHasChanges(false) // Reset guard — no false-positive prompt after saving
       // Phase 10: Delete the draft now that the real order is created
       if (draftId) {
         await api.delete(`/api/drafts?id=${draftId}`).catch(() => {})
         setDraftId(undefined)
       }
+      // ── Phase 4: Invalidate ALL relevant query keys ──
+      // The order list, the Booking Workbench (in case booking failed and the
+      // order lands there), and the Booking Activity report all need to refresh.
       void queryClient.invalidateQueries({ queryKey: ['orders'] })
+      void queryClient.invalidateQueries({ queryKey: ['booking-workbench-bookable'] })
+      void queryClient.invalidateQueries({ queryKey: ['booking-workbench-activity'] })
 
       if (paymentProofFile) {
         const ok = await uploadPaymentProof(data.orderId)
@@ -813,9 +839,49 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
         }
       }
 
-      navigate({ name: 'order-detail', id: data.orderId })
+      // If booking failed, stay on the create page briefly so the user sees
+      // the warning toast + can use the Retry button. Otherwise navigate to
+      // the order detail page immediately.
+      if (data.bookingAttempted && !data.bookingSucceeded) {
+        // Store the failure info for the inline Retry UI
+        setBookingFailure({
+          orderId: data.orderId,
+          orderNumber: data.flowopsOrderNumber,
+          error: data.bookingError ?? 'Unknown error',
+        })
+      } else {
+        navigate({ name: 'order-detail', id: data.orderId })
+      }
     } catch (err) {
       toast.error(getErrorMessage(err))
+    }
+  }
+
+  // ── Phase 5: Retry booking handler (uses state declared at top of component) ──
+  async function handleRetryBooking() {
+    if (!bookingFailure) return
+    setRetryingBooking(true)
+    try {
+      const result = await api.post<{ success: boolean; trackingNumber?: string; error?: string }>(
+        '/api/booking-workbench/book',
+        {
+          orderId: bookingFailure.orderId,
+          companyIntegrationId: courierIntegrationId,
+        },
+      )
+      if (result.success && result.trackingNumber) {
+        toast.success(`Booking successful! Tracking #: ${result.trackingNumber}`)
+        setBookingFailure(null)
+        void queryClient.invalidateQueries({ queryKey: ['orders'] })
+        void queryClient.invalidateQueries({ queryKey: ['booking-workbench-bookable'] })
+        navigate({ name: 'order-detail', id: bookingFailure.orderId })
+      } else {
+        toast.error(`Retry failed: ${result.error ?? 'Unknown error'}`)
+      }
+    } catch (err) {
+      toast.error(getErrorMessage(err))
+    } finally {
+      setRetryingBooking(false)
     }
   }
 
@@ -1021,6 +1087,57 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
           </div>
         </div>
       </div>
+
+      {/* ── Phase 5: Inline booking-failure banner with Retry button ── */}
+      {bookingFailure && (
+        <Card className="border-amber-300 bg-amber-50">
+          <CardContent className="p-4">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-amber-900">
+                  Order {bookingFailure.orderNumber} created, but courier booking failed
+                </p>
+                <p className="text-xs text-amber-700 mt-1">
+                  The order itself is saved and confirmed. You can retry booking now,
+                  or fix the issue and book manually from the Booking Workbench.
+                </p>
+                <p className="text-xs text-amber-800 mt-1.5 font-mono bg-amber-100 rounded px-2 py-1">
+                  {bookingFailure.error}
+                </p>
+                <div className="flex gap-2 mt-3">
+                  <Button
+                    size="sm"
+                    onClick={handleRetryBooking}
+                    disabled={retryingBooking || !courierIntegrationId}
+                  >
+                    {retryingBooking ? (
+                      <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Retrying…</>
+                    ) : (
+                      <><RotateCcw className="h-3.5 w-3.5" /> Retry Booking</>
+                    )}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => navigate({ name: 'order-detail', id: bookingFailure.orderId })}
+                  >
+                    View Order
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setBookingFailure(null)}
+                  >
+                    Dismiss
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {formGuardModal}
     </div>
   )

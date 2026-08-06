@@ -2,7 +2,6 @@
 
 import { useEffect } from 'react'
 import { cn } from '@/lib/utils'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Badge } from '@/components/ui/badge'
@@ -202,10 +201,11 @@ export function AddressSelector({
               placeholder="Search city…"
             />
           ) : (
-            <Input
-              placeholder="e.g. Lahore"
+            <CityAutocomplete
+              providerKey="all"
               value={deliveryCity}
-              onChange={(e) => onChange({ ...value, deliveryCity: e.target.value })}
+              onChange={(city) => onChange({ ...value, deliveryCity: city })}
+              placeholder="Search city (all couriers)…"
             />
           )}
           {cityError && <p className="text-xs text-destructive">{cityError}</p>}

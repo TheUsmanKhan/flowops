@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/sync-cities",
+      "schedule": "0 */3 * * *"
+    }
+  ]
+}

@@ -77,14 +77,16 @@ export interface BookOrderOptions {
 export async function bookOrderWithCourier(
   options: BookOrderOptions,
 ): Promise<ActionResult<BookOrderResult>> {
+  // Extract orderId + companyIntegrationId BEFORE the try block so they're
+  // accessible in the catch block (const is block-scoped in JS).
+  const { orderId, companyIntegrationId } = options
+  if (!orderId || !companyIntegrationId) {
+    return { success: false, error: 'orderId and companyIntegrationId are required' }
+  }
+
   try {
     const ctx = await getWorkspace()
     await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
-
-    const { orderId, companyIntegrationId } = options
-    if (!orderId || !companyIntegrationId) {
-      return { success: false, error: 'orderId and companyIntegrationId are required' }
-    }
 
     // ── Fetch the integration ──
     const integration = await db.companyIntegration.findFirst({
@@ -92,7 +94,12 @@ export async function bookOrderWithCourier(
       include: { provider: true },
     })
     if (!integration) {
-      return { success: false, error: 'Courier integration not found or inactive.' }
+      const reason = `Courier integration not found or inactive (integrationId: ${companyIntegrationId}).`
+      await db.order.update({
+        where: { id: orderId },
+        data: { courierBookingStatus: 'failed', courierBookingFailureReason: reason },
+      })
+      return { success: false, error: reason }
     }
 
     const providerKey = integration.provider.providerKey
@@ -149,27 +156,41 @@ export async function bookOrderWithCourier(
       options.transactionNotes?.trim() || (order.notesForCourier && order.notesForCourier.trim()) || ''
 
     if (!deliveryCity) {
-      return { success: false, error: 'Delivery city is required.' }
+      const reason = 'Delivery city is required.'
+      await db.order.update({
+        where: { id: orderId },
+        data: { courierBookingStatus: 'failed', courierBookingFailureReason: reason },
+      })
+      return { success: false, error: reason }
     }
     if (!customerPhone) {
-      return { success: false, error: 'Customer phone is required.' }
+      const reason = 'Customer phone is required.'
+      await db.order.update({
+        where: { id: orderId },
+        data: { courierBookingStatus: 'failed', courierBookingFailureReason: reason },
+      })
+      return { success: false, error: reason }
     }
 
-    // ── Validate city (with live PostEx fallback) ──
+    // ── Validate city (with live PostEx fallback + staleness check) ──
     const cityValid = await revalidateCityAtBookingTime(
       providerKey,
       deliveryCity,
       integration.id,
     )
     if (!cityValid) {
+      const reason = `City not recognized: "${deliveryCity}" is not available for delivery with ${integration.provider.providerName}. The city may need to be resolved or the courier may not serve this area.`
       await db.order.update({
         where: { id: orderId },
-        data: { courierCityStatus: 'unresolved', courierBookingStatus: 'failed' },
+        data: {
+          courierCityStatus: 'unresolved',
+          courierBookingStatus: 'failed',
+          courierBookingFailureReason: reason,
+          courierCompanyIntegrationId: integration.id,
+          courierName: integration.provider.providerName,
+        },
       })
-      return {
-        success: false,
-        error: `City "${deliveryCity}" is not available for delivery with ${integration.provider.providerName}.`,
-      }
+      return { success: false, error: reason }
     }
 
     // ── Compute weight + orderType ──
@@ -229,19 +250,21 @@ export async function bookOrderWithCourier(
     })
 
     if (!bookResult.success || !bookResult.trackingNumber) {
-      // Mark as failed so it shows up in the manual workbench for retry
+      // Mark as failed so it shows up in the manual workbench for retry.
+      // Persist the failure reason so it survives navigation — the user can
+      // see WHY booking failed from the order detail page or the Workbench
+      // without re-attempting.
+      const reason = bookResult.error || 'Booking failed — no tracking number returned.'
       await db.order.update({
         where: { id: orderId },
         data: {
           courierBookingStatus: 'failed',
+          courierBookingFailureReason: reason,
           courierCompanyIntegrationId: integration.id,
           courierName: integration.provider.providerName,
         },
       })
-      return {
-        success: false,
-        error: bookResult.error || 'Booking failed — no tracking number returned.',
-      }
+      return { success: false, error: reason }
     }
 
     // ── Update the order with tracking + booking status ──
@@ -254,6 +277,8 @@ export async function bookOrderWithCourier(
         courierSubStatus: bookResult.providerStatus ?? null,
         courierName: integration.provider.providerName,
         courierBookingStatus: 'booked',
+        // Clear any previous failure reason on success
+        courierBookingFailureReason: null,
       },
     })
 
@@ -284,10 +309,18 @@ export async function bookOrderWithCourier(
       },
     }
   } catch (err) {
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : 'Failed to book order',
+    // Any uncaught error (credential decryption, network, etc.) — persist
+    // the failure status so the order shows up in the Workbench for retry.
+    const reason = err instanceof Error ? err.message : 'Failed to book order'
+    try {
+      await db.order.update({
+        where: { id: orderId },
+        data: { courierBookingStatus: 'failed', courierBookingFailureReason: reason },
+      })
+    } catch {
+      // Best-effort — don't mask the original error
     }
+    return { success: false, error: reason }
   }
 }
 

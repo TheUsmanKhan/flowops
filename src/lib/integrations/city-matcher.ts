@@ -233,22 +233,27 @@ export async function saveCityAlias(
 /**
  * Final authoritative city validation at the exact moment of courier booking.
  *
- * Guards against the 3-hour sync window where a city could have been
- * disabled between order creation and booking.
+ * Two-tier check with staleness protection:
+ *   1. Local cache lookup — if the city exists AND its lastSyncedAt is fresh
+ *      (< 3 hours), trust the isDeliveryCity flag and return immediately.
+ *   2. Live courier API fallback — fires when:
+ *      a) The city is NOT in the cache at all (cache miss), OR
+ *      b) The cached city's lastSyncedAt is STALE (> 3 hours old) — the
+ *         courier may have disabled the city since our last sync.
  *
- * LIVE FALLBACK (migration 015+): if the city is NOT in our local cache,
- * this function queries the courier's API live (via the adapter's
- * fetchOperationalCities) to check whether the city is operational. If the
- * courier confirms the city, we UPSERT it into courier_operational_cities
- * so future bookings don't re-hit the API. This ensures booking NEVER fails
- * due to a stale or incomplete local cache — the courier is the source of
- * truth, our DB is just a cache.
+ * In both fallback cases, we fetch the full city list live from the courier,
+ * upsert ALL cities into the cache (refreshing lastSyncedAt), then re-check.
+ *
+ * FAIL-SAFE: if the live fetch fails (network error, bad credentials), we
+ * do NOT proceed on stale data — we return false with a clear "could not
+ * verify city availability" semantic. Booking is blocked rather than
+ * risking a courier rejection downstream.
  *
  * @param providerKey The courier provider key (e.g. 'postex')
  * @param cityName The delivery city name to validate
- * @param companyIntegrationId Optional: required for the live fallback.
- *   If not provided, the live fallback is skipped and this degrades to a
- *   pure local-cache lookup (the original behavior).
+ * @param companyIntegrationId Required for the live fallback (to decrypt
+ *   credentials). If not provided, staleness check is skipped and only the
+ *   pure local-cache lookup runs (degrades to original behavior).
  * @returns true if the city is a valid delivery city, false otherwise.
  */
 export async function revalidateCityAtBookingTime(
@@ -256,32 +261,45 @@ export async function revalidateCityAtBookingTime(
   cityName: string,
   companyIntegrationId?: string,
 ): Promise<boolean> {
+  // 3-hour staleness threshold — matches the intended cron sync interval.
+  const STALE_THRESHOLD_MS = 3 * 60 * 60 * 1000
+
   // ── Tier 1: local cache lookup (fast path) ──
   const city = await db.courierOperationalCity.findFirst({
     where: {
       providerKey,
       cityName: { equals: cityName, mode: 'insensitive' },
-      isDeliveryCity: true,
     },
-    select: { id: true, cityName: true },
+    select: { id: true, cityName: true, isDeliveryCity: true, lastSyncedAt: true },
   })
-  if (city) {
-    // Update lastSyncedAt so we know this city was recently confirmed
-    // (non-blocking — don't wait for this)
-    db.courierOperationalCity
-      .update({ where: { id: city.id }, data: { lastSyncedAt: new Date() } })
-      .catch(() => {})
-    return true
+
+  const isStale = (city?.lastSyncedAt?.getTime() ?? 0) < Date.now() - STALE_THRESHOLD_MS
+
+  if (city && !isStale) {
+    // Fresh cache hit — trust the isDeliveryCity flag
+    if (city.isDeliveryCity) {
+      // Bump lastSyncedAt (non-blocking) so we know this city was recently confirmed
+      db.courierOperationalCity
+        .update({ where: { id: city.id }, data: { lastSyncedAt: new Date() } })
+        .catch(() => {})
+      return true
+    }
+    // Fresh cache says city is NOT a delivery city — trust it
+    return false
   }
 
-  // ── Tier 2: live courier API fallback (slow path, only on cache miss) ──
-  // This is the critical fix: if the city isn't in our cache, query the
-  // courier live. The courier is the source of truth — our DB is just a
-  // cache. If the courier says the city is operational, we trust it and
-  // upsert it into the cache for next time.
+  // ── Tier 2: live courier API fallback ──
+  // Fires when: (a) city not in cache, OR (b) cached record is stale.
+  // Without a companyIntegrationId we can't decrypt credentials → fail safe.
   if (!companyIntegrationId) {
-    // No integration ID provided — can't do a live lookup (no credentials).
-    // Degrade to the original behavior (return false = booking fails).
+    // No integration ID — can't do a live lookup. If we have a stale cached
+    // hit that says isDeliveryCity=true, we COULD trust it, but per the
+    // fail-safe principle we return the cached value only if it's a hit
+    // (better to allow booking on stale-but-positive data than block with
+    // no recourse). A cache miss with no integration ID = hard block.
+    if (city?.isDeliveryCity) {
+      return true
+    }
     return false
   }
 
@@ -295,13 +313,12 @@ export async function revalidateCityAtBookingTime(
       include: { provider: true },
     })
     if (!integration || !integration.credentialsEncrypted) {
+      // Can't authenticate — fail safe (block booking)
       return false
     }
 
     const provider = integration.provider
     if (provider.providerKey !== providerKey) {
-      // Provider mismatch — the integration ID doesn't match the providerKey.
-      // This shouldn't happen, but guard against it.
       return false
     }
 
@@ -310,21 +327,17 @@ export async function revalidateCityAtBookingTime(
       decryptCredentials(integration.credentialsEncrypted),
     )
     if (!adapter.fetchOperationalCities) {
-      // Adapter doesn't support live city fetching — can't fall back
-      return false
+      // Adapter doesn't support live city fetching — can't fall back.
+      // Degrade to cached value if we have one, else block.
+      return !!city?.isDeliveryCity
     }
 
     // Fetch ALL cities live from the courier (PostEx doesn't expose a
     // per-city search endpoint — we have to fetch the full list).
-    // This is expensive (~1-2s) but only runs on a cache miss, and the
-    // result is cached in the DB so subsequent bookings for the same city
-    // hit the fast path.
     const liveCities = await adapter.fetchOperationalCities()
 
-    // Upsert ALL fetched cities into the cache (not just the one we're
-    // looking for) — this is a bonus refresh that catches any other cities
-    // PostEx may have added since our last sync. Batched in a transaction
-    // for performance.
+    // Upsert ALL fetched cities into the cache — refreshes lastSyncedAt for
+    // every city, catching both newly-added and newly-disabled cities.
     const now = new Date()
     await db.$transaction(
       liveCities.map((c) =>
@@ -362,7 +375,9 @@ export async function revalidateCityAtBookingTime(
     return !!refreshedCity
   } catch (err) {
     // Live fallback failed (network error, bad credentials, etc.)
-    // Log and return false — don't crash the booking
+    // FAIL-SAFE: do NOT proceed on stale data. Log and block the booking
+    // with a clear semantic — the caller should surface "could not verify
+    // city availability, try again" to the user.
     console.error(
       `[city-matcher] Live fallback failed for ${providerKey}/${cityName}:`,
       err instanceof Error ? err.message : err,

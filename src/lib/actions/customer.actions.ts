@@ -653,6 +653,71 @@ export async function removeCustomerPhone(phoneId: string): Promise<ActionResult
 }
 
 // ──────────────────────────────────────────────────────────────
+// Phase 7: validateCustomerAddressCity — non-blocking early warning
+// ──────────────────────────────────────────────────────────────
+/**
+ * Check a customer address's city against ALL of the company's connected
+ * courier integrations' cached operational cities. Updates the
+ * `cityMatchedCouriers` array and `cityValidatedAt` timestamp on the
+ * CustomerAddress row.
+ *
+ * This is INFORMATIONAL ONLY — an early warning mechanism, NOT a guarantee.
+ * The authoritative check always remains `revalidateCityAtBookingTime()` at
+ * booking time (with its live-fallback + staleness protection).
+ *
+ * Uses exact case-insensitive match only — no fuzzy matching here (this is a
+ * background check, not an interactive resolution flow).
+ *
+ * Non-blocking: called fire-and-forget after address create/update. If the
+ * city matches zero couriers, the address is still saved successfully — the
+ * empty `cityMatchedCouriers` array surfaces a soft warning in the UI.
+ */
+async function validateCustomerAddressCity(
+  addressId: string,
+  city: string,
+  companyId: string,
+): Promise<void> {
+  if (!city.trim()) return
+
+  // Fetch all active courier integrations for this company
+  const integrations = await db.companyIntegration.findMany({
+    where: { companyId, isActive: true, provider: { category: 'courier' } },
+    select: { provider: { select: { providerKey: true } } },
+  })
+  const providerKeys = [...new Set(integrations.map((i) => i.provider.providerKey))]
+
+  if (providerKeys.length === 0) {
+    // No couriers connected — set empty array + timestamp
+    await db.customerAddress.update({
+      where: { id: addressId },
+      data: { cityMatchedCouriers: [], cityValidatedAt: new Date() },
+    })
+    return
+  }
+
+  // Check each provider's cached cities for an exact case-insensitive match
+  const matchedProviders: string[] = []
+  for (const providerKey of providerKeys) {
+    const matched = await db.courierOperationalCity.findFirst({
+      where: {
+        providerKey,
+        cityName: { equals: city, mode: 'insensitive' },
+        isDeliveryCity: true,
+      },
+      select: { id: true },
+    })
+    if (matched) {
+      matchedProviders.push(providerKey)
+    }
+  }
+
+  await db.customerAddress.update({
+    where: { id: addressId },
+    data: { cityMatchedCouriers: matchedProviders, cityValidatedAt: new Date() },
+  })
+}
+
+// ──────────────────────────────────────────────────────────────
 // addCustomerAddress
 // ──────────────────────────────────────────────────────────────
 export async function addCustomerAddress(
@@ -707,6 +772,13 @@ export async function addCustomerAddress(
       employeeId: ctx.employee.id,
       newValues: { addressId: address.id, city: address.city, isDefault: d.is_default },
     })
+
+    // ── Phase 7: City validation (non-blocking early warning) ──
+    // Check the city against ALL connected couriers' cached operational cities.
+    // This is INFORMATIONAL — the authoritative check remains
+    // revalidateCityAtBookingTime() at booking time. Non-blocking: if zero
+    // couriers match, the address is still saved successfully.
+    validateCustomerAddressCity(address.id, d.city.trim(), ctx.company.id).catch(() => {})
 
     return { success: true, data: { addressId: address.id } }
   } catch (err) {
@@ -785,6 +857,12 @@ export async function updateCustomerAddress(
         isDefault: updated.isDefault,
       },
     })
+
+    // ── Phase 7: City validation (non-blocking early warning) ──
+    // Re-validate the city if it changed. Non-blocking.
+    if (updated.city !== address.city) {
+      validateCustomerAddressCity(updated.id, updated.city, ctx.company.id).catch(() => {})
+    }
 
     return { success: true, data: { addressId: updated.id } }
   } catch (err) {

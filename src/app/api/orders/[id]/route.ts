@@ -103,6 +103,7 @@ export async function GET(
         trackingNumber: order.trackingNumber,
         courierCompanyIntegrationId: order.courierCompanyIntegrationId,
         courierBookingStatus: order.courierBookingStatus,
+        courierBookingFailureReason: order.courierBookingFailureReason,
         courierCityStatus: order.courierCityStatus,
         courierSubStatus: order.courierSubStatus,
         needsShipperAdvice: order.needsShipperAdvice,

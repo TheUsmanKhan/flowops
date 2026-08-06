@@ -1,0 +1,734 @@
+     1→/**
+     2→ * PostEx Courier Adapter — REAL implementation.
+     3→ *
+     4→ * Replaces the previous stub. Implements all required CourierAdapter methods
+     5→ * plus the optional capabilities (fetchOperationalCities, createPickupAddress,
+     6→ * fetchExistingPickupAddresses, trackBulkShipments, generateLoadSheet).
+     7→ *
+     8→ * Base URL: https://api.postex.pk/services/integration/api/order/
+     9→ * Auth: single `token` header.
+    10→ *
+    11→ * CONFIRMED via live Postman testing:
+    12→ *   - Order Creation API (v3/create-order) matches PDF documentation exactly.
+    13→ *   - NO weight/handling/itemsQty/paymentMethod/orderTags fields exist in this API.
+    14→ *   - Available order types: "Normal", "Reversed", "Replacement", "Overland".
+    15→ *   - "Reversed" must NEVER be used — no code path generates this value.
+    16→ *   - PostEx does NOT support webhooks — use polling instead.
+    17→ *   - PostEx does NOT provide a rate calculation API.
+    18→ *
+    19→ * Every network call goes through executeLoggedIntegrationAction() via the
+    20→ * caller (the caller wraps the adapter call). The adapter itself is a thin
+    21→ * API wrapper — it makes the HTTP request and parses the response, nothing more.
+    22→ */
+    23→
+    24→import type {
+    25→  CourierAdapter,
+    26→  BookShipmentInput,
+    27→  BookShipmentResult,
+    28→  TrackShipmentResult,
+    29→  CancelShipmentResult,
+    30→  CalculateRateInput,
+    31→  CalculateRateResult,
+    32→  ParseStatusWebhookResult,
+    33→  OperationalCity,
+    34→  PickupAddressInput,
+    35→  PickupAddressResult,
+    36→} from '../types'
+    37→import { mapPostExStatus } from './postex.status-map'
+    38→
+    39→const POSTEX_BASE_URL = 'https://api.postex.pk/services/integration/api/order'
+    40→
+    41→// ──────────────────────────────────────────────────────────────
+    42→// Phone format conversion helper
+    43→// ──────────────────────────────────────────────────────────────
+    44→
+    45→/**
+    46→ * Convert a Pakistani phone number to PostEx's required format: 03XXXXXXXXX.
+    47→ *
+    48→ * PostEx's API requires customerPhone in format "03xxxxxxxxx" (11 digits,
+    49→ * starting with 03). Our CRM stores phones in E.164 format (+92XXXXXXXXXX).
+    50→ *
+    51→ * Conversion rules:
+    52→ *   +92 3XX XXXXXXX → 03XX XXXXXXX  (strip +92, prepend 0)
+    53→ *   92 3XX XXXXXXX  → 03XX XXXXXXX  (strip 92, prepend 0)
+    54→ *   03XXXXXXXXX     → 03XXXXXXXXX  (already correct)
+    55→ *   3XXXXXXXXX      → 03XXXXXXXXX  (prepend 0)
+    56→ *   Anything else   → return as-is (let PostEx validate/reject)
+    57→ */
+    58→function convertToPostExPhone(phone: string): string {
+    59→  const trimmed = phone.trim()
+    60→
+    61→  // Already in 03XXXXXXXXX format
+    62→  if (/^03\d{9}$/.test(trimmed)) {
+    63→    return trimmed
+    64→  }
+    65→
+    66→  // +92 3XX... → 03XX...
+    67→  if (trimmed.startsWith('+92')) {
+    68→    const rest = trimmed.substring(3) // remove +92
+    69→    if (rest.startsWith('3')) {
+    70→      return '0' + rest
+    71→    }
+    72→    return '0' + rest // fallback
+    73→  }
+    74→
+    75→  // 92 3XX... → 03XX...
+    76→  if (trimmed.startsWith('92') && trimmed.length >= 11) {
+    77→    const rest = trimmed.substring(2) // remove 92
+    78→    if (rest.startsWith('3')) {
+    79→      return '0' + rest
+    80→    }
+    81→    return '0' + rest
+    82→  }
+    83→
+    84→  // 3XX... (missing leading 0) → 03XX...
+    85→  if (/^3\d{9}$/.test(trimmed)) {
+    86→    return '0' + trimmed
+    87→  }
+    88→
+    89→  // Unknown format — return as-is, let PostEx validate
+    90→  return trimmed
+    91→}
+    92→
+    93→// ──────────────────────────────────────────────────────────────
+    94→// PostEx API response types (internal)
+    95→// ──────────────────────────────────────────────────────────────
+    96→
+    97→interface PostExApiResponse<T = unknown> {
+    98→  statusCode: string | number
+    99→  statusMessage: string
+   100→  dist?: T
+   101→}
+   102→
+   103→interface PostExCreateOrderDist {
+   104→  trackingNumber: string
+   105→  orderStatus: string
+   106→  orderDate: string
+   107→}
+   108→
+   109→interface PostExTrackOrderDist {
+   110→  trackingNumber: string
+   111→  transactionStatus: string
+   112→  transactionStatusHistory?: Array<{
+   113→    transactionStatusMessage: string
+   114→    transactionStatusMessageCode: string
+   115→  }>
+   116→  [key: string]: unknown
+   117→}
+   118→
+   119→interface PostExBulkTrackItem {
+   120→  trackingNumber: string
+   121→  trackingResponse: PostExTrackOrderDist | null
+   122→  message: string
+   123→}
+   124→
+   125→interface PostExOperationalCity {
+   126→  operationalCityName: string
+   127→  countryName: string
+   128→  isPickupCity: string | boolean
+   129→  isDeliveryCity: string | boolean
+   130→}
+   131→
+   132→interface PostExMerchantAddress {
+   133→  phone1: string
+   134→  phone2: string
+   135→  contactPersonName: string
+   136→  cityName: string
+   137→  address: string
+   138→  addressCode: string
+   139→}
+   140→
+   141→// ──────────────────────────────────────────────────────────────
+   142→// PostEx Adapter
+   143→// ──────────────────────────────────────────────────────────────
+   144→
+   145→export class PostExAdapter implements CourierAdapter {
+   146→  constructor(private readonly credentials: Record<string, string>) {}
+   147→
+   148→  private get token(): string {
+   149→    const token = this.credentials.token
+   150→    if (!token) {
+   151→      throw new Error('PostEx adapter requires a "token" credential.')
+   152→    }
+   153→    return token
+   154→  }
+   155→
+   156→  // ──────────────────────────────────────────────────────────────
+   157→  // 1. bookShipment — POST v3/create-order
+   158→  // ──────────────────────────────────────────────────────────────
+   159→
+   160→  async bookShipment(input: BookShipmentInput): Promise<BookShipmentResult> {
+   161→    // NOTE: City validation is handled by the CALLER (booking-workbench/book
+   162→    // route or the auto-booking server action) via revalidateCityAtBookingTime()
+   163→    // with the companyIntegrationId — which enables the live PostEx fallback.
+   164→    // The adapter doesn't have the integration ID, so it can't do the live
+   165→    // fallback. We trust the caller's pre-validation.
+   166→
+   167→    // Build the request body — ONLY fields that exist in the confirmed API.
+   168→    // NO weight/handling/itemsQty/paymentMethod/orderTags fields.
+   169→    const body = {
+   170→      cityName: input.deliveryCity,
+   171→      customerName: input.recipientName,
+   172→      customerPhone: convertToPostExPhone(input.recipientPhone),
+   173→      deliveryAddress: input.deliveryAddress,
+   174→      invoiceDivision: 1, // default 1 (split airway bills for larger orders)
+   175→      invoicePayment: input.codAmount,
+   176→      items: input.quantity ?? 1,
+   177→      orderDetail: input.itemDescription || 'Order',
+   178→      orderRefNumber: input.orderNumber,
+   179→      orderType: input.orderType ?? 'Normal',
+   180→      transactionNotes: input.transactionNotes ?? '',
+   181→      pickupAddressCode: input.pickupAddressCode ?? '',
+   182→      storeAddressCode: '', // not used currently
+   183→    }
+   184→
+   185→    const response = await fetch(`${POSTEX_BASE_URL}/v3/create-order`, {
+   186→      method: 'POST',
+   187→      headers: {
+   188→        'Content-Type': 'application/json',
+   189→        token: this.token,
+   190→      },
+   191→      body: JSON.stringify(body),
+   192→    })
+   193→
+   194→    const json: PostExApiResponse<PostExCreateOrderDist> = await response.json()
+   195→
+   196→    if (json.statusCode === 200 || json.statusCode === '200') {
+   197→      const trackingNumber = json.dist?.trackingNumber
+   198→      if (!trackingNumber) {
+   199→        return {
+   200→          success: false,
+   201→          error: 'PostEx returned success but no tracking number in response.',
+   202→          rawResponse: json,
+   203→        }
+   204→      }
+   205→
+   206→      return {
+   207→        success: true,
+   208→        trackingNumber,
+   209→        providerStatus: json.dist?.orderStatus ?? 'Unbooked',
+   210→        rawResponse: json,
+   211→      }
+   212→    }
+   213→
+   214→    return {
+   215→      success: false,
+   216→      error: json.statusMessage || `PostEx API returned statusCode ${json.statusCode}`,
+   217→      rawResponse: json,
+   218→    }
+   219→  }
+   220→
+   221→  // ──────────────────────────────────────────────────────────────
+   222→  // 2. trackShipment — GET v1/track-order/{trackingNumber}
+   223→  // ──────────────────────────────────────────────────────────────
+   224→
+   225→  async trackShipment(trackingNumber: string): Promise<TrackShipmentResult> {
+   226→    const response = await fetch(
+   227→      `${POSTEX_BASE_URL}/v1/track-order/${encodeURIComponent(trackingNumber)}`,
+   228→      {
+   229→        method: 'GET',
+   230→        headers: {
+   231→          token: this.token,
+   232→        },
+   233→      },
+   234→    )
+   235→
+   236→    const json: PostExApiResponse<PostExTrackOrderDist> = await response.json()
+   237→
+   238→    if (json.statusCode === 200 || json.statusCode === '200') {
+   239→      const dist = json.dist
+   240→      if (!dist) {
+   241→        return {
+   242→          success: false,
+   243→          error: 'PostEx returned success but no dist in response.',
+   244→          rawResponse: json,
+   245→        }
+   246→      }
+   247→
+   248→      const postexStatus = dist.transactionStatus || 'Unbooked'
+   249→      const mapped = mapPostExStatus(postexStatus)
+   250→
+   251→      // Map to the generic TrackShipmentResult status enum
+   252→      let genericStatus: TrackShipmentResult['status'] = 'booked'
+   253→      if (mapped.triggerDelivered) genericStatus = 'delivered'
+   254→      else if (mapped.triggerRto) genericStatus = 'returned'
+   255→      else if (mapped.triggerDispatch) genericStatus = 'in_transit'
+   256→
+   257→      return {
+   258→        success: true,
+   259→        status: genericStatus,
+   260→        lastUpdateAt: (dist.transactionDate as string) ?? undefined,
+   261→        rawResponse: {
+   262→          ...dist, // includes transactionStatusHistory for audit/display
+   263→          mappedSubStatus: mapped.courierSubStatus,
+   264→          needsShipperAdvice: mapped.needsShipperAdvice,
+   265→          unrecognized: mapped.unrecognized,
+   266→        },
+   267→      }
+   268→    }
+   269→
+   270→    return {
+   271→      success: false,
+   272→      error: json.statusMessage || `PostEx API returned statusCode ${json.statusCode}`,
+   273→      rawResponse: json,
+   274→    }
+   275→  }
+   276→
+   277→  // ──────────────────────────────────────────────────────────────
+   278→  // 3. trackBulkShipments — GET v1/track-bulk-order
+   279→  // ──────────────────────────────────────────────────────────────
+   280→
+   281→  async trackBulkShipments(trackingNumbers: string[]): Promise<TrackShipmentResult[]> {
+   282→    if (trackingNumbers.length === 0) return []
+   283→
+   284→    // Chunk into groups of 50 (default — PostEx docs don't specify a limit,
+   285→    // but 50 is a reasonable batch size to avoid URL length issues)
+   286→    const CHUNK_SIZE = 50
+   287→    const results: TrackShipmentResult[] = []
+   288→
+   289→    for (let i = 0; i < trackingNumbers.length; i += CHUNK_SIZE) {
+   290→      const chunk = trackingNumbers.slice(i, i + CHUNK_SIZE)
+   291→
+   292→      // PostEx's bulk tracking API uses GET with comma-separated tracking numbers
+   293→      // in the query param. The request body format in the docs shows an array,
+   294→      // but the actual API is GET with query params.
+   295→      const queryString = chunk.map((t) => `trackingNumber=${encodeURIComponent(t)}`).join('&')
+   296→
+   297→      const response = await fetch(
+   298→        `${POSTEX_BASE_URL}/v1/track-bulk-order?${queryString}`,
+   299→        {
+   300→          method: 'GET',
+   301→          headers: {
+   302→            token: this.token,
+   303→          },
+   304→        },
+   305→      )
+   306→
+   307→      const json: PostExApiResponse<PostExBulkTrackItem[]> = await response.json()
+   308→
+   309→      if (json.statusCode === 200 || json.statusCode === '200') {
+   310→        const dist = json.dist ?? []
+   311→        for (const item of dist) {
+   312→          if (!item.trackingResponse) {
+   313→            results.push({
+   314→              success: false,
+   315→              error: item.message || 'No tracking response for this number.',
+   316→              rawResponse: item,
+   317→            })
+   318→            continue
+   319→          }
+   320→
+   321→          const postexStatus = item.trackingResponse.transactionStatus || 'Unbooked'
+   322→          const mapped = mapPostExStatus(postexStatus)
+   323→
+   324→          let genericStatus: TrackShipmentResult['status'] = 'booked'
+   325→          if (mapped.triggerDelivered) genericStatus = 'delivered'
+   326→          else if (mapped.triggerRto) genericStatus = 'returned'
+   327→          else if (mapped.triggerDispatch) genericStatus = 'in_transit'
+   328→
+   329→          results.push({
+   330→            success: true,
+   331→            status: genericStatus,
+   332→            lastUpdateAt: (item.trackingResponse.transactionDate as string) ?? undefined,
+   333→            rawResponse: {
+   334→              ...item.trackingResponse,
+   335→              mappedSubStatus: mapped.courierSubStatus,
+   336→              needsShipperAdvice: mapped.needsShipperAdvice,
+   337→              unrecognized: mapped.unrecognized,
+   338→            },
+   339→          })
+   340→        }
+   341→      } else {
+   342→        // API error for this chunk — add error results for all tracking numbers in the chunk
+   343→        for (const _tn of chunk) {
+   344→          results.push({
+   345→            success: false,
+   346→            error: json.statusMessage || `PostEx bulk API returned statusCode ${json.statusCode}`,
+   347→            rawResponse: json,
+   348→          })
+   349→        }
+   350→      }
+   351→    }
+   352→
+   353→    return results
+   354→  }
+   355→
+   356→  // ──────────────────────────────────────────────────────────────
+   357→  // 4. cancelShipment — PUT v1/cancel-order
+   358→  // ──────────────────────────────────────────────────────────────
+   359→
+   360→  async cancelShipment(trackingNumber: string): Promise<CancelShipmentResult> {
+   361→    // NOTE: Only meaningful while PostEx status is Unbooked or Booked (per
+   362→    // confirmed cancel-window rule). The CALLER is responsible for checking
+   363→    // this before invoking — this adapter is a thin API wrapper.
+   364→    const response = await fetch(`${POSTEX_BASE_URL}/v1/cancel-order`, {
+   365→      method: 'PUT',
+   366→      headers: {
+   367→        'Content-Type': 'application/json',
+   368→        token: this.token,
+   369→      },
+   370→      body: JSON.stringify({ trackingNumber }),
+   371→    })
+   372→
+   373→    if (response.status === 200) {
+   374→      return { success: true }
+   375→    }
+   376→
+   377→    if (response.status === 404) {
+   378→      return { success: false, error: 'Order not found on PostEx.' }
+   379→    }
+   380→
+   381→    let errorMessage = `PostEx cancel API returned HTTP ${response.status}`
+   382→    try {
+   383→      const json = await response.json()
+   384→      errorMessage = json.statusMessage || errorMessage
+   385→    } catch {
+   386→      // Response body not JSON — use the HTTP status message
+   387→    }
+   388→
+   389→    return { success: false, error: errorMessage }
+   390→  }
+   391→
+   392→  // ──────────────────────────────────────────────────────────────
+   393→  // 5. calculateRate — NOT SUPPORTED
+   394→  // ──────────────────────────────────────────────────────────────
+   395→
+   396→  async calculateRate(_input: CalculateRateInput): Promise<CalculateRateResult> {
+   397→    throw new Error('PostEx does not provide a rate calculation API.')
+   398→  }
+   399→
+   400→  // ──────────────────────────────────────────────────────────────
+   401→  // 6. parseStatusWebhook / verifyWebhookSignature — NOT SUPPORTED
+   402→  // ──────────────────────────────────────────────────────────────
+   403→
+   404→  async parseStatusWebhook(_rawPayload: unknown): Promise<ParseStatusWebhookResult> {
+   405→    throw new Error('PostEx does not support webhooks — use polling instead.')
+   406→  }
+   407→
+   408→  async verifyWebhookSignature(
+   409→    _rawBody: string,
+   410→    _signatureHeader: string | null,
+   411→    _webhookSecret: string,
+   412→  ): Promise<boolean> {
+   413→    throw new Error('PostEx does not support webhooks — use polling instead.')
+   414→  }
+   415→
+   416→  // ──────────────────────────────────────────────────────────────
+   417→  // 7. fetchOperationalCities — GET v2/get-operational-city
+   418→  // ──────────────────────────────────────────────────────────────
+   419→
+   420→  /**
+   421→   * Fetch ALL operational cities from PostEx.
+   422→   *
+   423→   * PostEx's v2/get-operational-city endpoint accepts an optional
+   424→   * `operationalCityType` query param (Pickup | Delivery | null). Per the
+   425→   * official docs, omitting it should return all cities — but in practice
+   426→   * some merchants have reported receiving only a subset. To be safe, we
+   427→   * call the endpoint THREE times (no filter, Pickup, Delivery) and union
+   428→   * the results. This guarantees we capture every city even if PostEx's
+   429→   * default response is incomplete.
+   430→   *
+   431→   * Each call has a 15-second timeout (AbortController) so a hung PostEx
+   432→   * doesn't block the sync indefinitely.
+   433→   */
+   434→  async fetchOperationalCities(): Promise<OperationalCity[]> {
+   435→    // Helper: call the endpoint with a given operationalCityType (or none)
+   436→    const fetchBatch = async (
+   437→      cityType: 'Pickup' | 'Delivery' | null,
+   438→    ): Promise<PostExOperationalCity[]> => {
+   439→      const url = new URL(`${POSTEX_BASE_URL}/v2/get-operational-city`)
+   440→      if (cityType) url.searchParams.set('operationalCityType', cityType)
+   441→
+   442→      const controller = new AbortController()
+   443→      const timeout = setTimeout(() => controller.abort(), 15_000)
+   444→      try {
+   445→        const response = await fetch(url.toString(), {
+   446→          method: 'GET',
+   447→          headers: { token: this.token },
+   448→          signal: controller.signal,
+   449→        })
+   450→        const json: PostExApiResponse<PostExOperationalCity[]> = await response.json()
+   451→        if (json.statusCode === 200 || json.statusCode === '200') {
+   452→          return json.dist ?? []
+   453→        }
+   454→        // Non-200 — log but don't throw (the other calls might still succeed)
+   455→        console.warn(
+   456→          `[postex] fetchOperationalCities(cityType=${cityType}) returned statusCode ${json.statusCode}: ${json.statusMessage}`,
+   457→        )
+   458→        return []
+   459→      } catch (err) {
+   460→        // Network error / timeout — log and return empty (don't crash the whole sync)
+   461→        console.warn(
+   462→          `[postex] fetchOperationalCities(cityType=${cityType}) failed:`,
+   463→          err instanceof Error ? err.message : err,
+   464→        )
+   465→        return []
+   466→      } finally {
+   467→        clearTimeout(timeout)
+   468→      }
+   469→    }
+   470→
+   471→    // Call all three variants in parallel, then union by cityName
+   472→    const [all, pickup, delivery] = await Promise.all([
+   473→      fetchBatch(null),
+   474→      fetchBatch('Pickup'),
+   475→      fetchBatch('Delivery'),
+   476→    ])
+   477→
+   478→    // Union by cityName (case-sensitive — PostEx's casing is inconsistent
+   479→    // but the same city won't appear with different casing within one call)
+   480→    const cityMap = new Map<string, PostExOperationalCity>()
+   481→    for (const c of [...all, ...pickup, ...delivery]) {
+   482→      if (!c?.operationalCityName) continue
+   483→      // Prefer the entry where both flags are true; otherwise OR them together
+   484→      const existing = cityMap.get(c.operationalCityName)
+   485→      if (existing) {
+   486→        cityMap.set(c.operationalCityName, {
+   487→          ...existing,
+   488→          isPickupCity:
+   489→            existing.isPickupCity === true ||
+   490→            existing.isPickupCity === 'true' ||
+   491→            c.isPickupCity === true ||
+   492→            c.isPickupCity === 'true',
+   493→          isDeliveryCity:
+   494→            existing.isDeliveryCity === true ||
+   495→            existing.isDeliveryCity === 'true' ||
+   496→            c.isDeliveryCity === true ||
+   497→            c.isDeliveryCity === 'true',
+   498→        })
+   499→      } else {
+   500→        cityMap.set(c.operationalCityName, c)
+   501→      }
+   502→    }
+   503→
+   504→    if (cityMap.size === 0) {
+   505→      throw new Error(
+   506→        'PostEx cities API returned 0 cities across all three operationalCityType variants. Check the integration token.',
+   507→      )
+   508→    }
+   509→
+   510→    return Array.from(cityMap.values()).map((c) => ({
+   511→      cityName: c.operationalCityName,
+   512→      cityId: undefined,
+   513→      isPickupCity: c.isPickupCity === true || c.isPickupCity === 'true',
+   514→      isDeliveryCity: c.isDeliveryCity === true || c.isDeliveryCity === 'true',
+   515→    }))
+   516→  }
+   517→
+   518→  // ──────────────────────────────────────────────────────────────
+   519→  // 8. createPickupAddress — POST v2/create-merchant-address
+   520→  // ──────────────────────────────────────────────────────────────
+   521→
+   522→  async createPickupAddress(input: PickupAddressInput): Promise<PickupAddressResult> {
+   523→    const body = {
+   524→      address: input.address,
+   525→      addressTypeId: 2, // 2 = Pickup (1 = Return, but PostEx uses one address for both)
+   526→      cityName: input.cityName,
+   527→      contactPersonName: input.contactPersonName,
+   528→      phone1: input.phone1,
+   529→      phone2: input.phone2 ?? '',
+   530→      phone3: '', // optional
+   531→      wareHouseManagerName: '', // optional
+   532→    }
+   533→
+   534→    const response = await fetch(
+   535→      `${POSTEX_BASE_URL}/v2/create-merchant-address`,
+   536→      {
+   537→        method: 'POST',
+   538→        headers: {
+   539→          'Content-Type': 'application/json',
+   540→          token: this.token,
+   541→        },
+   542→        body: JSON.stringify(body),
+   543→      },
+   544→    )
+   545→
+   546→    const json: PostExApiResponse = await response.json()
+   547→
+   548→    if (json.statusCode === 200 || json.statusCode === '200') {
+   549→      // PostEx's create-merchant-address API returns only statusCode + statusMessage.
+   550→      // It does NOT return an addressCode in the response. The addressCode is
+   551→      // obtained by subsequently calling fetchExistingPickupAddresses() and
+   552→      // matching by address/cityName. For now, return success without a code —
+   553→      // the caller (addPickupAddress server action) handles this by falling back
+   554→      // to a local ID or prompting the user to fetch existing addresses.
+   555→      return {
+   556→        success: true,
+   557→        providerAddressCode: undefined, // PostEx doesn't return it on creation
+   558→      }
+   559→    }
+   560→
+   561→    return {
+   562→      success: false,
+   563→      error: json.statusMessage || `PostEx create-address API returned statusCode ${json.statusCode}`,
+   564→    }
+   565→  }
+   566→
+   567→  // ──────────────────────────────────────────────────────────────
+   568→  // 9. fetchExistingPickupAddresses — GET v1/get-merchant-address
+   569→  // ──────────────────────────────────────────────────────────────
+   570→
+   571→  async fetchExistingPickupAddresses(): Promise<Array<{
+   572→    providerAddressCode: string
+   573→    label?: string
+   574→    address: string
+   575→    cityName: string
+   576→    contactPersonName: string
+   577→    phone1: string
+   578→    phone2?: string
+   579→  }>> {
+   580→    const response = await fetch(
+   581→      `${POSTEX_BASE_URL}/v1/get-merchant-address`,
+   582→      {
+   583→        method: 'GET',
+   584→        headers: {
+   585→          token: this.token,
+   586→        },
+   587→      },
+   588→    )
+   589→
+   590→    const json: PostExApiResponse<PostExMerchantAddress[]> = await response.json()
+   591→
+   592→    if (json.statusCode === 200 || json.statusCode === '200') {
+   593→      const dist = json.dist ?? []
+   594→      return dist.map((a) => ({
+   595→        providerAddressCode: a.addressCode,
+   596→        label: a.address, // use the address as the label (PostEx doesn't return a label)
+   597→        address: a.address,
+   598→        cityName: a.cityName,
+   599→        contactPersonName: a.contactPersonName,
+   600→        phone1: a.phone1,
+   601→        phone2: a.phone2 || undefined,
+   602→      }))
+   603→    }
+   604→
+   605→    throw new Error(
+   606→      json.statusMessage || `PostEx get-merchant-address API returned statusCode ${json.statusCode}`,
+   607→    )
+   608→  }
+   609→
+   610→  // ──────────────────────────────────────────────────────────────
+   611→  // 10. generateLoadSheet — POST v2/generate-load-sheet
+   612→  // ──────────────────────────────────────────────────────────────
+   613→
+   614→  async generateLoadSheet(
+   615→    trackingNumbers: string[],
+   616→    pickupAddress?: string,
+   617→  ): Promise<{ success: boolean; rawResponse?: unknown; error?: string }> {
+   618→    if (trackingNumbers.length === 0) {
+   619→      return { success: false, error: 'No tracking numbers provided.' }
+   620→    }
+   621→
+   622→    const body = {
+   623→      pickupAddress: pickupAddress ?? '',
+   624→      trackingNumbers,
+   625→    }
+   626→
+   627→    const response = await fetch(
+   628→      `${POSTEX_BASE_URL}/v2/generate-load-sheet`,
+   629→      {
+   630→        method: 'POST',
+   631→        headers: {
+   632→          'Content-Type': 'application/json',
+   633→          token: this.token,
+   634→        },
+   635→        body: JSON.stringify(body),
+   636→      },
+   637→    )
+   638→
+   639→    // PostEx returns a PDF file for this endpoint, not JSON.
+   640→    if (response.status === 200) {
+   641→      // The response is a PDF binary — we can't parse it as JSON.
+   642→      // Return success with metadata about the response.
+   643→      return {
+   644→        success: true,
+   645→        rawResponse: {
+   646→          contentType: response.headers.get('content-type'),
+   647→          contentLength: response.headers.get('content-length'),
+   648→          status: response.status,
+   649→        },
+   650→      }
+   651→    }
+   652→
+   653→    return {
+   654→      success: false,
+   655→      error: `PostEx load-sheet API returned HTTP ${response.status}`,
+   656→    }
+   657→  }
+   658→
+   659→  // ──────────────────────────────────────────────────────────────
+   660→  // 11. fetchPaymentStatus — GET v1/payment-status/{trackingNumber}
+   661→  // ──────────────────────────────────────────────────────────────
+   662→
+   663→  /**
+   664→   * Fetch the payment/settlement status for a tracking number.
+   665→   *
+   666→   * PostEx's Payment Status API response:
+   667→   *   { statusCode, statusMessage, dist: { orderRefNumber, trackingNumber,
+   668→   *     settle (boolean), settlementDate, upfrontPaymentDate,
+   669→   *     cprNumber_1, reservePaymentDate, cprNumber_2 } }
+   670→   *
+   671→   * IMPORTANT: PostEx's Payment Status API does NOT break out delivery charge
+   672→   * as a separate field. It only provides settlement status (boolean), dates,
+   673→   * and CPR numbers. The `actualDeliveryCharge` field on Order/exchange_shipments
+   674→   * CANNOT be auto-populated from this API — it would need to come from a
+   675→   * different source (e.g. manual entry or a reconciliation report).
+   676→   */
+   677→  async fetchPaymentStatus(trackingNumber: string): Promise<{
+   678→    success: boolean
+   679→    settled: boolean
+   680→    settlementDate: string | null
+   681→    upfrontPaymentDate: string | null
+   682→    cprNumber1: string | null
+   683→    cprNumber2: string | null
+   684→    error?: string
+   685→  }> {
+   686→    const response = await fetch(
+   687→      `${POSTEX_BASE_URL}/v1/payment-status/${encodeURIComponent(trackingNumber)}`,
+   688→      {
+   689→        method: 'GET',
+   690→        headers: {
+   691→          token: this.token,
+   692→        },
+   693→      },
+   694→    )
+   695→
+   696→    if (response.status === 404) {
+   697→      return { success: false, settled: false, settlementDate: null, upfrontPaymentDate: null, cprNumber1: null, cprNumber2: null, error: 'Order not found on PostEx.' }
+   698→    }
+   699→
+   700→    const json: PostExApiResponse<{
+   701→      orderRefNumber: string
+   702→      trackingNumber: string
+   703→      settle: boolean
+   704→      settlementDate: string
+   705→      upfrontPaymentDate: string
+   706→      cprNumber_1: string
+   707→      reservePaymentDate: string
+   708→      cprNumber_2: string
+   709→    }> = await response.json()
+   710→
+   711→    if (json.statusCode === 200 || json.statusCode === '200') {
+   712→      const dist = json.dist
+   713→      return {
+   714→        success: true,
+   715→        settled: dist?.settle ?? false,
+   716→        settlementDate: dist?.settlementDate ?? null,
+   717→        upfrontPaymentDate: dist?.upfrontPaymentDate ?? null,
+   718→        cprNumber1: dist?.cprNumber_1 ?? null,
+   719→        cprNumber2: dist?.cprNumber_2 ?? null,
+   720→      }
+   721→    }
+   722→
+   723→    return {
+   724→      success: false,
+   725→      settled: false,
+   726→      settlementDate: null,
+   727→      upfrontPaymentDate: null,
+   728→      cprNumber1: null,
+   729→      cprNumber2: null,
+   730→      error: json.statusMessage || `PostEx payment-status API returned statusCode ${json.statusCode}`,
+   731→    }
+   732→  }
+   733→}
+   734→
