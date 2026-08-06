@@ -1,13 +1,21 @@
 import crypto from 'crypto'
-import { cookies } from 'next/headers'
+import { cookies, headers } from 'next/headers'
 import { db } from './db'
 
 /**
- * Lightweight signed-cookie session (HMAC).
- * The sandbox cannot reach Supabase Auth, so we implement a minimal,
- * secure session: the cookie carries `userId.timestamp.hmac` and is
- * verified server-side. This mirrors the Supabase Auth contract used
- * by the rest of the app (getCurrentUser / requireUser).
+ * Lightweight signed-token session (HMAC).
+ *
+ * The token carries `userId.timestamp.hmac` and is verified server-side.
+ *
+ * DUAL-CHANNEL AUTH:
+ *   1. Cookie-based: Set as an HttpOnly cookie on login (works for same-origin)
+ *   2. Header-based: Sent via `Authorization: Bearer <token>` header (works
+ *      for ALL contexts — iframes, cross-origin, preview panels, mobile apps)
+ *
+ * The server checks BOTH channels: first the Authorization header, then the
+ * cookie. This means the frontend can store the token in localStorage AND
+ * send it as a Bearer token, completely bypassing all cookie/SameSite/iframe
+ * restrictions while still maintaining cookie-based auth as a fallback.
  */
 
 const COOKIE_NAME = 'flowops_session'
@@ -43,8 +51,24 @@ export function verifySessionToken(token: string): string | null {
 export const SESSION_COOKIE = COOKIE_NAME
 export const SESSION_MAX_AGE = MAX_AGE_MS / 1000
 
-/** Read & verify the session cookie; returns the userId or null. */
+/**
+ * Read & verify the session token from EITHER:
+ *   1. Authorization: Bearer <token> header (preferred — works everywhere)
+ *   2. flowops_session cookie (fallback — works for same-origin)
+ *
+ * Returns the userId or null.
+ */
 export async function getSessionUserId(): Promise<string | null> {
+  // ── Channel 1: Authorization header ──
+  const hdrs = await headers()
+  const authHeader = hdrs.get('authorization')
+  if (authHeader?.startsWith('Bearer ')) {
+    const token = authHeader.substring(7)
+    const userId = verifySessionToken(token)
+    if (userId) return userId
+  }
+
+  // ── Channel 2: Cookie (fallback) ──
   const store = await cookies()
   const token = store.get(COOKIE_NAME)?.value
   if (!token) return null

@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { useAppStore, useCan } from '@/stores/app-store'
-import { api, FetchError } from '@/lib/api-client'
+import { api, FetchError, getSessionToken } from '@/lib/api-client'
 import { PageHeader } from '@/components/layout/dashboard-shell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -1577,6 +1577,7 @@ function ImagesTab({
         method: 'POST',
         body: fd,
         credentials: 'include',
+        headers: getSessionToken() ? { Authorization: `Bearer ${getSessionToken()}` } : {},
         cache: 'no-store',
       })
       const text = await res.text()

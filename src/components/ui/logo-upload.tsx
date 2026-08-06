@@ -3,6 +3,7 @@
 import { useState, useRef } from 'react'
 import { Loader2, Upload, X } from 'lucide-react'
 import { InitialsAvatar } from '@/components/ui/initials-avatar'
+import { getSessionToken } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
 
 /**
@@ -55,6 +56,7 @@ export function LogoUpload({
         method: 'POST',
         body: fd,
         credentials: 'include',
+        headers: getSessionToken() ? { Authorization: `Bearer ${getSessionToken()}` } : {},
       })
 
       const text = await res.text()

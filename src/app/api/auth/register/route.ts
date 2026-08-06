@@ -66,6 +66,7 @@ export async function POST(req: Request) {
       activeCompany: null,
       companies: [],
       employee: null,
+      sessionToken: token,
     })
   } catch (err) {
     return handleError(err)

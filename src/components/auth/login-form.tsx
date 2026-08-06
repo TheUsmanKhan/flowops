@@ -6,7 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2, Mail, Lock, ArrowRight } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAppStore } from '@/stores/app-store'
-import { api, FetchError } from '@/lib/api-client'
+import { api, FetchError, setSessionToken } from '@/lib/api-client'
 import { loginSchema, type LoginInput } from '@/lib/validations/auth'
 import type { SessionResponse } from '@/lib/types'
 import { Button } from '@/components/ui/button'
@@ -27,6 +27,10 @@ export function LoginForm() {
     setLoading(true)
     try {
       const session = await api.post<SessionResponse>('/api/auth/login', values)
+      // Store the session token in localStorage for Bearer auth
+      if (session.sessionToken) {
+        setSessionToken(session.sessionToken)
+      }
       setSession({
         user: session.user,
         activeCompany: session.activeCompany,

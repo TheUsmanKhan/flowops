@@ -149,6 +149,8 @@ export const useAppStore = create<AppState>((set) => ({
       loading: false,
     })
     if (typeof window !== 'undefined') {
+      // Clear the localStorage session token
+      localStorage.removeItem('flowops_session_token')
       replaceRouteInURL({ name: 'login' })
     }
   },

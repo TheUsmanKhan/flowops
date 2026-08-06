@@ -6,7 +6,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2, Mail, Lock, User, ArrowRight } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAppStore } from '@/stores/app-store'
-import { api, FetchError } from '@/lib/api-client'
+import { api, FetchError, setSessionToken } from '@/lib/api-client'
 import { registerSchema, type RegisterInput } from '@/lib/validations/auth'
 import type { SessionResponse } from '@/lib/types'
 import { Button } from '@/components/ui/button'
@@ -37,6 +37,10 @@ export function RegisterForm() {
         password: values.password,
         confirmPassword: values.confirmPassword,
       })
+      // Store the session token in localStorage for Bearer auth
+      if (session.sessionToken) {
+        setSessionToken(session.sessionToken)
+      }
       setSession({
         user: session.user,
         activeCompany: session.activeCompany,

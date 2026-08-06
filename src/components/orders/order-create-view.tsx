@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { api, FetchError } from '@/lib/api-client'
+import { api, FetchError, getSessionToken } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
 import { PERMISSIONS } from '@/lib/permissions'
 import { useFormGuard } from '@/hooks/form-guard/use-form-guard'
@@ -621,7 +621,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       fd.append('file', paymentProofFile)
       const uploadRes = await fetch(
         `/api/upload?type=payment-proofs&id=${orderId}`,
-        { method: 'POST', body: fd, credentials: 'include' },
+        { method: 'POST', body: fd, credentials: 'include', headers: getSessionToken() ? { Authorization: `Bearer ${getSessionToken()}` } : {} },
       )
       const uploadText = await uploadRes.text()
       let uploadBody: unknown = null

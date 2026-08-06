@@ -29,7 +29,7 @@ export async function POST(req: Request) {
     store.set(SESSION_COOKIE, token, {
       httpOnly: true,
       sameSite: 'none',
-      secure: false, // required for SameSite=none in dev (no HTTPS)
+      secure: false,
       path: '/',
       maxAge: SESSION_MAX_AGE,
     })
@@ -41,7 +41,11 @@ export async function POST(req: Request) {
       userId: profile.id,
     })
 
-    return Response.json(await buildSessionPayload(profile.id))
+    const payload = await buildSessionPayload(profile.id)
+    // Return the session token in the JSON body so the frontend can store it
+    // in localStorage and send it as a Bearer token. This is CRITICAL for
+    // iframe/preview-panel contexts where cookies don't work reliably.
+    return Response.json({ ...payload, sessionToken: token })
   } catch (err) {
     return handleError(err)
   }

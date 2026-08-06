@@ -114,6 +114,7 @@ export interface SessionResponse {
     permissions: string[]
     isElevated: boolean
   } | null
+  sessionToken?: string
 }
 
 /** Result type for API responses. */

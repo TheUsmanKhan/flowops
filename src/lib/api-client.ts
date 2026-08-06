@@ -9,28 +9,64 @@ export class FetchError extends Error {
 }
 
 /**
+ * The localStorage key where the session token is stored after login.
+ * This token is sent as `Authorization: Bearer <token>` on every request,
+ * which works in ALL contexts (iframes, cross-origin, preview panels, mobile)
+ * unlike cookies which are blocked by SameSite/HttpOnly/cross-origin rules.
+ */
+const SESSION_TOKEN_KEY = 'flowops_session_token'
+
+/** Store the session token in localStorage (called after login/register). */
+export function setSessionToken(token: string) {
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(SESSION_TOKEN_KEY, token)
+  }
+}
+
+/** Clear the session token from localStorage (called after logout). */
+export function clearSessionToken() {
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem(SESSION_TOKEN_KEY)
+  }
+}
+
+/** Get the session token from localStorage. */
+export function getSessionToken(): string | null {
+  if (typeof window !== 'undefined') {
+    return localStorage.getItem(SESSION_TOKEN_KEY)
+  }
+  return null
+}
+
+/**
  * Centralized fetch wrapper.
  *
- * CRITICAL: `credentials: 'include'` is REQUIRED for the session cookie to
- * be sent with every request. Without it, browsers in cross-origin contexts
- * (iframes, preview panels, different port numbers) do NOT send cookies
- * automatically even with SameSite=none. This is the #1 cause of
- * "You must be signed in" errors across the app.
+ * Sends the session token via `Authorization: Bearer <token>` header (from
+ * localStorage) AND includes credentials for cookie-based fallback.
  *
- * `cache: 'no-store'` prevents Next.js from caching API responses, which
- * would otherwise serve stale data to different users.
+ * This dual-channel approach ensures auth works in ALL contexts:
+ *   - Same-origin (cookie works)
+ *   - Cross-origin / iframe / preview panel (Bearer token works)
+ *   - Mobile app (Bearer token works)
  */
 async function request<T>(
   url: string,
   options?: RequestInit,
 ): Promise<T> {
+  const token = getSessionToken()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string> ?? {}),
+  }
+  // Attach Bearer token if available
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
   const res = await fetch(url, {
     ...options,
     credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options?.headers ?? {}),
-    },
+    headers,
     cache: 'no-store',
   })
   let body: unknown = null
