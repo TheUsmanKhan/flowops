@@ -302,6 +302,17 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
     queryKey: ['order', orderId],
     queryFn: () => api.get<OrderDetail>(`/api/orders/${orderId}`),
     staleTime: 10_000,
+    // Poll every 5s while booking is in progress (courierBookingStatus='not_booked'
+    // and the order is confirmed). Stops polling once the status becomes
+    // 'booked' or 'failed'. This catches async background auto-booking.
+    refetchInterval: (query) => {
+      const status = query.state.data?.order?.courierBookingStatus
+      const orderStatus = query.state.data?.order?.status
+      if (orderStatus === 'confirmed' && (status === 'not_booked' || !status)) {
+        return 5_000 // poll every 5s
+      }
+      return false // stop polling
+    },
   })
 
   const auditQuery = useQuery<AuditLogResponse>({

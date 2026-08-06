@@ -128,9 +128,9 @@ interface CreateOrderResponse {
   orderId: string
   flowopsOrderNumber: string
   orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
-  /** Phase 5: auto-booking result — distinct from order creation success. */
+  /** Auto-booking is now ASYNC — bookingAttempted=true means it's running in the background. */
   bookingAttempted: boolean
-  bookingSucceeded: boolean
+  bookingSucceeded?: boolean
   bookingError?: string
   bookingTrackingNumber?: string
 }
@@ -821,33 +821,24 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     try {
       const data = await api.post<CreateOrderResponse>('/api/orders', payload)
 
-      // ── Phase 5: Distinct success + failure messages ──
-      // The order itself is ALWAYS created successfully at this point.
-      // Booking success/failure is a SEPARATE concern — never conflate.
+      // ── Order creation is ALWAYS successful at this point ──
       toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
 
-      if (data.bookingAttempted && data.bookingSucceeded && data.bookingTrackingNumber) {
-        toast.success(
-          `Courier booked automatically. Tracking #: ${data.bookingTrackingNumber}`,
-        )
-      } else if (data.bookingAttempted && !data.bookingSucceeded && data.bookingError) {
-        // Distinct warning — the order is safe, but booking failed.
-        // Use a longer duration so the user has time to read the reason.
-        toast.warning(
-          `Auto-booking failed: ${data.bookingError}`,
-          { duration: 8000 },
-        )
+      // Auto-booking now runs ASYNCHRONOUSLY in the background (PostEx API
+      // can take 50-100s). The order is created with courierBookingStatus=
+      // 'not_booked', and the background task updates it when PostEx responds.
+      // We navigate to the order detail page immediately — the user will see
+      // the booking status update live as the background task completes.
+      if (data.bookingAttempted) {
+        toast.info('Courier booking is in progress… You can track the status on the order detail page.', { duration: 6000 })
       }
 
-      setHasChanges(false) // Reset guard — no false-positive prompt after saving
-      // Phase 10: Delete the draft now that the real order is created
+      setHasChanges(false)
       if (draftId) {
         await api.delete(`/api/drafts?id=${draftId}`).catch(() => {})
         setDraftId(undefined)
       }
-      // ── Phase 4: Invalidate ALL relevant query keys ──
-      // The order list, the Booking Workbench (in case booking failed and the
-      // order lands there), and the Booking Activity report all need to refresh.
+      // Invalidate ALL relevant query keys
       void queryClient.invalidateQueries({ queryKey: ['orders'] })
       void queryClient.invalidateQueries({ queryKey: ['booking-workbench-bookable'] })
       void queryClient.invalidateQueries({ queryKey: ['booking-workbench-activity'] })
@@ -861,19 +852,10 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
         }
       }
 
-      // If booking failed, stay on the create page briefly so the user sees
-      // the warning toast + can use the Retry button. Otherwise navigate to
-      // the order detail page immediately.
-      if (data.bookingAttempted && !data.bookingSucceeded) {
-        // Store the failure info for the inline Retry UI
-        setBookingFailure({
-          orderId: data.orderId,
-          orderNumber: data.flowopsOrderNumber,
-          error: data.bookingError ?? 'Unknown error',
-        })
-      } else {
-        navigate({ name: 'order-detail', id: data.orderId })
-      }
+      // Navigate to the order detail page immediately. The booking status
+      // will update live as the background task completes (the order detail
+      // page polls or refetches).
+      navigate({ name: 'order-detail', id: data.orderId })
     } catch (err) {
       toast.error(getErrorMessage(err))
     }

@@ -4270,3 +4270,38 @@ TEST RESULT — FULLY WORKING AUTO-BOOKING:
 
 Stage Summary:
 - The full auto-booking pipeline is now WORKING end-to-end: order creation → auto-booking fires → PostEx API called → tracking number returned and stored. The pickup address system supports syncing from PostEx, setting a default, and per-order override. The root cause of all previous booking failures was storeAddressCode="" being sent to PostEx, which PostEx rejected. Omitting the field entirely fixes it.
+
+---
+Task ID: 23
+Agent: main
+Task: Fix 502 Bad Gateway on order creation — auto-booking was synchronous (107s) causing gateway timeout
+
+Work Log:
+- Root cause: auto-booking ran SYNCHRONOUSLY inside createManualOrder(). PostEx's create-order API takes 50-100 seconds to respond. The entire POST /api/orders request blocked for 60-107 seconds, exceeding the ALB gateway timeout → 502 Bad Gateway.
+- Dev log showed: POST /api/orders 201 in 60s and POST /api/orders 201 in 107s.
+
+FIX 1 — createManualOrder (order.actions.ts):
+- Changed auto-booking from synchronous to ASYNCHRONOUS (fire-and-forget). The order is created immediately with courierBookingStatus='not_booked'. The booking runs in a background async IIFE that calls maybeAutoBookOrder(). When PostEx responds (50-100s later), the background task updates the order's courierBookingStatus + trackingNumber.
+- Quick synchronous check determines if auto-booking SHOULD fire (reads settings — no API call). If yes, sets bookingAttempted=true and fires the background task.
+- Order creation now returns in ~2 seconds instead of 107 seconds.
+
+FIX 2 — order-create-view.tsx:
+- Updated submit handler to handle async booking. Shows toast: "Order created successfully." + "Courier booking is in progress… You can track the status on the order detail page." Navigates to order detail immediately.
+- Removed the inline booking-failure banner + Retry button (no longer needed — the user navigates to the order detail page which shows live booking status).
+- Updated CreateOrderResponse type: bookingSucceeded and bookingError are now optional (may not be set when booking is async).
+
+FIX 3 — order-detail-view.tsx:
+- Added refetchInterval to the order detail query. Polls every 5 seconds while courierBookingStatus='not_booked' and the order is confirmed. Stops polling once the status becomes 'booked' or 'failed'. This catches the async background auto-booking — the user sees the tracking number appear live on the order detail page.
+
+FIX 4 — Return type (order.actions.ts):
+- Updated createManualOrder return type: bookingSucceeded, bookingError, bookingTrackingNumber are now optional (may not be set when booking is async).
+
+TEST RESULT:
+- Created order ORD-2026-00031. Response received in 2 seconds (was 107s).
+- No 502 Bad Gateway.
+- Background booking completed after ~60s.
+- DB verified: courierBookingStatus='booked', trackingNumber='22150830016003', courierName='PostEx'.
+- Dev log: "Background auto-booking succeeded for ORD-2026-00031: tracking=22150830016003"
+
+Stage Summary:
+- The 502 Bad Gateway is fixed. Order creation returns instantly (< 3s). Auto-booking runs in the background and the order detail page polls every 5s to show the booking status update live. The user no longer experiences any timeout — they create the order, get immediately redirected to the order detail page, and see the tracking number appear within 60-90 seconds.

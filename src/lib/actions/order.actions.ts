@@ -309,9 +309,9 @@ export async function createManualOrder(
   orderId: string
   flowopsOrderNumber: string
   orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
-  /** Phase 5: auto-booking result — distinct from order creation success. */
+  /** Auto-booking is now ASYNC — bookingAttempted=true means it's running in the background. */
   bookingAttempted: boolean
-  bookingSucceeded: boolean
+  bookingSucceeded?: boolean
   bookingError?: string
   bookingTrackingNumber?: string
 }>> {
@@ -705,50 +705,55 @@ export async function createManualOrder(
     }
 
     // 14. AUTO-BOOKING (Phase 3): if the company's courierBookingMode is
-    // 'automatic' AND the order is confirmed (NOT 'partially_backordered' —
-    // backordered orders are deferred to backorder fulfillment), automatically
-    // book the courier right now. maybeAutoBookOrder() reads the default courier
-    // from CompanyOrderSetting, so we attempt it regardless of whether the user
-    // explicitly selected a courier on the form.
+    // 'automatic' AND the order is confirmed, automatically book the courier.
     //
-    // NON-BLOCKING: if auto-booking fails, the order is STILL created
-    // successfully — courierBookingStatus='failed' + courierBookingFailureReason
-    // are persisted on the order, and it lands in the manual Workbench for retry.
-    // The failure reason is returned in bookingError so the frontend can show a
-    // distinct warning (separate from the order-created success message).
+    // ASYNCHRONOUS: PostEx's API can take 50-100 seconds to respond. Running
+    // the booking synchronously would block the order creation response for
+    // that long, causing a 502 Bad Gateway from the ALB. Instead, we fire the
+    // booking in the background and return immediately. The order is created
+    // with courierBookingStatus='not_booked', and the background task updates
+    // it to 'booked' or 'failed' when PostEx responds.
+    //
+    // The frontend shows "Order created. Booking in progress…" and can poll
+    // the order detail to see when the tracking number appears.
     let bookingAttempted = false
     let bookingSucceeded = false
     let bookingError: string | undefined
     let bookingTrackingNumber: string | undefined
+
     if (orderStatus === 'confirmed') {
+      // Check if auto-booking should fire (quick synchronous check — no API call)
       try {
-        const { maybeAutoBookOrder } = await import('./booking.actions')
-        const bookResult = await maybeAutoBookOrder(order.id, 'manual', orderStatus)
-        if (bookResult.success && bookResult.data) {
-          bookingAttempted = true
-          bookingSucceeded = true
-          bookingTrackingNumber = bookResult.data.trackingNumber
-        } else if (bookResult.error) {
-          // Distinguish between "skipped" (intentional — mode is semi_manual,
-          // or no courier selected and no default) vs genuine errors (inactive
-          // integration, API failure, city not recognized).
-          // - "skipped" messages: NOT surfaced as errors (the user is in
-          //   semi-manual mode or didn't select a courier — that's fine).
-          // - Other messages: surfaced as warnings so the user knows WHY
-          //   auto-booking failed and can fix it.
-          const isSkipped = bookResult.error.includes('skipped')
-          bookingAttempted = !isSkipped // skipped = not really "attempted"
-          bookingSucceeded = false
-          if (!isSkipped) {
-            bookingError = bookResult.error
-          }
+        const settings = await db.companyOrderSetting.findUnique({
+          where: { companyId: ctx.company.id },
+          select: { courierBookingMode: true, defaultCourierCompanyIntegrationId: true },
+        })
+        const shouldAutoBook =
+          settings?.courierBookingMode === 'automatic' &&
+          (d.courier_company_integration_id || settings?.defaultCourierCompanyIntegrationId)
+
+        if (shouldAutoBook) {
+          bookingAttempted = true // we're going to attempt it in the background
+          // Fire-and-forget: the booking runs in the background. The order
+          // creation returns immediately with bookingSucceeded=undefined
+          // (meaning "in progress"). When the background task completes, it
+          // updates the order's courierBookingStatus + trackingNumber.
+          ;(async () => {
+            try {
+              const { maybeAutoBookOrder } = await import('./booking.actions')
+              const bookResult = await maybeAutoBookOrder(order.id, 'manual', orderStatus)
+              if (bookResult.success) {
+                console.log(`[createManualOrder] Background auto-booking succeeded for ${flowopsOrderNumber}: tracking=${bookResult.data?.trackingNumber}`)
+              } else {
+                console.warn(`[createManualOrder] Background auto-booking failed for ${flowopsOrderNumber}: ${bookResult.error}`)
+              }
+            } catch (err) {
+              console.error(`[createManualOrder] Background auto-booking threw for ${flowopsOrderNumber}:`, err)
+            }
+          })()
         }
-      } catch (err) {
-        // Auto-booking threw — log but don't fail the order creation
-        console.error('[createManualOrder] Auto-booking failed:', err)
-        bookingAttempted = true
-        bookingSucceeded = false
-        bookingError = err instanceof Error ? err.message : 'Auto-booking failed'
+      } catch {
+        // Settings check failed — non-fatal, just skip auto-booking
       }
     }
 
