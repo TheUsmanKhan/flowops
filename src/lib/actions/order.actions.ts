@@ -1397,12 +1397,19 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
       }
     }
 
+    // ── Phase 3: Set physicalUnpackRequired if the order was already
+    // processing/packed (a physical parcel likely already exists) ──
+    const physicalUnpackRequired =
+      order.status === 'processing' ||
+      order.packedAt !== null
+
     await db.order.update({
       where: { id: d.order_id },
       data: {
         status: 'cancelled',
         cancelledAt: new Date(),
         cancellationReason: d.cancellation_reason,
+        physicalUnpackRequired,
       },
     })
 

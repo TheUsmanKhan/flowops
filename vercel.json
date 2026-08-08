@@ -7,6 +7,10 @@
     {
       "path": "/api/cron/poll-postex",
       "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/generate-scan-reports",
+      "schedule": "0 1 * * *"
     }
   ]
 }

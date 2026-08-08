@@ -36,6 +36,7 @@ import {
   Clock,
   XCircle,
   Send,
+  ScanLine,
   type LucideIcon,
 } from 'lucide-react'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -101,6 +102,7 @@ const NAV: NavItem[] = [
       { route: { name: 'orders-awaiting-production' }, label: 'Awaiting Production', icon: Factory, matchPrefixes: ['orders-awaiting'] },
       { route: { name: 'orders-ready-to-dispatch' }, label: 'Ready to Dispatch', icon: Truck, matchPrefixes: ['orders-ready'] },
       { route: { name: 'booking-workbench' }, label: 'Booking Workbench', icon: Send, matchPrefixes: ['booking-workbench'] },
+      { route: { name: 'order-scan' }, label: 'Order Scan', icon: ScanLine, matchPrefixes: ['order-scan'] },
       { route: { name: 'orders-returns' }, label: 'Returns & RTO', icon: Undo2, matchPrefixes: ['orders-returns'] },
       { route: { name: 'exchanges' }, label: 'Exchanges', icon: RefreshCw, matchPrefixes: ['exchanges', 'exchange-detail'] },
       { route: { name: 'orders-cancelled' }, label: 'Cancelled', icon: XCircle, matchPrefixes: ['orders-cancelled'] },

@@ -74,6 +74,7 @@ export type AppRoute =
   | { name: 'customer-detail'; id: string }
   | { name: 'order-workflow-settings' }
   | { name: 'booking-workbench' }
+  | { name: 'order-scan' }
 
 interface AppState {
   // session
