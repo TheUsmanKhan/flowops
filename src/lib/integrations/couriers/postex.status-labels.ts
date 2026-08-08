@@ -26,6 +26,8 @@ const SUBSTATUS_LABELS: Record<string, string> = {
   out_for_return: 'Being Returned',
   attempted: 'Need Advice',
   under_review: 'Under Review',
+  cancelled_by_merchant: 'Cancelled by Merchant',
+  expired: 'Expired',
 }
 
 /**

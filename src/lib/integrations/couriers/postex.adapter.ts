@@ -256,6 +256,7 @@ export class PostExAdapter implements CourierAdapter {
       if (mapped.triggerDelivered) genericStatus = 'delivered'
       else if (mapped.triggerRto) genericStatus = 'returned'
       else if (mapped.triggerDispatch) genericStatus = 'in_transit'
+      else if (mapped.orderStatus === 'cancelled') genericStatus = 'failed' // reuse 'failed' for cancelled-by-merchant/expired
 
       return {
         success: true,
@@ -292,10 +293,11 @@ export class PostExAdapter implements CourierAdapter {
     for (let i = 0; i < trackingNumbers.length; i += CHUNK_SIZE) {
       const chunk = trackingNumbers.slice(i, i + CHUNK_SIZE)
 
-      // PostEx's bulk tracking API uses GET with comma-separated tracking numbers
-      // in the query param. The request body format in the docs shows an array,
-      // but the actual API is GET with query params.
-      const queryString = chunk.map((t) => `trackingNumber=${encodeURIComponent(t)}`).join('&')
+      // PostEx's bulk tracking API uses GET with query params.
+      // The parameter name is "TrackingNumbers" (capital T, capital N)
+      // — confirmed from the live API error message:
+      // "Required List parameter 'TrackingNumbers' is not present"
+      const queryString = chunk.map((t) => `TrackingNumbers=${encodeURIComponent(t)}`).join('&')
 
       const response = await fetch(
         `${POSTEX_BASE_URL}/v1/track-bulk-order?${queryString}`,
@@ -328,6 +330,7 @@ export class PostExAdapter implements CourierAdapter {
           if (mapped.triggerDelivered) genericStatus = 'delivered'
           else if (mapped.triggerRto) genericStatus = 'returned'
           else if (mapped.triggerDispatch) genericStatus = 'in_transit'
+          else if (mapped.orderStatus === 'cancelled') genericStatus = 'failed' // cancelled-by-merchant/expired
 
           results.push({
             success: true,

@@ -377,6 +377,59 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                   errors.push(`Failed to mark order ${entry.id} as RTO: ${e}`)
                 }
               }
+              // ── "Cancelled by merchant" / "Expired" → cancel the order ──
+              // PostEx returns "Un-Assigned By Me" when the merchant cancels
+              // on the PostEx portal, or "Expired" when the booking expires.
+              // Both map to genericStatus='failed' + courierSubStatus='cancelled_by_merchant' or 'expired'.
+              // We need to cancel the order in FlowOps and unreserve stock.
+              if (result.status === 'failed' && mappedSubStatus &&
+                  (mappedSubStatus === 'cancelled_by_merchant' || mappedSubStatus === 'expired')) {
+                try {
+                  const order = await db.order.findUnique({
+                    where: { id: entry.id },
+                    select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true },
+                  })
+                  if (order && order.status !== 'cancelled' && order.status !== 'delivered' && order.status !== 'rto') {
+                    // Unreserve stock for reserved items
+                    const reservedItems = await db.orderItem.findMany({
+                      where: { orderId: entry.id, fulfillmentStatus: 'reserved' },
+                    })
+                    for (const item of reservedItems) {
+                      const locationId = item.reservedLocationId ?? order.dispatchLocationId
+                      if (!locationId) continue
+                      try {
+                        const { unreserveStockForOrder } = await import('@/lib/inventory')
+                        await unreserveStockForOrder({
+                          orgVariantId: item.orgVariantId,
+                          locationId,
+                          organizationId: order.organizationId,
+                          companyId: integration.companyId,
+                          employeeId: integration.createdBy ?? '',
+                          quantity: item.quantity,
+                          orderId: entry.id,
+                        })
+                      } catch (e) {
+                        console.error(`[poll] Failed to unreserve stock for item ${item.id}:`, e)
+                      }
+                    }
+
+                    // Cancel the order
+                    await db.order.update({
+                      where: { id: entry.id },
+                      data: {
+                        status: 'cancelled',
+                        cancelledAt: new Date(),
+                        cancellationReason: `Courier booking ${mappedSubStatus === 'cancelled_by_merchant' ? 'cancelled by merchant on PostEx portal' : 'expired on PostEx'} (detected via status polling)`,
+                        courierBookingStatus: 'cancelled',
+                      },
+                    })
+                    console.log(`[poll] Auto-cancelled ${order.flowopsOrderNumber} (PostEx status: ${mappedSubStatus})`)
+                  }
+                } catch (e) {
+                  console.error(`[poll] Failed to auto-cancel order ${entry.id}:`, e)
+                  errors.push(`Failed to auto-cancel order ${entry.id}: ${e}`)
+                }
+              }
             }
 
             // ── Payment Status lookup (Phase 3 — migration 012) ──

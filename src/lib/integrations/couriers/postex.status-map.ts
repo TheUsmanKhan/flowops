@@ -17,7 +17,7 @@
 
 export interface PostExStatusMapping {
   /** The FlowOps order/shipment status to transition to (if any). */
-  orderStatus: 'confirmed' | 'dispatched' | 'delivered' | 'rto' | 'no_change'
+  orderStatus: 'confirmed' | 'dispatched' | 'delivered' | 'rto' | 'cancelled' | 'no_change'
   /** A short machine-readable sub-status for display/audit. */
   courierSubStatus: string | null
   /** True if this status should trigger markOrderDelivered() / markExchangeShipmentDelivered(). */
@@ -176,6 +176,34 @@ export function mapPostExStatus(postexStatus: string): PostExStatusMapping {
         triggerDelivered: false,
         triggerRto: false,
         needsShipperAdvice: true,
+        unrecognized: false,
+      }
+
+    case 'un-assigned by me':
+      // PostEx returns this status when the merchant cancels the order
+      // directly on the PostEx portal. The courier booking is gone —
+      // we need to cancel the order in FlowOps too.
+      return {
+        orderStatus: 'cancelled',
+        courierSubStatus: 'cancelled_by_merchant',
+        triggerDispatch: false,
+        triggerDelivered: false,
+        triggerRto: false,
+        needsShipperAdvice: false,
+        unrecognized: false,
+      }
+
+    case 'expired':
+      // PostEx returns this when the booking expires (e.g. wasn't picked
+      // up within the time window). Treat like a cancellation — the
+      // booking is no longer active.
+      return {
+        orderStatus: 'cancelled',
+        courierSubStatus: 'expired',
+        triggerDispatch: false,
+        triggerDelivered: false,
+        triggerRto: false,
+        needsShipperAdvice: false,
         unrecognized: false,
       }
 
