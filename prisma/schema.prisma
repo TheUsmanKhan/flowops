@@ -1995,6 +1995,12 @@ model Order {
   // from the "ready for load sheet" checklist.
   loadSheetId                   String?
   loadSheet                     LoadSheet? @relation("OrderLoadSheet", fields: [loadSheetId], references: [id], onDelete: SetNull)
+
+  // ─── Courier Slip (migration 021) ────────────────────────────────
+  // Path to our own stored copy of the courier's booking slip PDF (downloaded
+  // from the courier's slip_link). NULL for couriers that don't provide a slip
+  // or if the download failed (non-fatal — booking still succeeded).
+  courierSlipStoragePath        String?
 }
 
 /// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
@@ -2059,6 +2065,9 @@ model CourierOperationalCity {
   cityId            String?  // Courier's own city ID (nullable, stored as TEXT)
   isPickupCity      Boolean  @default(true)
   isDeliveryCity    Boolean  @default(true)
+  // Leopard-specific: array of allowed shipment types per city (e.g. ["overnight","overland"]).
+  // Stored as a JSON array string. NULL for providers that don't return this field.
+  shipmentTypes     String?
   lastSyncedAt      DateTime @default(now())
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
@@ -2103,6 +2112,9 @@ model CourierPickupAddress {
   phone1                String
   phone2                String?
   isDefault             Boolean  @default(false)
+  // Leopard-specific: optional return address override (JSONB: {address, cityName,
+  // contactPersonName, phone}). NULL = use shipper's origin as return (Leopard default).
+  returnAddressOverride String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
@@ -2216,6 +2228,10 @@ model ExchangeShipment {
   // Set when this shipment is included in a generated load sheet (pickup manifest).
   loadSheetId                   String?
   loadSheet                     LoadSheet? @relation("ExchangeShipmentLoadSheet", fields: [loadSheetId], references: [id], onDelete: SetNull)
+
+  // ─── Courier Slip (migration 021) ────────────────────────────────
+  // Path to our own stored copy of the courier's booking slip PDF.
+  courierSlipStoragePath        String?
 
   @@map("exchange_shipments")
 }

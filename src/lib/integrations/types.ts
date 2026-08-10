@@ -46,6 +46,24 @@ export interface BookShipmentInput {
    * (PostEx-specific). Default false — the caller decides whether to chain.
    */
   autoGenerateLoadSheet?: boolean
+
+  /**
+   * Leopard-specific: shipment type name (e.g. "overnight", "overland").
+   * Optional — if empty, Leopard applies its own default ("overnight").
+   */
+  shipmentType?: string
+
+  /**
+   * Leopard-specific: optional return address override.
+   * JSONB: { address, cityName, contactPersonName, phone }.
+   * If not provided, Leopard uses the shipper's origin address as return.
+   */
+  returnAddressOverride?: {
+    address: string
+    cityName: string
+    contactPersonName: string
+    phone: string
+  } | null
 }
 
 export interface BookShipmentResult {
@@ -53,6 +71,11 @@ export interface BookShipmentResult {
   trackingNumber?: string
   /** Courier's initial status string (e.g. PostEx returns "Unbooked"). */
   providerStatus?: string
+  /**
+   * Courier's booking slip URL (if provided). The caller should download and
+   * store our own copy (courierSlipStoragePath) — don't trust external URLs.
+   */
+  slipLink?: string
   error?: string
   rawResponse?: unknown
 }

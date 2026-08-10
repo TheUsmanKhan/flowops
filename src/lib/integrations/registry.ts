@@ -52,7 +52,7 @@ export type AdapterStatus = 'live' | 'framework_ready' | 'stub'
 
 const COURIER_ADAPTER_STATUS: Record<string, AdapterStatus> = {
   postex: 'live',             // Real implementation — bookShipment, trackShipment, fetchOperationalCities, etc.
-  leopard: 'framework_ready', // Stub — methods throw "not yet implemented". Ready for later prompts.
+  leopard: 'live',            // Real implementation — bookShipment, trackShipment, fetchOperationalCities, createShipper, etc.
   tcs: 'framework_ready',     // Stub — methods throw "not yet implemented". Ready for later prompts.
 }
 

@@ -82,6 +82,23 @@ export async function syncCourierOperationalCities(providerKey: string): Promise
     }
 
     // Fetch cities via the logged wrapper (so the API call is logged)
+    // For Leopard, also fetch the raw city list with shipment_type arrays
+    // (the standard OperationalCity type doesn't include shipmentTypes).
+    const isLeopard = providerKey === 'leopard'
+
+    let leopardRawCities: Array<{ id: number; name: string; shipment_type: string[]; allow_as_origin: boolean; allow_as_destination: boolean }> | null = null
+
+    if (isLeopard && typeof (adapter as { fetchOperationalCitiesRaw?: () => Promise<unknown> }).fetchOperationalCitiesRaw === 'function') {
+      // Fetch raw cities with shipment_type arrays (Leopard-specific)
+      leopardRawCities = await executeLoggedIntegrationAction<typeof leopardRawCities>({
+        companyIntegrationId: integration.id,
+        organizationId: integration.organizationId,
+        actionType: 'fetch_operational_cities',
+        direction: 'outbound',
+        fn: async () => (adapter as { fetchOperationalCitiesRaw: () => Promise<typeof leopardRawCities> }).fetchOperationalCitiesRaw(),
+      })
+    }
+
     const cities = await executeLoggedIntegrationAction<OperationalCity[]>({
       companyIntegrationId: integration.id,
       organizationId: integration.organizationId,
@@ -92,6 +109,16 @@ export async function syncCourierOperationalCities(providerKey: string): Promise
 
     result.fetchedCount = cities.length
 
+    // Build a map of cityName → shipmentTypes JSON string (Leopard only)
+    const shipmentTypesMap = new Map<string, string>()
+    if (leopardRawCities) {
+      for (const rc of leopardRawCities) {
+        if (rc.shipment_type && Array.isArray(rc.shipment_type)) {
+          shipmentTypesMap.set(rc.name, JSON.stringify(rc.shipment_type))
+        }
+      }
+    }
+
     // Fetch currently-cached cities for this provider (to detect disabled ones)
     const existingCities = await db.courierOperationalCity.findMany({
       where: { providerKey },
@@ -101,7 +128,6 @@ export async function syncCourierOperationalCities(providerKey: string): Promise
     const freshCityNames = new Set(cities.map((c) => c.cityName))
 
     // Upsert each fresh city — batched in a single transaction for performance
-    // (270+ sequential upserts = 270 round-trips; a single transaction is ~10x faster)
     const now = new Date()
     await db.$transaction(
       cities.map((city) =>
@@ -113,6 +139,8 @@ export async function syncCourierOperationalCities(providerKey: string): Promise
             cityId: city.cityId ?? null,
             isPickupCity: city.isPickupCity,
             isDeliveryCity: city.isDeliveryCity,
+            // Leopard-specific: persist shipmentTypes if available
+            ...(shipmentTypesMap.has(city.cityName) ? { shipmentTypes: shipmentTypesMap.get(city.cityName) } : {}),
             lastSyncedAt: now,
           },
           create: {
@@ -121,6 +149,8 @@ export async function syncCourierOperationalCities(providerKey: string): Promise
             cityId: city.cityId ?? null,
             isPickupCity: city.isPickupCity,
             isDeliveryCity: city.isDeliveryCity,
+            // Leopard-specific: persist shipmentTypes if available
+            ...(shipmentTypesMap.has(city.cityName) ? { shipmentTypes: shipmentTypesMap.get(city.cityName) } : {}),
             lastSyncedAt: now,
           },
         }),

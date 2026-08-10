@@ -172,7 +172,9 @@ export async function bookOrderWithCourier(
       return { success: false, error: reason }
     }
 
-    // ── Validate city (with live PostEx fallback + staleness check) ──
+    // ── Validate city (with live courier fallback + staleness check) ──
+    // revalidateCityAtBookingTime() is provider-agnostic — it uses the
+    // adapter's fetchOperationalCities() for the live fallback.
     const cityValid = await revalidateCityAtBookingTime(
       providerKey,
       deliveryCity,
@@ -193,7 +195,7 @@ export async function bookOrderWithCourier(
       return { success: false, error: reason }
     }
 
-    // ── Compute weight + orderType ──
+    // ── Compute weight ──
     const weightResult = calculateOrderWeightKg(
       order.items.map((i) => ({
         quantity: i.quantity,
@@ -201,19 +203,25 @@ export async function bookOrderWithCourier(
       })),
     )
 
-    const orderType = options.orderType || determinePostExOrderType(
-      weightResult.totalWeightKg,
-      weightResult.hasMissingWeight,
-      false, // isExchangeReplacement=false for regular orders
-    )
+    // ── Compute orderType (PostEx-specific; Leopard doesn't use this concept) ──
+    // Leopard's shipment_type field is a DIFFERENT thing (optional, defaults to "overnight")
+    // — do NOT apply PostEx's Normal/Overland/Replacement logic to Leopard.
+    let orderType: string | undefined
+    if (providerKey === 'postex') {
+      orderType = options.orderType || determinePostExOrderType(
+        weightResult.totalWeightKg,
+        weightResult.hasMissingWeight,
+        false, // isExchangeReplacement=false for regular orders
+      )
+    } else {
+      orderType = options.orderType // pass through for other couriers (may be undefined)
+    }
 
     // ── Get pickup address code ──
     // Priority: per-call override > order's persisted pickupAddressId >
-    // integration's default. This allows per-order pickup address override
-    // set in the order creation form.
+    // integration's default.
     let pickupAddressCode = options.pickupAddressCode
     if (!pickupAddressCode && order.pickupAddressId) {
-      // Use the per-order override
       const orderAddr = await db.courierPickupAddress.findFirst({
         where: { id: order.pickupAddressId, companyIntegrationId: integration.id },
         select: { providerAddressCode: true },
@@ -221,12 +229,41 @@ export async function bookOrderWithCourier(
       pickupAddressCode = orderAddr?.providerAddressCode
     }
     if (!pickupAddressCode) {
-      // Fall back to the integration's default address
       const defaultAddr = await db.courierPickupAddress.findFirst({
         where: { companyIntegrationId: integration.id, isDefault: true },
         select: { providerAddressCode: true },
       })
       pickupAddressCode = defaultAddr?.providerAddressCode
+    }
+
+    // ── For Leopard: resolve delivery city NAME to numeric cityId ──
+    // Leopard requires numeric city IDs (integers), NOT city name strings.
+    // PostEx accepts city name strings directly.
+    let resolvedDeliveryCity = deliveryCity
+    if (providerKey === 'leopard') {
+      const cityRecord = await db.courierOperationalCity.findFirst({
+        where: {
+          providerKey: 'leopard',
+          cityName: { equals: deliveryCity, mode: 'insensitive' },
+          isDeliveryCity: true,
+        },
+        select: { cityId: true },
+      })
+      if (!cityRecord?.cityId) {
+        const reason = `Could not resolve city "${deliveryCity}" to a Leopard numeric city ID. Sync Leopard cities first.`
+        await db.order.update({
+          where: { id: orderId },
+          data: {
+            courierCityStatus: 'unresolved',
+            courierBookingStatus: 'failed',
+            courierBookingFailureReason: reason,
+            courierCompanyIntegrationId: integration.id,
+            courierName: integration.provider.providerName,
+          },
+        })
+        return { success: false, error: reason }
+      }
+      resolvedDeliveryCity = cityRecord.cityId // numeric ID as string
     }
 
     // ── Build the BookShipmentInput ──
@@ -235,10 +272,10 @@ export async function bookOrderWithCourier(
       recipientName: customerName,
       recipientPhone: customerPhone,
       deliveryAddress,
-      deliveryCity,
+      deliveryCity: resolvedDeliveryCity, // numeric ID for Leopard, name for PostEx
       pickupLocationAddress: '',
       pickupLocationCity: '',
-      weightGrams: Math.round(weightResult.totalWeightKg * 1000),
+      weightGrams: Math.round(weightResult.totalWeightKg * 1000), // KG → grams
       codAmount,
       itemDescription,
       pickupAddressCode,
@@ -262,10 +299,6 @@ export async function bookOrderWithCourier(
     })
 
     if (!bookResult.success || !bookResult.trackingNumber) {
-      // Mark as failed so it shows up in the manual workbench for retry.
-      // Persist the failure reason so it survives navigation — the user can
-      // see WHY booking failed from the order detail page or the Workbench
-      // without re-attempting.
       const reason = bookResult.error || 'Booking failed — no tracking number returned.'
       await db.order.update({
         where: { id: orderId },
@@ -279,14 +312,42 @@ export async function bookOrderWithCourier(
       return { success: false, error: reason }
     }
 
-    // ── Update the order with tracking + booking status ──
-    // Map the PostEx providerStatus through the status map to get the
-    // canonical courierSubStatus (e.g. "Unbooked" → "slip_generated").
-    // Without this, the raw PostEx string would be stored directly.
-    const { mapPostExStatus } = await import('@/lib/integrations/couriers/postex.status-map')
-    const mappedBookingStatus = bookResult.providerStatus
-      ? mapPostExStatus(bookResult.providerStatus)
-      : null
+    // ── Map the providerStatus to canonical courierSubStatus ──
+    // Provider-agnostic: PostEx uses mapPostExStatus, Leopard uses a simpler
+    // mapping (just 'Booked' → null for now, since Leopard doesn't return a
+    // meaningful initial sub-status; Prompt 7 will add the full status map).
+    let mappedBookingStatus: { courierSubStatus: string | null } | null = null
+    if (bookResult.providerStatus && providerKey === 'postex') {
+      const { mapPostExStatus } = await import('@/lib/integrations/couriers/postex.status-map')
+      mappedBookingStatus = mapPostExStatus(bookResult.providerStatus)
+    } else if (providerKey === 'leopard') {
+      // Leopard returns 'Booked' as the initial status — map to 'slip_generated'
+      // (the canonical sub-status for "booked but not yet pickup_requested")
+      mappedBookingStatus = { courierSubStatus: 'slip_generated' }
+    }
+
+    // ── Download the slip_link if provided (Leopard-specific) ──
+    // Store our own copy — don't trust external courier URLs long-term.
+    let courierSlipStoragePath: string | null = null
+    if (bookResult.slipLink) {
+      try {
+        const fs = await import('fs/promises')
+        const path = await import('path')
+        const dir = path.join(process.cwd(), 'public', 'uploads', 'courier-slips', ctx.company.id)
+        await fs.mkdir(dir, { recursive: true })
+        const filename = `slip-${order.flowopsOrderNumber}-${Date.now()}.pdf`
+        const filepath = path.join(dir, filename)
+        const slipResponse = await fetch(bookResult.slipLink)
+        if (slipResponse.ok) {
+          const arrayBuffer = await slipResponse.arrayBuffer()
+          await fs.writeFile(filepath, Buffer.from(arrayBuffer))
+          courierSlipStoragePath = `/uploads/courier-slips/${ctx.company.id}/${filename}`
+        }
+      } catch (slipErr) {
+        console.error('[booking] Failed to download courier slip:', slipErr)
+        // Non-fatal — booking still succeeded
+      }
+    }
 
     await db.order.update({
       where: { id: orderId },
@@ -297,8 +358,9 @@ export async function bookOrderWithCourier(
         courierSubStatus: mappedBookingStatus?.courierSubStatus ?? null,
         courierName: integration.provider.providerName,
         courierBookingStatus: 'booked',
-        // Clear any previous failure reason on success
         courierBookingFailureReason: null,
+        // Store our own copy of the courier slip PDF (if downloaded)
+        ...(courierSlipStoragePath ? { courierSlipStoragePath } : {}),
       },
     })
 
@@ -316,6 +378,8 @@ export async function bookOrderWithCourier(
         courierIntegrationId: integration.id,
         orderType,
         providerStatus: bookResult.providerStatus,
+        slipLink: bookResult.slipLink ?? null,
+        courierSlipStoragePath,
       },
     }).catch(() => {})
 

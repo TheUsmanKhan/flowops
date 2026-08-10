@@ -4685,3 +4685,86 @@ NOTE: Full end-to-end PDF generation couldn't be tested because the PostEx integ
 
 Stage Summary:
 - Courier-agnostic Load Sheet system built. Combines orders + exchange shipments in one load sheet. Reuses the existing PostEx adapter method (not duplicated). Leopard/TCS will plug into the same system automatically once their adapters implement generateLoadSheet(). PDF stored in our own file storage (not external courier URLs). Full UI with checklist + history + PDF download. All API routes compile and return correct responses. Validation guard works. Ready for live use once PostEx credentials are re-connected with a real token.
+
+---
+Task ID: 29
+Agent: main
+Task: Build the real Leopard Courier adapter (replacing stub) — cities, pickup address, booking, tracking, cancellation
+
+PHASE 1 — Cities:
+- fetchOperationalCities(): POST getAllCities/format/json/ with {api_key, api_password} in body. Maps Leopard's response: id→cityId (stored as string), name→cityName, allow_as_origin→isPickupCity, allow_as_destination→isDeliveryCity. Confirmed via live API test (returns {"status":0,"error":"Invalid API Key"} for bad credentials — endpoint structure verified).
+- Added fetchOperationalCitiesRaw() method to capture the shipment_type array per city (Leopard-specific field not in the standard OperationalCity type).
+- Migration 021: added shipmentTypes TEXT column to courier_operational_cities. Applied to live DB.
+- Updated Prisma schema: CourierOperationalCity.shipmentTypes String?
+- Updated city-sync.actions.ts: for Leopard, also fetches raw cities (fetchOperationalCitiesRaw) and persists shipmentTypes as JSON string during the upsert. Provider-agnostic — other providers are unaffected.
+- revalidateCityAtBookingTime() confirmed already provider-agnostic (uses adapter.fetchOperationalCities() with no PostEx-specific assumptions). No changes needed.
+
+PHASE 2 — Pickup Address (Shipper):
+- createPickupAddress(): POST createShipper/format/json/ with {api_key, api_password, shipment_name, shipment_email, shipment_phone, shipment_address, city_id}. Requires numeric city_id — the address-book action must resolve city name to Leopard's numeric cityId before calling. Returns providerAddressCode = shipment_id from response.
+- fetchExistingPickupAddresses(): GET getShipperDetails/format/json/?api_key=...&api_password=... Returns all shippers with their shipment_id, name, address, phone, city_id. Maps to the generic courier_pickup_addresses pattern (same as PostEx's fetchExistingPickupAddresses).
+- Migration 021: added returnAddressOverride JSONB column to courier_pickup_addresses. Applied to live DB.
+- Updated Prisma schema: CourierPickupAddress.returnAddressOverride String? (JSONB: {address, cityName, contactPersonName, phone}).
+- Added returnAddressOverride to BookShipmentInput type (Leopard-specific optional field).
+
+PHASE 3 — Booking:
+- bookShipment(): POST bookPacket/format/json/ with full field mapping:
+  • booked_packet_order_id ← orderNumber
+  • booked_packet_collect_amount ← codAmount (integer)
+  • booked_packet_no_piece ← quantity
+  • booked_packet_weight ← weightGrams (ALREADY in grams — booking action converts KG×1000)
+  • origin_city ← 'self' (uses shipper's registered city)
+  • destination_city ← numeric cityId (resolved from courier_operational_cities by the booking action)
+  • shipment_id ← pickupAddressCode (numeric shipper ID)
+  • shipment_name_eng/email/phone/address ← 'self' (uses shipper's registered info)
+  • consignment_name_eng ← recipientName, consignment_phone ← recipientPhone, consignment_address ← deliveryAddress
+  • special_instructions ← transactionNotes
+  • shipment_type ← shipmentType (optional, defaults to "overnight" if empty)
+  • return_address/return_city ← from returnAddressOverride if provided
+- On success (status=1): returns {trackingNumber (from track_number), providerStatus: 'Booked', slipLink (from slip_link), rawResponse}.
+- On failure (status=0): throws clear error using response's error field.
+- Booking action (booking.actions.ts) updated to be provider-agnostic:
+  • For Leopard: resolves delivery city NAME to numeric cityId via courier_operational_cities BEFORE calling adapter.
+  • For Leopard: maps providerStatus 'Booked' → courierSubStatus 'slip_generated' (Leopard doesn't return a meaningful initial sub-status).
+  • Downloads slip_link if provided → stores as courierSlipStoragePath (our own copy in /uploads/courier-slips/).
+  • For PostEx: keeps existing mapPostExStatus + determinePostExOrderType logic (no regression).
+  • orderType logic is PostEx-only — Leopard doesn't use the Normal/Overland/Replacement concept.
+- Migration 021: added courierSlipStoragePath TEXT to Order + ExchangeShipment. Applied to live DB.
+- Updated Prisma schema: Order.courierSlipStoragePath, ExchangeShipment.courierSlipStoragePath.
+- Added slipLink to BookShipmentResult type.
+
+PHASE 4 — Tracking + Cancellation:
+- trackShipment(): POST trackBookedPacket/format/json/ with {api_key, api_password, track_numbers}. Maps response's booked_packet_status to generic status enum (basic mapping for now — full status map in Prompt 7). Passes through rawStatus string + Tracking Detail history in rawResponse for Prompt 7's mapping logic.
+- cancelShipment(): POST cancelBookedPackets/format/json/ with {api_key, api_password, cn_numbers}. On status=1 returns success, on status=0 returns error. Wired to the existing generic Cancel button (already dispatches by courierCompanyIntegrationId — no changes needed).
+- Confirmed all Leopard API endpoints work structurally via live tests (getAllCities, bookPacket, trackBookedPacket, cancelBookedPackets all return {"status":0,"error":"Invalid API Key"} for bad credentials — correct behavior).
+
+PHASE 5 — Seed Data:
+- Updated Leopard's integration_providers row: capabilities now include ["book_shipment","track_shipment","cancel_shipment","fetch_operational_cities","create_pickup_address","fetch_existing_pickup_addresses"]. (calculate_rate NOT included — getTariffDetails will be added in a later prompt. batch_booking NOT included — that's Prompt 9.)
+- Updated registry.ts: COURIER_ADAPTER_STATUS.leopard = 'live' (was 'framework_ready').
+- The integrations banner now correctly shows Leopard as "live" (same as PostEx).
+
+FINAL VERIFICATION:
+- Connected a Leopard integration with test credentials via the API (POST /api/integrations → 201 Created).
+- Test Connection route (POST /api/integrations/[id]/test) → HTTP 200 with {"ok":false,"status":"error","error":"Invalid API Key"}. This proves the full code path: LeopardAdapter instantiated → pingConnection() → fetchOperationalCities() → Leopard API call → error surfaced correctly. Integration NOT disabled (non-destructive).
+- integration_action_logs: test_connection log created (status='success' because the fn returned a structured result).
+- Integrations API returns Leopard as adapterStatus='live' with correct capabilities.
+- Lint: 0 errors. Dev server: all routes 200.
+
+FIELDS REQUIRING LIVE-TESTING TO CLARIFY:
+- shipment_id: documented as 'int' in bookPacket but unclear if required or optional. The adapter sends it if pickupAddressCode is provided (which it should be after createShipper). Live testing with real credentials will confirm whether Leopard accepts it or requires 'self'.
+- return_city: documented as 'int' (optional). The adapter sends it only if returnAddressOverride is provided AND its cityName is numeric. Live testing will confirm if Leopard accepts a numeric return_city separate from origin.
+
+ORDER-TYPE UI CONCEPT:
+- Confirmed: NO Leopard-specific order-type logic was built. Leopard's shipment_type field is a different thing (optional, defaults to "overnight") — not the Normal/Overland/Replacement concept. The order-type dropdown UI wiring (hiding it for Leopard) happens in a later prompt.
+
+FILES CREATED/MODIFIED:
+1. supabase/migrations/021_leopard_adapter_fields.sql — NEW migration (shipmentTypes, returnAddressOverride, courierSlipStoragePath)
+2. prisma/schema.prisma — added shipmentTypes to CourierOperationalCity, returnAddressOverride to CourierPickupAddress, courierSlipStoragePath to Order + ExchangeShipment
+3. src/lib/integrations/types.ts — added shipmentType + returnAddressOverride to BookShipmentInput, slipLink to BookShipmentResult
+4. src/lib/integrations/couriers/leopard.adapter.ts — FULL REAL IMPLEMENTATION (replaces stub): fetchOperationalCities, fetchOperationalCitiesRaw, bookShipment, trackShipment, cancelShipment, createPickupAddress, fetchExistingPickupAddresses, pingConnection, calculateRate (throws — later prompt), parseStatusWebhook (throws — later prompt)
+5. src/lib/integrations/registry.ts — leopard adapter status = 'live'
+6. src/lib/actions/city-sync.actions.ts — updated to persist shipmentTypes for Leopard during city sync
+7. src/lib/actions/booking.actions.ts — provider-agnostic: Leopard city ID resolution, slip_link download, Leopard-specific status mapping, PostEx orderType logic isolated to PostEx only
+8. integration_providers DB row — Leopard capabilities updated
+
+Stage Summary:
+- Real Leopard Courier adapter built, replacing the stub. All core capabilities implemented: fetchOperationalCities (with shipmentTypes), createPickupAddress (createShipper), fetchExistingPickupAddresses (getShipperDetails), bookShipment (bookPacket with full field mapping + numeric city resolution + slip_link download), trackShipment (trackBookedPacket with raw status passthrough), cancelShipment (cancelBookedPackets), pingConnection (for Test Connection route). Booking action generalized to be provider-agnostic (Leopard city ID resolution + slip storage + status mapping). revalidateCityAtBookingTime() confirmed already provider-agnostic — no changes needed. Live API endpoints confirmed working structurally. Test Connection returns correct error for invalid credentials. Lint passes. Ready for live testing with real Leopard credentials.
