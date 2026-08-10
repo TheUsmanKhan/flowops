@@ -36,7 +36,6 @@ import { PERMISSIONS } from '@/lib/permissions'
 import {
   processInventoryTransaction,
   reserveStockForOrder,
-  dispatchOrder,
 } from '@/lib/inventory'
 import { flagCustomer } from './customer.actions'
 import {
@@ -89,19 +88,11 @@ interface ActionResult<T = unknown> {
 //
 // Returns the new exchange shipment ID + number.
 // ──────────────────────────────────────────────────────────────
-async function createAndDispatchExchangeOrder(
+async function createAndReserveExchangeShipment(
   exchangeId: string,
   ctx: Awaited<ReturnType<typeof getWorkspace>>,
   options?: {
-    /**
-     * Universal courier reference field (migration 015). When provided,
-     * overrides the default (which is the freshly-generated EXCH-#####).
-     */
     orderRefNumber?: string
-    /**
-     * Universal courier item-description string (migration 015). When
-     * provided, overrides the auto-generated variant summary.
-     */
     orderDetail?: string
   },
 ): Promise<{ newExchangeShipmentId: string; exchangeShipmentNumber: string }> {
@@ -132,37 +123,20 @@ async function createAndDispatchExchangeOrder(
 
   const customerId = exchange.originalOrder.customerId
 
-  // Determine the shipping address/phone to use. Default to the original
-  // order's used address/phone (the customer wants the replacement shipped
-  // to the same place). These may be null if the original order was created
-  // before the CRM address system existed.
   const shippingAddressId = exchange.originalOrder.usedCustomerAddressId
   const shippingPhoneId = exchange.originalOrder.usedCustomerPhoneId
 
-  // Determine invoice amount: when customer_owes, fold in the estimated delivery charge
-  // so the customer pays for delivery (no hidden business cost in collection case).
   const priceDiff = Number(exchange.priceDifference)
   const baseInvoiceAmount =
     exchange.priceDifferenceStatus === 'customer_owes' && priceDiff > 0 ? priceDiff : 0
-  // Fetch estimated delivery charge from CompanyOrderSetting's default or the exchange shipment
-  // For now, use 0 as the default estimated delivery charge (staff can edit in the modal).
-  // The SendExchangeShipmentModal (Prompt 5) allows overriding invoiceAmount directly.
-  const estimatedDeliveryCharge = 0 // Will be set by the modal if the staff enters one
-  const invoiceAmount = baseInvoiceAmount + estimatedDeliveryCharge
+  const invoiceAmount = baseInvoiceAmount
 
-  // 1. Generate the EXCH-{YYYY}-{NNNNN} number (independent sequence)
+  // 1. Generate the EXCH-{YYYY}-{NNNNN} number
   const exchangeShipmentNumber = await generateExchangeShipmentNumber()
 
-  // 1a. Universal courier reference fields (migration 015). For immediate-
-  // dispatch flows (courier_replacement, customer_self_return) we default
-  // orderRefNumber to the freshly-generated EXCH number, and auto-build
-  // orderDetail from the variant. Both can be overridden via the options
-  // argument (the SendExchangeShipmentModal collects them and the
-  // /dispatch-new-item + /dispatch-replacement routes pass them through).
+  // 1a. Universal courier reference fields (migration 015)
   const orderRefNumber =
     (options?.orderRefNumber && options.orderRefNumber.trim()) || exchangeShipmentNumber
-  // orderDetail: caller-provided takes precedence, otherwise auto-generate
-  // from the variant: "Product Title (SKU, Size: M, Color: Blue) ×N"
   let orderDetail = (options?.orderDetail && options.orderDetail.trim()) || ''
   if (!orderDetail) {
     const attrParts: string[] = []
@@ -178,7 +152,9 @@ async function createAndDispatchExchangeOrder(
     orderDetail = `${exchange.newOrgVariant.product.title}${inner ? ` (${inner})` : ''} ×1`
   }
 
-  // 2. Create the exchange shipment (status='confirmed')
+  // 2. Create the exchange shipment — status='confirmed' (NOT dispatched!)
+  // The shipment will be booked via the Booking Workbench or SendExchangeShipmentModal,
+  // and only transition to 'dispatched' after a real courier booking succeeds.
   const shipment = await db.exchangeShipment.create({
     data: {
       exchangeShipmentNumber,
@@ -194,7 +170,6 @@ async function createAndDispatchExchangeOrder(
       status: 'confirmed',
       isPriorityBackorder: true,
       invoiceAmount,
-      // Universal courier reference fields (migration 015)
       orderRefNumber,
       orderDetail,
       confirmedAt: new Date(),
@@ -232,42 +207,10 @@ async function createAndDispatchExchangeOrder(
       })
     }
   }
-  // NOTE: made_to_order variants don't reserve here — they'll trigger production
-  // via checkAndFulfillMadeToOrderVariant when the dispatch is attempted.
 
-  // 4. Dispatch the shipment immediately (if not backordered)
-  const updatedShipment = await db.exchangeShipment.findUniqueOrThrow({
-    where: { id: shipment.id },
-    select: { status: true },
-  })
-
-  if (updatedShipment.status !== 'backordered' && locationId) {
-    // Deduct stock via dispatchOrder() (same as dispatchOrderAction)
-    const dispatchResult = await dispatchOrder({
-      orgVariantId: exchange.newOrgVariantId,
-      locationId,
-      organizationId: ctx.company.organizationId,
-      companyId: ctx.company.id,
-      employeeId: ctx.employee.id,
-      quantity: 1,
-    })
-
-    if (dispatchResult.success) {
-      await db.exchangeShipment.update({
-        where: { id: shipment.id },
-        data: {
-          status: 'dispatched',
-          dispatchedAt: new Date(),
-        },
-      })
-    }
-    // If dispatch failed (e.g. race condition on stock), the shipment stays
-    // 'confirmed' and staff will see it needs attention.
-  }
-
-  // 5. Audit + metric
+  // 4. Audit + metric
   await insertAuditLog({
-    action: 'exchange.new_item_dispatched',
+    action: 'exchange_shipment.created',
     entityType: 'exchange_shipment',
     entityId: shipment.id,
     companyId: ctx.company.id,
@@ -286,9 +229,9 @@ async function createAndDispatchExchangeOrder(
     companyId: ctx.company.id,
     entityType: 'exchange_shipment',
     entityId: shipment.id,
-    metricKey: 'exchange.new_item_dispatched',
-    numericValue: Number(exchange.newItemPrice),
-    dimensions: { exchange_id: exchangeId, exchange_method: exchange.exchangeMethod },
+    metricKey: 'exchange_shipment.created',
+    numericValue: 1,
+    dimensions: { exchange_method: exchange.exchangeMethod },
   }).catch(() => {})
 
   return { newExchangeShipmentId: shipment.id, exchangeShipmentNumber }
@@ -475,8 +418,8 @@ export async function dispatchExchangeNewItem(
       }
     }
 
-    // Create + dispatch the new EXCHANGE SHIPMENT (courier collects old item during this delivery)
-    const { newExchangeShipmentId, exchangeShipmentNumber } = await createAndDispatchExchangeOrder(
+    // Create + reserve the new EXCHANGE SHIPMENT (courier booking happens later via Workbench)
+    const { newExchangeShipmentId, exchangeShipmentNumber } = await createAndReserveExchangeShipment(
       exchangeId,
       ctx,
       options,
@@ -1382,8 +1325,8 @@ export async function dispatchReplacementForSelfReturnExchange(
       return { success: false, error: `Cannot dispatch replacement for an exchange with status '${exchange.status}'. Expected 'old_item_manually_verified'.` }
     }
 
-    // Use the internal helper to create + dispatch the ExchangeShipment
-    const result = await createAndDispatchExchangeOrder(exchangeId, ctx, options)
+    // Use the internal helper to create + reserve the ExchangeShipment
+    const result = await createAndReserveExchangeShipment(exchangeId, ctx, options)
 
     // Mark the exchange as completed
     await db.orderExchange.update({
