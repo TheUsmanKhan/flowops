@@ -28,6 +28,9 @@ import { getCourierAdapter } from '@/lib/integrations/registry'
 import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
 import { mapPostExStatus } from '@/lib/integrations/couriers/postex.status-map'
 import type { TrackShipmentResult } from '@/lib/integrations/types'
+import { performOrderDispatch } from '@/lib/actions/order.actions'
+import { performExchangeShipmentDispatch } from '@/lib/actions/exchange-shipment.actions'
+import { unreserveStockForOrder } from '@/lib/inventory'
 
 interface ActionResult<T = unknown> {
   success: boolean
@@ -284,28 +287,27 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
               statusChanges++
 
               // ── "Picked By PostEx" → auto-dispatch ──
-              // When PostEx picks up the package, transition the order from
-              // confirmed/processing to dispatched. This is critical because
-              // markOrderDelivered requires the order to be in 'dispatched'
-              // status first — without this auto-dispatch, delivered/rto
-              // transitions would silently fail.
+              // When PostEx picks up the package, the item has physically left
+              // the warehouse. Call performOrderDispatch() which runs the FULL
+              // inventory deduction (processInventoryTransaction('sale_dispatched')
+              // per item — decrements onHand, releases reserved, locks WAC) +
+              // sets status='dispatched' + audit/metric. This is the fix for the
+              // critical bug where polling previously set status='dispatched' via
+              // direct db.order.update() WITHOUT inventory deduction.
               if (result.status === 'in_transit') {
                 try {
-                  // Fetch the order to check its current status
                   const order = await db.order.findUnique({
                     where: { id: entry.id },
                     select: { status: true, flowopsOrderNumber: true },
                   })
                   if (order && (order.status === 'confirmed' || order.status === 'processing')) {
-                    // Auto-dispatch: the package has physically left the warehouse
-                    await db.order.update({
-                      where: { id: entry.id },
-                      data: {
-                        status: 'dispatched',
-                        dispatchedAt: new Date(),
-                      },
-                    })
-                    console.log(`[poll] Auto-dispatched ${order.flowopsOrderNumber} (PostEx picked up package)`)
+                    const dispatchResult = await performOrderDispatch(entry.id, { source: 'auto_poll' })
+                    if (dispatchResult.success) {
+                      console.log(`[poll] Auto-dispatched ${order.flowopsOrderNumber} (PostEx picked up; inventory deducted${dispatchResult.skipped ? ' — skipped, already dispatched' : ''})`)
+                    } else if (!dispatchResult.skipped) {
+                      console.error(`[poll] Failed to auto-dispatch order ${entry.id}: ${dispatchResult.error}`)
+                      errors.push(`Failed to auto-dispatch order ${entry.id}: ${dispatchResult.error}`)
+                    }
                   }
                 } catch (e) {
                   console.error(`[poll] Failed to auto-dispatch order ${entry.id}:`, e)
@@ -316,21 +318,25 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
               // ── "Delivered" → mark as delivered ──
               if (result.status === 'delivered') {
                 try {
-                  // First ensure the order is dispatched (auto-dispatch if needed)
+                  // First ensure the order is dispatched WITH inventory deduction
+                  // (auto-dispatch if still confirmed/processing). performOrderDispatch
+                  // creates the sale_dispatched txn so onHand is correctly decremented.
                   const order = await db.order.findUnique({
                     where: { id: entry.id },
-                    select: { status: true },
+                    select: { status: true, flowopsOrderNumber: true },
                   })
                   if (order && (order.status === 'confirmed' || order.status === 'processing')) {
-                    // Auto-dispatch first, then mark delivered
-                    await db.order.update({
-                      where: { id: entry.id },
-                      data: { status: 'dispatched', dispatchedAt: new Date() },
-                    })
+                    const dispatchResult = await performOrderDispatch(entry.id, { source: 'auto_poll' })
+                    if (!dispatchResult.success && !dispatchResult.skipped) {
+                      console.error(`[poll] Failed to auto-dispatch order ${entry.id} before marking delivered: ${dispatchResult.error}`)
+                      errors.push(`Failed to auto-dispatch order ${entry.id} before delivered: ${dispatchResult.error}`)
+                    }
                   }
                   if (order && order.status !== 'delivered' && order.status !== 'cancelled' && order.status !== 'refunded') {
                     // Mark as delivered directly (bypass markOrderDelivered's
-                    // getWorkspace() which breaks multi-tenant polling)
+                    // getWorkspace() which breaks multi-tenant polling).
+                    // No inventory change at delivery time — the dispatch txn
+                    // already decremented onHand.
                     await db.order.update({
                       where: { id: entry.id },
                       data: {
@@ -338,7 +344,7 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                         deliveredAt: new Date(),
                       },
                     })
-                    console.log(`[poll] Marked order ${entry.id} as delivered (PostEx confirmed delivery)`)
+                    console.log(`[poll] Marked order ${order.flowopsOrderNumber} as delivered (PostEx confirmed delivery)`)
                   }
                 } catch (e) {
                   console.error(`[poll] Failed to mark order ${entry.id} as delivered:`, e)
@@ -347,19 +353,49 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
               }
 
               // ── "Returned" → mark as RTO ──
+              // RTO means the item came back. The correct inventory treatment is
+              // to RELEASE the reservation (order_unreserved) — NOT create a
+              // sale_dispatched txn, because the item never stayed sold. This
+              // matches the retroactive cleanup fix for RTO orders.
+              //
+              // NOTE: if the order was already 'dispatched' (has a sale_dispatched
+              // txn from a previous in_transit polling cycle), the onHand was
+              // already decremented. The correct return would be a return_resellable
+              // txn to add stock back, but that requires per-item cost lookup and
+              // the full processOrderReturn() logic (which uses getWorkspace()).
+              // This is a pre-existing gap in the polling RTO path — NOT introduced
+              // by this fix. For orders that go directly confirmed→rto (never
+              // dispatched), this path correctly releases the reservation without
+              // touching onHand.
               if (result.status === 'returned') {
                 try {
                   const order = await db.order.findUnique({
                     where: { id: entry.id },
-                    select: { status: true },
+                    select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true },
                   })
                   if (order && order.status !== 'rto' && order.status !== 'cancelled' && order.status !== 'refunded') {
-                    // Ensure dispatched first (for consistency)
+                    // If still confirmed/processing, release the reservation for
+                    // all reserved items (the item came back — don't dispatch it).
                     if (order.status === 'confirmed' || order.status === 'processing') {
-                      await db.order.update({
-                        where: { id: entry.id },
-                        data: { status: 'dispatched', dispatchedAt: new Date() },
+                      const reservedItems = await db.orderItem.findMany({
+                        where: { orderId: entry.id, fulfillmentStatus: 'reserved' },
                       })
+                      for (const item of reservedItems) {
+                        const locationId = item.reservedLocationId ?? order.dispatchLocationId
+                        if (!locationId) continue
+                        try {
+                          await unreserveStockForOrder({
+                            orgVariantId: item.orgVariantId,
+                            locationId,
+                            organizationId: order.organizationId,
+                            companyId: integration.companyId,
+                            quantity: item.quantity,
+                            orderId: entry.id,
+                          })
+                        } catch (e) {
+                          console.error(`[poll] Failed to unreserve stock for RTO item ${item.id}:`, e)
+                        }
+                      }
                     }
                     // Mark as RTO directly (bypass processOrderReturn's
                     // getWorkspace() which breaks multi-tenant polling)
@@ -370,7 +406,7 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                         returnedAt: new Date(),
                       },
                     })
-                    console.log(`[poll] Marked order ${entry.id} as RTO (PostEx returned)`)
+                    console.log(`[poll] Marked order ${order.flowopsOrderNumber} as RTO (PostEx returned; reservation released)`)
                   }
                 } catch (e) {
                   console.error(`[poll] Failed to mark order ${entry.id} as RTO:`, e)
@@ -398,7 +434,6 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                       const locationId = item.reservedLocationId ?? order.dispatchLocationId
                       if (!locationId) continue
                       try {
-                        const { unreserveStockForOrder } = await import('@/lib/inventory')
                         await unreserveStockForOrder({
                           orgVariantId: item.orgVariantId,
                           locationId,
@@ -498,22 +533,31 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
             if (subStatusChanged) {
               statusChanges++
 
-              // Auto-dispatch exchange shipment when picked up
+              // ── "Picked By PostEx" → auto-dispatch exchange shipment ──
+              // Call performExchangeShipmentDispatch() which runs the FULL
+              // inventory deduction (dispatchOrder → sale_dispatched txn —
+              // decrements onHand, releases reserved) + sets status='dispatched'
+              // + updates parent exchange status + audit/metric. This is the fix
+              // for the bug where polling previously set status='dispatched' via
+              // direct db.exchangeShipment.update() WITHOUT inventory deduction.
               if (result.status === 'in_transit') {
                 try {
                   const shipment = await db.exchangeShipment.findUnique({
                     where: { id: entry.id },
-                    select: { status: true },
+                    select: { status: true, exchangeShipmentNumber: true },
                   })
                   if (shipment && shipment.status === 'confirmed') {
-                    await db.exchangeShipment.update({
-                      where: { id: entry.id },
-                      data: { status: 'dispatched', dispatchedAt: new Date() },
-                    })
-                    console.log(`[poll] Auto-dispatched exchange shipment ${entry.id}`)
+                    const dispatchResult = await performExchangeShipmentDispatch(entry.id, { source: 'auto_poll' })
+                    if (dispatchResult.success) {
+                      console.log(`[poll] Auto-dispatched exchange shipment ${shipment.exchangeShipmentNumber} (inventory deducted${dispatchResult.skipped ? ' — skipped, already dispatched' : ''})`)
+                    } else if (!dispatchResult.skipped) {
+                      console.error(`[poll] Failed to auto-dispatch shipment ${entry.id}: ${dispatchResult.error}`)
+                      errors.push(`Failed to auto-dispatch shipment ${entry.id}: ${dispatchResult.error}`)
+                    }
                   }
                 } catch (e) {
                   console.error(`[poll] Failed to auto-dispatch shipment ${entry.id}:`, e)
+                  errors.push(`Failed to auto-dispatch shipment ${entry.id}: ${e}`)
                 }
               }
 
@@ -521,21 +565,23 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                 try {
                   const shipment = await db.exchangeShipment.findUnique({
                     where: { id: entry.id },
-                    select: { status: true },
+                    select: { status: true, exchangeShipmentNumber: true },
                   })
                   if (shipment && shipment.status !== 'delivered' && shipment.status !== 'cancelled') {
-                    // Auto-dispatch first if needed
+                    // Auto-dispatch first if needed (with inventory deduction)
                     if (shipment.status === 'confirmed') {
-                      await db.exchangeShipment.update({
-                        where: { id: entry.id },
-                        data: { status: 'dispatched', dispatchedAt: new Date() },
-                      })
+                      const dispatchResult = await performExchangeShipmentDispatch(entry.id, { source: 'auto_poll' })
+                      if (!dispatchResult.success && !dispatchResult.skipped) {
+                        console.error(`[poll] Failed to auto-dispatch shipment ${entry.id} before delivered: ${dispatchResult.error}`)
+                        errors.push(`Failed to auto-dispatch shipment ${entry.id} before delivered: ${dispatchResult.error}`)
+                      }
                     }
+                    // Mark as delivered (no inventory change at delivery — dispatch txn already decremented onHand)
                     await db.exchangeShipment.update({
                       where: { id: entry.id },
                       data: { status: 'delivered', deliveredAt: new Date() },
                     })
-                    console.log(`[poll] Marked exchange shipment ${entry.id} as delivered`)
+                    console.log(`[poll] Marked exchange shipment ${shipment.exchangeShipmentNumber} as delivered`)
                   }
                 } catch (e) {
                   console.error(`[poll] Failed to mark shipment ${entry.id} as delivered:`, e)

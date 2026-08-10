@@ -442,8 +442,193 @@ export async function reserveExchangeShipmentStock(
 }
 
 // ──────────────────────────────────────────────────────────────
-// 3. dispatchExchangeShipment
+// 3. dispatchExchangeShipment (+ performExchangeShipmentDispatch)
 // ──────────────────────────────────────────────────────────────
+
+/**
+ * SHARED exchange-shipment-dispatch business logic — the SINGLE place where
+ * inventory deduction (dispatchOrder → processInventoryTransaction('sale_dispatched'))
+ * + status='dispatched' + parent-exchange-status update + audit/metric happen.
+ *
+ * Mirrors performOrderDispatch() in order.actions.ts. Exists to fix the same
+ * bug: the PostEx status-polling cron was setting exchange_shipments.status=
+ * 'dispatched' via direct db.exchangeShipment.update() WITHOUT calling the
+ * inventory deduction logic. See worklog Task 25.
+ *
+ * Called from:
+ *   - dispatchExchangeShipment() [manual/Booking-Workbench, source='manual'] —
+ *     AFTER getWorkspace()/permission checks
+ *   - pollPostExOrderStatuses() [cron, source='auto_poll'] — no session,
+ *     reads companyId/organizationId from the shipment itself
+ *
+ * CRITICAL: this function does NOT call getWorkspace().
+ *
+ * IDEMPOTENT: if the shipment already has a matching sale_dispatched txn
+ * (linked via metadata.exchangeShipmentId), the inventory deduction is skipped
+ * and only the status is updated — preventing double-deduction.
+ */
+export async function performExchangeShipmentDispatch(
+  exchangeShipmentId: string,
+  context: {
+    source: 'manual' | 'auto_poll'
+    triggeredByEmployeeId?: string | null
+    trackingNumber?: string
+    courierCompanyIntegrationId?: string
+  },
+): Promise<ActionResult & { skipped?: boolean; reason?: string }> {
+  const source = context.source
+
+  // 1. Fetch the shipment — NO companyId scoping (works in cron context)
+  const shipment = await db.exchangeShipment.findUnique({
+    where: { id: exchangeShipmentId },
+    include: {
+      orderExchange: {
+        select: {
+          id: true,
+          exchangeMethod: true,
+          originalOrder: { select: { dispatchLocationId: true } },
+        },
+      },
+    },
+  })
+  if (!shipment) return { success: false, error: 'Exchange shipment not found.' }
+
+  // 2. Guard: block if backordered or already in a terminal state
+  if (shipment.status === 'backordered') {
+    return { success: false, error: 'Cannot dispatch a backordered shipment. Resolve the backorder first.' }
+  }
+  if (shipment.status === 'dispatched' || shipment.status === 'delivered' || shipment.status === 'cancelled') {
+    return { success: false, skipped: true, error: `Cannot dispatch a shipment with status='${shipment.status}'.` }
+  }
+
+  const locationId = shipment.orderExchange.originalOrder.dispatchLocationId
+  if (!locationId) {
+    return { success: false, error: 'No dispatch location set on the original order.' }
+  }
+
+  // 3. IDEMPOTENCY GUARD: check if a sale_dispatched txn already exists for
+  //    this shipment (linked via metadata.exchangeShipmentId). If so, skip
+  //    the inventory deduction — only update the status. This prevents
+  //    double-deduction if the polling job fires twice or a manual dispatch
+  //    races with an auto-dispatch.
+  const existingDispatchTxn = await db.inventoryTransaction.findFirst({
+    where: {
+      transactionType: 'sale_dispatched',
+      orgVariantId: shipment.newOrgVariantId,
+      locationId,
+      metadata: { contains: `"exchangeShipmentId":"${exchangeShipmentId}"` },
+    },
+    select: { id: true },
+  })
+
+  const inventorySkipped = !!existingDispatchTxn
+
+  if (!inventorySkipped) {
+    // 4. Deduct stock via dispatchOrder() (mirrors dispatchOrderAction)
+    const dispatchResult = await dispatchOrder({
+      orgVariantId: shipment.newOrgVariantId,
+      locationId,
+      organizationId: shipment.organizationId,
+      companyId: shipment.companyId,
+      employeeId: context.triggeredByEmployeeId ?? null,
+      quantity: shipment.quantity,
+    })
+
+    if (!dispatchResult.success) {
+      return { success: false, error: dispatchResult.error ?? 'Failed to dispatch stock.' }
+    }
+
+    // Tag the newly-created txn with the exchangeShipmentId in metadata so
+    // future idempotency checks can find it. We do this by updating the most
+    // recent sale_dispatched txn for this variant+location.
+    await db.inventoryTransaction.updateMany({
+      where: {
+        transactionType: 'sale_dispatched',
+        orgVariantId: shipment.newOrgVariantId,
+        locationId,
+        // The txn was created seconds ago — match by recordedAt within the last minute
+        recordedAt: { gte: new Date(Date.now() - 60_000) },
+        metadata: '{}',
+      },
+      data: {
+        metadata: JSON.stringify({
+          exchangeShipmentId,
+          dispatch_source: source,
+        }),
+      },
+    }).catch((e) => console.error(`[performExchangeShipmentDispatch] failed to tag txn metadata:`, e))
+  }
+
+  // 5. Update the shipment
+  await db.exchangeShipment.update({
+    where: { id: exchangeShipmentId },
+    data: {
+      status: 'dispatched',
+      dispatchedAt: new Date(),
+      ...(context.trackingNumber ? { trackingNumber: context.trackingNumber } : {}),
+      ...(context.courierCompanyIntegrationId ? { courierCompanyIntegrationId: context.courierCompanyIntegrationId } : {}),
+    },
+  })
+
+  // 6. Update the parent order_exchanges status appropriately
+  const exchange = shipment.orderExchange
+  let newExchangeStatus: string
+  if (exchange.exchangeMethod === 'courier_replacement') {
+    // For courier_replacement: the new item is now dispatched, courier will
+    // collect the old item during this delivery → awaiting_old_item_return
+    newExchangeStatus = 'awaiting_old_item_return'
+  } else {
+    // For customer_self_return: the old item was already verified before
+    // this shipment was created → the exchange is now complete
+    newExchangeStatus = 'completed'
+  }
+
+  await db.orderExchange.update({
+    where: { id: exchange.id },
+    data: {
+      status: newExchangeStatus,
+      ...(newExchangeStatus === 'completed' ? { completedAt: new Date() } : {}),
+    },
+  })
+
+  // 7. Audit + metric (tagged with dispatch_source)
+  await insertAuditLog({
+    action: 'exchange_shipment.dispatched',
+    entityType: 'exchange_shipment',
+    entityId: exchangeShipmentId,
+    companyId: shipment.companyId,
+    organizationId: shipment.organizationId,
+    userId: null,
+    employeeId: context.triggeredByEmployeeId ?? null,
+    newValues: {
+      trackingNumber: context.trackingNumber,
+      courierCompanyIntegrationId: context.courierCompanyIntegrationId,
+      exchangeStatusUpdate: newExchangeStatus,
+      dispatch_source: source,
+      inventory_skipped: inventorySkipped,
+    },
+  })
+
+  await insertMetricEvent({
+    companyId: shipment.companyId,
+    entityType: 'exchange_shipment',
+    entityId: exchangeShipmentId,
+    metricKey: 'exchange_shipment.dispatched',
+    numericValue: Number(shipment.invoiceAmount),
+    dimensions: {
+      exchange_method: exchange.exchangeMethod,
+      tracking_number: context.trackingNumber,
+      dispatch_source: source,
+      inventory_skipped: inventorySkipped,
+    },
+  }).catch(() => {})
+
+  return {
+    success: true,
+    skipped: inventorySkipped,
+    reason: inventorySkipped ? 'Inventory already dispatched — status updated only' : undefined,
+  }
+}
 
 export async function dispatchExchangeShipment(
   exchangeShipmentId: string,
@@ -454,113 +639,30 @@ export async function dispatchExchangeShipment(
     const ctx = await getWorkspace()
     await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
 
+    // Workspace-scope check (the shared function does NOT do this)
     const shipment = await db.exchangeShipment.findFirst({
       where: { id: exchangeShipmentId, companyId: ctx.company.id },
-      include: {
-        orderExchange: {
-          select: {
-            id: true,
-            exchangeMethod: true,
-            originalOrder: { select: { dispatchLocationId: true } },
-          },
-        },
-      },
+      select: { id: true, status: true },
     })
     if (!shipment) {
       return { success: false, error: 'Exchange shipment not found.' }
     }
-
-    // Guard: block if backordered
     if (shipment.status === 'backordered') {
-      return {
-        success: false,
-        error: 'Cannot dispatch a backordered shipment. Resolve the backorder first.',
-      }
+      return { success: false, error: 'Cannot dispatch a backordered shipment. Resolve the backorder first.' }
     }
     if (shipment.status === 'dispatched' || shipment.status === 'delivered' || shipment.status === 'cancelled') {
       return { success: false, error: `Cannot dispatch a shipment with status='${shipment.status}'.` }
     }
 
-    const locationId = shipment.orderExchange.originalOrder.dispatchLocationId
-    if (!locationId) {
-      return { success: false, error: 'No dispatch location set on the original order.' }
-    }
-
-    // Deduct stock via dispatchOrder() (mirrors dispatchOrderAction)
-    const dispatchResult = await dispatchOrder({
-      orgVariantId: shipment.newOrgVariantId,
-      locationId,
-      organizationId: shipment.organizationId,
-      companyId: shipment.companyId,
-      employeeId: ctx.employee.id,
-      quantity: shipment.quantity,
+    // Delegate the inventory deduction + status update + parent-exchange
+    // status update + audit/metric to the shared function. No duplicated
+    // inventory logic remains in this function.
+    return await performExchangeShipmentDispatch(exchangeShipmentId, {
+      source: 'manual',
+      triggeredByEmployeeId: ctx.employee.id,
+      trackingNumber,
+      courierCompanyIntegrationId,
     })
-
-    if (!dispatchResult.success) {
-      return { success: false, error: dispatchResult.error ?? 'Failed to dispatch stock.' }
-    }
-
-    // Update the shipment
-    await db.exchangeShipment.update({
-      where: { id: exchangeShipmentId },
-      data: {
-        status: 'dispatched',
-        dispatchedAt: new Date(),
-        trackingNumber,
-        courierCompanyIntegrationId,
-      },
-    })
-
-    // Update the parent order_exchanges status appropriately
-    const exchange = shipment.orderExchange
-    let newExchangeStatus: string
-    if (exchange.exchangeMethod === 'courier_replacement') {
-      // For courier_replacement: the new item is now dispatched, courier will
-      // collect the old item during this delivery → awaiting_old_item_return
-      newExchangeStatus = 'awaiting_old_item_return'
-    } else {
-      // For customer_self_return: the old item was already verified before
-      // this shipment was created → the exchange is now complete
-      newExchangeStatus = 'completed'
-    }
-
-    await db.orderExchange.update({
-      where: { id: exchange.id },
-      data: {
-        status: newExchangeStatus,
-        ...(newExchangeStatus === 'completed' ? { completedAt: new Date() } : {}),
-      },
-    })
-
-    // Audit + metric
-    await insertAuditLog({
-      action: 'exchange_shipment.dispatched',
-      entityType: 'exchange_shipment',
-      entityId: exchangeShipmentId,
-      companyId: ctx.company.id,
-      organizationId: ctx.company.organizationId,
-      userId: ctx.user.id,
-      employeeId: ctx.employee.id,
-      newValues: {
-        trackingNumber,
-        courierCompanyIntegrationId,
-        exchangeStatusUpdate: newExchangeStatus,
-      },
-    })
-
-    await insertMetricEvent({
-      companyId: ctx.company.id,
-      entityType: 'exchange_shipment',
-      entityId: exchangeShipmentId,
-      metricKey: 'exchange_shipment.dispatched',
-      numericValue: Number(shipment.invoiceAmount),
-      dimensions: {
-        exchange_method: exchange.exchangeMethod,
-        tracking_number: trackingNumber,
-      },
-    }).catch(() => {})
-
-    return { success: true }
   } catch (err) {
     return {
       success: false,

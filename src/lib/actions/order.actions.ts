@@ -1850,7 +1850,210 @@ export async function getOrderDetail(
 // ──────────────────────────────────────────────────────────────
 
 /**
+ * SHARED order-dispatch business logic — the SINGLE place where inventory
+ * deduction (processInventoryTransaction('sale_dispatched')) + status='dispatched'
+ * + audit/metric happen together.
+ *
+ * This function exists to fix a critical bug where the PostEx status-polling
+ * cron job was setting order.status='dispatched' via direct db.order.update()
+ * WITHOUT calling the inventory deduction logic — causing onHand to stay
+ * inflated (never decremented) and reserved to stay inflated (never released)
+ * for any order auto-dispatched by polling. See worklog Task 25.
+ *
+ * Called from:
+ *   - dispatchOrderAction() [manual/UI-triggered, source='manual'] — AFTER
+ *     getWorkspace()/permission/packing checks
+ *   - pollPostExOrderStatuses() [cron, source='auto_poll'] — no session,
+ *     reads companyId/organizationId from the order itself
+ *
+ * CRITICAL: this function does NOT call getWorkspace(). The manual caller
+ * must do its own auth/workspace scoping before invoking. The auto_poll
+ * caller runs in a cron context with NO user session and relies on the
+ * order's own companyId/organizationId for audit tagging.
+ *
+ * IDEMPOTENT: if the order's items are already all 'dispatched' (e.g. a
+ * previous partial-dispatch completed, or a race between manual + auto_poll),
+ * this skips the inventory deduction and only updates the order status —
+ * preventing double-deduction. The fulfillmentStatus='reserved' filter on
+ * the item query naturally handles partial-dispatch resume (only un-processed
+ * items are picked up).
+ */
+export async function performOrderDispatch(
+  orderId: string,
+  context: {
+    source: 'manual' | 'auto_poll'
+    triggeredByEmployeeId?: string | null
+    trackingNumber?: string
+    courierName?: string
+  },
+): Promise<ActionResult & { skipped?: boolean; reason?: string }> {
+  const source = context.source
+
+  // 1. Fetch the order — NO companyId scoping (works in cron context where
+  //    there's no workspace). The caller is responsible for auth.
+  const order = await db.order.findUnique({
+    where: { id: orderId },
+    select: {
+      id: true,
+      status: true,
+      flowopsOrderNumber: true,
+      dispatchLocationId: true,
+      organizationId: true,
+      companyId: true,
+      courierName: true,
+      trackingNumber: true,
+      createdAt: true,
+      totalOrderValue: true,
+      customerId: true,
+    },
+  })
+  if (!order) return { success: false, error: 'Order not found' }
+
+  // 2. Guard: already in a terminal/dispatched state
+  if (['dispatched', 'delivered', 'rto', 'cancelled', 'refunded'].includes(order.status)) {
+    return { success: false, skipped: true, error: `Order is already ${order.status}` }
+  }
+
+  // 3. Defensive: if order is still 'pending' (confirmation was skipped), run
+  //    inline confirmation + reservation first. The auto_poll path should
+  //    never hit this (orders with tracking numbers have been confirmed), but
+  //    we handle it so the function is self-contained.
+  if (order.status === 'pending') {
+    await db.order.update({
+      where: { id: orderId },
+      data: { status: 'confirmed', confirmedAt: new Date() },
+    })
+    await reserveOrderStock(orderId, {
+      company: { id: order.companyId, organizationId: order.organizationId },
+      user: { id: '' },
+      employee: { id: context.triggeredByEmployeeId ?? '' },
+    })
+  }
+
+  // 4. Check for backordered items — BLOCK dispatch (hard rule, no split shipments)
+  const backorderedItems = await db.orderItem.findMany({
+    where: { orderId, fulfillmentStatus: 'backordered' },
+    include: { orgVariant: { select: { sku: true } } },
+  })
+  if (backorderedItems.length > 0) {
+    const itemList = backorderedItems
+      .map((i) => `${i.orgVariant.sku} (qty: ${i.quantity})`)
+      .join(', ')
+    return {
+      success: false,
+      error: `Cannot dispatch: ${backorderedItems.length} item(s) are still backordered: ${itemList}. Receive stock or cancel those items first.`,
+    }
+  }
+
+  // 5. Dispatch each reserved item (inventory deduction). The fulfillmentStatus
+  //    filter naturally handles partial-dispatch resume AND the idempotency case
+  //    (if all items are already 'dispatched', itemsToDispatch is empty → we
+  //    skip the inventory loop and just update the status below).
+  const itemsToDispatch = await db.orderItem.findMany({
+    where: { orderId, fulfillmentStatus: 'reserved' },
+  })
+
+  const inventorySkipped = itemsToDispatch.length === 0
+
+  for (const item of itemsToDispatch) {
+    const locationId = item.reservedLocationId ?? order.dispatchLocationId
+    if (!locationId) {
+      return { success: false, error: `Order item ${item.id} has no dispatch location` }
+    }
+
+    const dispatchResult = await dispatchInventory({
+      orgVariantId: item.orgVariantId,
+      locationId,
+      organizationId: order.organizationId,
+      companyId: order.companyId,
+      employeeId: context.triggeredByEmployeeId ?? null,
+      quantity: item.quantity,
+      orderId,
+    })
+
+    if (!dispatchResult.success) {
+      return {
+        success: false,
+        error: `Failed to dispatch item: ${dispatchResult.error}`,
+      }
+    }
+
+    // Mark item as dispatched
+    await db.orderItem.update({
+      where: { id: item.id },
+      data: { fulfillmentStatus: 'dispatched', fulfilledAt: new Date() },
+    })
+  }
+
+  // 6. Update order status — the backfill_order_timestamps() trigger
+  //    auto-sets confirmedAt/packedAt if they were still NULL.
+  await db.order.update({
+    where: { id: orderId },
+    data: {
+      status: 'dispatched',
+      dispatchedAt: new Date(),
+      trackingNumber: context.trackingNumber || order.trackingNumber,
+      courierName: context.courierName || order.courierName,
+    },
+  })
+
+  // 7. Audit log — tagged with dispatch_source so financial reports can
+  //    distinguish manual dispatches from auto-poll dispatches.
+  await insertAuditLog({
+    action: 'order.dispatched',
+    entityType: 'order',
+    entityId: orderId,
+    companyId: order.companyId,
+    organizationId: order.organizationId,
+    userId: null,
+    employeeId: context.triggeredByEmployeeId ?? null,
+    newValues: {
+      status: 'dispatched',
+      trackingNumber: context.trackingNumber || order.trackingNumber,
+      courierName: context.courierName || order.courierName,
+      itemsDispatched: itemsToDispatch.length,
+      dispatch_source: source,
+      inventory_skipped: inventorySkipped,
+    },
+  })
+
+  // 8. Metric event
+  const timeToDispatchHours = order.createdAt
+    ? Math.round((new Date().getTime() - new Date(order.createdAt).getTime()) / (1000 * 60 * 60))
+    : 0
+  await insertMetricEvent({
+    companyId: order.companyId,
+    entityType: 'order',
+    entityId: orderId,
+    metricKey: 'order.dispatched',
+    numericValue: Number(order.totalOrderValue),
+    dimensions: {
+      courier_name: context.courierName || order.courierName,
+      dispatch_source: source,
+      time_to_dispatch_hours: timeToDispatchHours,
+      inventory_skipped: inventorySkipped,
+    },
+  }).catch(() => {})
+
+  // 9. Update customer stats (the customer's order count/total reflects this dispatch)
+  if (order.customerId) {
+    await updateCustomerStats(order.customerId).catch((e) =>
+      console.error(`[performOrderDispatch] updateCustomerStats failed for ${order.customerId}:`, e),
+    )
+  }
+
+  return {
+    success: true,
+    skipped: inventorySkipped,
+    reason: inventorySkipped ? 'Items already dispatched — status updated only' : undefined,
+  }
+}
+
+/**
  * Dispatch an order — deducts stock from inventory, sets tracking info.
+ *
+ * Manual/UI-triggered dispatch. Performs getWorkspace()/permission/packing
+ * checks, then delegates the inventory + status logic to performOrderDispatch().
  *
  * Business rules:
  *   - If order.status = 'pending' (confirmation was skipped): run the
@@ -1883,7 +2086,9 @@ export async function dispatchOrderAction(
       return { success: false, error: `Cannot dispatch an order that is already ${order.status}` }
     }
 
-    // Check packing requirement
+    // Check packing requirement (manual-path-only policy gate — the auto_poll
+    // path in performOrderDispatch skips this since the courier has already
+    // physically picked up the package)
     const settings = await db.companyOrderSetting.findUnique({
       where: { companyId: ctx.company.id },
     })
@@ -1894,133 +2099,17 @@ export async function dispatchOrderAction(
       }
     }
 
-    // If order is still 'pending' (confirmation was skipped), run the
-    // full confirmation + reservation logic inline first.
-    if (order.status === 'pending') {
-      await db.order.update({
-        where: { id: orderId },
-        data: { status: 'confirmed', confirmedAt: new Date() },
-      })
-      await reserveOrderStock(orderId, ctx)
-    }
-
-    // Re-fetch the order to get the updated status after reservation
-    const updatedOrder = await db.order.findFirst({
-      where: { id: orderId },
-      select: { status: true, dispatchLocationId: true, organizationId: true },
-    })
-    if (!updatedOrder) return { success: false, error: 'Order not found after reservation' }
-
-    // Check for backordered items — BLOCK dispatch if any exist
-    const backorderedItems = await db.orderItem.findMany({
-      where: { orderId, fulfillmentStatus: 'backordered' },
-      include: {
-        orgVariant: { select: { sku: true } },
-      },
+    // Delegate the inventory deduction + status update + audit/metric to the
+    // shared performOrderDispatch() function. No duplicated inventory logic
+    // remains in this function.
+    const result = await performOrderDispatch(orderId, {
+      source: 'manual',
+      triggeredByEmployeeId: ctx.employee.id,
+      trackingNumber,
+      courierName,
     })
 
-    if (backorderedItems.length > 0) {
-      const itemList = backorderedItems
-        .map((i) => `${i.orgVariant.sku} (qty: ${i.quantity})`)
-        .join(', ')
-      return {
-        success: false,
-        error: `Cannot dispatch: ${backorderedItems.length} item(s) are still backordered: ${itemList}. Receive stock or cancel those items first.`,
-      }
-    }
-
-    // Dispatch each reserved item
-    const itemsToDispatch = await db.orderItem.findMany({
-      where: { orderId, fulfillmentStatus: 'reserved' },
-    })
-
-    for (const item of itemsToDispatch) {
-      const locationId = item.reservedLocationId ?? updatedOrder.dispatchLocationId
-      if (!locationId) {
-        return { success: false, error: `Order item ${item.id} has no dispatch location` }
-      }
-
-      const dispatchResult = await dispatchInventory({
-        orgVariantId: item.orgVariantId,
-        locationId,
-        organizationId: updatedOrder.organizationId,
-        companyId: ctx.company.id,
-        employeeId: ctx.employee.id,
-        quantity: item.quantity,
-        orderId,
-      })
-
-      if (!dispatchResult.success) {
-        return {
-          success: false,
-          error: `Failed to dispatch item: ${dispatchResult.error}`,
-        }
-      }
-
-      // Mark item as dispatched
-      await db.orderItem.update({
-        where: { id: item.id },
-        data: { fulfillmentStatus: 'dispatched', fulfilledAt: new Date() },
-      })
-    }
-
-    // Update order status — the backfill_order_timestamps() trigger
-    // will auto-set confirmedAt/packedAt if they were still NULL.
-    await db.order.update({
-      where: { id: orderId },
-      data: {
-        status: 'dispatched',
-        dispatchedAt: new Date(),
-        trackingNumber: trackingNumber || null,
-        courierName: courierName || order.courierName,
-      },
-    })
-
-    await insertAuditLog({
-      action: 'order.dispatched',
-      entityType: 'order',
-      entityId: orderId,
-      companyId: ctx.company.id,
-      organizationId: ctx.company.organizationId,
-      userId: ctx.user.id,
-      employeeId: ctx.employee.id,
-      oldValues: { status: updatedOrder.status },
-      newValues: {
-        status: 'dispatched',
-        trackingNumber,
-        courierName,
-        itemsDispatched: itemsToDispatch.length,
-      },
-    })
-
-    const timeToDispatchHours = order.createdAt
-      ? Math.round((new Date().getTime() - new Date(order.createdAt).getTime()) / (1000 * 60 * 60))
-      : 0
-    await insertMetricEvent({
-      companyId: ctx.company.id,
-      entityType: 'order',
-      entityId: orderId,
-      metricKey: 'order.dispatched',
-      numericValue: Number(order.totalOrderValue),
-      dimensions: {
-        courier_name: courierName || order.courierName,
-        employee_id: ctx.employee.id,
-        skipped_confirmation: updatedOrder.status === 'pending',
-        skipped_packing: !order.packedAt,
-        time_to_dispatch_hours: timeToDispatchHours,
-      },
-    }).catch(() => {})
-
-    // Update customer stats
-    const orderWithCustomer = await db.order.findUnique({
-      where: { id: orderId },
-      select: { customerId: true },
-    })
-    if (orderWithCustomer) {
-      await updateCustomerStats(orderWithCustomer.customerId)
-    }
-
-    return { success: true }
+    return result
   } catch (err) {
     return {
       success: false,
