@@ -23,6 +23,13 @@ export interface AddressDTO {
   lastUsedAt: string | null
   createdAt: string
   updatedAt: string
+  // City validation (Phase 7 — early warning, not blocking).
+  // List of courier providerKeys (e.g. ['postex', 'tcs']) whose cached
+  // operational cities include this address's city. Empty array = no
+  // connected courier recognizes this city (soft warning).
+  // The authoritative check is always revalidateCityAtBookingTime() at booking.
+  cityMatchedCouriers: string[]
+  cityValidatedAt: string | null
 }
 
 export interface ExternalIdentityDTO {

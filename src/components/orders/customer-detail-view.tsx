@@ -62,6 +62,9 @@ import {
   Clock,
   TrendingUp,
   Truck,
+  AlertTriangle,
+  CheckCircle2,
+  Info,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatPKR, formatDate, getErrorMessage, badgeForStatus } from './_shared'
@@ -1061,6 +1064,14 @@ function AddressCardView({
         <p className="text-sm font-medium">{address.address}</p>
         <p className="text-xs text-muted-foreground">{address.city}</p>
       </div>
+      {/* City validation — early warning, not blocking.
+          The authoritative check is always revalidateCityAtBookingTime() at
+          booking time (with its live fallback). This is informational only,
+          based on the cached courier_operational_cities table. */}
+      <CityMatchInfo
+        matchedCouriers={address.cityMatchedCouriers ?? []}
+        validatedAt={address.cityValidatedAt ?? null}
+      />
       {canManage && (
         <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t">
           {!address.isDefault && (
@@ -1116,6 +1127,67 @@ function AddressCardView({
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * City-match early-warning indicator for a customer address.
+ *
+ * Shows which connected couriers recognize the address's city (based on the
+ * cached courier_operational_cities table). This is INFORMATIONAL ONLY — the
+ * authoritative check is always revalidateCityAtBookingTime() at booking time,
+ * which has a live-fallback for stale/missing cached data.
+ *
+ * Three states:
+ *   - matched (1+ couriers): green check + "Supported by: PostEx, TCS"
+ *   - no match (0 couriers, but couriers are connected): amber warning +
+ *     "Not recognized by any connected courier yet"
+ *   - not validated yet (cityValidatedAt is null): muted info +
+ *     "City check pending…" (the background validation runs right after
+ *     create/update; this shows briefly until it completes)
+ */
+function CityMatchInfo({
+  matchedCouriers,
+  validatedAt,
+}: {
+  matchedCouriers: string[]
+  validatedAt: string | null
+}) {
+  // Not validated yet — the background check is still running (or never ran)
+  if (!validatedAt) {
+    return (
+      <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+        <Info className="h-2.5 w-2.5" />
+        <span>City check pending…</span>
+      </div>
+    )
+  }
+
+  // No couriers connected OR city not recognized by any connected courier
+  if (matchedCouriers.length === 0) {
+    return (
+      <div className="flex items-center gap-1 text-[10px] text-amber-700 dark:text-amber-400">
+        <AlertTriangle className="h-2.5 w-2.5" />
+        <span>Not recognized by any connected courier yet</span>
+      </div>
+    )
+  }
+
+  // Matched — show the list of couriers that recognize this city
+  // Capitalize provider keys for display (postex → PostEx, tcs → TCS)
+  const displayNames = matchedCouriers.map((p) => {
+    const lower = p.toLowerCase()
+    if (lower === 'postex') return 'PostEx'
+    if (lower === 'tcs') return 'TCS'
+    if (lower === 'leopard') return 'Leopard'
+    return p.charAt(0).toUpperCase() + p.slice(1)
+  })
+
+  return (
+    <div className="flex items-center gap-1 text-[10px] text-emerald-700 dark:text-emerald-400">
+      <CheckCircle2 className="h-2.5 w-2.5" />
+      <span>Supported by: {displayNames.join(', ')}</span>
     </div>
   )
 }

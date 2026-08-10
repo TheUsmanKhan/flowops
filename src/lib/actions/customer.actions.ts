@@ -72,6 +72,9 @@ interface AddressDTO {
   lastUsedAt: Date | null
   createdAt: Date
   updatedAt: Date
+  // City validation (Phase 7 — early warning, not blocking)
+  cityMatchedCouriers: string[]
+  cityValidatedAt: Date | null
 }
 
 interface CustomerSummaryDTO {
@@ -182,6 +185,8 @@ function toAddressDTO(a: {
   lastUsedAt: Date | null
   createdAt: Date
   updatedAt: Date
+  cityMatchedCouriers?: string[]
+  cityValidatedAt?: Date | null
 }): AddressDTO {
   return {
     id: a.id,
@@ -192,6 +197,8 @@ function toAddressDTO(a: {
     lastUsedAt: a.lastUsedAt,
     createdAt: a.createdAt,
     updatedAt: a.updatedAt,
+    cityMatchedCouriers: a.cityMatchedCouriers ?? [],
+    cityValidatedAt: a.cityValidatedAt ?? null,
   }
 }
 

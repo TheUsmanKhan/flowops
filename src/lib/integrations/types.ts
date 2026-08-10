@@ -181,6 +181,24 @@ export interface CourierAdapter {
    * Returns the raw response (may be a PDF binary or a URL).
    */
   generateLoadSheet?(trackingNumbers: string[], pickupAddress?: string): Promise<{ success: boolean; rawResponse?: unknown; error?: string }>
+
+  /**
+   * OPTIONAL: Lightweight read-only connectivity check.
+   *
+   * Used by testIntegrationConnection() to verify credentials work without
+   * making any state-changing call. Implementations should use the cheapest
+   * read-only endpoint the provider offers (e.g. PostEx: fetchOperationalCities;
+   * Leopard: getAllCities; TCS: a cities/list endpoint).
+   *
+   * Adapters that don't implement this fall back to calculateRate() (which is
+   * the historical test method, but unsupported by PostEx and other couriers
+   * that don't expose rate endpoints). Adapters that support neither
+   * pingConnection() nor calculateRate() will surface a clear "not supported"
+   * error to the user.
+   *
+   * MUST be read-only — no booking, no address creation, no manifest generation.
+   */
+  pingConnection?(): Promise<{ success: boolean; error?: string }>
 }
 
 // ──────────────────────────────────────────────────────────────

@@ -571,11 +571,23 @@ export async function testIntegrationConnection(companyIntegrationId: string): P
       return { success: false, error: `No adapter registered for provider '${providerKey}'` }
     }
 
-    // Call a lightweight capability check via the logged wrapper.
-    // For stub adapters, this will fail gracefully with "not yet implemented"
-    // — the plumbing is here so future real adapters can plug in a real test.
+    // Call a lightweight, read-only capability check via the logged wrapper.
+    //
+    // PROVIDER-DISPATCH PATTERN (not PostEx-hardcoded):
+    //   1. If the adapter implements pingConnection() → use it (preferred).
+    //      PostEx implements this (calls fetchOperationalCities — read-only).
+    //      Leopard/TCS will automatically pick this up once their adapters
+    //      implement pingConnection() — no changes needed here.
+    //   2. Else if the adapter supports fetchOperationalCities() → use it
+    //      (covers couriers that have a cities endpoint but no explicit ping).
+    //   3. Else fall back to calculateRate() (legacy path — some couriers
+    //      expose a rate endpoint that validates credentials).
+    //   4. Else surface a clear "not supported" error.
+    //
+    // For ecommerce adapters: no standard "ping" — parseWebhookOrder with an
+    // empty payload is the minimal "does the adapter work" test.
     try {
-      await executeLoggedIntegrationAction({
+      const testResult = await executeLoggedIntegrationAction<{ success: boolean; error?: string }>({
         companyIntegrationId,
         organizationId: ctx.company.organizationId,
         actionType: 'test_connection',
@@ -583,30 +595,97 @@ export async function testIntegrationConnection(companyIntegrationId: string): P
         fn: async () => {
           if (category === 'courier') {
             const adapter = getCourierAdapter(providerKey, credentials)
-            // Use calculateRate as a lightweight connectivity test (most
-            // courier APIs have a rate endpoint that validates credentials)
-            return adapter.calculateRate({ fromCity: 'Karachi', toCity: 'Lahore', weightGrams: 500 })
+
+            // Preferred: adapter implements pingConnection()
+            if (typeof adapter.pingConnection === 'function') {
+              return adapter.pingConnection()
+            }
+
+            // Fallback 1: adapter supports fetchOperationalCities() (read-only)
+            if (typeof adapter.fetchOperationalCities === 'function') {
+              const cities = await adapter.fetchOperationalCities()
+              if (cities.length === 0) {
+                return {
+                  success: false,
+                  error: `${providerKey} accepted the credentials but returned 0 cities.`,
+                }
+              }
+              return { success: true }
+            }
+
+            // Fallback 2: calculateRate() (legacy — unsupported by PostEx)
+            if (typeof adapter.calculateRate === 'function') {
+              try {
+                const rateResult = await adapter.calculateRate({
+                  fromCity: 'Karachi',
+                  toCity: 'Lahore',
+                  weightGrams: 500,
+                })
+                return {
+                  success: rateResult.success,
+                  error: rateResult.success ? undefined : rateResult.error,
+                }
+              } catch (rateErr) {
+                return {
+                  success: false,
+                  error: rateErr instanceof Error ? rateErr.message : 'calculateRate failed',
+                }
+              }
+            }
+
+            // No read-only test method available
+            return {
+              success: false,
+              error: `The ${providerKey} adapter does not implement a read-only connectivity check (pingConnection, fetchOperationalCities, or calculateRate). Test not supported.`,
+            }
           } else {
             const adapter = getEcommerceAdapter(providerKey, credentials)
             // Ecommerce: no standard "ping" — use parseWebhookOrder with
             // an empty payload as a minimal "does the adapter work" test
-            return adapter.parseWebhookOrder({})
+            try {
+              const parsed = await adapter.parseWebhookOrder({})
+              return {
+                success: parsed.success,
+                error: parsed.success ? undefined : parsed.error,
+              }
+            } catch (parseErr) {
+              return {
+                success: false,
+                error: parseErr instanceof Error ? parseErr.message : 'parseWebhookOrder failed',
+              }
+            }
           }
         },
       })
 
-      // If we get here, the call succeeded
-      await db.companyIntegration.update({
-        where: { id: companyIntegrationId },
-        data: { connectionStatus: 'connected', lastSyncAt: new Date(), lastError: null },
-      })
-      return { success: true, data: { status: 'connected' } }
-    } catch (testErr) {
-      const errorMsg = testErr instanceof Error ? testErr.message : String(testErr)
+      // executeLoggedIntegrationAction throws on failure; if we reach here
+      // with testResult.success=true, the connection is good.
+      if (testResult.success) {
+        await db.companyIntegration.update({
+          where: { id: companyIntegrationId },
+          data: { connectionStatus: 'connected', lastSyncAt: new Date(), lastError: null },
+        })
+        return { success: true, data: { status: 'connected' } }
+      }
+
+      // The ping call returned a structured failure (not an exception).
+      // Surface the error but DON'T mark the integration as broken — a single
+      // failed test ping may be transient (network blip, rate limit, etc.).
+      // We update lastError + connectionStatus='error' for visibility, but
+      // isActive stays true so the integration remains usable.
+      const errorMsg = testResult.error || 'Connection test failed'
       await db.companyIntegration.update({
         where: { id: companyIntegrationId },
         data: { connectionStatus: 'error', lastError: errorMsg },
       })
+      return { success: false, error: errorMsg, data: { status: 'error', error: errorMsg } }
+    } catch (testErr) {
+      const errorMsg = testErr instanceof Error ? testErr.message : String(testErr)
+      // Same non-destructive policy: log the error, don't disable the integration.
+      await db.companyIntegration.update({
+        where: { id: companyIntegrationId },
+        data: { connectionStatus: 'error', lastError: errorMsg },
+      }).catch(() => {}) // don't let a DB failure mask the original test error
       // Return success=false but with the error message (don't throw —
       // the caller wants to display it in the UI)
       return { success: false, error: errorMsg, data: { status: 'error', error: errorMsg } }

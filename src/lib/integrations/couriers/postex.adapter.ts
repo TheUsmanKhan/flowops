@@ -469,6 +469,44 @@ export class PostExAdapter implements CourierAdapter {
   }
 
   // ──────────────────────────────────────────────────────────────
+  // 7b. pingConnection — read-only connectivity check (test route)
+  // ──────────────────────────────────────────────────────────────
+
+  /**
+   * Lightweight read-only connectivity check used by the "Test Connection"
+   * button. Calls fetchOperationalCities() — the cheapest read-only PostEx
+   * endpoint that validates the integration token without making any
+   * state-changing call.
+   *
+   * PostEx does NOT offer a dedicated "ping" endpoint, and calculateRate()
+   * is unsupported (throws by design). The cities endpoint is the lightest
+   * available read-only call. We don't need the full city list for a
+   * connectivity check, but PostEx's API returns the full list regardless
+   * of params, so we just verify the response is non-empty (a 0-city
+   * response indicates an invalid token per PostEx's behavior).
+   *
+   * Returns { success: true } on a valid connection, { success: false, error }
+   * with a user-facing message otherwise.
+   */
+  async pingConnection(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const cities = await this.fetchOperationalCities()
+      if (cities.length === 0) {
+        return {
+          success: false,
+          error: 'PostEx accepted the token but returned 0 cities. The token may be valid but the account may have no cities enabled.',
+        }
+      }
+      return { success: true }
+    } catch (e) {
+      return {
+        success: false,
+        error: e instanceof Error ? e.message : 'PostEx connectivity check failed.',
+      }
+    }
+  }
+
+  // ──────────────────────────────────────────────────────────────
   // 8. createPickupAddress — POST v2/create-merchant-address
   // ──────────────────────────────────────────────────────────────
 
