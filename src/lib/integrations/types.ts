@@ -178,9 +178,11 @@ export interface CourierAdapter {
   /**
    * OPTIONAL: Generate a load sheet (pickup manifest) for a batch of tracking numbers.
    * Used by couriers that require a load sheet before pickup (e.g. PostEx).
-   * Returns the raw response (may be a PDF binary or a URL).
+   * Returns the raw response + pdfBase64 (the PDF binary encoded as base64,
+   * so the caller can store it in our own file storage — not an external
+   * courier URL that might expire).
    */
-  generateLoadSheet?(trackingNumbers: string[], pickupAddress?: string): Promise<{ success: boolean; rawResponse?: unknown; error?: string }>
+  generateLoadSheet?(trackingNumbers: string[], pickupAddress?: string): Promise<{ success: boolean; rawResponse?: unknown; error?: string; pdfBase64?: string }>
 
   /**
    * OPTIONAL: Lightweight read-only connectivity check.

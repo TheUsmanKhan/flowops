@@ -49,6 +49,7 @@ import {
 import { cn } from '@/lib/utils'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 import { calculateOrderWeightKg } from '@/lib/utils/order-weight'
+import { LoadSheetsTab } from './load-sheets-tab'
 import {
   determinePostExOrderType, type PostExOrderType,
 } from '@/lib/integrations/couriers/postex.order-type'
@@ -249,7 +250,7 @@ function defaultRowState(row: BookableRow): RowState {
 
 export function BookingWorkbenchView() {
   const queryClient = useQueryClient()
-  const [activeTab, setActiveTab] = useState<'orders' | 'shipments' | 'activity'>('orders')
+  const [activeTab, setActiveTab] = useState<'orders' | 'shipments' | 'activity' | 'load-sheets'>('orders')
   const [search, setSearch] = useState('')
   const [bulkApplyIntegrationId, setBulkApplyIntegrationId] = useState('')
   const [rowStates, setRowStates] = useState<Record<string, RowState>>({})
@@ -283,7 +284,7 @@ export function BookingWorkbenchView() {
   }, [courierIntegrations])
 
   function onTabChange(v: string) {
-    setActiveTab(v as 'orders' | 'shipments' | 'activity')
+    setActiveTab(v as 'orders' | 'shipments' | 'activity' | 'load-sheets')
     setSearch('')
   }
 
@@ -505,6 +506,10 @@ export function BookingWorkbenchView() {
             <CheckCircle2 className="h-3.5 w-3.5" />
             Booking Activity
           </TabsTrigger>
+          <TabsTrigger value="load-sheets" className="gap-1.5">
+            <FileText className="h-3.5 w-3.5" />
+            Load Sheets
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="orders" className="mt-4">
@@ -559,6 +564,10 @@ export function BookingWorkbenchView() {
 
         <TabsContent value="activity" className="mt-4">
           <BookingActivityTab />
+        </TabsContent>
+
+        <TabsContent value="load-sheets" className="mt-4">
+          <LoadSheetsTab courierIntegrations={courierIntegrations} />
         </TabsContent>
       </Tabs>
     </div>

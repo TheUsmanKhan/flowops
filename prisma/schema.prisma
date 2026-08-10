@@ -114,6 +114,8 @@ model Organization {
   // Order Scan Module back-relations (migration 017)
   scanEvents              ScanEvent[]
   scanDailyReports        ScanDailyReport[]
+  // Load Sheets back-relation (migration 020)
+  loadSheets              LoadSheet[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -194,6 +196,9 @@ model Company {
   // Order Scan Module back-relations (migration 017)
   scanEvents             ScanEvent[]
   scanDailyReports       ScanDailyReport[]
+
+  // Load Sheets back-relation (migration 020)
+  loadSheets             LoadSheet[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -328,6 +333,7 @@ model Employee {
 
   // Order Scan Module back-relation (migration 017)
   scanEvents                      ScanEvent[] @relation("ScanEventScannedBy")
+  loadSheetsGenerated             LoadSheet[] @relation("LoadSheetGenerator")
 
   @@unique([companyId, userId])
 }
@@ -1734,6 +1740,7 @@ model CompanyIntegration {
   pickupAddresses           CourierPickupAddress[]
   exchangeShipmentsBooked   ExchangeShipment[] @relation("ExchangeShipmentCourierIntegration")
   exchangeShipmentsRecommended ExchangeShipment[] @relation("ExchangeShipmentRecommendedCourier")
+  loadSheets                LoadSheet[]
 
   @@index([companyId, isActive])
   @@map("company_integrations")
@@ -1981,6 +1988,13 @@ model Order {
   // physicalUnpackConfirmedAt: set when staff confirms the physical
   // unpacking is done (via 'locate_cancelled' scan mode confirmation).
   physicalUnpackConfirmedAt     DateTime?
+
+  // ─── Load Sheet (migration 020) ──────────────────────────────────
+  // Set when this order is included in a generated load sheet (pickup manifest).
+  // Nullable — null means not yet load-sheeted. Once set, the order disappears
+  // from the "ready for load sheet" checklist.
+  loadSheetId                   String?
+  loadSheet                     LoadSheet? @relation("OrderLoadSheet", fields: [loadSheetId], references: [id], onDelete: SetNull)
 }
 
 /// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
@@ -2094,6 +2108,8 @@ model CourierPickupAddress {
 
   // Back-relation: orders that use this address as a per-order override
   ordersUsedIn          Order[] @relation("OrderPickupAddress")
+  // Back-relation: load sheets generated for this pickup address
+  loadSheets            LoadSheet[]
 
   @@index([companyIntegrationId])
   @@map("courier_pickup_addresses")
@@ -2196,6 +2212,11 @@ model ExchangeShipment {
   physicalUnpackRequired        Boolean  @default(false)
   physicalUnpackConfirmedAt     DateTime?
 
+  // ─── Load Sheet (migration 020) ──────────────────────────────────
+  // Set when this shipment is included in a generated load sheet (pickup manifest).
+  loadSheetId                   String?
+  loadSheet                     LoadSheet? @relation("ExchangeShipmentLoadSheet", fields: [loadSheetId], references: [id], onDelete: SetNull)
+
   @@map("exchange_shipments")
 }
 
@@ -2257,4 +2278,54 @@ model ScanDailyReport {
   @@unique([companyId, reportDate])
   @@index([companyId, reportDate])
   @@map("scan_daily_reports")
+}
+
+// ============================================================================
+// Load Sheets (migration 020) — courier-agnostic pickup manifest system
+// ============================================================================
+
+/// A generated load sheet (pickup manifest) from any courier provider.
+/// Combines orders AND exchange shipments (a courier rider picks up both
+/// types in one trip). The PDF is stored in OUR file storage (not an external
+/// courier URL that might expire — same principle as Proof of Delivery).
+///
+/// Immutable once generated (no UPDATE/DELETE exposed — consistent with other
+/// audit-adjacent records like inventory_transactions and scan_events).
+model LoadSheet {
+  id                      String   @id @default(cuid())
+  organizationId          String
+  organization            Organization @relation(fields: [organizationId], references: [id])
+  companyId               String
+  company                 Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Which courier provider generated this (e.g. 'postex', 'leopard', 'tcs')
+  providerKey             String
+  // The specific company_integration used (tracks which credentials were used)
+  companyIntegrationId    String
+  companyIntegration      CompanyIntegration @relation(fields: [companyIntegrationId], references: [id], onDelete: SetNull)
+  // Which pickup address this load sheet is for (nullable — some couriers may not require it)
+  pickupAddressId         String?
+  pickupAddress           CourierPickupAddress? @relation(fields: [pickupAddressId], references: [id], onDelete: SetNull)
+
+  // The entities included (orders + exchange shipments mixed).
+  // JSONB array of: { entityType: 'order'|'exchange_shipment', entityId, trackingNumber }
+  items                   String   @default("[]")
+
+  // Path to the stored PDF in our /uploads folder (e.g. /uploads/load-sheets/<companyId>/<filename>.pdf)
+  pdfStoragePath          String?
+
+  generatedBy             String?
+  generatedByEmployee     Employee? @relation("LoadSheetGenerator", fields: [generatedBy], references: [id], onDelete: SetNull)
+  generatedAt             DateTime @default(now())
+
+  createdAt               DateTime @default(now())
+
+  // Back-relations
+  orders                  Order[] @relation("OrderLoadSheet")
+  exchangeShipments       ExchangeShipment[] @relation("ExchangeShipmentLoadSheet")
+
+  @@index([companyId, generatedAt])
+  @@index([companyIntegrationId])
+  @@index([providerKey])
+  @@map("load_sheets")
 }

@@ -605,7 +605,7 @@ export class PostExAdapter implements CourierAdapter {
   async generateLoadSheet(
     trackingNumbers: string[],
     pickupAddress?: string,
-  ): Promise<{ success: boolean; rawResponse?: unknown; error?: string }> {
+  ): Promise<{ success: boolean; rawResponse?: unknown; error?: string; pdfBase64?: string }> {
     if (trackingNumbers.length === 0) {
       return { success: false, error: 'No tracking numbers provided.' }
     }
@@ -629,21 +629,37 @@ export class PostExAdapter implements CourierAdapter {
 
     // PostEx returns a PDF file for this endpoint, not JSON.
     if (response.status === 200) {
-      // The response is a PDF binary — we can't parse it as JSON.
-      // Return success with metadata about the response.
+      // The response is a PDF binary — capture it as base64 so the caller
+      // can store it in our own file storage (not an external courier URL
+      // that might expire — same principle as Proof of Delivery).
+      const arrayBuffer = await response.arrayBuffer()
+      const buffer = Buffer.from(arrayBuffer)
+      const pdfBase64 = buffer.toString('base64')
+
       return {
         success: true,
+        pdfBase64,
         rawResponse: {
           contentType: response.headers.get('content-type'),
           contentLength: response.headers.get('content-length'),
           status: response.status,
+          pdfSizeBytes: buffer.length,
         },
       }
     }
 
+    // Non-200: try to parse as JSON for the error message
+    let errorMsg = `PostEx load-sheet API returned HTTP ${response.status}`
+    try {
+      const json = await response.json()
+      errorMsg = json.statusMessage || json.message || errorMsg
+    } catch {
+      // Not JSON — use the HTTP status error
+    }
+
     return {
       success: false,
-      error: `PostEx load-sheet API returned HTTP ${response.status}`,
+      error: errorMsg,
     }
   }
 
