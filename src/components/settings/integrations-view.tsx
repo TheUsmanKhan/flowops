@@ -73,6 +73,7 @@ interface Provider {
   supportsWebhook: boolean
   configSchema: string
   capabilities: string
+  adapterStatus?: string // 'live' | 'framework_ready' | 'stub' — from registry
 }
 
 interface Integration {
@@ -245,17 +246,65 @@ export function IntegrationsView() {
         }
       />
 
-      {/* Framework-only notice */}
-      <div className="rounded-md border border-sky-200 bg-sky-50 p-3 flex items-start gap-2">
-        <Info className="h-4 w-4 text-sky-600 shrink-0 mt-0.5" />
-        <div className="text-xs text-sky-800">
-          <strong>Integration framework is active.</strong> Provider adapters are currently in
-          stub mode — you can connect and configure providers now, but actual API calls (booking
-          shipments, receiving orders) will be available once each provider&apos;s adapter is
-          fully implemented. Connection testing will also show &quot;not yet implemented&quot; for
-          stub providers.
-        </div>
-      </div>
+      {/* Dynamic adapter status banner — shows per-provider implementation status.
+          Replaces the old hardcoded "framework-only/stub" banner that incorrectly
+          claimed ALL adapters were stubs. Now accurately reflects which adapters
+          are live (PostEx) vs framework-ready (Leopard, TCS). */}
+      {(() => {
+        const liveProviders = providers.filter((p) => p.adapterStatus === 'live')
+        const stubProviders = providers.filter((p) => p.adapterStatus !== 'live')
+        const hasLive = liveProviders.length > 0
+        const hasStubs = stubProviders.length > 0
+
+        if (hasLive && hasStubs) {
+          // Mixed: some live, some stub
+          return (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 flex items-start gap-2">
+              <Info className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+              <div className="text-xs text-emerald-800 space-y-1">
+                <div>
+                  <strong>Integration framework is active.</strong>{' '}
+                  <span className="font-medium">{liveProviders.map((p) => p.providerName).join(', ')}</span>{' '}
+                  {liveProviders.length === 1 ? 'is' : 'are'} fully implemented — API calls (booking, tracking, city sync) work end-to-end.
+                </div>
+                <div className="text-emerald-700">
+                  The following providers are framework-ready (adapter class exists but methods are not yet implemented):
+                  {' '}
+                  <span className="font-medium">{stubProviders.map((p) => p.providerName).join(', ')}</span>.
+                  You can save credentials now, but API calls will show &quot;not yet implemented&quot; until the adapter is completed.
+                </div>
+              </div>
+            </div>
+          )
+        }
+
+        if (hasLive && !hasStubs) {
+          // All live
+          return (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 flex items-start gap-2">
+              <Info className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+              <div className="text-xs text-emerald-800">
+                <strong>All providers are fully implemented.</strong>{' '}
+                API calls (booking, tracking, city sync, connection testing) work end-to-end for all connected providers.
+              </div>
+            </div>
+          )
+        }
+
+        // All stubs (no live providers)
+        return (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 flex items-start gap-2">
+            <Info className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-800">
+              <strong>Integration framework is active.</strong>{' '}
+              Provider adapters are currently in framework-ready mode — you can connect and
+              configure providers now, but actual API calls (booking shipments, receiving orders)
+              will be available once each provider&apos;s adapter is fully implemented. Connection
+              testing will also show &quot;not yet implemented&quot; for these providers.
+            </div>
+          </div>
+        )
+      })()}
 
       <Tabs defaultValue="courier">
         <TabsList>
@@ -621,12 +670,21 @@ function ConnectDialog({
               </div>
             ))}
 
-            {/* Framework note */}
-            <div className="rounded-md bg-amber-50 border border-amber-200 p-2.5 text-[10px] text-amber-800">
-              Note: This provider&apos;s adapter is currently a stub. Credentials will be saved
-              securely, but actual API calls and connection testing will be available once the
-              adapter is fully implemented.
-            </div>
+            {/* Per-provider adapter status note — only shown for non-live adapters */}
+            {provider.adapterStatus !== 'live' && (
+              <div className="rounded-md bg-amber-50 border border-amber-200 p-2.5 text-[10px] text-amber-800">
+                Note: This provider&apos;s adapter is{' '}
+                {provider.adapterStatus === 'framework_ready' ? 'framework-ready (methods not yet implemented)' : 'a stub'}.
+                Credentials will be saved securely, but actual API calls and connection testing will
+                show &quot;not yet implemented&quot; until the adapter is fully implemented.
+              </div>
+            )}
+            {provider.adapterStatus === 'live' && (
+              <div className="rounded-md bg-emerald-50 border border-emerald-200 p-2.5 text-[10px] text-emerald-800">
+                This provider&apos;s adapter is fully implemented. API calls (booking, tracking,
+                city sync, connection testing) work end-to-end once credentials are saved.
+              </div>
+            )}
           </div>
         )}
 

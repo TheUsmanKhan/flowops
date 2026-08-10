@@ -1599,7 +1599,7 @@ model OrderExchange {
   exchangeShipments             ExchangeShipment[] @relation("ExchangeNewShipment")
 
   exchangeMethod                String   // 'courier_replacement' | 'customer_self_return' (CHECK in SQL)
-  status                        String   @default("requested") // 9 states (CHECK in SQL)
+  status                        String   @default("requested") // 10 states (CHECK in SQL) — migration 019 added 'exchange_item_returned'
 
   // Old item verification (manual — no courier API confirms arrival)
   oldItemCondition              String?  // 'perfect' | 'good' | 'open_box' | 'damaged' (CHECK in SQL)
@@ -2137,8 +2137,11 @@ model ExchangeShipment {
 
   shippingCityOverride          String?
 
-  // Simplified lifecycle (6 states vs Order's 9)
-  status                        String   @default("confirmed") // pending | confirmed | backordered | dispatched | delivered | cancelled (CHECK in SQL)
+  // Simplified lifecycle (7 states — migration 019 added 'rto')
+  // RTO means the replacement item itself was returned by the courier.
+  // Triggers markExchangeShipmentRto() which restores inventory + sets the
+  // parent order_exchanges to 'exchange_item_returned' (terminal, manual follow-up).
+  status                        String   @default("confirmed") // pending | confirmed | backordered | dispatched | delivered | rto | cancelled (CHECK in SQL)
   isPriorityBackorder           Boolean  @default(true)
   backorderedAt                 DateTime?
 
@@ -2176,6 +2179,7 @@ model ExchangeShipment {
   confirmedAt                   DateTime?
   dispatchedAt                  DateTime?
   deliveredAt                   DateTime?
+  returnedAt                    DateTime? // migration 019 — set when status='rto' (replacement item returned)
   cancelledAt                   DateTime?
 
   createdBy                     String?

@@ -47,6 +47,7 @@ export interface ShipmentTrackingCardProps {
     trackingNumber: string | null
     dispatchedAt: string | null
     deliveredAt: string | null
+    returnedAt: string | null
     createdAt: string
     courierSubStatus?: string | null
   }
@@ -77,6 +78,10 @@ const SHIPMENT_STATUS_BADGE: Record<
     label: 'Delivered',
     className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
   },
+  rto: {
+    label: 'Returned (RTO)',
+    className: 'bg-rose-50 text-rose-700 border-rose-200',
+  },
   cancelled: {
     label: 'Cancelled',
     className: 'bg-slate-100 text-slate-500 border-slate-200',
@@ -94,6 +99,7 @@ export function ShipmentTrackingCard({ shipment }: ShipmentTrackingCardProps) {
 
   const isBackordered = shipment.status === 'backordered'
   const isCancelled = shipment.status === 'cancelled'
+  const isRto = shipment.status === 'rto'
 
   async function handleCopyTracking() {
     if (!shipment.trackingNumber) return
@@ -138,6 +144,19 @@ export function ShipmentTrackingCard({ shipment }: ShipmentTrackingCardProps) {
               <strong className="font-semibold">Queued</strong> — will be
               fulfilled when stock arrives. Priority backorder (fulfilled ahead
               of regular order items).
+            </span>
+          </div>
+        )}
+
+        {/* RTO notice — replacement item was returned, requires manual follow-up */}
+        {isRto && (
+          <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800 flex items-start gap-2">
+            <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+            <span>
+              <strong className="font-semibold">Replacement item was returned</strong> — the
+              courier returned this shipment. Inventory has been restored. This
+              requires <strong className="font-semibold">manual follow-up</strong> (re-send,
+              refund, or contact customer). No automatic re-exchange is triggered.
             </span>
           </div>
         )}
@@ -221,6 +240,18 @@ export function ShipmentTrackingCard({ shipment }: ShipmentTrackingCardProps) {
               {formatDateTime(shipment.deliveredAt)}
             </p>
           </div>
+
+          {/* Returned at (only shown when RTO) */}
+          {isRto && (
+            <div className="space-y-0.5 col-span-2">
+              <p className="text-muted-foreground flex items-center gap-1">
+                <AlertTriangle className="h-3 w-3" /> Returned
+              </p>
+              <p className="text-xs font-medium text-rose-700">
+                {formatDateTime(shipment.returnedAt)}
+              </p>
+            </div>
+          )}
 
           {/* Created at */}
           <div className="space-y-0.5 col-span-2">

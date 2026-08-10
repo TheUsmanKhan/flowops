@@ -1060,7 +1060,7 @@ export async function listExchanges(
           newOrder: { select: { flowopsOrderNumber: true } },
           // NEW: include exchange shipments (migration 008)
           exchangeShipments: {
-            select: { id: true, exchangeShipmentNumber: true, status: true, trackingNumber: true, courierSubStatus: true, dispatchedAt: true, deliveredAt: true, createdAt: true, invoiceAmount: true, quantity: true },
+            select: { id: true, exchangeShipmentNumber: true, status: true, trackingNumber: true, courierSubStatus: true, dispatchedAt: true, deliveredAt: true, returnedAt: true, createdAt: true, invoiceAmount: true, quantity: true },
             orderBy: { createdAt: 'desc' },
           },
         },
@@ -1165,6 +1165,7 @@ export async function getExchangeDetail(
             courierSubStatus: true,
             dispatchedAt: true,
             deliveredAt: true,
+            returnedAt: true,
             createdAt: true,
           },
           orderBy: { createdAt: 'desc' },

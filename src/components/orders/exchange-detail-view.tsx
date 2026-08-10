@@ -113,6 +113,7 @@ interface ExchangeDetail {
     trackingNumber: string | null
     dispatchedAt: string | null
     deliveredAt: string | null
+    returnedAt: string | null
     createdAt: string
   }>
   requestedByEmployee: { id: string; user: { fullName: string } }
@@ -128,6 +129,7 @@ const STATUS_BADGE: Record<string, { label: string; className: string }> = {
   old_item_manually_verified: { label: 'Old Item Verified', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
   completed: { label: 'Completed', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
   customer_did_not_return: { label: 'Not Returned', className: 'bg-rose-50 text-rose-700 border-rose-200' },
+  exchange_item_returned: { label: 'Item Returned (RTO)', className: 'bg-rose-50 text-rose-700 border-rose-200' },
   cancelled: { label: 'Cancelled', className: 'bg-slate-100 text-slate-500 border-slate-200' },
 }
 

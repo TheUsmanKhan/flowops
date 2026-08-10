@@ -29,6 +29,7 @@ import {
   unreserveStockForOrder,
   dispatchOrder,
   checkAndFulfillMadeToOrderVariant,
+  processInventoryTransaction,
 } from '@/lib/inventory'
 
 interface ActionResult<T = unknown> {
@@ -728,6 +729,223 @@ export async function markExchangeShipmentDelivered(
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Failed to mark exchange shipment as delivered',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// 4c. markExchangeShipmentRto (+ performExchangeShipmentRto) — replacement item was returned (RTO)
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * SHARED exchange-shipment RTO business logic — the SINGLE place where
+ * inventory restoration (processInventoryTransaction with return_resellable /
+ * return_stitched_received) + status='rto' + parent-exchange terminal state +
+ * audit/metric happen together.
+ *
+ * Called from:
+ *   - markExchangeShipmentRto() [manual/UI-triggered, source='manual'] — AFTER
+ *     getWorkspace()/permission checks
+ *   - pollPostExOrderStatuses() [cron, source='auto_poll'] — no session,
+ *     reads companyId/organizationId from the shipment itself
+ *
+ * CRITICAL: this function does NOT call getWorkspace(). The manual caller
+ * must do its own auth/workspace scoping before invoking.
+ *
+ * IDEMPOTENT: if the shipment is already 'rto', returns success without
+ * re-processing inventory (prevents double-return).
+ */
+export async function performExchangeShipmentRto(
+  exchangeShipmentId: string,
+  context: {
+    source: 'manual' | 'auto_poll'
+    triggeredByEmployeeId?: string | null
+    returnReason?: string
+  },
+): Promise<ActionResult & { skipped?: boolean }> {
+  // 1. Fetch the shipment — NO companyId scoping (works in cron context)
+  const shipment = await db.exchangeShipment.findUnique({
+    where: { id: exchangeShipmentId },
+    include: {
+      orderExchange: {
+        select: {
+          id: true,
+          exchangeMethod: true,
+          originalOrder: { select: { dispatchLocationId: true } },
+          newOrgVariant: {
+            select: { id: true, sku: true, costPrice: true, fulfillmentType: true },
+          },
+        },
+      },
+    },
+  })
+  if (!shipment) return { success: false, error: 'Exchange shipment not found.' }
+
+  // IDEMPOTENT: already RTO → return success without re-processing
+  if (shipment.status === 'rto') {
+    return { success: true, skipped: true }
+  }
+
+  // Guard: must be dispatched or delivered to be returnable
+  if (shipment.status !== 'dispatched' && shipment.status !== 'delivered') {
+    return {
+      success: false,
+      error: `Cannot mark as RTO a shipment with status='${shipment.status}'. Must be dispatched or delivered.`,
+    }
+  }
+
+  const locationId = shipment.orderExchange.originalOrder.dispatchLocationId
+  if (!locationId) {
+    return { success: false, error: 'No dispatch location set on the original order.' }
+  }
+
+  // ── Process the returned item back into inventory ──
+  // Find the dispatch txn to get the cost basis (mirrors processOrderReturn)
+  const dispatchTxn = await db.inventoryTransaction.findFirst({
+    where: {
+      orgVariantId: shipment.newOrgVariantId,
+      locationId,
+      transactionType: 'sale_dispatched',
+      metadata: { contains: `"exchangeShipmentId":"${exchangeShipmentId}"` },
+    },
+    select: { costPerUnit: true },
+    orderBy: { recordedAt: 'desc' },
+  })
+
+  const costPerUnit = dispatchTxn
+    ? Number(dispatchTxn.costPerUnit)
+    : Number(shipment.orderExchange.newOrgVariant.costPrice)
+
+  // Determine transaction type based on the NEW item's fulfillment type
+  const fulfillmentType = shipment.fulfillmentTypeSnapshot
+  const transactionType = fulfillmentType === 'made_to_order' ? 'return_stitched_received' : 'return_resellable'
+
+  const txnResult = await processInventoryTransaction({
+    orgVariantId: shipment.newOrgVariantId,
+    locationId,
+    organizationId: shipment.organizationId,
+    companyId: shipment.companyId,
+    employeeId: context.triggeredByEmployeeId ?? null,
+    transactionType,
+    quantity: shipment.quantity,
+    costPerUnit,
+    referenceType: 'exchange_shipment',
+    referenceId: exchangeShipmentId,
+    notes: `Exchange shipment RTO — replacement item returned by courier. ${context.returnReason ? `Reason: ${context.returnReason}` : ''}`.trim(),
+    metadata: {
+      exchangeShipmentId,
+      exchangeShipmentNumber: shipment.exchangeShipmentNumber,
+      returnReason: context.returnReason ?? null,
+      rto_source: context.source,
+    },
+  })
+
+  if (!txnResult.success) {
+    return {
+      success: false,
+      error: `Failed to process returned item into inventory: ${txnResult.error}`,
+    }
+  }
+
+  // ── Update shipment status to 'rto' ──
+  await db.exchangeShipment.update({
+    where: { id: exchangeShipmentId },
+    data: {
+      status: 'rto',
+      returnedAt: new Date(),
+    },
+  })
+
+  // ── Set parent order_exchanges to terminal 'exchange_item_returned' state ──
+  // This is INTENTIONALLY terminal — no automatic re-exchange/refund.
+  await db.orderExchange.update({
+    where: { id: shipment.orderExchange.id },
+    data: {
+      status: 'exchange_item_returned',
+    },
+  })
+
+  // ── Audit + metric (tagged with rto_source) ──
+  await insertAuditLog({
+    action: 'exchange_shipment.rto',
+    entityType: 'exchange_shipment',
+    entityId: exchangeShipmentId,
+    companyId: shipment.companyId,
+    organizationId: shipment.organizationId,
+    userId: null,
+    employeeId: context.triggeredByEmployeeId ?? null,
+    newValues: {
+      status: 'rto',
+      returnedAt: new Date(),
+      inventoryTxnId: txnResult.transactionId,
+      transactionType,
+      costPerUnit,
+      exchangeStatusUpdate: 'exchange_item_returned',
+      returnReason: context.returnReason ?? null,
+      rto_source: context.source,
+    },
+  })
+
+  await insertMetricEvent({
+    companyId: shipment.companyId,
+    entityType: 'exchange_shipment',
+    entityId: exchangeShipmentId,
+    metricKey: 'exchange_shipment.rto',
+    numericValue: Number(shipment.invoiceAmount),
+    dimensions: {
+      exchange_method: shipment.orderExchange.exchangeMethod,
+      fulfillment_type: fulfillmentType,
+      transaction_type: transactionType,
+      rto_source: context.source,
+    },
+  }).catch(() => {})
+
+  return { success: true, data: { inventoryTxnId: txnResult.transactionId } }
+}
+
+/**
+ * Mark an exchange shipment as RTO (returned by courier). Manual/UI-triggered.
+ *
+ * Mirrors the core logic of processOrderReturn() but scoped to exchange_shipments:
+ *   - Processes the returned NEW item back into inventory via
+ *     processInventoryTransaction() (return_resellable or
+ *     return_stitched_received per fulfillmentTypeSnapshot).
+ *   - Sets exchange_shipments.status='rto', returnedAt=now().
+ *   - Sets the parent order_exchanges.status='exchange_item_returned' (terminal
+ *     state — manual follow-up required, no automatic re-exchange/refund).
+ *
+ * INTENTIONALLY TERMINAL: does NOT trigger any new exchange, refund, or
+ * replacement. Staff must manually decide what to do next.
+ *
+ * Delegates the inventory + status logic to performExchangeShipmentRto()
+ * (shared with the auto_poll path). No duplicated logic here.
+ */
+export async function markExchangeShipmentRto(
+  exchangeShipmentId: string,
+  returnReason?: string,
+): Promise<ActionResult<{ inventoryTxnId?: string }>> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+
+    // Workspace-scope check (the shared function does NOT do this)
+    const shipment = await db.exchangeShipment.findFirst({
+      where: { id: exchangeShipmentId, companyId: ctx.company.id },
+      select: { id: true, status: true },
+    })
+    if (!shipment) {
+      return { success: false, error: 'Exchange shipment not found.' }
+    }
+
+    return await performExchangeShipmentRto(exchangeShipmentId, {
+      source: 'manual',
+      triggeredByEmployeeId: ctx.employee.id,
+      returnReason,
+    })
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to mark exchange shipment as RTO',
     }
   }
 }

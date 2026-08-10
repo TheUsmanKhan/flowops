@@ -20,7 +20,7 @@ import {
   generateWebhookEndpointId,
   generateWebhookSecret,
 } from '@/lib/utils/encryption'
-import { getCourierAdapter, getEcommerceAdapter, getAdapterCategory } from '@/lib/integrations/registry'
+import { getCourierAdapter, getEcommerceAdapter, getAdapterCategory, getAdapterStatus } from '@/lib/integrations/registry'
 import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
 
 interface ActionResult<T = unknown> {
@@ -44,6 +44,7 @@ export async function listAvailableProviders(category?: 'courier' | 'ecommerce')
     supportsWebhook: boolean
     configSchema: string
     capabilities: string
+    adapterStatus: string // 'live' | 'framework_ready' | 'stub' — from registry
   }>
 }>> {
   try {
@@ -69,6 +70,7 @@ export async function listAvailableProviders(category?: 'courier' | 'ecommerce')
           supportsWebhook: p.supportsWebhook,
           configSchema: p.configSchema,
           capabilities: p.capabilities,
+          adapterStatus: getAdapterStatus(p.providerKey),
         })),
       },
     }

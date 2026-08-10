@@ -875,20 +875,37 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                 {order.courierCharges !== null && order.courierCharges > 0 && (
                   <PaymentRow label="Courier charges" value={formatPKR(order.courierCharges)} />
                 )}
-                {order.estimatedDeliveryCharge !== null && order.estimatedDeliveryCharge !== undefined && order.estimatedDeliveryCharge > 0 && (
-                  <PaymentRow
-                    label="Delivery charge (est.)"
-                    value={formatPKR(order.estimatedDeliveryCharge)}
-                    valueClassName="text-sky-700"
-                  />
-                )}
-                {order.actualDeliveryCharge !== null && order.actualDeliveryCharge !== undefined && order.actualDeliveryCharge > 0 && (
-                  <PaymentRow
-                    label="Delivery charge (actual)"
-                    value={formatPKR(order.actualDeliveryCharge)}
-                    valueClassName="text-emerald-700"
-                  />
-                )}
+                {/* Delivery charge display — honest about PostEx's limitation.
+                    PostEx does NOT provide a confirmed actual delivery charge via API.
+                    When actualDeliveryCharge is NULL, we show estimatedDeliveryCharge
+                    with a clear "(estimated)" label instead of leaving the field blank. */}
+                {(() => {
+                  const hasActual = order.actualDeliveryCharge !== null && order.actualDeliveryCharge !== undefined && order.actualDeliveryCharge > 0
+                  const hasEstimated = order.estimatedDeliveryCharge !== null && order.estimatedDeliveryCharge !== undefined && order.estimatedDeliveryCharge > 0
+                  const isPostEx = (order.courierName ?? '').toLowerCase().includes('postex')
+
+                  if (hasActual) {
+                    // Confirmed actual charge available
+                    return (
+                      <PaymentRow
+                        label="Delivery charge (confirmed)"
+                        value={formatPKR(order.actualDeliveryCharge)}
+                        valueClassName="text-emerald-700"
+                      />
+                    )
+                  }
+                  if (hasEstimated) {
+                    // No actual charge — show estimated with honest label
+                    return (
+                      <PaymentRow
+                        label={isPostEx ? 'Delivery charge (estimated — PostEx does not provide a confirmed actual charge)' : 'Delivery charge (estimated)'}
+                        value={formatPKR(order.estimatedDeliveryCharge)}
+                        valueClassName="text-sky-700"
+                      />
+                    )
+                  }
+                  return null
+                })()}
                 {order.taxAmount !== null && order.taxAmount !== undefined && order.taxAmount > 0 && (
                   <PaymentRow
                     label={order.taxLabel || 'Tax'}
@@ -1940,11 +1957,17 @@ function RefreshCourierStatusButton({
   async function handleRefresh() {
     setIsRefreshing(true)
     try {
-      // Trigger the global polling endpoint (polls all active orders).
-      // A per-order endpoint would be more efficient, but the global poll
-      // is fast enough (skips orders without tracking numbers).
-      await api.post('/api/couriers/postex/poll')
-      toast.success('Courier status refreshed.')
+      // Per-order single-tracking via trackShipment() — faster and cheaper
+      // than the global bulk poll. Calls POST /api/orders/[id]/refresh-status
+      // which uses the adapter's trackShipment() method (GET /v1/track-order/{tn}).
+      const result = await api.post<{ status: string; subStatus: string | null; updated: boolean }>(
+        `/api/orders/${orderId}/refresh-status`,
+      )
+      if (result.updated) {
+        toast.success(`Courier status updated: ${result.status}${result.subStatus ? ` (${result.subStatus})` : ''}`)
+      } else {
+        toast.success('Courier status checked — no change since last poll.')
+      }
       onSuccess()
     } catch (err) {
       toast.error(err instanceof FetchError ? err.message : 'Failed to refresh courier status')

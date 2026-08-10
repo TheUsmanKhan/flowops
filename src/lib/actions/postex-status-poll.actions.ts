@@ -29,7 +29,7 @@ import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
 import { mapPostExStatus } from '@/lib/integrations/couriers/postex.status-map'
 import type { TrackShipmentResult } from '@/lib/integrations/types'
 import { performOrderDispatch } from '@/lib/actions/order.actions'
-import { performExchangeShipmentDispatch } from '@/lib/actions/exchange-shipment.actions'
+import { performExchangeShipmentDispatch, performExchangeShipmentRto } from '@/lib/actions/exchange-shipment.actions'
 import { unreserveStockForOrder } from '@/lib/inventory'
 
 interface ActionResult<T = unknown> {
@@ -134,6 +134,182 @@ export async function generatePostExLoadSheet(
  * (cron, Vercel Cron, etc.) still needs to be connected — same pattern as
  * the city-sync job.
  */
+
+// ──────────────────────────────────────────────────────────────
+// 2b. trackSingleOrderStatus — single-order immediate tracking (uses trackShipment)
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Track a SINGLE order's courier status immediately via the adapter's
+ * trackShipment() method (NOT the bulk API). This is the function wired to the
+ * manual "Refresh Courier Status" button on the Order Detail page.
+ *
+ * Why a separate function (not just calling pollPostExOrderStatuses)?
+ *   - The bulk poll iterates ALL active orders across ALL companies — wasteful
+ *     for a single user-initiated check.
+ *   - trackShipment() is the adapter's single-tracking method (GET /v1/track-order/{tn}),
+ *     which is faster and cheaper than the bulk API for one order.
+ *   - This gives the user an immediate, per-order refresh without waiting for
+ *     the next cron cycle.
+ *
+ * Reuses the SAME status-transition logic as the bulk poll (performOrderDispatch
+ * for in_transit, mark delivered for delivered, RTO handling, etc.) by calling
+ * the shared functions directly.
+ *
+ * @param orderId - The order to track
+ * @returns { success, data: { status, subStatus, updated } }
+ */
+export async function trackSingleOrderStatus(orderId: string): Promise<ActionResult<{
+  status: string
+  subStatus: string | null
+  updated: boolean
+}>> {
+  try {
+    const ctx = await getWorkspace()
+    if (!isElevated(ctx)) {
+      return { success: false, error: 'Only elevated roles can refresh courier status.' }
+    }
+
+    // Fetch the order (workspace-scoped)
+    const order = await db.order.findFirst({
+      where: { id: orderId, companyId: ctx.company.id },
+      select: {
+        id: true,
+        trackingNumber: true,
+        courierCompanyIntegrationId: true,
+        status: true,
+        courierSubStatus: true,
+        flowopsOrderNumber: true,
+      },
+    })
+    if (!order) return { success: false, error: 'Order not found' }
+    if (!order.trackingNumber) return { success: false, error: 'Order has no tracking number' }
+    if (!order.courierCompanyIntegrationId) {
+      return { success: false, error: 'Order has no courier integration' }
+    }
+
+    // Fetch the integration + decrypt credentials
+    const integration = await db.companyIntegration.findUnique({
+      where: { id: order.courierCompanyIntegrationId },
+      include: { provider: true },
+    })
+    if (!integration || !integration.credentialsEncrypted) {
+      return { success: false, error: 'Courier integration not found or no credentials' }
+    }
+
+    const credentials = decryptCredentials(integration.credentialsEncrypted)
+    const providerKey = integration.provider.providerKey
+    const adapter = getCourierAdapter(providerKey, credentials)
+
+    // Call trackShipment() via the logged wrapper (single-order, NOT bulk)
+    const trackResult = await executeLoggedIntegrationAction<TrackShipmentResult>({
+      companyIntegrationId: integration.id,
+      organizationId: integration.organizationId,
+      actionType: 'track_shipment',
+      direction: 'outbound',
+      relatedEntityType: 'order',
+      relatedEntityId: order.id,
+      fn: async () => adapter.trackShipment(order.trackingNumber!),
+    })
+
+    // Extract mapped subStatus from raw response
+    const raw = trackResult.rawResponse as Record<string, unknown> | undefined
+    const mappedSubStatus = (raw?.mappedSubStatus as string) ?? null
+    const needsShipperAdvice = (raw?.needsShipperAdvice as boolean) ?? false
+    const unrecognized = (raw?.unrecognized as boolean) ?? false
+
+    const subStatusChanged = mappedSubStatus !== order.courierSubStatus
+    const now = new Date()
+
+    // Update lastPolledAt + courierSubStatus + flags (same as bulk poll)
+    await db.order.update({
+      where: { id: order.id },
+      data: {
+        lastPolledAt: now,
+        courierSubStatus: mappedSubStatus,
+        needsShipperAdvice,
+        unrecognizedCourierStatus: unrecognized,
+      },
+    })
+
+    // Apply the SAME status transitions as the bulk poll
+    if (subStatusChanged) {
+      // in_transit → auto-dispatch (with inventory deduction)
+      if (trackResult.status === 'in_transit') {
+        if (order.status === 'confirmed' || order.status === 'processing') {
+          const dispatchResult = await performOrderDispatch(order.id, { source: 'auto_poll' })
+          if (!dispatchResult.success && !dispatchResult.skipped) {
+            console.error(`[trackSingle] Failed to auto-dispatch order ${order.id}: ${dispatchResult.error}`)
+          }
+        }
+      }
+
+      // delivered → mark as delivered
+      if (trackResult.status === 'delivered') {
+        const freshOrder = await db.order.findUnique({ where: { id: order.id }, select: { status: true } })
+        if (freshOrder && (freshOrder.status === 'confirmed' || freshOrder.status === 'processing')) {
+          await performOrderDispatch(order.id, { source: 'auto_poll' }).catch(() => {})
+        }
+        if (freshOrder && freshOrder.status !== 'delivered' && freshOrder.status !== 'cancelled' && freshOrder.status !== 'refunded') {
+          await db.order.update({
+            where: { id: order.id },
+            data: { status: 'delivered', deliveredAt: new Date() },
+          })
+        }
+      }
+
+      // returned → RTO (release reservation if still confirmed/processing)
+      if (trackResult.status === 'returned') {
+        const freshOrder = await db.order.findUnique({
+          where: { id: order.id },
+          select: { status: true, dispatchLocationId: true, organizationId: true },
+        })
+        if (freshOrder && freshOrder.status !== 'rto' && freshOrder.status !== 'cancelled' && freshOrder.status !== 'refunded') {
+          if (freshOrder.status === 'confirmed' || freshOrder.status === 'processing') {
+            const reservedItems = await db.orderItem.findMany({
+              where: { orderId: order.id, fulfillmentStatus: 'reserved' },
+            })
+            for (const item of reservedItems) {
+              const locationId = item.reservedLocationId ?? freshOrder.dispatchLocationId
+              if (!locationId) continue
+              try {
+                await unreserveStockForOrder({
+                  orgVariantId: item.orgVariantId,
+                  locationId,
+                  organizationId: freshOrder.organizationId,
+                  companyId: integration.companyId,
+                  quantity: item.quantity,
+                  orderId: order.id,
+                })
+              } catch (e) {
+                console.error(`[trackSingle] Failed to unreserve stock for item ${item.id}:`, e)
+              }
+            }
+          }
+          await db.order.update({
+            where: { id: order.id },
+            data: { status: 'rto', returnedAt: new Date() },
+          })
+        }
+      }
+    }
+
+    return {
+      success: true,
+      data: {
+        status: trackResult.status ?? 'unknown',
+        subStatus: mappedSubStatus,
+        updated: subStatusChanged,
+      },
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to track single order',
+    }
+  }
+}
+
 export async function pollPostExOrderStatuses(): Promise<ActionResult<{
   polledOrders: number
   polledShipments: number
@@ -586,6 +762,37 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                 } catch (e) {
                   console.error(`[poll] Failed to mark shipment ${entry.id} as delivered:`, e)
                   errors.push(`Failed to mark exchange shipment ${entry.id} as delivered: ${e}`)
+                }
+              }
+
+              // ── "Returned" → mark exchange shipment as RTO ──
+              // The replacement item itself was returned by the courier.
+              // Calls performExchangeShipmentRto() which restores inventory
+              // (return_resellable or return_stitched_received) + sets status='rto'
+              // + sets parent order_exchanges to 'exchange_item_returned' (terminal).
+              // This is INTENTIONALLY terminal — no automatic re-exchange/refund.
+              if (result.status === 'returned') {
+                try {
+                  const shipment = await db.exchangeShipment.findUnique({
+                    where: { id: entry.id },
+                    select: { status: true, exchangeShipmentNumber: true },
+                  })
+                  if (shipment && shipment.status !== 'rto' && shipment.status !== 'cancelled' &&
+                      (shipment.status === 'dispatched' || shipment.status === 'delivered')) {
+                    const rtoResult = await performExchangeShipmentRto(entry.id, {
+                      source: 'auto_poll',
+                      returnReason: 'Courier returned the replacement item (detected via PostEx status polling)',
+                    })
+                    if (rtoResult.success) {
+                      console.log(`[poll] Marked exchange shipment ${shipment.exchangeShipmentNumber} as RTO (inventory restored${rtoResult.skipped ? ' — skipped, already RTO' : ''})`)
+                    } else if (!rtoResult.skipped) {
+                      console.error(`[poll] Failed to mark shipment ${entry.id} as RTO: ${rtoResult.error}`)
+                      errors.push(`Failed to mark exchange shipment ${entry.id} as RTO: ${rtoResult.error}`)
+                    }
+                  }
+                } catch (e) {
+                  console.error(`[poll] Failed to mark shipment ${entry.id} as RTO:`, e)
+                  errors.push(`Failed to mark exchange shipment ${entry.id} as RTO: ${e}`)
                 }
               }
             }

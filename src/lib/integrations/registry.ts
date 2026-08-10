@@ -28,6 +28,49 @@ const ECOMMERCE_FACTORIES: Record<string, (creds: Record<string, string>) => Eco
   daraz: (creds) => new DarazAdapter(creds),
 }
 
+// ──────────────────────────────────────────────────────────────
+// Adapter implementation status registry
+// ──────────────────────────────────────────────────────────────
+//
+// Tracks whether each provider's adapter is a REAL implementation or still a
+// STUB. Used by the Integrations settings page to show accurate status text
+// per provider (instead of the old hardcoded "framework-only/stub" banner
+// that incorrectly claimed ALL adapters were stubs).
+//
+// Values:
+//   'live'            — real adapter, all core methods implemented + tested
+//                       against the live API. API calls work end-to-end.
+//   'framework_ready' — adapter class exists but methods throw "not yet
+//                       implemented". Credentials can be saved, but API calls
+//                       will fail. Ready to be filled in by a later prompt.
+//   'stub'            — no adapter class exists yet (should not happen for
+//                       registered providers, but included for completeness).
+//
+// Update this map when an adapter is upgraded from stub to real.
+
+export type AdapterStatus = 'live' | 'framework_ready' | 'stub'
+
+const COURIER_ADAPTER_STATUS: Record<string, AdapterStatus> = {
+  postex: 'live',             // Real implementation — bookShipment, trackShipment, fetchOperationalCities, etc.
+  leopard: 'framework_ready', // Stub — methods throw "not yet implemented". Ready for later prompts.
+  tcs: 'framework_ready',     // Stub — methods throw "not yet implemented". Ready for later prompts.
+}
+
+const ECOMMERCE_ADAPTER_STATUS: Record<string, AdapterStatus> = {
+  shopify: 'framework_ready', // Stub
+  daraz: 'framework_ready',   // Stub
+}
+
+/**
+ * Get the implementation status of a provider's adapter.
+ * Returns 'stub' for unrecognized provider keys.
+ */
+export function getAdapterStatus(providerKey: string): AdapterStatus {
+  if (providerKey in COURIER_ADAPTER_STATUS) return COURIER_ADAPTER_STATUS[providerKey]
+  if (providerKey in ECOMMERCE_ADAPTER_STATUS) return ECOMMERCE_ADAPTER_STATUS[providerKey]
+  return 'stub'
+}
+
 /**
  * Get the courier adapter for a given provider key.
  * Throws a clear error for unrecognized provider keys.
