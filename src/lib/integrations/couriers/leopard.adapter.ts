@@ -126,6 +126,14 @@ interface LeopardShipper {
   user_password?: string
 }
 
+interface LeopardWebhookUpdate {
+  cn_number: string
+  status: string
+  receiver_name?: string
+  reason?: string
+  activity_date?: string
+}
+
 export class LeopardAdapter implements CourierAdapter {
   private readonly apiKey: string
   private readonly apiPassword: string
@@ -468,19 +476,66 @@ export class LeopardAdapter implements CourierAdapter {
   // 6. parseStatusWebhook / verifyWebhookSignature
   // ──────────────────────────────────────────────────────────────
 
-  async parseStatusWebhook(_rawPayload: unknown): Promise<ParseStatusWebhookResult> {
-    // Leopard supports webhooks but the payload structure will be documented
-    // in a later prompt. For now, throw a clear error.
-    throw new Error('Leopard webhook parsing is not yet implemented. Use polling (trackShipment) for now.')
+  /**
+   * Parse Leopard's webhook push payload.
+   *
+   * Leopard pushes: { "data": [{ cn_number, status, receiver_name, reason, activity_date }, ...] }
+   *
+   * Returns the FIRST update's tracking number + mapped status (for the
+   * generic webhook route's ParseStatusWebhookResult compatibility). The
+   * FULL array is processed by processLeopardWebhookUpdates() in the webhook
+   * route handler, which handles ALL updates.
+   *
+   * If the payload has no data array or is empty, throws a clear error.
+   */
+  async parseStatusWebhook(rawPayload: unknown): Promise<ParseStatusWebhookResult> {
+    const payload = rawPayload as { data?: LeopardWebhookUpdate[] }
+
+    if (!payload?.data || !Array.isArray(payload.data) || payload.data.length === 0) {
+      throw new Error('Leopard webhook payload missing or empty "data" array')
+    }
+
+    // Return the first update (for compatibility with the generic webhook route).
+    // The full array is processed by processLeopardWebhookUpdates() in the route handler.
+    const firstUpdate = payload.data[0]
+    if (!firstUpdate.cn_number || !firstUpdate.status) {
+      throw new Error('Leopard webhook update missing cn_number or status')
+    }
+
+    // Map the status to our generic status enum
+    const { mapLeopardStatus } = await import('./leopard.status-map')
+    const mapping = mapLeopardStatus(firstUpdate.status)
+
+    let genericStatus: ParseStatusWebhookResult['status'] = 'booked'
+    if (mapping.triggerDelivered) genericStatus = 'delivered'
+    else if (mapping.triggerRto) genericStatus = 'returned'
+    else if (mapping.triggerDispatch) genericStatus = 'in_transit'
+
+    return {
+      trackingNumber: firstUpdate.cn_number,
+      status: genericStatus,
+      lastUpdateAt: firstUpdate.activity_date,
+    }
   }
 
+  /**
+   * Verify the authenticity of an incoming Leopard webhook.
+   *
+   * Leopard's documentation does NOT document any HMAC signature mechanism
+   * for webhook payloads. The primary security mechanism in this framework
+   * is the webhook_endpoint_id in the URL — only someone who knows the
+   * endpoint ID can push to it. This is sufficient for Leopard's design.
+   *
+   * If Leopard adds signature support in the future, implement it here.
+   */
   async verifyWebhookSignature(
     _rawBody: string,
     _signatureHeader: string | null,
     _webhookSecret: string,
   ): Promise<boolean> {
-    // Leopard's webhook signature verification will be implemented when
-    // webhook support is added in a later prompt.
+    // No signature verification documented for Leopard.
+    // Security relies on the webhook_endpoint_id in the URL (already verified
+    // by the generic webhook route's integration lookup).
     return true
   }
 

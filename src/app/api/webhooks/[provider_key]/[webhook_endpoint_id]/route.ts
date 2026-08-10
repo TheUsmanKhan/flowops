@@ -6,6 +6,7 @@ import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
 import { markOrderDelivered } from '@/lib/actions/order.actions'
 import { processOrderReturn } from '@/lib/actions/order-return.actions'
 import { matchOrCreateExternalCustomer } from '@/lib/actions/customer.actions'
+import { processLeopardWebhookUpdates } from '@/lib/actions/leopard-webhook.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -92,6 +93,22 @@ export async function POST(
             throw new Error('Webhook signature verification failed')
           }
 
+          // ── Leopard-specific: process the FULL array of status updates ──
+          // Leopard pushes: { "data": [{ cn_number, status, ... }, ...] }
+          // The adapter's parseStatusWebhook() returns only the first update
+          // (for interface compatibility). processLeopardWebhookUpdates()
+          // handles ALL updates in the array, reusing the shared dispatch/
+          // delivery/RTO functions.
+          if (providerKey === 'leopard') {
+            const payload = rawPayload as { data?: Array<{ cn_number: string; status: string; receiver_name?: string; reason?: string; activity_date?: string }> }
+            if (payload?.data && Array.isArray(payload.data) && payload.data.length > 0) {
+              const result = await processLeopardWebhookUpdates(integration.id, payload.data)
+              return { processed: result.data?.processed ?? 0, errors: result.data?.errors ?? [] }
+            }
+            // Fall through to single-update handling if no data array
+          }
+
+          // ── Standard single-update handling (PostEx and other couriers) ──
           const statusUpdate = await adapter.parseStatusWebhook(rawPayload)
 
           // Find the order by tracking number

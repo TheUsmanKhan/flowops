@@ -9,6 +9,10 @@
       "schedule": "*/30 * * * *"
     },
     {
+      "path": "/api/cron/poll-leopard-safety-net",
+      "schedule": "0 */12 * * *"
+    },
+    {
       "path": "/api/cron/generate-scan-reports",
       "schedule": "0 1 * * *"
     }

@@ -18,6 +18,7 @@ const SUBSTATUS_LABELS: Record<string, string> = {
   slip_generated: 'Slip Generated',
   pickup_requested: 'Pickup Requested',
   picked_up: 'Picked Up',
+  dispatched: 'Dispatched',
   at_warehouse: 'At Warehouse',
   en_route: 'In-Route',
   out_for_delivery: 'Out for Delivery',
