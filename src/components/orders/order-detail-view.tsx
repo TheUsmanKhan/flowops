@@ -594,6 +594,11 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
         <Badge variant="outline" className={statusBadge.className}>
           {statusBadge.label}
         </Badge>
+        {order.packedAt && order.status !== 'dispatched' && order.status !== 'delivered' && order.status !== 'rto' && order.status !== 'cancelled' && (
+          <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">
+            Packed
+          </Badge>
+        )}
         <Badge variant="outline" className={paymentBadge.className}>
           {paymentBadge.label}
         </Badge>

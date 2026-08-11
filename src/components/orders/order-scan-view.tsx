@@ -141,18 +141,30 @@ function ScanStation() {
       // If cancel_via_scan and success → show confirmation
       if (data.scanResult === 'success' && data.entity && scanMode === 'cancel_via_scan') {
         setConfirmCancel(data.entity)
+        // Invalidate so other tabs (order detail) reflect the change
+        queryClient.invalidateQueries({ queryKey: ['orders'] })
+        queryClient.invalidateQueries({ queryKey: ['order'] })
         return
       }
 
       // If locate_cancelled and success + physicalUnpackRequired → show unpack confirmation
       if (data.scanResult === 'success' && data.entity && scanMode === 'locate_cancelled' && data.entity.physicalUnpackRequired && !data.entity.physicalUnpackConfirmedAt) {
         setConfirmUnpack(data.entity)
+        queryClient.invalidateQueries({ queryKey: ['orders'] })
+        queryClient.invalidateQueries({ queryKey: ['order'] })
         return
       }
 
       // Show toast
       if (data.scanResult === 'success') {
         toast.success(data.message || 'Scan successful')
+        // Invalidate orders + order detail queries so any open order-detail
+        // tab reflects the new status (packed → processing, audit log entry,
+        // etc.). Previously this was MISSING — the scan worked backend-side
+        // but the order detail page showed stale data until manual refresh.
+        queryClient.invalidateQueries({ queryKey: ['orders'] })
+        queryClient.invalidateQueries({ queryKey: ['order'] })
+        queryClient.invalidateQueries({ queryKey: ['audit-logs'] })
       } else if (data.scanResult === 'rejected') {
         toast.warning(data.rejectionReason || 'Scan rejected')
       } else {

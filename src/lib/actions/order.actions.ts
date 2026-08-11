@@ -2213,9 +2213,20 @@ export async function markOrderPacked(orderId: string): Promise<ActionResult> {
       return { success: false, error: `Order must be confirmed or processing to pack (current: ${order.status})` }
     }
 
+    // Set packedAt AND transition status to 'processing' if it's still
+    // 'confirmed'/'partially_backordered'. Previously this only set packedAt
+    // without changing status — the order detail's prominent status badge
+    // kept showing "Confirmed" even after the parcel was packed, which made
+    // users think the scan didn't work. Now the badge correctly shows
+    // "Processing" once packed.
+    const updateData: Prisma.OrderUncheckedUpdateInput = { packedAt: new Date() }
+    if (order.status === 'confirmed' || order.status === 'partially_backordered') {
+      updateData.status = 'processing'
+    }
+
     await db.order.update({
       where: { id: orderId },
-      data: { packedAt: new Date() },
+      data: updateData,
     })
 
     insertAuditLog({
@@ -2226,7 +2237,7 @@ export async function markOrderPacked(orderId: string): Promise<ActionResult> {
       organizationId: ctx.company.organizationId,
       userId: ctx.user.id,
       employeeId: ctx.employee.id,
-      newValues: { packedAt: new Date() },
+      newValues: { packedAt: new Date(), status: updateData.status ?? order.status },
     })
 
     insertMetricEvent({

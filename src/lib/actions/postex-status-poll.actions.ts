@@ -283,6 +283,40 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
           })
         }
       }
+
+      // failed + cancelled_by_merchant/expired → cancel the order + unreserve stock
+      // (same as the bulk poll does — previously MISSING from trackSingleOrderStatus)
+      if (trackResult.status === 'failed' && mappedSubStatus &&
+          (mappedSubStatus === 'cancelled_by_merchant' || mappedSubStatus === 'expired')) {
+        const freshOrder = await db.order.findUnique({
+          where: { id: order.id },
+          select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true, companyId: true },
+        })
+        if (freshOrder && freshOrder.status !== 'cancelled' && freshOrder.status !== 'delivered' && freshOrder.status !== 'rto') {
+          // Unreserve stock for any reserved items (if not yet dispatched)
+          if (freshOrder.status === 'confirmed' || freshOrder.status === 'processing') {
+            const restockResult = await restockOrderForRto(order.id, {
+              organizationId: freshOrder.organizationId,
+              companyId: freshOrder.companyId ?? integration.companyId,
+              employeeId: integration.createdBy ?? null,
+              returnReason: `Courier booking ${mappedSubStatus === 'cancelled_by_merchant' ? 'cancelled by merchant' : 'expired'} (trackSingleOrderStatus)`,
+            })
+            if (restockResult.itemsRestocked > 0) {
+              console.log(`[trackSingle] Released ${restockResult.itemsRestocked} item(s) for cancelled order ${freshOrder.flowopsOrderNumber}`)
+            }
+          }
+          await db.order.update({
+            where: { id: order.id },
+            data: {
+              status: 'cancelled',
+              cancelledAt: new Date(),
+              cancellationReason: `Courier booking ${mappedSubStatus === 'cancelled_by_merchant' ? 'cancelled by merchant on PostEx portal' : 'expired on PostEx'} (detected via single-order track)`,
+              courierBookingStatus: 'cancelled',
+            },
+          })
+          console.log(`[trackSingle] Auto-cancelled ${freshOrder.flowopsOrderNumber} (PostEx: ${mappedSubStatus})`)
+        }
+      }
     }
 
     return {
@@ -409,7 +443,12 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
         for (const entry of allTrackingNumbers) {
           const result = resultsByTrackingNumber.get(entry.trackingNumber)
           if (!result || !result.success) {
-            // Tracking failed for this number — update lastPolledAt only
+            // Tracking failed for this number — update lastPolledAt only,
+            // AND push to errors[] so the audit log reflects real failures
+            // (previously this was silently swallowed — errorCount stayed 0
+            // even when all API calls failed, hiding the problem).
+            const failReason = result?.error || `No tracking result returned for ${entry.trackingNumber}`
+            errors.push(`${entry.type} ${entry.trackingNumber}: ${failReason}`)
             if (entry.type === 'order') {
               await db.order.update({ where: { id: entry.id }, data: { lastPolledAt: now } }).catch((e) => {
                 console.error(`[poll] Failed to update lastPolledAt for order ${entry.id}:`, e)

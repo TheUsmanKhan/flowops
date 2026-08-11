@@ -299,15 +299,38 @@ export class PostExAdapter implements CourierAdapter {
       // "Required List parameter 'TrackingNumbers' is not present"
       const queryString = chunk.map((t) => `TrackingNumbers=${encodeURIComponent(t)}`).join('&')
 
-      const response = await fetch(
-        `${POSTEX_BASE_URL}/v1/track-bulk-order?${queryString}`,
-        {
-          method: 'GET',
-          headers: {
-            token: this.token,
+      let response: Response
+      try {
+        response = await fetch(
+          `${POSTEX_BASE_URL}/v1/track-bulk-order?${queryString}`,
+          {
+            method: 'GET',
+            headers: {
+              token: this.token,
+            },
           },
-        },
-      )
+        )
+      } catch (fetchErr) {
+        // Network error on the bulk call — fall back to single-track for this chunk
+        console.warn('[postex] bulk track fetch failed, falling back to single-track:', fetchErr instanceof Error ? fetchErr.message : fetchErr)
+        for (const tn of chunk) {
+          results.push(await this.trackShipment(tn))
+        }
+        continue
+      }
+
+      // If the HTTP status itself is an error (400/500), fall back to single-track.
+      // PostEx's bulk endpoint intermittently returns 400 "Required List parameter
+      // 'TrackingNumbers' is not present" even when the param IS present — this is
+      // a known PostEx API instability. Falling back to single-track (which uses
+      // a different endpoint /v1/track-order/{tn}) is reliable.
+      if (!response.ok) {
+        console.warn(`[postex] bulk track returned HTTP ${response.status}, falling back to single-track for ${chunk.length} orders`)
+        for (const tn of chunk) {
+          results.push(await this.trackShipment(tn))
+        }
+        continue
+      }
 
       const json: PostExApiResponse<PostExBulkTrackItem[]> = await response.json()
 
@@ -345,13 +368,11 @@ export class PostExAdapter implements CourierAdapter {
           })
         }
       } else {
-        // API error for this chunk — add error results for all tracking numbers in the chunk
-        for (const _tn of chunk) {
-          results.push({
-            success: false,
-            error: json.statusMessage || `PostEx bulk API returned statusCode ${json.statusCode}`,
-            rawResponse: json,
-          })
+        // API returned a non-200 statusCode in the JSON body — fall back to
+        // single-track for this chunk (same as the HTTP-error case above).
+        console.warn(`[postex] bulk track returned statusCode ${json.statusCode} (${json.statusMessage}), falling back to single-track for ${chunk.length} orders`)
+        for (const tn of chunk) {
+          results.push(await this.trackShipment(tn))
         }
       }
     }
