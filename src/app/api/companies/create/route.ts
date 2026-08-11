@@ -126,7 +126,7 @@ export async function POST(req: Request) {
       create: { userId: user.id, activeCompanyId: company.id, activeOrgId: org.id },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'company.created',
       entityType: 'company',
       entityId: company.id,

@@ -149,7 +149,7 @@ export async function POST(req: Request) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'production_order.created',
       entityType: 'production_order',
       entityId: order.id,

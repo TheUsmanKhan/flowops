@@ -267,7 +267,7 @@ export async function confirmPhysicalUnpack(
       await db.exchangeShipment.update({ where: { id: entityId }, data: { physicalUnpackConfirmedAt: now } })
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'scan.physical_unpack_confirmed',
       entityType,
       entityId,
@@ -275,7 +275,7 @@ export async function confirmPhysicalUnpack(
       organizationId: ctx.company.organizationId,
       userId: ctx.user.id,
       employeeId: ctx.employee.id,
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {

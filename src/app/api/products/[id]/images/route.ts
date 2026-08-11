@@ -96,7 +96,7 @@ export async function POST(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.image_uploaded',
       entityType: 'product_image',
       entityId: image.id,
@@ -106,7 +106,7 @@ export async function POST(
       employeeId: caller.id,
       newValues: { productId, isPrimary, variantId },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,
@@ -187,7 +187,7 @@ export async function DELETE(
       }
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.image_deleted',
       entityType: 'product_image',
       entityId: imageId,
@@ -197,7 +197,7 @@ export async function DELETE(
       employeeId: caller.id,
       oldValues: { wasPrimary: image.isPrimary },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,

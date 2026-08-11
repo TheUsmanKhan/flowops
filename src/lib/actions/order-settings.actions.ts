@@ -129,7 +129,7 @@ export async function updateCompanyOrderSettings(
       data: updateData,
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'company_order_settings.updated',
       entityType: 'company_order_settings',
       entityId: existing.id,
@@ -146,13 +146,13 @@ export async function updateCompanyOrderSettings(
       newValues: updateData,
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'company_order_settings',
       entityId: existing.id,
       metricKey: 'company_order_settings.updated',
       numericValue: 1,
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {

@@ -115,7 +115,7 @@ export async function POST(req: Request) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'location.created',
       entityType: 'location',
       entityId: location.id,

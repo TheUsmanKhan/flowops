@@ -365,7 +365,7 @@ export async function bookOrderWithCourier(
     })
 
     // Audit log
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.auto_booked',
       entityType: 'order',
       entityId: orderId,
@@ -381,7 +381,7 @@ export async function bookOrderWithCourier(
         slipLink: bookResult.slipLink ?? null,
         courierSlipStoragePath,
       },
-    }).catch(() => {})
+    })
 
     return {
       success: true,
@@ -499,24 +499,24 @@ export async function maybeAutoBookOrder(
 
     if (result.success) {
       // Metric event for successful auto-booking
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId: ctx.company.id,
         entityType: 'order',
         entityId: orderId,
         metricKey: 'order.auto_booked',
         numericValue: 1,
         dimensions: { provider: 'postex', mode: 'automatic' },
-      }).catch(() => {})
+      })
     } else {
       // Metric event for failed auto-booking
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId: ctx.company.id,
         entityType: 'order',
         entityId: orderId,
         metricKey: 'order.auto_booking_failed',
         numericValue: 1,
         dimensions: { reason: result.error?.slice(0, 100) ?? 'unknown' },
-      }).catch(() => {})
+      })
     }
 
     return result

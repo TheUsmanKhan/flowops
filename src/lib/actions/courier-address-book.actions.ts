@@ -203,7 +203,7 @@ export async function addPickupAddress(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'courier_pickup_address_added',
       entityType: 'company_integration',
       entityId: companyIntegrationId,
@@ -214,14 +214,14 @@ export async function addPickupAddress(
       newValues: { label: input.label, cityName: input.cityName, providerAddressCode, isDefault: shouldBeDefault },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'company_integration',
       entityId: companyIntegrationId,
       metricKey: 'courier_pickup_address_added',
       numericValue: 1,
       dimensions: { provider_key: providerKey },
-    }).catch(() => {})
+    })
 
     return { success: true, data: { addressId: address.id } }
   } catch (err) {
@@ -325,7 +325,7 @@ export async function setDefaultPickupAddress(
       }),
     ])
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'courier_pickup_address_set_default',
       entityType: 'company_integration',
       entityId: companyIntegrationId,
@@ -388,7 +388,7 @@ export async function deletePickupAddress(addressId: string): Promise<ActionResu
       }
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'courier_pickup_address_deleted',
       entityType: 'company_integration',
       entityId: address.companyIntegrationId,
@@ -498,7 +498,7 @@ export async function syncPickupAddresses(
       upserted++
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'courier_pickup_addresses_synced',
       entityType: 'company_integration',
       entityId: companyIntegrationId,

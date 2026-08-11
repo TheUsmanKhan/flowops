@@ -145,7 +145,7 @@ export async function POST(req: Request) {
     })
 
     // 6. Audit logs.
-    await insertAuditLog({
+    insertAuditLog({
       action: 'organization.created',
       entityType: 'organization',
       entityId: org.id,
@@ -153,7 +153,7 @@ export async function POST(req: Request) {
       userId: user.id,
       newValues: { name: org.name, slug: org.slug },
     })
-    await insertAuditLog({
+    insertAuditLog({
       action: 'company.created',
       entityType: 'company',
       entityId: company.id,

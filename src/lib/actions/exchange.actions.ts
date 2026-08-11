@@ -209,7 +209,7 @@ async function createAndReserveExchangeShipment(
   }
 
   // 4. Audit + metric
-  await insertAuditLog({
+  insertAuditLog({
     action: 'exchange_shipment.created',
     entityType: 'exchange_shipment',
     entityId: shipment.id,
@@ -225,14 +225,14 @@ async function createAndReserveExchangeShipment(
     },
   })
 
-  await insertMetricEvent({
+  insertMetricEvent({
     companyId: ctx.company.id,
     entityType: 'exchange_shipment',
     entityId: shipment.id,
     metricKey: 'exchange_shipment.created',
     numericValue: 1,
     dimensions: { exchange_method: exchange.exchangeMethod },
-  }).catch(() => {})
+  })
 
   return { newExchangeShipmentId: shipment.id, exchangeShipmentNumber }
 }
@@ -337,7 +337,7 @@ export async function createExchangeRequest(
     })
 
     // 8. Audit log
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange.requested',
       entityType: 'order_exchange',
       entityId: exchange.id,
@@ -360,7 +360,7 @@ export async function createExchangeRequest(
     })
 
     // 9. Metric event
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: orderItem.order.id,
@@ -370,7 +370,7 @@ export async function createExchangeRequest(
         exchange_id: exchange.id,
         exchange_method: d.exchange_method,
       },
-    }).catch(() => {})
+    })
 
     return { success: true, data: { exchangeId: exchange.id } }
   } catch (err) {
@@ -484,7 +484,7 @@ export async function confirmCustomerShippedOldItem(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange.customer_confirmed_shipped',
       entityType: 'order_exchange',
       entityId: d.exchange_id,
@@ -666,7 +666,7 @@ export async function verifyOldItemReceived(
     // dispatchReplacementForSelfReturnExchange() to create + dispatch the shipment.
 
     // 10. Audit log
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange.old_item_verified',
       entityType: 'order_exchange',
       entityId: d.exchange_id,
@@ -683,7 +683,7 @@ export async function verifyOldItemReceived(
     })
 
     // Metric event
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order_exchange',
       entityId: d.exchange_id,
@@ -693,13 +693,13 @@ export async function verifyOldItemReceived(
         condition: d.condition,
         exchange_method: exchange.exchangeMethod,
       },
-    }).catch(() => {})
+    })
 
     // Also fire exchange.completed metric — ONLY for courier_replacement
     // (customer_self_return no longer auto-completes; completion happens when
     // the "Send Replacement Order" button is clicked and the shipment is dispatched)
     if (exchange.exchangeMethod === 'courier_replacement') {
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId: ctx.company.id,
         entityType: 'order_exchange',
         entityId: d.exchange_id,
@@ -709,7 +709,7 @@ export async function verifyOldItemReceived(
           exchange_method: exchange.exchangeMethod,
           condition: d.condition,
         },
-      }).catch(() => {})
+      })
     }
 
     return {
@@ -803,7 +803,7 @@ export async function settlePriceDifference(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange.price_difference_settled',
       entityType: 'order_exchange',
       entityId: d.exchange_id,
@@ -893,7 +893,7 @@ export async function markExchangeAsNotReturned(
     //    an unrecovered loss tracked via not_returned_recovery_amount.
 
     // 7. Audit log
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange.not_returned',
       entityType: 'order_exchange',
       entityId: d.exchange_id,
@@ -911,7 +911,7 @@ export async function markExchangeAsNotReturned(
     })
 
     // Metric event
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order_exchange',
       entityId: d.exchange_id,
@@ -921,7 +921,7 @@ export async function markExchangeAsNotReturned(
         exchange_method: exchange.exchangeMethod,
         recovery_status: d.recovery_status,
       },
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {
@@ -975,7 +975,7 @@ export async function cancelExchangeRequest(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange.cancelled',
       entityType: 'order_exchange',
       entityId: d.exchange_id,
@@ -1336,14 +1336,14 @@ export async function dispatchReplacementForSelfReturnExchange(
     })
 
     // Fire exchange.completed metric
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order_exchange',
       entityId: exchangeId,
       metricKey: 'exchange.completed',
       numericValue: Number(exchange.newItemPrice) - Number(exchange.oldItemPrice),
       dimensions: { exchange_method: exchange.exchangeMethod },
-    }).catch(() => {})
+    })
 
     return { success: true, data: result }
   } catch (err) {

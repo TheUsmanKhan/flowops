@@ -65,7 +65,7 @@ export async function POST(
       )
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'purchase_order.confirmed',
       entityType: 'purchase_order',
       entityId: poId,
@@ -76,7 +76,7 @@ export async function POST(
       newValues: { status: 'ordered', itemCount: po.items.length },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'purchase_order',
       entityId: poId,

@@ -58,7 +58,7 @@ export async function POST(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.selective_access_granted',
       entityType: 'product',
       entityId: productId,
@@ -68,7 +68,7 @@ export async function POST(
       employeeId: caller.id,
       newValues: { grantedTo: parsed.data.company_id },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,
@@ -125,7 +125,7 @@ export async function DELETE(
       where: { orgProductId: productId, companyId: targetCompanyId },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.selective_access_revoked',
       entityType: 'product',
       entityId: productId,
@@ -135,7 +135,7 @@ export async function DELETE(
       employeeId: caller.id,
       oldValues: { revokedFrom: targetCompanyId },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,

@@ -55,7 +55,7 @@ export async function PATCH(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'attribute.updated',
       entityType: 'attribute',
       entityId: id,
@@ -65,7 +65,7 @@ export async function PATCH(
       employeeId: caller.id,
       newValues: parsed.data,
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'catalog',
       entityId: id,
@@ -111,7 +111,7 @@ export async function DELETE(
     // Cascade deletes attribute values automatically.
     await db.orgAttribute.delete({ where: { id } })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'attribute.deleted',
       entityType: 'attribute',
       entityId: id,
@@ -121,7 +121,7 @@ export async function DELETE(
       employeeId: caller.id,
       oldValues: { name: attr.name },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'catalog',
       entityId: id,

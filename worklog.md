@@ -4858,3 +4858,749 @@ FILES CREATED/MODIFIED:
 
 Stage Summary:
 - Leopard's push-webhook status handling fully implemented. The generic webhook route is reused (not duplicated) — updated to handle Leopard's array payload via processLeopardWebhookUpdates(). Confirmed status-mapping table covers all documented Leopard short codes (RC/SP/DP/AR/AC/DV/PN1/PN2/RO/RN1/RN2/NR/RW/DW/RS/DR) with correct transitions. Safety-net poll runs twice daily targeting only stale records (lastPolledAt > 12h or NULL). All shared functions (performOrderDispatch, performExchangeShipmentDispatch, markOrderDelivered, processOrderReturn, performExchangeShipmentRto, markExchangeShipmentDelivered) are reused directly — no inventory logic duplicated. Unrecognized statuses don't crash and are flagged for manual review. No HMAC signature found in Leopard docs — security relies on webhook_endpoint_id URL routing. Lint passes. All routes compile and return correct responses.
+
+---
+Task ID: EXPLORE-1
+Agent: Explore
+Task: Map `insertAuditLog` + `insertMetricEvent` definitions, ALL call sites, deployment target, and waitUntil usage (research only — no code changes)
+
+## 1. Helper Definitions (both confirmed to never throw upward)
+
+### `insertAuditLog` — `/home/z/my-project/src/lib/audit.ts`
+- Defined at line 23: `export async function insertAuditLog(input: InsertAuditLogInput)`
+- **Internal try/catch confirmed**: lines 38–44 — wraps `db.auditLog.create({ data })` in `try { ... } catch (err) { console.error('[audit] failed to insert audit log:', err); return null }`.
+- Failure inside the helper will NEVER propagate to the caller. Returns `null` on error, returns the created Prisma row on success.
+
+### `insertMetricEvent` — `/home/z/my-project/src/lib/metrics.ts`
+- Defined at line 18: `export async function insertMetricEvent(input: InsertMetricEventInput)`
+- **Internal try/catch confirmed**: lines 19–35 — wraps `db.metricEvent.create({ data })` in `try { ... } catch (err) { console.error('[metrics] failed to insert metric event:', err); return null }`.
+- Failure inside the helper will NEVER propagate to the caller. Returns `null` on error, returns the created Prisma row on success.
+
+→ **Both helpers are already safe to drop the `await` from** — they cannot throw, so converting a call site from `await insertAuditLog({...})` to `insertAuditLog({...})` (fire-and-forget) will not change error-handling behavior in the caller. The only behavioral change is that the DB write will continue in the background while the response returns immediately.
+
+## 2. Total Call Site Counts
+
+### `insertAuditLog(` — 159 actual call sites
+- 158 call sites use the standard blocking `await insertAuditLog({` pattern.
+- 1 call site uses fire-and-forget via `Promise.all`: `src/app/api/workspace/switch/route.ts:50` (paired with `db.userSetting.update` — both await as a `Promise.all` group; technically still awaited, just in parallel with another write).
+- 3 additional matches are JSDoc comment mentions only (not real call sites): `customer.actions.ts:22`, `exchange.actions.ts:27`, `order.actions.ts:10`. Excluded from the 159 count.
+- Definition line (`audit.ts:23`) excluded.
+
+### `insertMetricEvent(` — 98 actual call sites
+- All 98 use the standard blocking `await insertMetricEvent({` pattern.
+- 1 additional match is a JSDoc comment mention (`exchange.actions.ts:27`); excluded from the 98 count.
+- Definition line (`metrics.ts:18`) excluded.
+
+### Awaited vs fire-and-forget breakdown
+| Function | Total real call sites | Blocking `await X(` | Inside `Promise.all` (still awaited) | True fire-and-forget (no await) |
+|---|---|---|---|---|
+| `insertAuditLog`  | 159 | 158 | 1 (`workspace/switch/route.ts:50`) | 0 |
+| `insertMetricEvent` | 98 | 98 | 0 | 0 |
+| **Total** | **257** | **256** | **1** | **0** |
+
+**Conclusion**: Essentially 100% of call sites today BLOCK the HTTP response on the audit/metric DB write. Zero true fire-and-forget, zero `.catch()` attachments, zero `waitUntil()` usage.
+
+## 3. Call Sites Grouped by Module/Directory
+
+### `src/lib/actions/` (server actions — shared business logic, called from API routes)
+| File | insertAuditLog | insertMetricEvent |
+|---|---:|---:|
+| order.actions.ts                 | 11 | 13 |
+| exchange-shipment.actions.ts     | 11 | 8  |
+| exchange.actions.ts              | 7  | 6  |
+| customer.actions.ts             | 9  | 1  |
+| integration.actions.ts          | 4  | 0  |
+| courier-address-book.actions.ts | 4  | 1  |
+| postex-status-poll.actions.ts    | 3  | 1  |
+| order-return.actions.ts         | 3  | 2  |
+| backorder.actions.ts            | 3  | 2  |
+| drafts/save-draft.ts            | 2  | 2  |
+| leopard-webhook.actions.ts       | 2  | 1  |
+| booking.actions.ts              | 1  | 2  |
+| load-sheet.actions.ts           | 1  | 1  |
+| courier-cancel.actions.ts       | 1  | 0  |
+| scan.actions.ts                 | 1  | 0  |
+| city-sync.actions.ts            | 1  | 1  |
+| order-settings.actions.ts       | 1  | 1  |
+| **Subtotal**                    | **64** | **41** |
+
+### `src/app/api/` (HTTP route handlers — direct user-facing endpoints)
+| Module group | Files | insertAuditLog | insertMetricEvent |
+|---|---:|---:|---:|
+| Products / Catalog / Brands / Categories | 20 | 28 | 28 |
+| Inventory (receive / adjust / transfers / opening-stock / receive-returned-stitched) | 5 | 7 | 7 |
+| Stock-loss (report-theft / report-transit / report-damaged / resolve) | 4 | 5 | 5 |
+| Purchase-orders (create / confirm / cancel / receive) | 4 | 4 | 4 |
+| Suppliers / Supplier-returns | 5 | 5 | 5 |
+| Cycle-counts | 2 | 5 | 2 |
+| Inventory-locations | 2 | 3 | 0 |
+| Returned-stitched | 2 | 3 | 0 |
+| Production-orders | 2 | 2 | 0 |
+| Auth (login / logout / register / reset-password) | 4 | 4 | 0 |
+| Workspaces / workspace-switch / Company | 3 | 3 | 0 |
+| Organizations / Companies / Onboarding | 5 | 7 | 0 |
+| Employees / Roles | 5 | 5 | 0 |
+| Order-settings (route) | 1 | 1 | 1 |
+| **Subtotal** | **70** | **95** | **57** |
+
+(Inventory count includes 1 fire-and-forget Promise.all site at `workspace/switch/route.ts:50`.)
+
+**Grand total: 257 real call sites** — 159 audit + 98 metric.
+
+## 4. Deployment Target Analysis
+
+### Findings
+1. **`next.config.ts`** declares `output: "standalone"` — produces a self-contained Next.js server bundle for self-hosting.
+2. **`package.json` `start` script**: `"start": "NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log"` — runs the standalone Node.js server with **Bun** as a long-lived process.
+3. **`vercel.json`** exists with 4 cron jobs (sync-cities every 3h, poll-postex every 30min, poll-leopard-safety-net every 12h, generate-scan-reports daily at 1am). No `regions`, no `functions` config, no edge config.
+4. **Every API route declares `export const runtime = 'nodejs'`** — verified across 130+ route files via Grep. **Zero** routes declare `runtime = 'edge'`.
+5. **No `export const runtime = 'edge'`** anywhere in the codebase.
+6. **No `@vercel/edge` or `@vercel/functions` imports** anywhere.
+7. No `export const preferredRegion` declarations.
+
+### Conclusion
+- **Runtime: Node.js (long-lived process), NOT Edge / NOT Cloudflare Workers**.
+- The `output: "standalone"` + `bun .next/standalone/server.js` pattern is for **self-hosting on a long-lived Node.js (Bun) server**. The `vercel.json` is present ONLY for the cron schedule (production likely deployed on Vercel too, but as Node.js serverless functions — not Edge).
+- Since the project can run as a long-lived Bun server (per the `start` script) AND every route is explicitly `runtime = 'nodejs'`, **`waitUntil()` is NOT strictly required** — simply dropping the `await` is sufficient for fire-and-forget on a long-lived Node.js server, because the event loop keeps running after the response is sent.
+- If the production deployment is actually Vercel serverless Node.js (where each function invocation has a max duration and the process may freeze after the response is returned), `waitUntil()` from `@vercel/functions` WOULD be needed to guarantee the audit/metric DB write completes after the response returns. **The user should confirm which deployment target is actually used in production.**
+
+## 5. `waitUntil()` Usage
+
+**ZERO usages of `waitUntil()` in the project source code.**
+- Grep across `/home/z/my-project/src` for `waitUntil` returned no project-source matches. (The only `waitUntil` occurrences in the repo are in `skills/pptx/` and `skills/pdf/` — unrelated Playwright page-goto `waitUntil: 'networkidle'` options, not Vercel's `waitUntil()` primitive.)
+- No `import { waitUntil } from '@vercel/functions'` anywhere.
+- No `import { unstable_after } from 'next/server'` or `after(...)` calls (Next.js 15+ `after()` API) anywhere either.
+
+## 6. Files Modified / Created
+
+**None.** This was a research-only task. No code changes were made.
+
+## 7. Recommended Next Actions (for the implementing agent)
+
+Given the findings above, when converting the 256 blocking `await insertAuditLog/insertMetricEvent` calls to fire-and-forget:
+
+1. **On a long-lived Node.js server (Bun standalone)**: simply remove `await` (the event loop will flush the promise). Safe given the helpers' internal try/catch.
+2. **On Vercel serverless Node.js**: use `waitUntil()` from `@vercel/functions` to wrap the un-awaited promise (otherwise the function may freeze before the DB write completes).
+3. **Hybrid safety**: If the deployment target is uncertain, the cleanest pattern is to add a thin wrapper helper (e.g., `fireAndForget(promise)` in `src/lib/audit.ts` or a new `src/lib/fire-and-forget.ts`) that internally calls `waitUntil()` when available (via dynamic import) and falls back to a plain promise otherwise. This avoids touching 257 call sites individually — callers would just swap `await insertAuditLog({...})` for `fireAndForget(insertAuditLog({...}))`.
+4. The 1 existing fire-and-forget (`workspace/switch/route.ts:50` inside `Promise.all`) is already in parallel with another DB write — it's the closest existing thing to a "background" pattern in the codebase but is still awaited as a group. No change needed there.
+
+
+---
+Task ID: EXPLORE-3
+Agent: explore
+Task: Research the city-search + city-sync flow so a "fetch missing city on demand" feature can be added. Research only — no code changes.
+
+## 1. CourierOperationalCity schema (prisma/schema.prisma, lines 2061-2078)
+
+model CourierOperationalCity {
+  id                String   @id @default(cuid())
+  providerKey       String   // 'postex', 'tcs', 'leopard' — matches integration_providers.providerKey
+  cityName          String   // Human-readable city name from courier API
+  cityId            String?  // Courier's own city ID (nullable, stored as TEXT). For Leopard this is the numeric ID as a string.
+  isPickupCity      Boolean  @default(true)
+  isDeliveryCity    Boolean  @default(true)
+  shipmentTypes     String?  // Leopard-specific: JSON array string of allowed shipment types per city (e.g. '["overnight","overland"]'). NULL for providers that don't return this field.
+  lastSyncedAt      DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  @@unique([providerKey, cityName])
+  @@index([providerKey])
+  @@map("courier_operational_cities")
+}
+
+Companion table for learned fuzzy-match mappings (lines 2084-2096):
+model CourierCityAlias {
+  id                String   @id @default(cuid())
+  providerKey       String
+  typedCityText     String   // Lowercased/normalized text the user typed
+  resolvedCityName  String   // Confirmed city name from courier_operational_cities
+  companyId         String?  // NULL = org-wide; set = company-specific (FK → Company)
+  company           Company? @relation(...)
+  createdAt         DateTime @default(now())
+  @@unique([providerKey, typedCityText, companyId])
+  @@index([providerKey, typedCityText])
+  @@map("courier_city_aliases")
+}
+
+## 2. ALL city-search API routes and server actions
+
+### API routes (src/app/api/)
+1. **GET /api/couriers/[providerKey]/cities?q=...&limit=...** — `src/app/api/couriers/[providerKey]/cities/route.ts`
+   - Lightweight cached-city search endpoint. Reads DIRECTLY from courier_operational_cities (no live API call).
+   - Filters: `providerKey` (exact), `isDeliveryCity=true`, `cityName contains q` (case-insensitive).
+   - Special `providerKey='all'`: searches across ALL providers' delivery cities, deduped by case-insensitive cityName. Used by Order Create form when no specific courier selected yet.
+   - Returns `{ id, cityName, cityId, isPickupCity, isDeliveryCity, providerKey }` (providerKey only in 'all' mode).
+   - Limit capped at 50 (default 20). DOES NOT FETCH LIVE — pure cache lookup.
+
+2. **POST /api/couriers/match-city** (body: `{providerKey, typedCity}`) — `src/app/api/couriers/match-city/route.ts`
+   - Thin wrapper around `matchCity()` server action (city-matcher.ts).
+   - 3-tier resolution: (1) learned alias from courier_city_aliases (company-specific takes priority over org-wide), (2) exact case-insensitive match against cached delivery cities, (3) fuzzy Levenshtein similarity (top 3 above 70% threshold).
+   - Returns `{status:'matched', cityName}` or `{status:'unresolved', suggestions: string[]}`.
+   - DOES NOT FETCH LIVE — reads only from cache + alias tables.
+
+3. **POST /api/couriers/save-city-alias** (body: `{providerKey, typedCity, resolvedCityName}`) — `src/app/api/couriers/save-city-alias/route.ts`
+   - Persists a manually-confirmed city mapping into courier_city_aliases. Called by CityMismatchResolver component.
+
+4. **POST /api/couriers/sync-cities** (body: `{providerKey?}`) — `src/app/api/couriers/sync-cities/route.ts`
+   - Manual trigger for bulk sync. Elevated-role only.
+   - Fire-and-forget (returns immediately, sync runs in background to avoid gateway timeouts).
+   - Calls `syncCourierOperationalCities(providerKey)` or `syncAllCourierCities()`.
+
+5. **POST /api/cron/sync-cities** — `src/app/api/cron/sync-cities/route.ts`
+   - Scheduled bulk sync (every 3h). Auth via shared `x-cron-secret` header.
+   - Calls `syncAllCourierCities()`.
+
+### Server actions
+- `src/lib/actions/city-sync.actions.ts`:
+  - `syncCourierOperationalCities(providerKey)` — bulk-syncs a single provider's cities
+  - `syncAllCourierCities()` — iterates all active courier integrations, calls syncCourierOperationalCities for each distinct providerKey
+- `src/lib/integrations/city-matcher.ts`:
+  - `matchCity(providerKey, typedCity, companyId?)` — 3-tier resolver (alias → exact → fuzzy). Reads cache only.
+  - `saveCityAlias(providerKey, typedCity, resolvedCityName, companyId?)` — persists learned mapping.
+  - `revalidateCityAtBookingTime(providerKey, cityName, companyIntegrationId?)` — see §5 below.
+
+## 3. How city-sync works (the upsert flow) — src/lib/actions/city-sync.actions.ts
+
+syncCourierOperationalCities(providerKey) flow:
+1. Looks up ANY active company_integration for the providerKey (cities are provider-level, not company-level — one merchant's token is enough).
+2. Decrypts credentials via `decryptCredentials()`, gets adapter via `getCourierAdapter(providerKey, credentials)`.
+3. Checks `adapter.fetchOperationalCities` exists (optional capability) — returns clear error if not.
+4. For Leopard specifically (providerKey === 'leopard'): ALSO calls `adapter.fetchOperationalCitiesRaw()` (custom Leopard-only method) to capture the raw city_list including `shipment_type` arrays per city. Builds a `Map<cityName, JSON.stringify(shipment_type)>`.
+5. Wraps the call in `executeLoggedIntegrationAction({actionType:'fetch_operational_cities', direction:'outbound'})` so the API call gets logged in integration_action_logs.
+6. Fetches currently-cached cities for that providerKey (to detect disabled ones).
+7. **Upserts** each fresh city by `@@unique([providerKey, cityName])` in a single `db.$transaction` of `db.courierOperationalCity.upsert()` calls — updates `cityId`, `isPickupCity`, `isDeliveryCity`, `shipmentTypes` (Leopard only), `lastSyncedAt`. Creates new rows for cities not yet cached.
+8. **Disables** (does NOT delete) cities that were cached but are no longer in fresh response — sets `isPickupCity=false, isDeliveryCity=false`. Historical references (orders/addresses already pointing to those city names) aren't broken, but the city stops being offered/matched going forward.
+9. Audit log `courier_cities_synced` + metric event `courier_cities_synced` (non-fatal — wrapped in `.catch(()=>{})`).
+
+NO single-city fetch capability exists in city-sync.actions.ts. Only bulk fetch via `adapter.fetchOperationalCities()`.
+
+## 4. Courier adapter interface & single-city fetch capability
+
+### CourierAdapter interface — `src/lib/integrations/types.ts` (lines 140-227)
+
+The interface declares `fetchOperationalCities?(): Promise<OperationalCity[]>` as an OPTIONAL method (lines 168-169). The comment explicitly says: "Only implemented by adapters whose provider exposes a cities endpoint (e.g. PostEx). Adapters that don't support this simply omit the method — the sync job checks for its existence before calling."
+
+OperationalCity type (lines 118-123):
+  { cityName: string, cityId?: string, isPickupCity: boolean, isDeliveryCity: boolean }
+
+**There is NO method on the interface — and NO method on either adapter — for fetching or searching a SINGLE city on demand.** No `fetchCityByName`, no `searchCity`, no `findCity`, nothing. The only city-related method on either adapter is the bulk `fetchOperationalCities()`.
+
+### PostEx adapter — `src/lib/integrations/couriers/postex.adapter.ts` (lines 437-469)
+```
+async fetchOperationalCities(): Promise<OperationalCity[]>
+  GET https://api.postex.pk/services/integration/api/order/v2/get-operational-city
+  Headers: { token: this.token }
+  30-second AbortController timeout
+  Maps response.dist[] → { cityName: operationalCityName, cityId: undefined (PostEx doesn't return a city ID), isPickupCity, isDeliveryCity }
+  Throws if dist is empty or statusCode != 200
+```
+**NOTE**: PostEx's API does NOT expose a per-city search endpoint. Inline comment in `revalidateCityAtBookingTime()` confirms this: "PostEx doesn't expose a per-city search endpoint — we have to fetch the full list."
+
+### Leopard adapter — `src/lib/integrations/couriers/leopard.adapter.ts` (lines 214-239 and 247-253)
+```
+async fetchOperationalCities(): Promise<OperationalCity[]>
+  POST https://merchantapistaging.leopardscourier.com/api/getAllCities/format/json/
+  Body: { api_key, api_password } (JSON, in body not header)
+  Maps city_list[] → { cityName: name, cityId: String(id), isPickupCity: allow_as_origin, isDeliveryCity: allow_as_destination }
+
+async fetchOperationalCitiesRaw(): Promise<LeopardCity[]>  // Leopard-specific, returns raw city_list including shipment_type arrays
+  POST getAllCities (same endpoint, called separately so the sync action can capture shipmentTypes for the new column)
+```
+**Leopard's getAllCities endpoint also returns the FULL list — no per-city search capability exists.**
+
+### What it would take to add a "fetch single city on demand" method
+
+Since neither courier's API exposes a per-city search endpoint, the realistic implementation is NOT a new adapter method `fetchCityByName(name)`. The realistic implementation is what `revalidateCityAtBookingTime()` already does — call `adapter.fetchOperationalCities()` (full list) and upsert into cache, then re-query. To make this work on the SEARCH path (when a user types a city not in cache), we would:
+
+(a) Add a NEW server action (e.g. `ensureCityCached(providerKey, cityName, companyIntegrationId)`) that mirrors `revalidateCityAtBookingTime`'s fallback: checks cache, and if missing/stale, calls `adapter.fetchOperationalCities()`, upserts the full list, then re-queries for the specific city name. Returns the resolved city or null.
+
+(b) Wire it into the search path. Two options:
+   - (i) Add a `force=true` or `live=true` query param to GET /api/couriers/[providerKey]/cities that triggers the live fallback when the cache returns zero results. The CityAutocomplete component would pass this flag when its first (cache-only) query returns empty.
+   - (ii) Add a NEW route POST /api/couriers/[providerKey]/cities/lookup (body: `{cityName}`) that returns `{found:boolean, city?:OperationalCity}` and is called as a fallback by the frontend when the autocomplete search returns empty.
+
+(i) is simpler — single endpoint, opt-in flag. (ii) is cleaner separation of concerns but adds another route. Either way, the heavy lifting is the same: a full `adapter.fetchOperationalCities()` call on cache miss + upsert.
+
+## 5. How the booking action currently handles a missing city
+
+### Booking flow — `src/lib/actions/booking.actions.ts` (lines 175-196)
+
+The booking action calls `revalidateCityAtBookingTime(providerKey, deliveryCity, integration.id)` BEFORE calling the adapter's `bookShipment()`. This function lives in `src/lib/integrations/city-matcher.ts` (lines 259-387).
+
+**`revalidateCityAtBookingTime()` is the ONLY place in the codebase where a missing city triggers a live courier API fallback.** It does NOT use a hypothetical single-city fetch — it does a full bulk fetch and upsert.
+
+Behavior (3-hour staleness threshold):
+- **Tier 1 (fast path)**: lookup `courierOperationalCity.findFirst({providerKey, cityName: insensitive})`. If found AND fresh (`lastSyncedAt` < 3 hours ago), trust `isDeliveryCity` flag and return immediately. Also bumps `lastSyncedAt` (non-blocking `.catch(()=>{})`) on every successful hit so we know it was recently confirmed.
+- **Tier 2 (live fallback)**: fires when (a) city is NOT in cache (cache miss), OR (b) cached record is stale (> 3 hours old).
+  - Without `companyIntegrationId`: returns the cached `isDeliveryCity` value if a stale hit exists, else `false` (hard block — can't authenticate).
+  - With `companyIntegrationId`: dynamically imports `decryptCredentials` + `getCourierAdapter`, validates the integration is active + matches providerKey, calls `adapter.fetchOperationalCities()` (FULL list), then `db.$transaction` of `db.courierOperationalCity.upsert()` calls for EVERY city (refreshing lastSyncedAt). Then re-queries the target city from the freshly-updated cache.
+  - If `adapter.fetchOperationalCities` doesn't exist on the adapter, degrades to cached value if any, else blocks.
+- **FAIL-SAFE**: if live fetch fails (network error, bad credentials), logs the error and returns `false` → booking blocked. The booking action then sets `courierBookingStatus='failed', courierCityStatus='unresolved', courierBookingFailureReason='City not recognized: "{deliveryCity}" is not available for delivery with {providerName}. The city may need to be resolved or the courier may not serve this area.'` on the order.
+
+### Leopard-specific second check (booking.actions.ts lines 239-267)
+
+AFTER city validation passes, for Leopard specifically the booking action needs to resolve the city NAME to Leopard's numeric cityId (Leopard requires integers in `bookPacket`'s `destination_city` field, NOT city name strings):
+```
+db.courierOperationalCity.findFirst({ providerKey:'leopard', cityName: insensitive, isDeliveryCity:true, select:{cityId:true} })
+if (!cityRecord?.cityId) → fail with 'Could not resolve city "{deliveryCity}" to a Leopard numeric city ID. Sync Leopard cities first.'
+resolvedDeliveryCity = cityRecord.cityId  // numeric ID as string, passed to adapter
+```
+This second check is purely cache-based — NO live fallback. If `revalidateCityAtBookingTime` already did the live bulk upsert in Tier 2, the cityId will now be present in cache and this check passes. If the live fetch failed, this check fails too (cityId stays null in cache).
+
+**Summary**: The booking path ALREADY has the desired behavior — a missing city triggers a full live `fetchOperationalCities()` + bulk upsert + re-check. The gap the user is asking about is the SEARCH path (autocomplete / match-city) — those read cache only and never fall back to the live API. The fix is to extend the search path with the same live-fallback pattern.
+
+## 6. Frontend city-search components
+
+### Main reusable component — `src/components/couriers/city-autocomplete.tsx` (187 lines)
+- Generic text input with live dropdown of city suggestions.
+- **API route it hits**: `GET /api/couriers/${providerKey}/cities?q=${encodeURIComponent(debouncedQuery)}&limit=10` via `api.get()` from `@/lib/api-client`.
+- Uses `@tanstack/react-query`'s `useQuery` with `queryKey: ['courier-cities', providerKey, debouncedQuery]`.
+- 200ms debounce, min query length 1, `staleTime: 30_000` (30s), `enabled: debouncedQuery.length >= 1 && showSuggestions`.
+- Props: `providerKey` (string — 'all' for union mode, '' for plain text input), `value`, `onChange`, `onBlur?`, `placeholder?`, `className?`, `disabled?`, `pickupOnly?` (filters suggestions to pickup cities only — used by address book forms).
+- **When zero results**: shows static text "No cities found. Try a different spelling or sync cities first." — NO live fallback, NO retry. This is the primary gap to address.
+- Renders Pickup/Delivery badges next to each suggestion.
+
+### Used by:
+- `src/components/customers/AddressSelector.tsx` — Order Create form's address selector (line 197+208). Uses both single-provider mode (when a courier is preselected) and 'all' mode (when no courier is selected yet). Renders two CityAutocomplete instances conditionally based on whether a courier is selected.
+- `src/components/orders/customer-detail-view.tsx` — customer detail address card edit form. (Confirmed via grep — uses CityAutocomplete import.)
+- `src/components/couriers/city-mismatch-resolver.tsx` — shown when matchCity() returns 'unresolved'. Contains a "Search manually..." button that reveals a CityAutocomplete for the user to pick the right city. On selection, calls `POST /api/couriers/save-city-alias` to persist the mapping.
+- Pickup address book form (referenced in CityAutocomplete's docstring).
+- Booking Workbench (referenced in CityAutocomplete's docstring).
+
+### CityMismatchResolver — `src/components/couriers/city-mismatch-resolver.tsx` (157 lines)
+- Triggered when `POST /api/couriers/match-city` returns `{status:'unresolved'}`.
+- Shows top 3 fuzzy suggestions as clickable buttons + "Search manually..." fallback (renders a CityAutocomplete for free-text search).
+- On city selection, calls `POST /api/couriers/save-city-alias` (via `useMutation`) to persist the mapping.
+- Toast confirmation on success.
+
+## EXPLORE-3 SUMMARY
+
+- **CourierOperationalCity schema**: 9 columns. PK cuid, providerKey, cityName (unique per provider), cityId (nullable TEXT — Leopard stores numeric ID as string), isPickupCity/isDeliveryCity booleans, shipmentTypes (Leopard-specific JSON string), lastSyncedAt/createdAt/updatedAt. Companion CourierCityAlias table for fuzzy-match learning.
+- **City-search API routes/actions**: 5 routes total — GET /api/couriers/[providerKey]/cities (cache-only autocomplete), POST /api/couriers/match-city (3-tier resolver, cache-only), POST /api/couriers/save-city-alias (persist mapping), POST /api/couriers/sync-cities (manual bulk sync), POST /api/cron/sync-cities (scheduled bulk sync). All SEARCH routes read cache only — NONE call the live courier API. Only the BOOKING path (revalidateCityAtBookingTime) has a live fallback.
+- **City-sync upsert flow**: find ANY active company_integration → decrypt creds → getCourierAdapter → for Leopard also call fetchOperationalCitiesRaw() to capture shipmentTypes → bulk fetchOperationalCities() → $transaction of upserts by @@unique([providerKey, cityName]) → disable (not delete) cities no longer in fresh response.
+- **Single-city fetch on adapters**: NO. Neither the CourierAdapter interface nor the PostEx/Leopard adapters declare any method for fetching/searching a single city. Only bulk `fetchOperationalCities()` exists. The PostEx adapter explicitly comments "PostEx doesn't expose a per-city search endpoint — we have to fetch the full list." Leopard's `getAllCities` endpoint similarly returns the full list. The realistic implementation is to reuse `adapter.fetchOperationalCities()` (full bulk) + bulk upsert, then re-query the cache for the specific city name — same pattern as `revalidateCityAtBookingTime`.
+- **Booking missing-city handling**: Already has live fallback via `revalidateCityAtBookingTime()` (city-matcher.ts lines 259-387). Tier 1: fresh cache hit (< 3h) returns immediately. Tier 2: cache miss OR stale → calls `adapter.fetchOperationalCities()` (full bulk), `db.$transaction` of upserts for ALL cities, then re-query. FAIL-SAFE on live-fetch error → booking blocked with clear error message. Leopard has an additional cache-only check to resolve city NAME → numeric cityId for the `bookPacket` API.
+- **Frontend city-search component**: `src/components/couriers/city-autocomplete.tsx` queries `GET /api/couriers/${providerKey}/cities?q=${q}&limit=10` via react-query. Zero-results state shows static "No cities found" text with no live fallback. Companion `src/components/couriers/city-mismatch-resolver.tsx` is shown when matchCity returns unresolved — surfaces fuzzy suggestions + manual CityAutocomplete + persists chosen mapping via /save-city-alias.
+
+### RECOMMENDED IMPLEMENTATION PATH (for the follow-up build task)
+
+The cleanest approach is to extend the existing pattern rather than add a new adapter method:
+
+1. Add a new server action `ensureCityCached(providerKey, cityName, companyIntegrationId)` to `src/lib/integrations/city-matcher.ts` (mirrors revalidateCityAtBookingTime's Tier 2, but returns the city object instead of a boolean, and can be called from the search path without the staleness gate — pure cache-miss trigger).
+
+2. Add `?live=true` query param to GET /api/couriers/[providerKey]/cities that triggers `ensureCityCached` when the cache returns zero results (one-shot fallback). Frontend (CityAutocomplete) opts in by retrying with `live=true` when its first cache-only query returns empty.
+
+3. The frontend already has the right primitives — just add a `useEffect` that watches `data?.cities.length === 0` and refetches with `&live=true`. Show a subtle "Checking live courier API..." loader while the fallback runs.
+
+4. This reuses 100% of existing adapter + sync logic — no new adapter method, no new courier API endpoint, no schema change. The only cost is one extra bulk `fetchOperationalCities()` call per genuinely-missing city (which will be rare — the cache is refreshed every 3h by the cron).
+
+
+---
+Task ID: EXPLORE-2
+Agent: Explore (research only — no code changes)
+Task: Map getWorkspace + createManualOrder for a later optimization pass
+
+================================================================
+PART A — getWorkspace()
+================================================================
+
+A.1 FILE PATH
+  /home/z/my-project/src/lib/workspace.ts  (lines 47–95)
+
+A.2 FULL IMPLEMENTATION (verbatim)
+  export async function getWorkspace(): Promise<WorkspaceContext> {
+    const user = await getCurrentUser()                  // ← calls db.profile.findUnique
+    if (!user) {
+      throw new ApiError(401, 'You must be signed in to continue.')
+    }
+    const settings = await db.userSetting.findUnique({
+      where: { userId: user.id },
+    })
+    const activeCompanyId = settings?.activeCompanyId
+    if (!activeCompanyId) {
+      throw new ApiError(403, 'No active company. Please complete onboarding.')
+    }
+    const employee = await db.employee.findFirst({
+      where: { companyId: activeCompanyId, userId: user.id },
+      include: { role: true },
+    })
+    if (!employee) {
+      throw new ApiError(403, 'You are not a member of the active company.')
+    }
+    const company = await db.company.findUnique({ where: { id: activeCompanyId } })
+    if (!company || !company.isActive) {
+      throw new ApiError(403, 'Active company is unavailable.')
+    }
+    return { user, employee: { ...employee, role: {...} }, company: { id, name, slug, logoUrl, baseCurrency, organizationId } }
+  }
+
+  Note: `getCurrentUser()` lives in /home/z/my-project/src/lib/session.ts (lines 79–94) and itself executes `db.profile.findUnique` (selecting id, email, fullName, avatarUrl, phone, isOnboarded, createdAt). `getSessionUserId()` (no DB call — HMAC verify on header/cookie) runs before that.
+
+A.3 SEQUENCE OF DB QUERIES (4, all sequential)
+  Step 0: getSessionUserId()                  — NO DB call (header/cookie HMAC verify)
+  Step 1: db.profile.findUnique               — needs userId from session (Step 0)
+  Step 2: db.userSetting.findUnique            — needs user.id from Step 1
+  Step 3: db.employee.findFirst (include role) — needs activeCompanyId from Step 2 AND user.id from Step 1
+  Step 4: db.company.findUnique                — needs activeCompanyId from Step 2
+
+A.4 PER-QUERY DEPENDENCY ANALYSIS
+  Step 1 → must run first (every other step needs user.id)
+  Step 2 → depends on Step 1 (user.id)
+  Step 3 → depends on Step 1 (user.id) + Step 2 (activeCompanyId)
+  Step 4 → depends on Step 2 (activeCompanyId) ONLY — does NOT depend on Step 3
+           ⟹ Step 4 could run in PARALLEL with Step 3 today.
+  ⟹ Of the 3 post-Step-1 queries (2,3,4), only Step 3 transitively depends on Step 2's result. Step 4 also depends on Step 2 but is independent of Step 3. So a 2-batch parallelism is possible today without any schema change: Step 1 → Step 2 → Promise.all([Step 3, Step 4]).
+
+A.5 PRISMA SCHEMA RELATIONS (verified in prisma/schema.prisma)
+  Profile (model lines 17–38)
+    settings          UserSetting?        // 1:1 — Profile → UserSetting
+    employees         Employee[]          // 1:N — Profile → Employee
+  UserSetting (model lines 365–377)
+    user              Profile             // back-rel
+    activeCompany     Company?            // FK activeCompanyId → Company.id
+  Employee (model lines 246–272)
+    user              Profile             // back-rel
+    company           Company             // FK companyId
+    role              Role                // FK roleId
+  Company (model lines 122–202)
+    employees         Employee[]          // back-rel
+    activeForSettings UserSetting[]       // back-rel
+  Role (model lines 206–229)
+    employees         Employee[]          // back-rel
+
+A.6 CAN THE 3 POST-STEP-1 QUERIES BE COMBINED INTO A SINGLE Prisma `include`-BASED QUERY?
+  YES — feasible. The relation chain Profile → settings → activeCompany exists, and Profile → employees → role exists. A single Prisma query rooted at Profile could pull everything:
+
+    db.profile.findUnique({
+      where: { id: userId },
+      select: {
+        id, email, fullName, avatarUrl, phone, isOnboarded, createdAt,
+        settings: {
+          select: {
+            activeCompanyId: true,
+            activeCompany: {
+              select: { id, name, slug, logoUrl, baseCurrency, organizationId, isActive }
+            }
+          }
+        },
+        employees: {                       // 1:N — fetch ALL employees for this user
+          where: { status: 'active' },
+          include: { role: true },
+        }
+      }
+    })
+
+  Then in JS:
+    const activeCompanyId = profile.settings?.activeCompanyId
+    const employee = profile.employees.find(e => e.companyId === activeCompanyId)
+    const company = profile.settings?.activeCompany
+
+  CAVEATS / WHY THIS IS NOT A TRIVIAL SWAP:
+    (a) Prisma's `where` inside `include` cannot reference `settings.activeCompanyId` cross-field — i.e. we cannot pre-filter `employees` by `companyId === settings.activeCompanyId` at the SQL level. We must fetch ALL the user's employees (typically 1–2, but theoretically unbounded) and filter in JS. Need a `take:` cap to be safe.
+    (b) The `status:'active'` filter on employees (currently the `findFirst` does NOT filter by status — it picks the FIRST employee regardless of status). The current code accepts inactive employees, so this is a behavioural nuance — to keep behaviour identical, drop the `where:{status:'active'}` clause and filter purely by companyId in JS.
+    (c) `getCurrentUser()` is shared with many other callers (session.ts is imported widely) — refactoring it has cross-cutting impact. Safer refactor: keep `getCurrentUser()` untouched, replace Steps 2+3+4 with a single `db.profile.findUnique({ include: { settings: { include: { activeCompany: true } } }, employees: { include: { role: true } } })`. This still nets the same 1-query reduction (4 → 2 queries).
+    (d) Return shape (WorkspaceContext) must be preserved exactly (see A.7 for the spot-checks).
+
+  NET QUERY-COUNT IMPACT (best refactor): 4 sequential DB queries → 1 sequential DB query (Step 0 stays free of DB; Step 1's profile fetch absorbs Steps 2/3/4 via include).
+
+A.7 CALLER COUNT
+  `await getWorkspace()` literal call sites: 89 across 19 files (verified via `rg --count "await getWorkspace\(\)"`).
+  `getWorkspace()` raw string occurrences: 103 across 21 files (includes 14 comment mentions + 1 declaration in workspace.ts).
+
+  Full list of files calling `getWorkspace()` (the 19 with actual `await`):
+    1.  src/lib/actions/order.actions.ts                    (13 call sites — largest consumer)
+    2.  src/lib/actions/customer.actions.ts                  (13)
+    3.  src/lib/actions/exchange-shipment.actions.ts         (10)
+    4.  src/lib/actions/exchange.actions.ts                  (11)
+    5.  src/lib/actions/integration.actions.ts               (7)
+    6.  src/lib/actions/courier-address-book.actions.ts      (6)
+    7.  src/lib/actions/drafts/save-draft.ts                 (6)
+    8.  src/lib/actions/order-return.actions.ts              (4)
+    9.  src/lib/actions/scan.actions.ts                      (3)
+    10. src/lib/actions/load-sheet.actions.ts                (3)
+    11. src/lib/actions/postex-status-poll.actions.ts        (2)
+    12. src/lib/actions/order-settings.actions.ts            (2)
+    13. src/lib/actions/booking.actions.ts                   (2)
+    14. src/app/api/order-settings/route.ts                  (2)
+    15. src/lib/actions/courier-cancel.actions.ts             (1)
+    16. src/lib/actions/scan-report.actions.ts               (1)
+    17. src/app/api/customers/backfill-stats/route.ts        (1)
+    18. src/app/api/orders/[id]/route.ts                     (1)
+    19. src/app/api/integrations/logs/route.ts               (1)
+
+A.8 SPOT-CHECK 3 CALL SITES — fields of the returned WorkspaceContext that are used (confirms return shape MUST NOT change)
+
+  (a) ORDERS — src/lib/actions/order.actions.ts:319 (createManualOrder)
+      Fields consumed: ctx.company.id, ctx.company.organizationId, ctx.user.id, ctx.employee.id
+      (plus passed to requirePermission() which reads ctx.employee.roleId + role.roleTier via isElevated())
+      Used in: db.order.create, db.orderItem.create, insertAuditLog, insertMetricEvent, reserveOrderStock(ctx)
+
+  (b) CUSTOMERS (chosen because no Products actions file exists — `src/app/api/products/route.ts` uses inline auth, not getWorkspace) — src/lib/actions/customer.actions.ts:240 (searchCustomerByPhone)
+      Fields consumed: ctx.company.organizationId
+      (passed to db.customerPhone.findFirst + db.customer.findFirst)
+      NOTE: this caller does NOT read ctx.user / ctx.employee / ctx.role at all — it's a read-only listing call. This confirms that callers rely on a subset of the context, and the full shape must be preserved for the order/audit callers.
+
+  (c) INTEGRATIONS — src/lib/actions/integration.actions.ts:182 (connectIntegration)
+      Fields consumed: ctx.employee.role.roleTier (via isElevated(ctx)),
+                       ctx.company.id, ctx.company.organizationId, ctx.user.id, ctx.employee.id
+      Used in: db.integrationProvider.findUnique, db.companyIntegration.findFirst/update/create,
+               insertAuditLog (companyId + organizationId + userId + employeeId)
+
+  CONCLUSION: callers rely on ALL of `ctx.user.id`, `ctx.employee.id`, `ctx.employee.roleId`, `ctx.employee.role.roleTier`, `ctx.company.id`, `ctx.company.organizationId`, `ctx.company.name`, `ctx.company.baseCurrency` (rarely). The WorkspaceContext shape must stay identical.
+
+================================================================
+PART B — createManualOrder()
+================================================================
+
+B.1 FILE PATH
+  /home/z/my-project/src/lib/actions/order.actions.ts (lines 306–789)
+
+B.2 FULL CODE: lines 306–789 (read in full — not duplicated here for brevity, but every await is enumerated in B.3 below).
+
+B.3 NUMBERED LIST OF EVERY `await db.` AND `await <helper>` CALL IN createManualOrder (in source order)
+  (Helpers that contain DB calls are annotated with their internal call count.)
+
+   #  Line   Call                                                            Depends on
+   ─── ────── ─────────────────────────────────────────────────────────── ──────────────────────────────
+   1   319   await getWorkspace()                                            session (cookie/header)
+              └─ 4 internal DB queries (see PART A):
+                  profile.findUnique → userSetting.findUnique →
+                  employee.findFirst (include role) → company.findUnique
+   2   320   await requirePermission(ctx, ORDERS_CREATE)                     ctx (from #1)
+              └─ if not elevated: db.rolePermission.count
+   3   345   await db.customer.findFirst                                     ctx (from #1) + input
+              (existing-customer path)
+   4   355   await db.customerAddress.findFirst                              existing.id from #3
+              (only if d.used_customer_address_id)
+   5   377   await db.customerPhone.findFirst                                existing.id from #3
+              (only if d.used_customer_phone_id)
+   6   393   await createCustomer(d.new_customer)                            ctx (from #1) + input
+              └─ internal DB calls (NEW customer path):
+                  • getWorkspace() AGAIN  → 4 more queries (REDUNDANT!)
+                  • requirePermission     → 1 query (REDUNDANT!)
+                  • normalizePhone loop   → 1 $queryRaw per phone (sequential, NOT batched)
+                  • db.customerPhone.findMany (conflict check)
+                  • db.$transaction: customer.create + customerPhone.createMany + customerAddress.createMany
+                  • insertAuditLog
+   7   402   await db.customerAddress.findFirst                              customerId from #6
+              (new-customer path — find the just-created default address)
+   8   411   await db.customerPhone.findFirst                                customerId from #6
+              (new-customer path — find the just-created primary phone)
+   9   430   await db.orgProductVariant.findMany (include product +        ctx.company.id/orgId + input
+              companyPricing) — ALREADY BATCHED via `where: { id: { in: variantIds } }`
+              NO dependency on customer resolution (#3–#8)
+  10   545   await db.companyOrderSetting.findUnique                         ctx.company.id
+              (COD path — checks requireOrderConfirmation)
+              NO dependency on customer resolution
+  11   556   await generateOrderNumber(ctx.company.id)                      ctx.company.id
+              └─ db.$queryRaw (SQL function generate_order_number)
+              NO dependency on customer resolution
+  12   571   await db.order.create                                           customerId + flowopsOrderNumber +
+                                                                    orderItemsData + all totals  (#3/#6, #9, #11)
+   13   625   await db.orderItem.create  ← INSIDE A for-LOOP                order.id from #12 + orderItemsData (#9)
+              (one call per line item → N round trips)
+  14   646   await insertAuditLog({ ... })                                   order.id from #12
+              └─ db.auditLog.create
+  15   676   await markAddressAsUsed(selectedSavedAddressId)                 selectedSavedAddressId (from #4 or #7)
+              └─ db.customerAddress.update
+              (mutually exclusive with #16 — runs only on the existing-customer-with-saved-address path
+               OR the new-customer path)
+  16   681   await db.customerAddress.create                                 order.id from #12 + input
+              (alt branch — only if save_address_for_next_time && !selectedSavedAddressId)
+  17   693   await db.order.update                                           order.id from #12 + savedAddr.id from #16
+              (links order to the newly-saved address — runs only on the alt branch of #16)
+  18   699   await updateCustomerStats(customerId)                            customerId (#3 or #6)
+              └─ internal: db.order.findMany + db.customer.update
+                 (and conditionally: db.customer.findUnique + flagCustomerInternal → more queries)
+  19   704   await reserveOrderStock(order.id, ctx)                          order.id from #12 + orderItemsData
+              └─ internal: db.order.findUnique + db.orderItem.findMany +
+                 per item (LOOP):
+                   db.inventoryPool.findUnique +
+                   reserveStockForOrder() → processInventoryTransaction() → multiple inserts/updates +
+                   db.orderItem.update (per item)
+                 + final db.order.update if any backordered
+              THIS IS THE BIGGEST HIDDEN COST — N items × ~3-5 DB calls each, sequential.
+  20   727   await db.companyOrderSetting.findUnique                         ctx.company.id
+              (auto-booking settings — courierBookingMode, defaultCourierCompanyIntegrationId)
+              ⟹ DUPLICATE OF #10 — same row, different `select` projection!
+  21   744   await maybeAutoBookOrder(...)   ← INSIDE fire-and-forget IIFE   order.id from #12
+              (NOT actually awaited — runs in background)
+              Does NOT block the response. Excluded from latency analysis.
+  22   760   await insertMetricEvent(...)                                    order.id from #12
+              └─ db.metricEvent.create
+
+  TOTAL `await db.` (direct): 12  + helpers that hit DB: ~6 (getWorkspace ×2 once for #1 and once inside #6; requirePermission ×2; insertAuditLog ×1; insertMetricEvent ×1; markAddressAsUsed ×1; updateCustomerStats ×1; reserveOrderStock ×1; generateOrderNumber ×1)
+  If you expand every helper into its raw DB calls and count line-item creation as N, the total round-trips for a 3-item new-customer COD order with auto-booking enabled is roughly:
+    4 (getWorkspace) + 1 (permission) + 4 (getWorkspace-again inside createCustomer) + 1 (permission-again) + ~3 (normalizePhone+conflict+transaction) + 1 (audit in createCustomer) + 2 (new-customer addr/phone lookup) + 1 (variants) + 1 (settings) + 1 (orderNumber) + 1 (order.create) + 3 (orderItem.create loop) + 1 (audit) + 1 (markAddressAsUsed) + 1 (updateCustomerStats) + ~9 (reserveOrderStock for 3 items: 2 reads + 3×[pool+reserve+update] + 1 final update) + 1 (DUPLICATE settings) + 1 (metric event)
+    ≈ 36 DB round-trips for a single 3-item order creation.
+
+B.4 DEPENDENCY GRAPH — MUST-BE-SEQUENTIAL vs CAN-BE-PARALLEL
+
+  MUST-BE-SEQUENTIAL (depends on a prior result):
+    #1  getWorkspace()           — root: needs session
+    #2  requirePermission()      — needs ctx (technically only needs ctx.employee; could be folded into getWorkspace)
+    #3  db.customer.findFirst    — needs ctx (independent of #9/#10/#11)
+        OR
+    #6  createCustomer()         — needs ctx (independent of #9/#10/#11)
+    #4  db.customerAddress.findFirst — needs existing.id from #3
+    #5  db.customerPhone.findFirst   — needs existing.id from #3
+    #7  db.customerAddress.findFirst — needs customerId from #6
+    #8  db.customerPhone.findFirst   — needs customerId from #6
+    #12 db.order.create           — needs customerId (#3/#6), orderItemsData (#9), flowopsOrderNumber (#11), totals
+    #13 db.orderItem.create LOOP  — needs order.id from #12
+    #14 insertAuditLog           — needs order.id from #12
+    #15 markAddressAsUsed         — needs selectedSavedAddressId (from #4/#7)
+    #16 db.customerAddress.create — needs order.id from #12 + input
+    #17 db.order.update           — needs savedAddr.id from #16 + order.id from #12
+    #18 updateCustomerStats       — needs customerId (could ALSO be deferred post-response)
+    #19 reserveOrderStock         — needs order.id + items from #12/#9
+    #20 db.companyOrderSetting    — DUPLICATE of #10 — should be ELIMINATED, not parallelized
+    #22 insertMetricEvent        — needs order.id from #12
+
+  COULD RUN IN PARALLEL (no inter-dependency):
+    Group A — all independent of customer resolution:
+      • #9  db.orgProductVariant.findMany  (needs only ctx.company.id/orgId + input)
+      • #10 db.companyOrderSetting.findUnique (needs only ctx.company.id)
+      • #11 generateOrderNumber (needs only ctx.company.id)
+      ⟹ Promise.all([#9, #10, #11]) could run concurrently with the entire customer-resolution block (#3 OR #6 → #4/#5 OR #7/#8). Today they all serialize.
+    Group B — within the existing-customer branch:
+      • #4 (saved-address verify) and #5 (saved-phone verify) both depend only on existing.id from #3
+      ⟹ Promise.all([#4, #5])
+    Group C — within the new-customer branch:
+      • #7 (default-address lookup) and #8 (primary-phone lookup) both depend only on customerId from #6
+      ⟹ Promise.all([#7, #8])
+    Group D — after order.create (#12):
+      • #14 (audit), #15 (markAddressAsUsed) [or #16+#17 alt branch], #22 (metric event)
+      ⟹ Promise.all([#14, #15_or_#16+#17, #22])  — all depend only on order.id
+    Group E — also after order.create:
+      • #18 (updateCustomerStats) and #19 (reserveOrderStock) both depend on order.id + (customerId/items)
+      ⟹ Promise.all([#18, #19])
+    Group F — combine D + E:
+      • Everything from #14 onwards depends only on order.id (and the locally-computed orderItemsData + the selectedSavedAddressId that was already resolved earlier). Could all run in parallel as one big Promise.all post-#12.
+
+B.5 LOOP-DOING-N-SEPARATE-VARIANT-LOOKUPS?
+  NO for variants — the variant lookup #9 is ALREADY a single batched `db.orgProductVariant.findMany({ where: { id: { in: variantIds } } })` with `include: { product, companyPricing }`. ✓ well done.
+  YES for order items — the `db.orderItem.create` loop at #13 (line 624) makes N round-trips, one per item.
+  ⟹ RECOMMENDATION: replace with `db.orderItem.createMany({ data: orderItemsData.map(...) })`. CAVEAT: `createMany` does NOT return the created rows, so we lose the `id` per item. The current return shape includes `orderItems: Array<{ id, orgVariantId, quantity }>`. Workarounds:
+    (i) Use `db.orderItem.createManyAndReturn({ ... })` (Prisma 5.14+ on Postgres) — returns the created rows. Cleanest.
+    (ii) Follow createMany with `db.orderItem.findMany({ where: { orderId: order.id }, select: { id, orgVariantId, quantity } })` — 2 queries instead of N. Acceptable.
+    (iii) Use a $transaction with N parallel create()s — still N queries but in 1 round trip via Promise.all inside tx. Use only if (i) and (ii) are unacceptable.
+
+  YES for inventory pools inside reserveOrderStock — `db.inventoryPool.findUnique` is called once per item (line 154 in reserveOrderStock). Could be a single `db.inventoryPool.findMany({ where: { OR: items.map(i => ({ orgVariantId: i.orgVariantId, locationId })) } })`.
+
+  YES for normalizePhone inside createCustomer — called per phone in a for-loop (line 347 in customer.actions.ts). Could be batched via a single SQL `SELECT normalize_phone(unnest(ARRAY[..]))` query.
+
+B.6 IS CUSTOMER RESOLUTION BLOCKING LATER STEPS THAT DON'T DEPEND ON IT?
+  Partially — YES, it's currently blocking but DOESN'T NEED TO BE:
+    • #9 (variant fetch) does NOT depend on customer resolution.
+    • #10 (companyOrderSetting fetch) does NOT depend on customer resolution.
+    • #11 (order number generation) does NOT depend on customer resolution.
+    • Only #12 (order.create) actually NEEDS customerId.
+  ⟹ Currently the customer-resolution path (#3 + #4 + #5 OR #6 + #7 + #8) runs FIRST and serially blocks #9/#10/#11. This is unnecessary. Refactor to: `Promise.all([ customerResolution, variantFetch, settingsFetch, generateOrderNumber ])`.
+
+B.7 IS CITY-VALIDATION OR COURIER-SELECTION LOOKUP INDEPENDENT OF CUSTOMER RESOLUTION?
+  N/A — createManualOrder performs NEITHER city-validation NOR courier-selection lookup. It only stores the user-supplied `d.delivery_city` (string), `d.courier_name`, and `d.courier_company_integration_id` (a passthrough FK). No DB lookup against courier_operational_cities or company_integration occurs in this function.
+  The authoritative city validation is `revalidateCityAtBookingTime()`, called later inside `booking.actions.ts` when the courier is actually booked (or via the async maybeAutoBookOrder fire-and-forget in #21).
+  ⟹ There is no city/courier lookup to optimize here in createManualOrder itself.
+
+B.8 OTHER LOW-HANGING OPTIMIZATIONS SPOTTED
+  (a) Eliminate the duplicate `db.companyOrderSetting.findUnique` (#20 vs #10) — fetch both `requireOrderConfirmation` AND `courierBookingMode`/`defaultCourierCompanyIntegrationId` in a single call at #10, then reuse the cached row at #20. Saves 1 round-trip per confirmed order.
+  (b) Eliminate the redundant getWorkspace() call inside `createCustomer` (#6 expansion) — when createManualOrder already has a ctx, it should call a `createCustomerInternal(ctx, input)` variant that skips the workspace+permission re-resolution. Saves 5 round-trips (4 getWorkspace + 1 permission) on the new-customer path.
+  (c) Skip `requirePermission`'s rolePermission.count query when ctx.employee.role.roleTier === 'elevated' — the current code already short-circuits via `isElevated(ctx)`, so this is already optimized. ✓
+  (d) `updateCustomerStats` (#18) and `reserveOrderStock` (#19) both run AFTER the order is created and neither blocks the response to the user. They could be moved to a fire-and-forget IIFE (same pattern as #21 maybeAutoBookOrder) and the response returned immediately after #14 (audit). This would reduce synchronous latency significantly — the user would see "order created" instantly while stats + stock reservation run in the background. CAVEAT: stock reservation must complete before the user can dispatch; need to ensure the order-detail page handles "stock reservation in progress" gracefully (probably already does via fulfillmentStatus='reserved' placeholder on OrderItem).
+  (e) `markAddressAsUsed` (#15) is non-fatal by design (it has try/catch that swallows errors). It could also move to fire-and-forget.
+
+B.9 SUMMARY TABLE — createManualOrder
+  Direct `await db.` calls in function body:           12
+  Helper-included DB-touching awaits:                  10 (getWorkspace×1, requirePermission×1, createCustomer×1, generateOrderNumber×1, insertAuditLog×1, markAddressAsUsed×1, updateCustomerStats×1, reserveOrderStock×1, insertMetricEvent×1, maybeAutoBookOrder×1-as-fire-and-forget)
+  Loop-of-N DB calls:                                  1 (db.orderItem.create at #13 — N round trips)
+  Redundant duplicate queries:                         2 (the duplicate companyOrderSetting at #20; the recursive getWorkspace+requirePermission inside createCustomer at #6)
+  Already-batched lookups:                             1 (db.orgProductVariant.findMany at #9 — correct pattern)
+  Already-fire-and-forget:                             1 (maybeAutoBookOrder at #21)
+
+  PROMISE.ALL BATCHING CANDIDATES:
+    • Group A: [#9 variants, #10 settings, #11 orderNumber]  ‒ parallel with customer resolution
+    • Group B: [#4 saved-addr-verify, #5 saved-phone-verify] (existing-customer branch)
+    • Group C: [#7 new-addr-lookup, #8 new-phone-lookup]    (new-customer branch)
+    • Group D: [#14 audit, #15 markAddressAsUsed, #22 metric] (post-order-create, parallel writes)
+    • Group E: [#18 updateCustomerStats, #19 reserveOrderStock] (post-create, parallel heavy work)
+
+  SINGLE-BATCHED-findMany CANDIDATES:
+    • db.orderItem.createManyAndReturn to replace the #13 loop (Prisma 5.14+)
+    • db.inventoryPool.findMany (in reserveOrderStock) to replace the per-item findUnique at line 154
+    • Single normalize_phone SQL call for all phones in createCustomer
+
+  REDUNDANT-QUERY ELIMINATIONS:
+    • Merge #20 into #10 (single companyOrderSetting fetch with broader select)
+    • Add `createCustomerInternal(ctx, input)` to skip the recursive getWorkspace+requirePermission inside createCustomer
+
+================================================================
+PART C — Prisma schema relations relevant to this work
+================================================================
+  (Read in full from /home/z/my-project/prisma/schema.prisma — model line ranges below)
+
+  Order         (model lines 1833–2004) — fields consumed by createManualOrder:
+    organizationId, companyId, flowopsOrderNumber, orderSource, customerId, recipientName,
+    usedCustomerAddressId (FK→CustomerAddress), usedCustomerPhoneId (FK→CustomerPhone),
+    status, paymentType, paymentStatus, paymentSource, subtotal, discountAmount, discountReason,
+    courierCharges, estimatedDeliveryCharge, taxAmount, taxLabel, totalOrderValue, advanceAmount,
+    advancePaymentMethod, advancePaymentReference, advancePaidAt, remainingCodAmount,
+    deliveryAddress, deliveryCity, courierName, courierCompanyIntegrationId (FK→CompanyIntegration),
+    recommendedCourierCompanyIntegrationId, dispatchLocationId (FK→InventoryLocation),
+    notesForCourier, pickupAddressId (FK→CourierPickupAddress), orderRefNumber, orderDetail,
+    skippedConfirmation, confirmedAt, createdBy (FK→Employee), loadSheetId, courierSlipStoragePath,
+    courierBookingStatus, courierBookingFailureReason, courierSubStatus, lastPolledAt, etc.
+    Relations: items[] (OrderItem), customer (Customer), usedCustomerAddress (CustomerAddress?),
+               usedCustomerPhone (CustomerPhone?), createdByEmployee (Employee?), etc.
+
+  OrderItem     (model lines 2010–2050+) — fields written by the #13 loop:
+    orderId (FK→Order), orgVariantId (FK→OrgProductVariant), organizationId, quantity,
+    unitPrice, lineTotal (GENERATED = quantity × unitPrice), fulfillmentStatus,
+    fulfillmentTypeSnapshot, backorderedAt, fulfilledAt, productionOrderId, returnedStitchedUsed,
+    reservedLocationId (FK→InventoryLocation).
+
+  Customer      (model lines 1424–1460) — used for the findFirst in #3:
+    id, organizationId, name, email, totalOrdersCount, totalOrderValue, totalRtoCount (cached),
+    isFlagged, flaggedReason, createdBy, createdAt. Relations: phones[], addresses[], orders[].
+
+  CustomerAddress (model lines 1496–1530) — used for #4 saved-address verify + #16 create + #15 markAddressAsUsed:
+    id, customerId, organizationId, label, address, city, isDefault, lastUsedAt,
+    cityMatchedCouriers[], cityValidatedAt, createdAt, updatedAt.
+
+  CustomerPhone (model lines 1467–1490) — used for #5 saved-phone verify:
+    id, customerId, organizationId, phoneRaw, phoneNormalized (UNIQUE per org), label, isPrimary.
+
+  OrgProductVariant (model lines 596–679) — used for #9 batched fetch:
+    id, productId (FK→OrgProduct), organizationId, sku, attributeValues (JSONB), costPrice,
+    weightGrams, fulfillmentType, inventoryPolicy, stitchingType, stitchingCharges, etc.
+    Relations: product (OrgProduct), companyPricing (CompanyVariantPricing[] — filtered to companyId in #9),
+               inventoryPools (InventoryPool[] — used by reserveOrderStock).
+
+  OrgProduct    (model lines 542–592) — used via include in #9 to read `.title`:
+    id, organizationId, sourceCompanyId, title, slug, productType, etc.
+
+  CompanyOrderSetting (model lines 1805–1828) — used by #10 and #20 (DUPLICATE):
+    companyId (UNIQUE), requireOrderConfirmation, requirePackingStep, defaultCourier,
+    defaultDispatchLocationId, courierBookingMode, defaultCourierCompanyIntegrationId,
+    deductDeliveryChargeFromRefund.
+
+  InventoryPool  (model lines 948+) — touched inside reserveOrderStock:
+    Unique on (orgVariantId, locationId) — used by findUnique at line 154 and 701.
+    Fields: onHand, reserved (used to compute available = onHand − reserved).
+
+================================================================
+PART D — Conclusions / next-action recommendations (research-only — no code changed)
+================================================================
+  getWorkspace(): 4 sequential DB queries today. A single Prisma `include` chain through Profile → settings.activeCompany + employees.role would collapse them to 1 query. Caveats: (i) cannot cross-filter `employees` by `settings.activeCompanyId` at the SQL level — must fetch all employees for the user and filter in JS (use `take:` cap); (ii) preserve the WorkspaceContext return shape verbatim — 89 callers depend on it.
+
+  createManualOrder(): 12 direct `await db.` + ~10 helper awaits + a per-item orderItem.create loop. Worst-case ~36 round trips for a 3-item new-customer COD order. Concrete wins available:
+    (1) Promise.all Group A [#9, #10, #11] — parallelize with customer resolution
+    (2) Replace #13 loop with `createManyAndReturn` (or `createMany` + follow-up `findMany`)
+    (3) Eliminate #20 (duplicate of #10 — merge `select` clauses)
+    (4) Eliminate recursive getWorkspace+requirePermission inside `createCustomer` via a `createCustomerInternal(ctx, …)` variant
+    (5) Promise.all Group D [#14, #15_or_#16+#17, #22] post-create parallel writes
+    (6) Promise.all Group E [#18, #19] — or move both to fire-and-forget post-response
+    (7) Batch the per-item `db.inventoryPool.findUnique` loop inside `reserveOrderStock` into a single `findMany`
+    (8) Batch the per-phone `normalizePhone` loop inside `createCustomer` into one SQL call
+
+  No code was modified. Findings are ready for a follow-up refactor task.
+

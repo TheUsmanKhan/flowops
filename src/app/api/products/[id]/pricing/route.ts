@@ -65,7 +65,7 @@ export async function POST(
           comparePrice: p.compare_price ?? null,
         },
       })
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId,
         entityType: 'product',
         entityId: productId,
@@ -86,7 +86,7 @@ export async function POST(
       })
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.pricing_set',
       entityType: 'product',
       entityId: productId,

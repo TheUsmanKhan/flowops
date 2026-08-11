@@ -53,7 +53,7 @@ export async function POST(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'supplier_return.disputed',
       entityType: 'supplier_return',
       entityId: id,
@@ -64,7 +64,7 @@ export async function POST(
       newValues: { status: 'disputed', notes: body.notes },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'supplier',
       entityId: record.supplierId,

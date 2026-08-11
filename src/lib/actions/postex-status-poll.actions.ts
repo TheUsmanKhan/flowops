@@ -91,7 +91,7 @@ export async function generatePostExLoadSheet(
       fn: async () => adapter.generateLoadSheet!(trackingNumbers, pickupAddress),
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'postex.load_sheet_generated',
       entityType: 'company_integration',
       entityId: companyIntegrationId,
@@ -675,7 +675,7 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                 })
 
                 if (paymentStatus?.settled) {
-                  await insertAuditLog({
+                  insertAuditLog({
                     action: 'postex.payment_settled',
                     entityType: 'order',
                     entityId: entry.id,
@@ -685,7 +685,7 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                       trackingNumber: entry.trackingNumber,
                       settlementDate: paymentStatus.settlementDate,
                     },
-                  }).catch((e) => console.error(`[poll] Failed to log payment settlement for ${entry.id}:`, e))
+                  })
                 }
               } catch (e) {
                 console.error(`[poll] Payment status lookup failed for ${entry.id}:`, e)
@@ -808,23 +808,23 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
     // Audit log for the polling run (non-fatal) — use the first integration's
     // company/org context so the audit row is queryable (was previously empty strings).
     const firstIntegration = postexIntegrations[0]
-    await insertAuditLog({
+    insertAuditLog({
       action: 'postex.status_poll_completed',
       entityType: 'company_integration',
       entityId: firstIntegration?.id ?? '',
       companyId: firstIntegration?.companyId ?? '',
       organizationId: firstIntegration?.organizationId ?? '',
       newValues: { polledOrders, polledShipments, statusChanges, errorCount: errors.length },
-    }).catch((e) => console.error('[poll] Failed to insert audit log:', e))
+    })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: firstIntegration?.companyId ?? '',
       entityType: 'company_integration',
       entityId: firstIntegration?.id ?? '',
       metricKey: 'postex.status_poll_completed',
       numericValue: statusChanges,
       dimensions: { polled_orders: polledOrders, polled_shipments: polledShipments, errors: errors.length },
-    }).catch((e) => console.error('[poll] Failed to insert metric event:', e))
+    })
 
     return {
       success: true,

@@ -179,7 +179,7 @@ export async function PATCH(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.updated',
       entityType: 'product',
       entityId: id,
@@ -191,7 +191,7 @@ export async function PATCH(
       newValues: d,
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: id,
@@ -241,7 +241,7 @@ export async function DELETE(
       data: { productScope: 'archived', isActive: false },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.archived',
       entityType: 'product',
       entityId: id,
@@ -253,7 +253,7 @@ export async function DELETE(
       newValues: { productScope: 'archived', isActive: false },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: id,

@@ -166,7 +166,7 @@ export async function processOrderReturn(
       }
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.returned',
       entityType: 'order',
       entityId: orderId,
@@ -178,7 +178,7 @@ export async function processOrderReturn(
     })
 
     // Metric: order.rto
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: orderId,
@@ -188,7 +188,7 @@ export async function processOrderReturn(
         return_reason: returnReason,
         courier_name: order.courierName,
       },
-    }).catch(() => {})
+    })
 
     // Update customer stats (increments totalRtoCount)
     await updateCustomerStats(order.customerId)
@@ -320,7 +320,7 @@ export async function correctReturnItemCondition(
       data: { needsReview: false },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order_item.return_condition_corrected',
       entityType: 'order_item',
       entityId: orderItemId,
@@ -333,14 +333,14 @@ export async function correctReturnItemCondition(
     })
 
     // Metric: order_item.return_condition_corrected
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'product',
       entityId: item.orgVariantId,
       metricKey: 'order_item.return_condition_corrected',
       numericValue: 1,
       dimensions: { corrected_to: actualCondition },
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {
@@ -375,7 +375,7 @@ export async function dismissReturnReview(orderItemId: string): Promise<ActionRe
       data: { needsReview: false },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order_item.return_review_dismissed',
       entityType: 'order_item',
       entityId: orderItemId,

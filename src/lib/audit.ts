@@ -1,4 +1,5 @@
 import { db } from './db'
+import { fireAndForget } from './fire-and-forget'
 import type { Prisma } from '@prisma/client'
 
 interface InsertAuditLogInput {
@@ -19,8 +20,28 @@ interface InsertAuditLogInput {
 /**
  * Insert an immutable audit-log entry. Every mutating server action in
  * FlowOps MUST call this on success. Never updates or deletes rows.
+ *
+ * FIRE-AND-FORGET (non-blocking):
+ *   Returns `void` immediately. The DB write is scheduled on the event
+ *   loop via `fireAndForget()` and completes AFTER the caller's response
+ *   is sent. This removes the audit-log DB round-trip from the critical
+ *   path of every mutation in the system (~159 call sites).
+ *
+ *   Callers may still write `insertAuditLog({...})` — awaiting
+ *   `void` resolves synchronously (a harmless microtask yield), so
+ *   existing call sites need NO change. For clarity, call sites SHOULD
+ *   drop the `await` (a mechanical pass does this).
+ *
+ *   The internal try/catch is preserved as a FIRST line of defense — a
+ *   failure inside the write never throws. `fireAndForget()`'s `.catch()`
+ *   is the SECOND line of defense (defense-in-depth) so no failure can
+ *   ever become an unhandled promise rejection.
+ *
+ *   NOTE: because this now returns `void`, callers cannot use the created
+ *   row. No caller in the codebase uses the return value (verified by grep
+ *   for `= await insertAuditLog` / `= insertAuditLog`).
  */
-export async function insertAuditLog(input: InsertAuditLogInput) {
+export function insertAuditLog(input: InsertAuditLogInput): void {
   const data: Prisma.AuditLogUncheckedCreateInput = {
     action: input.action,
     entityType: input.entityType,
@@ -35,13 +56,16 @@ export async function insertAuditLog(input: InsertAuditLogInput) {
     ipAddress: input.ipAddress ?? null,
     userAgent: input.userAgent ?? null,
   }
-  try {
-    return await db.auditLog.create({ data })
-  } catch (err) {
-    // Audit logging must never break the primary operation.
-    console.error('[audit] failed to insert audit log:', err)
-    return null
-  }
+  fireAndForget(
+    (async () => {
+      try {
+        await db.auditLog.create({ data })
+      } catch (err) {
+        // Audit logging must never break the primary operation.
+        console.error('[audit] failed to insert audit log:', err)
+      }
+    })(),
+  )
 }
 
 /** Parse a metadata JSON column safely. */

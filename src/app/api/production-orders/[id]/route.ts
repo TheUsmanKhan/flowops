@@ -139,7 +139,7 @@ export async function PATCH(
       data: updateData,
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'production_order.updated',
       entityType: 'production_order',
       entityId: id,

@@ -68,7 +68,7 @@ export async function POST(
         },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'returned_stitched.sold',
         entityType: 'returned_stitched',
         entityId: recordId,
@@ -106,7 +106,7 @@ export async function POST(
         },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'returned_stitched.written_off',
         entityType: 'returned_stitched',
         entityId: recordId,

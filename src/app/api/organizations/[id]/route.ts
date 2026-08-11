@@ -51,7 +51,7 @@ export async function PATCH(req: NextRequest) {
       })
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'organization.updated',
       entityType: 'organization',
       entityId: org.id,
@@ -108,7 +108,7 @@ export async function POST(req: NextRequest) {
       data: { activeCompanyId: null, activeOrgId: null },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'organization.archived',
       entityType: 'organization',
       entityId: org.id,

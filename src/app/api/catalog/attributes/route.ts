@@ -98,7 +98,7 @@ export async function POST(req: Request) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'attribute.created',
       entityType: 'attribute',
       entityId: attribute.id,
@@ -108,7 +108,7 @@ export async function POST(req: Request) {
       employeeId: caller.id,
       newValues: { name: attribute.name, displayName: attribute.displayName },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'catalog',
       entityId: attribute.id,

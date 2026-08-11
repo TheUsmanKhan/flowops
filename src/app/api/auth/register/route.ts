@@ -35,7 +35,7 @@ export async function POST(req: Request) {
       data: { userId: profile.id, theme: 'system', language: 'en' },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'auth.registered',
       entityType: 'user',
       entityId: profile.id,

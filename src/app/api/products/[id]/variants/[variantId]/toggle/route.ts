@@ -62,7 +62,7 @@ export async function POST(
       data: { isActive: is_active },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: is_active ? 'variant.activated' : 'variant.deactivated',
       entityType: 'variant',
       entityId: variantId,
@@ -73,7 +73,7 @@ export async function POST(
       oldValues,
       newValues: { isActive: is_active },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,

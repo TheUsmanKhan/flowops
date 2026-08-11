@@ -34,7 +34,7 @@ export async function POST(req: Request) {
       maxAge: SESSION_MAX_AGE,
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'auth.login',
       entityType: 'user',
       entityId: profile.id,

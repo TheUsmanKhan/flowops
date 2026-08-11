@@ -95,7 +95,7 @@ export async function POST(req: Request) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'supplier.created',
       entityType: 'supplier',
       entityId: supplier.id,

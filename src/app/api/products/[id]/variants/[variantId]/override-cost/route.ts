@@ -48,7 +48,7 @@ export async function POST(
       data: { costPrice: body.cost_price, costPriceSyncedWithParent: false },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'variant.cost_overridden',
       entityType: 'variant',
       entityId: variantId,
@@ -58,7 +58,7 @@ export async function POST(
       employeeId: caller.id,
       newValues: { costPrice: body.cost_price, synced: false },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: productId,

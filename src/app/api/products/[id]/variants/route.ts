@@ -142,7 +142,7 @@ export async function POST(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.variants_created',
       entityType: 'product',
       entityId: productId,
@@ -152,7 +152,7 @@ export async function POST(
       employeeId: caller.id,
       newValues: { variantCount: createdIds.length, variantIds: createdIds },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,

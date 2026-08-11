@@ -125,7 +125,7 @@ export async function POST(req: Request) {
       throw new ApiError(500, `Transfer in failed: ${inResult.error}`)
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'stock.transferred',
       entityType: 'transfer',
       entityId: transfer.id,
@@ -143,7 +143,7 @@ export async function POST(req: Request) {
     })
 
     // ── Metric event (CRITICAL — powers stock movement / turnover KPIs) ──
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: body.org_variant_id,

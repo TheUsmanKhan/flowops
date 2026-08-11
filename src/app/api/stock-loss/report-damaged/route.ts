@@ -102,7 +102,7 @@ export async function POST(req: Request) {
       data: { inventoryTxnId: txnResult.transactionId },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'stock_loss.damaged_reported',
       entityType: 'stock_loss',
       entityId: lossRecord.id,
@@ -113,7 +113,7 @@ export async function POST(req: Request) {
       newValues: { quantity: d.quantity, damageType: d.damage_type, value: d.quantity * avgCost },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: d.org_variant_id,

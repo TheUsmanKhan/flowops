@@ -101,7 +101,7 @@ export async function POST(req: Request) {
       include: { rolePermissions: { select: { permissionKey: true } } },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'role.created',
       entityType: 'role',
       entityId: role.id,

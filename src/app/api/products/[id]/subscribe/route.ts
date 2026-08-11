@@ -81,7 +81,7 @@ export async function POST(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.subscribed',
       entityType: 'product',
       entityId: productId,
@@ -91,7 +91,7 @@ export async function POST(
       employeeId: caller.id,
       newValues: { subscriptionId: subscription.id, isActive: false },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,

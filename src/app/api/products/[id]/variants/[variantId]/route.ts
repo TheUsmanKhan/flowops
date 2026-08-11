@@ -110,7 +110,7 @@ export async function PATCH(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'variant.updated',
       entityType: 'variant',
       entityId: variantId,
@@ -121,7 +121,7 @@ export async function PATCH(
       oldValues,
       newValues: d,
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,

@@ -108,7 +108,7 @@ export async function POST(
           ? 'employee.suspended'
           : 'employee.reactivated'
 
-    await insertAuditLog({
+    insertAuditLog({
       action: actionLog,
       entityType: 'employee',
       entityId: id,

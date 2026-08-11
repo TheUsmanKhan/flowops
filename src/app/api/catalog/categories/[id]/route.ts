@@ -59,7 +59,7 @@ export async function PATCH(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'category.updated',
       entityType: 'category',
       entityId: id,
@@ -70,7 +70,7 @@ export async function PATCH(
       oldValues,
       newValues: parsed.data,
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'catalog',
       entityId: id,
@@ -125,7 +125,7 @@ export async function DELETE(
 
     await db.orgCategory.delete({ where: { id } })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'category.deleted',
       entityType: 'category',
       entityId: id,
@@ -135,7 +135,7 @@ export async function DELETE(
       employeeId: caller.id,
       oldValues: { name: category.name },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'catalog',
       entityId: id,

@@ -269,7 +269,7 @@ export async function processLeopardWebhookUpdates(
       }
 
       // ── Audit log ──
-      await insertAuditLog({
+      insertAuditLog({
         action: 'leopard.webhook_status_update',
         entityType,
         entityId,
@@ -285,7 +285,7 @@ export async function processLeopardWebhookUpdates(
           activityDate: update.activity_date ?? null,
           unrecognized: mapping.unrecognized,
         },
-      }).catch(() => {})
+      })
 
       processed++
     } catch (e) {
@@ -294,14 +294,14 @@ export async function processLeopardWebhookUpdates(
   }
 
   // Metric event for the webhook batch
-  await insertMetricEvent({
+  insertMetricEvent({
     companyId: integration.companyId,
     entityType: 'company_integration',
     entityId: integration.id,
     metricKey: 'leopard.webhook_processed',
     numericValue: processed,
     dimensions: { error_count: errors.length, total_updates: updates.length },
-  }).catch(() => {})
+  })
 
   return { success: true, data: { processed, errors } }
 }
@@ -482,14 +482,14 @@ export async function pollLeopardOrderStatuses(): Promise<ActionResult<{
 
     // Audit log for the safety-net poll run
     const firstIntegration = leopardIntegrations[0]
-    await insertAuditLog({
+    insertAuditLog({
       action: 'leopard.safety_net_poll_completed',
       entityType: 'company_integration',
       entityId: firstIntegration?.id ?? '',
       companyId: firstIntegration?.companyId ?? '',
       organizationId: firstIntegration?.organizationId ?? '',
       newValues: { polledOrders, polledShipments, statusChanges, errorCount: errors.length },
-    }).catch(() => {})
+    })
 
     return {
       success: true,

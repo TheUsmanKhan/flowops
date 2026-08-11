@@ -58,7 +58,7 @@ export async function POST(
 
     await db.companyVariantPricing.update({ where: { id: pricing.id }, data: updateData })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'variant.price_overridden',
       entityType: 'variant',
       entityId: variantId,
@@ -68,7 +68,7 @@ export async function POST(
       employeeId: caller.id,
       newValues: body,
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: productId,

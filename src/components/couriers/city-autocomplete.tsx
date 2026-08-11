@@ -7,6 +7,16 @@
  * courier_operational_cities for the given provider via
  * GET /api/couriers/[providerKey]/cities?q=search_term.
  *
+ * AUTO-FETCH MISSING CITIES:
+ *   When the first (cache-only) search returns ZERO results, the component
+ *   AUTOMATICALLY fires a second search with `?live=true`. The backend then
+ *   calls the courier API live, caches the full city list, and re-runs the
+ *   search. This means: if the courier serves a city that isn't in our local
+ *   cache yet (recently added, or sync hasn't run), the user will STILL see
+ *   it — they'll just see a "Checking live courier API…" loader for ~1-2s
+ *   first. This guarantees no city is ever permanently "missing" or a "bug"
+ *   in the city search.
+ *
  * GENERIC — not hardcoded into any specific form. Will be reused in:
  *   - Order Create (Prompt 5)
  *   - Exchange Shipment forms (Prompt 5)
@@ -27,7 +37,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api-client'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { Loader2, MapPin } from 'lucide-react'
+import { Loader2, MapPin, CloudOff } from 'lucide-react'
 
 interface CityOption {
   id: string
@@ -91,16 +101,48 @@ export function CityAutocomplete({
     }
   }, [inputValue])
 
-  // Fetch city suggestions (only when there's a query and dropdown is open)
-  const { data, isLoading } = useQuery<CitySearchResponse>({
+  const enabled = debouncedQuery.length >= 1 && showSuggestions && providerKey !== ''
+
+  // ── Query 1: cache-only search (fast path) ──
+  const cacheQuery = useQuery<CitySearchResponse>({
     queryKey: ['courier-cities', providerKey, debouncedQuery],
     queryFn: () =>
       api.get<CitySearchResponse>(
         `/api/couriers/${providerKey}/cities?q=${encodeURIComponent(debouncedQuery)}&limit=10`,
       ),
-    enabled: debouncedQuery.length >= 1 && showSuggestions,
+    enabled,
     staleTime: 30_000,
   })
+
+  const cacheCities = cacheQuery.data?.cities ?? []
+  const cacheEmpty = cacheQuery.isSuccess && cacheCities.length === 0
+
+  // ── Query 2: live fallback — ONLY fires when the cache search returned
+  //    zero results. Appends `live=true` so the backend fetches the full
+  //    city list from the courier API, caches it, then re-runs the search.
+  //    This catches cities that exist at the courier but aren't in our
+  //    local cache yet (recently added, sync hasn't run, etc.).
+  //    providerKey='all' doesn't support live (no single courier to fetch
+  //    from), so we skip the live fallback in that case.
+  const liveQuery = useQuery<CitySearchResponse>({
+    queryKey: ['courier-cities-live', providerKey, debouncedQuery],
+    queryFn: () =>
+      api.get<CitySearchResponse>(
+        `/api/couriers/${providerKey}/cities?q=${encodeURIComponent(debouncedQuery)}&limit=10&live=true`,
+      ),
+    enabled: enabled && cacheEmpty && providerKey !== 'all',
+    staleTime: 60_000, // cache the live result longer — it's expensive
+  })
+
+  // Merge: prefer cache results; fall back to live-fetched results.
+  const liveCities = liveQuery.data?.cities ?? []
+  const suggestions = cacheCities.length > 0 ? cacheCities : liveCities
+  const filteredSuggestions = pickupOnly
+    ? suggestions.filter((s) => s.isPickupCity)
+    : suggestions
+
+  const isLoading = cacheQuery.isFetching || (cacheEmpty && liveQuery.isFetching)
+  const isLiveFetching = cacheEmpty && liveQuery.isFetching
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -120,11 +162,6 @@ export function CityAutocomplete({
     onChange(city.cityName)
     setShowSuggestions(false)
   }
-
-  const suggestions = data?.cities ?? []
-  const filteredSuggestions = pickupOnly
-    ? suggestions.filter((s) => s.isPickupCity)
-    : suggestions
 
   return (
     <div ref={containerRef} className={cn('relative', className)}>
@@ -152,6 +189,15 @@ export function CityAutocomplete({
       {showSuggestions && debouncedQuery.length >= 1 && (
         <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover shadow-md max-h-60 overflow-y-auto">
           {filteredSuggestions.length === 0 && !isLoading ? (
+            <div className="px-3 py-2 text-xs text-muted-foreground">
+              No cities found. Try a different spelling or sync cities first.
+            </div>
+          ) : isLiveFetching ? (
+            <div className="px-3 py-2 text-xs text-muted-foreground flex items-center gap-1.5">
+              <CloudOff className="h-3 w-3" />
+              Checking live courier API for &quot;{debouncedQuery}&quot;…
+            </div>
+          ) : filteredSuggestions.length === 0 && !isLoading ? (
             <div className="px-3 py-2 text-xs text-muted-foreground">
               No cities found. Try a different spelling or sync cities first.
             </div>

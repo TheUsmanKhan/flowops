@@ -327,7 +327,35 @@ export async function createCustomer(
   try {
     const ctx = await getWorkspace()
     await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+    // Delegate to the internal variant that skips the (now-redundant)
+    // getWorkspace + requirePermission resolution.
+    return createCustomerInternal(ctx, input)
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to create customer',
+    }
+  }
+}
 
+/**
+ * Internal customer-creation variant that accepts a PRE-RESOLVED workspace
+ * context. Used by createManualOrder() which has already called
+ * getWorkspace() + requirePermission() — calling the public createCustomer()
+ * from there would redundantly re-resolve the context + re-check permissions
+ * (~3 extra DB round-trips on the new-customer order path).
+ *
+ * Returns the created customerId PLUS the default address + primary phone IDs
+ * so the caller (createManualOrder) can set usedCustomerAddressId /
+ * usedCustomerPhoneId WITHOUT two extra findFirst queries.
+ *
+ * Behavior is IDENTICAL to createCustomer() minus the redundant resolution.
+ */
+export async function createCustomerInternal(
+  ctx: { company: { id: string; organizationId: string }; user: { id: string }; employee: { id: string } },
+  input: CreateCustomerInput,
+): Promise<ActionResult<{ customerId: string; defaultAddressId: string | null; primaryPhoneId: string | null }>> {
+  try {
     const parsed = createCustomerSchema.safeParse(input)
     if (!parsed.success) {
       return {
@@ -395,7 +423,11 @@ export async function createCustomer(
     }))
 
     // 4. Insert customer + phones + addresses in a single transaction.
-    const customer = await db.$transaction(async (tx) => {
+    //    Uses createManyAndReturn so we capture the created row IDs
+    //    (default address + primary phone) WITHOUT two extra findFirst
+    //    queries afterward — createManualOrder needs these IDs to set
+    //    usedCustomerAddressId / usedCustomerPhoneId on the order.
+    const { customer, defaultAddressId, primaryPhoneId } = await db.$transaction(async (tx) => {
       const created = await tx.customer.create({
         data: {
           organizationId: ctx.company.organizationId,
@@ -405,7 +437,7 @@ export async function createCustomer(
         },
       })
 
-      await tx.customerPhone.createMany({
+      const phones = await tx.customerPhone.createManyAndReturn({
         data: phonesWithNormalized.map((p) => ({
           customerId: created.id,
           organizationId: ctx.company.organizationId,
@@ -414,9 +446,10 @@ export async function createCustomer(
           label: p.label,
           isPrimary: p.isPrimary,
         })),
+        select: { id: true, isPrimary: true },
       })
 
-      await tx.customerAddress.createMany({
+      const addresses = await tx.customerAddress.createManyAndReturn({
         data: addressesData.map((a) => ({
           customerId: created.id,
           organizationId: ctx.company.organizationId,
@@ -426,13 +459,17 @@ export async function createCustomer(
           isDefault: a.isDefault,
           lastUsedAt: a.lastUsedAt,
         })),
+        select: { id: true, isDefault: true },
       })
 
-      return created
+      const defaultAddrId = addresses.find((a) => a.isDefault)?.id ?? null
+      const primaryPhId = phones.find((p) => p.isPrimary)?.id ?? null
+
+      return { customer: created, defaultAddressId: defaultAddrId, primaryPhoneId: primaryPhId }
     })
 
     // 5. Audit log.
-    await insertAuditLog({
+    insertAuditLog({
       action: 'customer.created',
       entityType: 'customer',
       entityId: customer.id,
@@ -448,7 +485,7 @@ export async function createCustomer(
       },
     })
 
-    return { success: true, data: { customerId: customer.id } }
+    return { success: true, data: { customerId: customer.id, defaultAddressId, primaryPhoneId } }
   } catch (err) {
     return {
       success: false,
@@ -496,7 +533,7 @@ export async function updateCustomer(
 
     await db.customer.update({ where: { id: existing.id }, data: updateData })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'customer.updated',
       entityType: 'customer',
       entityId: existing.id,
@@ -586,7 +623,7 @@ export async function addCustomerPhone(
       })
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'customer.phone_added',
       entityType: 'customer',
       entityId: customerId,
@@ -639,7 +676,7 @@ export async function removeCustomerPhone(phoneId: string): Promise<ActionResult
 
     await db.customerPhone.delete({ where: { id: phoneId } })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'customer.phone_removed',
       entityType: 'customer',
       entityId: phone.customerId,
@@ -769,7 +806,7 @@ export async function addCustomerAddress(
       })
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'customer.address_added',
       entityType: 'customer',
       entityId: customerId,
@@ -843,7 +880,7 @@ export async function updateCustomerAddress(
       })
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'customer.address_updated',
       entityType: 'customer',
       entityId: address.customerId,
@@ -912,7 +949,7 @@ export async function removeCustomerAddress(addressId: string): Promise<ActionRe
 
     await db.customerAddress.delete({ where: { id: addressId } })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'customer.address_removed',
       entityType: 'customer',
       entityId: address.customerId,
@@ -1232,7 +1269,7 @@ async function flagCustomerInternal(
   })
 
   if (ctx) {
-    await insertAuditLog({
+    insertAuditLog({
       action: auto ? 'customer.auto_flagged' : 'customer.flagged',
       entityType: 'customer',
       entityId: customerId,
@@ -1244,14 +1281,14 @@ async function flagCustomerInternal(
     })
 
     if (!auto) {
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId: ctx.company.id,
         entityType: 'customer',
         entityId: customerId,
         metricKey: 'customer.flagged',
         numericValue: 1,
         dimensions: { reason },
-      }).catch(() => {})
+      })
     }
   }
 
@@ -1281,7 +1318,7 @@ export async function unflagCustomer(customerId: string): Promise<ActionResult> 
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'customer.unflagged',
       entityType: 'customer',
       entityId: customerId,

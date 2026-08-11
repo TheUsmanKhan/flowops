@@ -87,7 +87,7 @@ export async function PATCH(
       }
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'role.updated',
       entityType: 'role',
       entityId: role.id,
@@ -147,7 +147,7 @@ export async function DELETE(
 
     await db.role.delete({ where: { id: role.id } })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'role.deleted',
       entityType: 'role',
       entityId: role.id,

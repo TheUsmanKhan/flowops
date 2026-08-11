@@ -55,7 +55,7 @@ export async function PATCH(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'brand.updated',
       entityType: 'brand',
       entityId: id,
@@ -66,7 +66,7 @@ export async function PATCH(
       oldValues,
       newValues: parsed.data,
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'catalog',
       entityId: id,
@@ -119,7 +119,7 @@ export async function DELETE(
 
     await db.orgBrand.delete({ where: { id } })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'brand.deleted',
       entityType: 'brand',
       entityId: id,
@@ -129,7 +129,7 @@ export async function DELETE(
       employeeId: caller.id,
       oldValues: { name: brand.name },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'catalog',
       entityId: id,

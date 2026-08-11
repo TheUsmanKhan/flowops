@@ -11,7 +11,7 @@ export async function POST() {
   try {
     const user = await getCurrentUser()
     if (user) {
-      await insertAuditLog({
+      insertAuditLog({
         action: 'auth.logout',
         entityType: 'user',
         entityId: user.id,

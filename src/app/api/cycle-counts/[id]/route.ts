@@ -153,7 +153,7 @@ export async function PATCH(
         data: { status: 'in_progress', startedAt: new Date() },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'cycle_count.started',
         entityType: 'cycle_count',
         entityId: id,
@@ -205,7 +205,7 @@ export async function PATCH(
         },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'cycle_count.submitted',
         entityType: 'cycle_count',
         entityId: id,
@@ -323,7 +323,7 @@ export async function PATCH(
         },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'cycle_count.approved',
         entityType: 'cycle_count',
         entityId: id,
@@ -333,7 +333,7 @@ export async function PATCH(
         employeeId: caller.id,
       })
 
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId: company.id,
         entityType: 'location',
         entityId: count.locationId,
@@ -355,7 +355,7 @@ export async function PATCH(
         data: { status: 'cancelled' },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'cycle_count.cancelled',
         entityType: 'cycle_count',
         entityId: id,

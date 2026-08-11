@@ -161,7 +161,7 @@ export async function PATCH(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: d.roleId ? 'employee.role_changed' : 'employee.updated',
       entityType: 'employee',
       entityId: updated.id,

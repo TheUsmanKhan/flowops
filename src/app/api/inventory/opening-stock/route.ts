@@ -141,7 +141,7 @@ export async function POST(req: Request) {
     }
 
     // Audit log
-    await insertAuditLog({
+    insertAuditLog({
       action: 'inventory.opening_stock_added',
       entityType: 'variant',
       entityId: d.org_variant_id,
@@ -161,7 +161,7 @@ export async function POST(req: Request) {
 
     // ── Metric event (CRITICAL — powers stock value KPI; same key as
     //     /api/inventory/receive so opening stock doesn't double-count) ──
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: d.org_variant_id,

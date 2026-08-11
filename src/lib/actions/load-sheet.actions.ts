@@ -294,7 +294,7 @@ export async function generateLoadSheet(
     }
 
     // ── 8. Audit log ──
-    await insertAuditLog({
+    insertAuditLog({
       action: 'load_sheet.generated',
       entityType: 'load_sheet',
       entityId: loadSheet.id,
@@ -314,7 +314,7 @@ export async function generateLoadSheet(
       },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'load_sheet',
       entityId: loadSheet.id,
@@ -325,7 +325,7 @@ export async function generateLoadSheet(
         order_count: orderItemIds.length,
         shipment_count: shipmentItemIds.length,
       },
-    }).catch(() => {})
+    })
 
     return {
       success: true,

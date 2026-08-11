@@ -64,7 +64,7 @@ export async function POST(
       data: { weightKg: body.weightKg },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'variant.parent_weight_updated',
       entityType: 'product',
       entityId: productId,
@@ -74,7 +74,7 @@ export async function POST(
       employeeId: caller.id,
       newValues: { parentValue: body.parent_value, weightKg: body.weightKg, affectedCount: result.count },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: productId,

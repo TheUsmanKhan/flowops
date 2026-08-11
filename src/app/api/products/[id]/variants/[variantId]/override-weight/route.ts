@@ -49,7 +49,7 @@ export async function POST(
       data: { weightKg: body.weightKg, weightSyncedWithParent: false },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'variant.weight_overridden',
       entityType: 'variant',
       entityId: variantId,
@@ -59,7 +59,7 @@ export async function POST(
       employeeId: caller.id,
       newValues: { weightKg: body.weightKg, synced: false },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: productId,

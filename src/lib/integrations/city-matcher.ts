@@ -217,6 +217,121 @@ export async function saveCityAlias(
 }
 
 // ──────────────────────────────────────────────────────────────
+// ensureCityCached — on-demand city fetch for the search autocomplete
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Ensure a specific city is present in the local cache by fetching the full
+ * city list live from the courier if the city is missing.
+ *
+ * This is the ON-DEMAND city fetch used by the city-search autocomplete
+ * (GET /api/couriers/[providerKey]/cities?live=true) so that a genuinely
+ * missing city — one not in courier_operational_cities because the last
+ * bulk sync hasn't run yet, or the city was recently added by the courier —
+ * is fetched and cached the moment a user searches for it. This guarantees
+ * no city is ever permanently "missing" from the UI.
+ *
+ * Mirrors the live-fallback logic of revalidateCityAtBookingTime() but:
+ *   - returns the city OBJECT (not a boolean) so the caller can use it
+ *   - has NO staleness gate (a pure cache-miss trigger — if the city IS
+ *     cached, even if stale, we return it immediately without re-fetching;
+ *     staleness is the booking-time check's concern, not the search's)
+ *   - is non-fatal: returns null on any error so the search UI can still
+ *     show "no results" gracefully
+ *
+ * @param providerKey  The courier provider key (e.g. 'postex')
+ * @param cityName     The city name to ensure is cached (case-insensitive)
+ * @returns The cached city row, or null if it couldn't be resolved.
+ */
+export async function ensureCityCached(
+  providerKey: string,
+  cityName: string,
+): Promise<{ id: string; cityName: string; cityId: string | null; isPickupCity: boolean; isDeliveryCity: boolean } | null> {
+  const trimmed = cityName.trim()
+  if (!trimmed) return null
+
+  // ── Tier 1: cache lookup (fast path — no staleness gate) ──
+  const cached = await db.courierOperationalCity.findFirst({
+    where: {
+      providerKey,
+      cityName: { equals: trimmed, mode: 'insensitive' },
+    },
+    select: { id: true, cityName: true, cityId: true, isPickupCity: true, isDeliveryCity: true },
+  })
+  if (cached) {
+    return cached
+  }
+
+  // ── Tier 2: cache miss → live courier API fallback ──
+  // Find ANY active integration for this provider to decrypt credentials.
+  const integration = await db.companyIntegration.findFirst({
+    where: { provider: { providerKey }, isActive: true },
+    include: { provider: true },
+  })
+  if (!integration || !integration.credentialsEncrypted) {
+    return null // no credentials → can't fetch live
+  }
+
+  try {
+    const { decryptCredentials } = await import('@/lib/utils/encryption')
+    const { getCourierAdapter } = await import('@/lib/integrations/registry')
+
+    const adapter = getCourierAdapter(
+      integration.provider.providerKey,
+      decryptCredentials(integration.credentialsEncrypted),
+    )
+    if (!adapter.fetchOperationalCities) {
+      return null // adapter doesn't support live city fetching
+    }
+
+    // Fetch ALL cities live (neither PostEx nor Leopard exposes a per-city
+    // search endpoint — both return the full list).
+    const liveCities = await adapter.fetchOperationalCities()
+
+    // Bulk-insert ALL fetched cities in a SINGLE query via createMany +
+    // skipDuplicates. This is dramatically faster than N individual upserts
+    // (873 cities × ~100ms/query = ~87s sequential vs ~1s for one bulk
+    // INSERT). skipDuplicates generates INSERT ... ON CONFLICT DO NOTHING,
+    // so existing cities are left untouched (their flags/lastSyncedAt stay
+    // as-is — the periodic bulk sync + the booking-time staleness check
+    // handle flag refreshes). For the SEARCH use case, the only goal is to
+    // make missing cities APPEAR in results — we don't need to refresh
+    // existing cities' metadata here.
+    const now = new Date()
+    if (liveCities.length > 0) {
+      await db.courierOperationalCity.createMany({
+        data: liveCities.map((c) => ({
+          providerKey,
+          cityName: c.cityName,
+          cityId: c.cityId ?? null,
+          isPickupCity: c.isPickupCity,
+          isDeliveryCity: c.isDeliveryCity,
+          lastSyncedAt: now,
+        })),
+        skipDuplicates: true,
+      })
+    }
+
+    // Now re-query the target city from the freshly-updated cache.
+    const refreshed = await db.courierOperationalCity.findFirst({
+      where: {
+        providerKey,
+        cityName: { equals: trimmed, mode: 'insensitive' },
+      },
+      select: { id: true, cityName: true, cityId: true, isPickupCity: true, isDeliveryCity: true },
+    })
+    return refreshed ?? null
+  } catch (err) {
+    // Live fallback failed — non-fatal for search (just return null).
+    console.error(
+      `[city-matcher] ensureCityCached live fallback failed for ${providerKey}/${trimmed}:`,
+      err instanceof Error ? err.message : err,
+    )
+    return null
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
 // revalidateCityAtBookingTime — final authoritative check
 // ──────────────────────────────────────────────────────────────
 

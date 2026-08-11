@@ -98,7 +98,7 @@ export async function POST(
       })
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.demoted',
       entityType: 'product',
       entityId: productId,
@@ -113,7 +113,7 @@ export async function POST(
         affectedCompanies: affectedCompanyIds,
       },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,

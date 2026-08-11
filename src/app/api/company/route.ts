@@ -131,7 +131,7 @@ export async function PATCH(req: Request) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'company.updated',
       entityType: 'company',
       entityId: company.id,

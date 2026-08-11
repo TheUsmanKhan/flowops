@@ -99,7 +99,7 @@ export async function PATCH(
           supplierReturnId: id,
         },
       })
-      await insertAuditLog({
+      insertAuditLog({
         action: 'stock_loss.supplier_dispute_created',
         entityType: 'stock_loss',
         entityId: lossRecord.id,
@@ -111,7 +111,7 @@ export async function PATCH(
       })
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'supplier_return.resolved',
       entityType: 'supplier_return',
       entityId: id,
@@ -126,7 +126,7 @@ export async function PATCH(
     const totalValue = Number(record.costPerUnit) * record.quantity
     const resolutionValue =
       body.resolution_amount !== undefined ? body.resolution_amount : totalValue
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'supplier',
       entityId: record.supplierId,

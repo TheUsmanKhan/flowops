@@ -285,7 +285,7 @@ export async function POST(req: Request) {
     })
 
     // Audit + metric
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.created',
       entityType: 'product',
       entityId: product.id,
@@ -300,7 +300,7 @@ export async function POST(req: Request) {
         isStitchable: product.isStitchable,
       },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: product.id,

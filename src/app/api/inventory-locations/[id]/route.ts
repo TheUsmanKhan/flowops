@@ -152,7 +152,7 @@ export async function PATCH(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'location.updated',
       entityType: 'location',
       entityId: id,
@@ -222,7 +222,7 @@ export async function DELETE(
 
     await db.inventoryLocation.update({ where: { id }, data: { isActive: false, isDefault: false } })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'location.deactivated',
       entityType: 'location',
       entityId: id,

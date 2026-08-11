@@ -71,7 +71,7 @@ export async function saveProductDraft(input: {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'draft.product_saved',
       entityType: 'form_draft',
       entityId: draft.id,
@@ -81,13 +81,13 @@ export async function saveProductDraft(input: {
       employeeId: ctx.employee.id,
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'form_draft',
       entityId: draft.id,
       metricKey: 'draft.product_saved',
       numericValue: 1,
-    }).catch(() => {})
+    })
 
     return { success: true, data: { draftId: draft.id } }
   } catch (err) {
@@ -157,7 +157,7 @@ export async function saveOrderDraft(input: {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'draft.order_saved',
       entityType: 'form_draft',
       entityId: draft.id,
@@ -167,13 +167,13 @@ export async function saveOrderDraft(input: {
       employeeId: ctx.employee.id,
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'form_draft',
       entityId: draft.id,
       metricKey: 'draft.order_saved',
       numericValue: 1,
-    }).catch(() => {})
+    })
 
     return { success: true, data: { draftId: draft.id, draftNumber: draftNumber ?? undefined } }
   } catch (err) {

@@ -80,7 +80,7 @@ export async function POST(req: Request) {
         throw new ApiError(500, `Adjustment failed: ${txnResult.error}`)
       }
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'stock.adjusted',
         entityType: 'variant',
         entityId: d.org_variant_id,
@@ -92,7 +92,7 @@ export async function POST(req: Request) {
       })
 
       // Metric event (CRITICAL — powers stock adjustment KPI)
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId: company.id,
         entityType: 'product',
         entityId: d.org_variant_id,
@@ -123,7 +123,7 @@ export async function POST(req: Request) {
         throw new ApiError(500, `Adjustment failed: ${txnResult.error}`)
       }
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'stock.adjusted',
         entityType: 'variant',
         entityId: d.org_variant_id,
@@ -135,7 +135,7 @@ export async function POST(req: Request) {
       })
 
       // Metric event (CRITICAL — powers stock adjustment KPI)
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId: company.id,
         entityType: 'product',
         entityId: d.org_variant_id,

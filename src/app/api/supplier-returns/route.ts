@@ -129,7 +129,7 @@ export async function POST(req: Request) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'supplier_return.created',
       entityType: 'supplier_return',
       entityId: record.id,
@@ -140,7 +140,7 @@ export async function POST(req: Request) {
       newValues: { quantity: d.quantity, reason: d.reason, totalValue: d.quantity * d.cost_per_unit },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'supplier',
       entityId: d.supplier_id,

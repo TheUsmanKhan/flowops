@@ -180,7 +180,7 @@ export async function syncCourierOperationalCities(providerKey: string): Promise
     result.disabledCount = toDisable.length
 
     // Audit + metric (non-fatal)
-    await insertAuditLog({
+    insertAuditLog({
       action: 'courier_cities_synced',
       entityType: 'company_integration',
       entityId: integration.id,
@@ -192,16 +192,16 @@ export async function syncCourierOperationalCities(providerKey: string): Promise
         upsertedCount: result.upsertedCount,
         disabledCount: result.disabledCount,
       },
-    }).catch(() => {})
+    })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: integration.companyId,
       entityType: 'company_integration',
       entityId: integration.id,
       metricKey: 'courier_cities_synced',
       numericValue: result.upsertedCount,
       dimensions: { provider_key: providerKey, disabled: result.disabledCount },
-    }).catch(() => {})
+    })
 
     result.success = true
     return result

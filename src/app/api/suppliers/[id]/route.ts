@@ -62,7 +62,7 @@ export async function PATCH(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'supplier.updated',
       entityType: 'supplier',
       entityId: id,
@@ -111,7 +111,7 @@ export async function DELETE(
 
     await db.supplier.update({ where: { id }, data: { isActive: false } })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'supplier.deactivated',
       entityType: 'supplier',
       entityId: id,

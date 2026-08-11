@@ -101,7 +101,7 @@ export async function POST(req: Request) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'cycle_count.created',
       entityType: 'cycle_count',
       entityId: count.id,
@@ -112,7 +112,7 @@ export async function POST(req: Request) {
       newValues: { countName: count.countName, countType: count.countType },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'location',
       entityId: d.location_id,

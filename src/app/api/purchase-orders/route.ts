@@ -180,7 +180,7 @@ export async function POST(req: Request) {
       }
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'purchase_order.created',
       entityType: 'purchase_order',
       entityId: po.id,
@@ -195,7 +195,7 @@ export async function POST(req: Request) {
       (sum, item) => sum + item.ordered_quantity * item.cost_per_unit,
       0,
     )
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'purchase_order',
       entityId: po.id,

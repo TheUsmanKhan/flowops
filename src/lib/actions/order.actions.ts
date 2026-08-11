@@ -36,7 +36,7 @@ import {
   type ShopifyOrderWebhook,
   type UpdatePaymentScreenshotInput,
 } from '@/lib/validations/order.schemas'
-import { updateCustomerStats, createCustomer, markAddressAsUsed, matchOrCreateExternalCustomer } from './customer.actions'
+import { updateCustomerStats, createCustomer, createCustomerInternal, markAddressAsUsed, matchOrCreateExternalCustomer } from './customer.actions'
 import type { Prisma } from '@prisma/client'
 
 // ──────────────────────────────────────────────────────────────
@@ -189,14 +189,14 @@ async function reserveOrderStock(
           where: { id: item.id },
           data: { fulfillmentStatus: 'backordered', backorderedAt: new Date() },
         })
-        await insertMetricEvent({
+        insertMetricEvent({
           companyId: order.companyId,
           entityType: 'product',
           entityId: item.orgVariantId,
           metricKey: 'order.backordered',
           numericValue: item.quantity,
           dimensions: { order_id: orderId },
-        }).catch(() => {})
+        })
         hasBackordered = true
         results.push({
           orderItemId: item.id,
@@ -241,14 +241,14 @@ async function reserveOrderStock(
               reservedLocationId: mtoResult.locationId,
             },
           })
-          await insertMetricEvent({
+          insertMetricEvent({
             companyId: order.companyId,
             entityType: 'product',
             entityId: item.orgVariantId,
             metricKey: 'order.made_to_order_from_returned_stock',
             numericValue: 1,
             dimensions: { order_id: orderId, stitching_cost_saved: Number(item.orgVariant.stitchingCharges) || 0 },
-          }).catch(() => {})
+          })
           results.push({ orderItemId: item.id, outcome: 'reserved' })
         } else {
           results.push({ orderItemId: item.id, outcome: 'failed', reason: reserveResult.error })
@@ -267,14 +267,14 @@ async function reserveOrderStock(
           where: { id: mtoResult.productionOrderId },
           data: { orderItemId: item.id },
         })
-        await insertMetricEvent({
+        insertMetricEvent({
           companyId: order.companyId,
           entityType: 'product',
           entityId: item.orgVariantId,
           metricKey: 'order.made_to_order_production_triggered',
           numericValue: 1,
           dimensions: { order_id: orderId, production_order_id: mtoResult.productionOrderId },
-        }).catch(() => {})
+        })
         results.push({ orderItemId: item.id, outcome: 'reserved' })
       } else {
         // Error (no fabric source, insufficient fabric, etc.)
@@ -329,117 +329,155 @@ export async function createManualOrder(
     }
     const d = parsed.data
 
-    // 2. Resolve customer (existing customer_id OR inline new_customer).
-    //    Also resolve optional saved address/phone selection and recipient_name.
-    let customerId: string
-    let customerName: string
-    let usedCustomerAddressId: string | null = null
-    let usedCustomerPhoneId: string | null = null
-    let saveAddressForNextTime = d.save_address_for_next_time ?? false
-    // Whether the delivery_address came from a saved customer_addresses row
-    // (vs. typed as a one-off). Used to decide whether to bump lastUsedAt.
-    let selectedSavedAddressId: string | null = null
-
-    if (d.customer_id) {
-      // Existing customer path — verify they belong to this org.
-      const existing = await db.customer.findFirst({
-        where: { id: d.customer_id, organizationId: ctx.company.organizationId },
-        select: { id: true, name: true },
-      })
-      if (!existing) return { success: false, error: 'Customer not found' }
-      customerId = existing.id
-      customerName = existing.name
-
-      // If a saved address was selected, verify it belongs to this customer.
-      if (d.used_customer_address_id) {
-        const addr = await db.customerAddress.findFirst({
-          where: {
-            id: d.used_customer_address_id,
-            customerId: existing.id,
-            organizationId: ctx.company.organizationId,
-          },
-          select: { id: true, address: true, city: true },
-        })
-        if (addr) {
-          usedCustomerAddressId = addr.id
-          selectedSavedAddressId = addr.id
-          // The delivery_address snapshot is the order's own editable copy.
-          // If the caller passed the same address text, we trust it; if they
-          // passed different text (edited it), we still record the link to
-          // the saved address for lastUsedAt tracking but keep the edited text
-          // as the order's snapshot. Either way, delivery_address comes from
-          // the input — we do NOT override it here.
-        }
-      }
-
-      // If a saved phone was selected, verify it belongs to this customer.
-      if (d.used_customer_phone_id) {
-        const phone = await db.customerPhone.findFirst({
-          where: {
-            id: d.used_customer_phone_id,
-            customerId: existing.id,
-            organizationId: ctx.company.organizationId,
-          },
-          select: { id: true },
-        })
-        if (phone) {
-          usedCustomerPhoneId = phone.id
-        }
-      }
-    } else if (d.new_customer) {
-      // Inline new-customer path — create the customer + their phones +
-      // addresses now via the Customer Management System. The first phone is
-      // primary and the first address is default (validated by createCustomerSchema).
-      const createResult = await createCustomer(d.new_customer)
-      if (!createResult.success || !createResult.data) {
-        return { success: false, error: createResult.error ?? 'Failed to create customer' }
-      }
-      customerId = createResult.data.customerId
-      customerName = d.new_customer.name.trim()
-      // For a brand-new customer, the first address they provided IS the
-      // saved default address. Mark it as the selected address so we bump
-      // its lastUsedAt after order creation.
-      const newAddr = await db.customerAddress.findFirst({
-        where: { customerId, isDefault: true },
-        select: { id: true },
-      })
-      if (newAddr) {
-        usedCustomerAddressId = newAddr.id
-        selectedSavedAddressId = newAddr.id
-      }
-      // Same for the primary phone.
-      const newPhone = await db.customerPhone.findFirst({
-        where: { customerId, isPrimary: true },
-        select: { id: true },
-      })
-      if (newPhone) {
-        usedCustomerPhoneId = newPhone.id
-      }
-      // For a brand-new customer, we already saved the address as part of
-      // createCustomer — don't double-save it.
-      saveAddressForNextTime = false
-    } else {
-      return { success: false, error: 'Either customer_id or new_customer is required' }
-    }
-
-    // 3. recipient_name defaults to the customer's name if not explicitly overridden.
-    const recipientName = (d.recipient_name && d.recipient_name.trim()) || customerName
-
-    // 3. Fetch variants + their pricing for this company + fulfillment_type snapshot
+    // ──────────────────────────────────────────────────────────────
+    // 2. PARALLEL GROUP 1 — all independent pre-create reads.
+    //    Previously these ran SEQUENTIALLY (customer → variants → settings →
+    //    order-number → …), costing ~4× the per-query network latency.
+    //    Now they run in a single Promise.all() batch. None of these depend
+    //    on each other's results:
+    //      - customer resolution: depends on ctx + d only
+    //      - variant fetch: depends on ctx.company.organizationId + d.items
+    //      - companyOrderSetting: depends on ctx.company.id (fetched ONCE here
+    //        — previously fetched TWICE, once for requireOrderConfirmation
+    //        and again for courierBookingMode)
+    //      - generateOrderNumber: SQL function, depends on ctx.company.id only
+    // ──────────────────────────────────────────────────────────────
     const variantIds = d.items.map((i) => i.org_variant_id)
-    const variants = await db.orgProductVariant.findMany({
-      where: { id: { in: variantIds }, organizationId: ctx.company.organizationId },
-      include: {
-        product: { select: { title: true } },
-        companyPricing: { where: { companyId: ctx.company.id } },
-      },
-    })
+    const [custResult, variants, orderSettings, flowopsOrderNumber] = await Promise.all([
+      // ── Customer resolution (existing lookup OR inline new-customer creation) ──
+      (async () => {
+        let customerId: string
+        let customerName: string
+        let usedCustomerAddressId: string | null = null
+        let usedCustomerPhoneId: string | null = null
+        let saveAddressForNextTime = d.save_address_for_next_time ?? false
+        let selectedSavedAddressId: string | null = null
+
+        if (d.customer_id) {
+          // Existing customer path — verify they belong to this org.
+          const existing = await db.customer.findFirst({
+            where: { id: d.customer_id, organizationId: ctx.company.organizationId },
+            select: { id: true, name: true },
+          })
+          if (!existing) return { ok: false as const, error: 'Customer not found' }
+          customerId = existing.id
+          customerName = existing.name
+
+          // If BOTH a saved address AND a saved phone were selected, verify
+          // them in PARALLEL (independent lookups). Otherwise do whichever
+          // is present.
+          if (d.used_customer_address_id && d.used_customer_phone_id) {
+            const [addr, phone] = await Promise.all([
+              db.customerAddress.findFirst({
+                where: { id: d.used_customer_address_id, customerId: existing.id, organizationId: ctx.company.organizationId },
+                select: { id: true },
+              }),
+              db.customerPhone.findFirst({
+                where: { id: d.used_customer_phone_id, customerId: existing.id, organizationId: ctx.company.organizationId },
+                select: { id: true },
+              }),
+            ])
+            if (addr) {
+              usedCustomerAddressId = addr.id
+              selectedSavedAddressId = addr.id
+            }
+            if (phone) {
+              usedCustomerPhoneId = phone.id
+            }
+          } else if (d.used_customer_address_id) {
+            const addr = await db.customerAddress.findFirst({
+              where: { id: d.used_customer_address_id, customerId: existing.id, organizationId: ctx.company.organizationId },
+              select: { id: true },
+            })
+            if (addr) {
+              usedCustomerAddressId = addr.id
+              selectedSavedAddressId = addr.id
+            }
+          } else if (d.used_customer_phone_id) {
+            const phone = await db.customerPhone.findFirst({
+              where: { id: d.used_customer_phone_id, customerId: existing.id, organizationId: ctx.company.organizationId },
+              select: { id: true },
+            })
+            if (phone) {
+              usedCustomerPhoneId = phone.id
+            }
+          }
+        } else if (d.new_customer) {
+          // Inline new-customer path — create the customer + phones +
+          // addresses via the INTERNAL variant (skips the redundant
+          // getWorkspace + requirePermission that createCustomer() would
+          // re-run). createCustomerInternal also returns the default
+          // address + primary phone IDs, saving two findFirst queries.
+          const createResult = await createCustomerInternal(ctx, d.new_customer)
+          if (!createResult.success || !createResult.data) {
+            return { ok: false as const, error: createResult.error ?? 'Failed to create customer' }
+          }
+          customerId = createResult.data.customerId
+          customerName = d.new_customer.name.trim()
+          // For a brand-new customer, the first address they provided IS the
+          // saved default address. The internal variant returns its ID
+          // directly — no extra query needed.
+          usedCustomerAddressId = createResult.data.defaultAddressId
+          selectedSavedAddressId = createResult.data.defaultAddressId
+          usedCustomerPhoneId = createResult.data.primaryPhoneId
+          // For a brand-new customer, we already saved the address as part of
+          // createCustomer — don't double-save it.
+          saveAddressForNextTime = false
+        } else {
+          return { ok: false as const, error: 'Either customer_id or new_customer is required' }
+        }
+
+        return {
+          ok: true as const,
+          customerId,
+          customerName,
+          usedCustomerAddressId,
+          usedCustomerPhoneId,
+          saveAddressForNextTime,
+          selectedSavedAddressId,
+        }
+      })(),
+      // ── Variant fetch (already batched via `in` clause) ──
+      db.orgProductVariant.findMany({
+        where: { id: { in: variantIds }, organizationId: ctx.company.organizationId },
+        include: {
+          product: { select: { title: true } },
+          companyPricing: { where: { companyId: ctx.company.id } },
+        },
+      }),
+      // ── Company order settings — fetched ONCE (was twice) ──
+      db.companyOrderSetting.findUnique({
+        where: { companyId: ctx.company.id },
+        select: {
+          requireOrderConfirmation: true,
+          courierBookingMode: true,
+          defaultCourierCompanyIntegrationId: true,
+        },
+      }),
+      // ── Order number (SQL function, independent) ──
+      generateOrderNumber(ctx.company.id),
+    ])
+
+    if (!custResult.ok) {
+      return { success: false, error: custResult.error }
+    }
+    const {
+      customerId,
+      customerName,
+      usedCustomerAddressId,
+      usedCustomerPhoneId,
+      saveAddressForNextTime,
+      selectedSavedAddressId,
+    } = custResult
 
     if (variants.length !== variantIds.length) {
       return { success: false, error: 'One or more variants not found in this organization' }
     }
 
-    // 4. Compute subtotal + build order items data
+    // 3. recipient_name defaults to the customer's name if not explicitly overridden.
+    const recipientName = (d.recipient_name && d.recipient_name.trim()) || customerName
+
+    // 4. Compute subtotal + build order items data (CPU-only, no DB)
     let subtotal = 0
     const orderItemsData: Array<{
       orgVariantId: string
@@ -449,18 +487,12 @@ export async function createManualOrder(
       fulfillmentTypeSnapshot: string
     }> = []
 
-    // Build the order_detail string as we iterate — universal courier
-    // reference field (migration 015). Format:
-    //   "Product Title (SKU-001, Size: M, Color: Blue) ×2, ..."
-    // Auto-generated but editable from the order-create form. If the caller
-    // supplies an explicit order_detail, we honour it verbatim.
     const orderDetailParts: string[] = []
 
     for (const item of d.items) {
       const variant = variants.find((v) => v.id === item.org_variant_id)
       if (!variant) continue
 
-      // Use provided unit_price OR fall back to company pricing OR variant cost
       const unitPrice =
         item.unit_price ??
         (variant.companyPricing[0]?.salePrice
@@ -478,7 +510,6 @@ export async function createManualOrder(
         fulfillmentTypeSnapshot: variant.fulfillmentType,
       })
 
-      // Append to orderDetail: "Product Title (SKU-001, Size: M) ×2"
       const attrParts: string[] = []
       try {
         const attrs = JSON.parse(variant.attributeValues || '{}') as Record<string, string>
@@ -494,16 +525,14 @@ export async function createManualOrder(
       )
     }
 
-    // 5. Compute totals
+    // 5. Compute totals (CPU-only)
     const discountAmount = d.discount_amount ?? 0
     const courierCharges = d.courier_charges ?? 0
     const estimatedDeliveryCharge = d.estimated_delivery_charge ?? 0
     const taxAmount = d.tax_amount ?? 0
-    // Total = subtotal + courier charges + delivery charge + tax - discount
-    // (delivery charge and tax are ADDITIVE — not absorbed into subtotal)
     const totalOrderValue = subtotal + courierCharges + estimatedDeliveryCharge + taxAmount - discountAmount
 
-    // 6. Determine payment status + source
+    // 6. Determine payment status + source (CPU-only)
     let paymentStatus: string = 'cod_pending'
     let paymentSource: string = 'cod_native'
     let advanceAmount: number | null = null
@@ -527,47 +556,33 @@ export async function createManualOrder(
       advancePaidAt = new Date()
     }
 
-    // remainingCodAmount is NOT a GENERATED column in the DB — the application
-    // MUST compute it as totalOrderValue - (advanceAmount ?? 0).
     const remainingCodAmount = totalOrderValue - (advanceAmount ?? 0)
 
-    // 7. Determine initial order status
+    // 7. Determine initial order status — uses the ALREADY-FETCHED
+    //    companyOrderSetting (no separate query). Previously this did a
+    //    dedicated findUnique for requireOrderConfirmation.
     let orderStatus: string = 'pending'
     let confirmedAt: Date | null = null
     let skippedConfirmation = false
 
     if (paymentStatus === 'advance_paid' || paymentStatus === 'fully_prepaid') {
-      // Payment itself is the confirmation signal — bypasses require_order_confirmation
       orderStatus = 'confirmed'
       confirmedAt = new Date()
     } else {
-      // COD order — check company_order_settings
-      const settings = await db.companyOrderSetting.findUnique({
-        where: { companyId: ctx.company.id },
-      })
-      if (!settings?.requireOrderConfirmation) {
+      if (!orderSettings?.requireOrderConfirmation) {
         orderStatus = 'confirmed'
         confirmedAt = new Date()
         skippedConfirmation = true
       }
     }
 
-    // 8. Generate order number
-    const flowopsOrderNumber = await generateOrderNumber(ctx.company.id)
-
-    // 8a. Universal courier reference fields (migration 015).
-    // orderRefNumber: defaults to flowopsOrderNumber if the caller left it
-    // blank — every courier has a "reference" field so this is a core OMS
-    // field, mapped to the courier's own ref at booking time.
+    // 8. Universal courier reference fields (migration 015).
     const orderRefNumber =
       (d.order_ref_number && d.order_ref_number.trim()) || flowopsOrderNumber
-    // orderDetail: caller-provided takes precedence, otherwise use the
-    // auto-generated string from the cart items (product title + SKU +
-    // variant attributes + quantity).
     const orderDetail =
       (d.order_detail && d.order_detail.trim()) || orderDetailParts.join(', ')
 
-    // 9. Create the order
+    // 9. Create the order (sequential — needs all above)
     const order = await db.order.create({
       data: {
         organizationId: ctx.company.organizationId,
@@ -575,12 +590,6 @@ export async function createManualOrder(
         flowopsOrderNumber,
         orderSource: 'manual',
         customerId,
-        // Customer Management System integration (migration 002):
-        //   - recipientName: the name to deliver to (defaults to customer.name)
-        //   - usedCustomerAddressId / usedCustomerPhoneId: which saved
-        //     customer_addresses / customer_phones rows were used for this
-        //     order, for lastUsedAt tracking and reporting. Nullable when a
-        //     one-off address/phone was typed without saving.
         recipientName,
         usedCustomerAddressId,
         usedCustomerPhoneId,
@@ -608,9 +617,7 @@ export async function createManualOrder(
         recommendedCourierCompanyIntegrationId: d.courier_company_integration_id || null,
         dispatchLocationId: d.dispatch_location_id,
         notesForCourier: d.notes_for_courier || null,
-        // Per-order pickup address override (null = use integration default at booking time)
         pickupAddressId: d.pickup_address_id || null,
-        // Universal courier reference fields (migration 015)
         orderRefNumber,
         orderDetail,
         skippedConfirmation,
@@ -619,31 +626,31 @@ export async function createManualOrder(
       },
     })
 
-    // 10. Create order items (fulfillment_status = 'reserved' as PLACEHOLDER)
-    const createdItems: Array<{ id: string; orgVariantId: string; quantity: number }> = []
-    for (const itemData of orderItemsData) {
-      const item = await db.orderItem.create({
-        data: {
-          orderId: order.id,
-          orgVariantId: itemData.orgVariantId,
-          organizationId: ctx.company.organizationId,
-          quantity: itemData.quantity,
-          unitPrice: itemData.unitPrice,
-          lineTotal: itemData.lineTotal,
-          fulfillmentStatus: 'reserved', // PLACEHOLDER — Step 3 will validate/adjust
-          fulfillmentTypeSnapshot: itemData.fulfillmentTypeSnapshot,
-          reservedLocationId: d.dispatch_location_id,
-        },
-      })
-      createdItems.push({
-        id: item.id,
-        orgVariantId: item.orgVariantId,
-        quantity: item.quantity,
-      })
-    }
+    // 10. Batch-create order items — SINGLE query via createManyAndReturn
+    //     (was N sequential inserts in a loop). Returns the created rows so
+    //     we can populate `createdItems` for the response.
+    const createdItemRows = await db.orderItem.createManyAndReturn({
+      data: orderItemsData.map((itemData) => ({
+        orderId: order.id,
+        orgVariantId: itemData.orgVariantId,
+        organizationId: ctx.company.organizationId,
+        quantity: itemData.quantity,
+        unitPrice: itemData.unitPrice,
+        lineTotal: itemData.lineTotal,
+        fulfillmentStatus: 'reserved', // PLACEHOLDER — reserveOrderStock validates/adjusts
+        fulfillmentTypeSnapshot: itemData.fulfillmentTypeSnapshot,
+        reservedLocationId: d.dispatch_location_id,
+      })),
+      select: { id: true, orgVariantId: true, quantity: true },
+    })
+    const createdItems = createdItemRows.map((r) => ({
+      id: r.id,
+      orgVariantId: r.orgVariantId,
+      quantity: r.quantity,
+    }))
 
-    // 11. Audit log
-    await insertAuditLog({
+    // 11. Audit log (fire-and-forget — see src/lib/audit.ts)
+    insertAuditLog({
       action: 'order.created',
       entityType: 'order',
       entityId: order.id,
@@ -662,22 +669,22 @@ export async function createManualOrder(
       },
     })
 
-    // 12. Customer Management System integration:
-    //   a. If a saved address was selected, bump its lastUsedAt to NOW() so
-    //      the UI can sort saved addresses by recency.
-    //   b. If a brand-new one-off address was typed AND the caller set
-    //      save_address_for_next_time=true, persist it as a new
-    //      customer_addresses row (and link it via usedCustomerAddressId
-    //      for future tracking). This is the "Save this address for next
-    //      time" UX from Step 3's frontend.
-    //   c. Recompute cached customer stats (total_orders_count, etc.) and
-    //      auto-flag if RTO threshold crossed.
+    // 12. Customer Management System integration — address lastUsedAt +
+    //     save-one-off-address + recompute cached stats. The
+    //     saveAddressForNextTime branch MUST be sequential (the order.update
+    //     needs the created address ID), but markAddressAsUsed (the other
+    //     branch) and updateCustomerStats are independent → run in parallel.
     if (selectedSavedAddressId) {
-      await markAddressAsUsed(selectedSavedAddressId)
+      // Bump lastUsedAt on the saved address + recompute customer stats
+      // in parallel (independent writes to different tables).
+      await Promise.all([
+        markAddressAsUsed(selectedSavedAddressId),
+        updateCustomerStats(customerId),
+      ])
     } else if (saveAddressForNextTime && d.delivery_address && d.delivery_city) {
       // One-off address typed + user opted to save it for next time.
-      // Persist as a non-default customer_addresses row (default stays as-is
-      // unless the user explicitly changes it via the customer profile).
+      // Persist as a non-default customer_addresses row, then link the
+      // order to it + recompute customer stats in parallel.
       const savedAddr = await db.customerAddress.create({
         data: {
           customerId,
@@ -689,82 +696,62 @@ export async function createManualOrder(
           lastUsedAt: new Date(),
         },
       })
-      // Link the order to the newly-saved address for future tracking.
-      await db.order.update({
-        where: { id: order.id },
-        data: { usedCustomerAddressId: savedAddr.id },
-      })
+      await Promise.all([
+        db.order.update({
+          where: { id: order.id },
+          data: { usedCustomerAddressId: savedAddr.id },
+        }),
+        updateCustomerStats(customerId),
+      ])
+    } else {
+      // No address to save — just recompute stats.
+      await updateCustomerStats(customerId)
     }
 
-    await updateCustomerStats(customerId)
-
-    // 13. If the order auto-confirmed (payment-driven or company setting),
-    // run the stock reservation logic immediately.
+    // 13. If the order auto-confirmed, run the stock reservation logic.
+    //     Sequential — reserveOrderStock reads the order items created above.
     if (orderStatus === 'confirmed') {
       await reserveOrderStock(order.id, ctx)
     }
 
-    // 14. AUTO-BOOKING (Phase 3): if the company's courierBookingMode is
-    // 'automatic' AND the order is confirmed, automatically book the courier.
-    //
-    // ASYNCHRONOUS: PostEx's API can take 50-100 seconds to respond. Running
-    // the booking synchronously would block the order creation response for
-    // that long, causing a 502 Bad Gateway from the ALB. Instead, we fire the
-    // booking in the background and return immediately. The order is created
-    // with courierBookingStatus='not_booked', and the background task updates
-    // it to 'booked' or 'failed' when PostEx responds.
-    //
-    // The frontend shows "Order created. Booking in progress…" and can poll
-    // the order detail to see when the tracking number appears.
+    // 14. AUTO-BOOKING — uses the ALREADY-FETCHED orderSettings (no 2nd
+    //     findUnique). Fires in the background (PostEx can take 50-100s).
     let bookingAttempted = false
     let bookingSucceeded = false
     let bookingError: string | undefined
     let bookingTrackingNumber: string | undefined
 
     if (orderStatus === 'confirmed') {
-      // Check if auto-booking should fire (quick synchronous check — no API call)
-      try {
-        const settings = await db.companyOrderSetting.findUnique({
-          where: { companyId: ctx.company.id },
-          select: { courierBookingMode: true, defaultCourierCompanyIntegrationId: true },
-        })
-        const shouldAutoBook =
-          settings?.courierBookingMode === 'automatic' &&
-          (d.courier_company_integration_id || settings?.defaultCourierCompanyIntegrationId)
+      const shouldAutoBook =
+        orderSettings?.courierBookingMode === 'automatic' &&
+        (d.courier_company_integration_id || orderSettings?.defaultCourierCompanyIntegrationId)
 
-        if (shouldAutoBook) {
-          bookingAttempted = true // we're going to attempt it in the background
-          // Fire-and-forget: the booking runs in the background. The order
-          // creation returns immediately with bookingSucceeded=undefined
-          // (meaning "in progress"). When the background task completes, it
-          // updates the order's courierBookingStatus + trackingNumber.
-          ;(async () => {
-            try {
-              const { maybeAutoBookOrder } = await import('./booking.actions')
-              const bookResult = await maybeAutoBookOrder(order.id, 'manual', orderStatus)
-              if (bookResult.success) {
-                console.log(`[createManualOrder] Background auto-booking succeeded for ${flowopsOrderNumber}: tracking=${bookResult.data?.trackingNumber}`)
-              } else {
-                console.warn(`[createManualOrder] Background auto-booking failed for ${flowopsOrderNumber}: ${bookResult.error}`)
-              }
-            } catch (err) {
-              console.error(`[createManualOrder] Background auto-booking threw for ${flowopsOrderNumber}:`, err)
+      if (shouldAutoBook) {
+        bookingAttempted = true
+        ;(async () => {
+          try {
+            const { maybeAutoBookOrder } = await import('./booking.actions')
+            const bookResult = await maybeAutoBookOrder(order.id, 'manual', orderStatus)
+            if (bookResult.success) {
+              console.log(`[createManualOrder] Background auto-booking succeeded for ${flowopsOrderNumber}: tracking=${bookResult.data?.trackingNumber}`)
+            } else {
+              console.warn(`[createManualOrder] Background auto-booking failed for ${flowopsOrderNumber}: ${bookResult.error}`)
             }
-          })()
-        }
-      } catch {
-        // Settings check failed — non-fatal, just skip auto-booking
+          } catch (err) {
+            console.error(`[createManualOrder] Background auto-booking threw for ${flowopsOrderNumber}:`, err)
+          }
+        })()
       }
     }
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: order.id,
       metricKey: 'order.created',
       numericValue: Number(totalOrderValue),
       dimensions: { order_source: 'manual', payment_type: d.payment_type, company_id: ctx.company.id },
-    }).catch(() => {})
+    })
 
     return {
       success: true,
@@ -772,9 +759,6 @@ export async function createManualOrder(
         orderId: order.id,
         flowopsOrderNumber,
         orderItems: createdItems,
-        // Phase 5: booking result — distinct from order creation success.
-        // The frontend uses bookingAttempted + bookingSucceeded to show TWO
-        // separate messages: "Order created" + (if applicable) "Booking failed".
         bookingAttempted,
         bookingSucceeded,
         bookingError,
@@ -1030,7 +1014,7 @@ export async function createOrderFromShopifyWebhook(
       })
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.created_from_shopify',
       entityType: 'order',
       entityId: order.id,
@@ -1048,14 +1032,14 @@ export async function createOrderFromShopifyWebhook(
 
     await updateCustomerStats(customerId)
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'order',
       entityId: order.id,
       metricKey: 'order.created',
       numericValue: Number(totalOrderValue),
       dimensions: { order_source: 'shopify', payment_type: paymentType, company_id: companyId },
-    }).catch(() => {})
+    })
 
     return { success: true, data: { orderId: order.id, flowopsOrderNumber } }
   } catch (err) {
@@ -1088,7 +1072,7 @@ export async function confirmOrder(orderId: string): Promise<ActionResult> {
       data: { status: 'confirmed', confirmedAt: new Date() },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.confirmed',
       entityType: 'order',
       entityId: orderId,
@@ -1109,14 +1093,14 @@ export async function confirmOrder(orderId: string): Promise<ActionResult> {
       // The results array has per-item details.
     }
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: orderId,
       metricKey: 'order.confirmed',
       numericValue: Number(order.totalOrderValue),
       dimensions: { confirmation_method: 'manual' },
-    }).catch(() => {})
+    })
 
     // Recompute cached customer stats (order count may change if this was a
     // re-confirmation, and the status transition affects value/rto calcs).
@@ -1193,7 +1177,7 @@ export async function convertPaymentStatus(
 
     await db.order.update({ where: { id: d.order_id }, data: updateData })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.payment_converted',
       entityType: 'order',
       entityId: d.order_id,
@@ -1212,14 +1196,14 @@ export async function convertPaymentStatus(
       },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: d.order_id,
       metricKey: 'order.payment_converted',
       numericValue: d.advance_amount ?? 0,
       dimensions: { converted_by: ctx.employee.id, method: d.advance_payment_method || 'unknown' },
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {
@@ -1282,7 +1266,7 @@ export async function updatePaymentScreenshot(
       data: { advancePaymentScreenshotUrl: newUrl },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.payment_screenshot_updated',
       entityType: 'order',
       entityId: d.order_id,
@@ -1337,7 +1321,7 @@ export async function markCodCollected(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.cod_collected',
       entityType: 'order',
       entityId: d.order_id,
@@ -1348,13 +1332,13 @@ export async function markCodCollected(
       newValues: { collectedAmount: d.collected_amount },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: d.order_id,
       metricKey: 'order.cod_collected',
       numericValue: d.collected_amount,
-    }).catch(() => {})
+    })
 
     // Recompute cached customer stats (COD collection is a financial event
     // that may affect the value calculations). Non-fatal.
@@ -1437,7 +1421,7 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
       })
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.cancelled',
       entityType: 'order',
       entityId: d.order_id,
@@ -1449,14 +1433,14 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
       newValues: { status: 'cancelled', reason: d.cancellation_reason, unreservedItems: reservedItems.length },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: d.order_id,
       metricKey: 'order.cancelled',
       numericValue: Number(order.totalOrderValue),
       dimensions: { cancellation_reason: d.cancellation_reason, had_reserved_items: reservedItems.length > 0 },
-    }).catch(() => {})
+    })
 
     // Recompute cached customer stats (cancelled orders are excluded from
     // total_orders_count, so this count drops). Non-fatal.
@@ -1999,7 +1983,7 @@ export async function performOrderDispatch(
 
   // 7. Audit log — tagged with dispatch_source so financial reports can
   //    distinguish manual dispatches from auto-poll dispatches.
-  await insertAuditLog({
+  insertAuditLog({
     action: 'order.dispatched',
     entityType: 'order',
     entityId: orderId,
@@ -2021,7 +2005,7 @@ export async function performOrderDispatch(
   const timeToDispatchHours = order.createdAt
     ? Math.round((new Date().getTime() - new Date(order.createdAt).getTime()) / (1000 * 60 * 60))
     : 0
-  await insertMetricEvent({
+  insertMetricEvent({
     companyId: order.companyId,
     entityType: 'order',
     entityId: orderId,
@@ -2033,7 +2017,7 @@ export async function performOrderDispatch(
       time_to_dispatch_hours: timeToDispatchHours,
       inventory_skipped: inventorySkipped,
     },
-  }).catch(() => {})
+  })
 
   // 9. Update customer stats (the customer's order count/total reflects this dispatch)
   if (order.customerId) {
@@ -2141,7 +2125,7 @@ export async function markOrderProcessing(orderId: string): Promise<ActionResult
       data: { status: 'processing' },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.processing_started',
       entityType: 'order',
       entityId: orderId,
@@ -2153,13 +2137,13 @@ export async function markOrderProcessing(orderId: string): Promise<ActionResult
       newValues: { status: 'processing' },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: orderId,
       metricKey: 'order.processing_started',
       numericValue: 1,
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {
@@ -2194,7 +2178,7 @@ export async function markOrderPacked(orderId: string): Promise<ActionResult> {
       data: { packedAt: new Date() },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.packed',
       entityType: 'order',
       entityId: orderId,
@@ -2205,13 +2189,13 @@ export async function markOrderPacked(orderId: string): Promise<ActionResult> {
       newValues: { packedAt: new Date() },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: orderId,
       metricKey: 'order.packed',
       numericValue: 1,
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {
@@ -2247,7 +2231,7 @@ export async function markOrderDelivered(orderId: string): Promise<ActionResult>
       data: { status: 'delivered', deliveredAt: new Date() },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'order.delivered',
       entityType: 'order',
       entityId: orderId,
@@ -2264,14 +2248,14 @@ export async function markOrderDelivered(orderId: string): Promise<ActionResult>
       ? Math.round((Date.now() - new Date(order.dispatchedAt).getTime()) / (1000 * 60 * 60 * 24))
       : 0
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'order',
       entityId: orderId,
       metricKey: 'order.delivered',
       numericValue: Number(order.totalOrderValue),
       dimensions: { delivery_days: deliveryDays },
-    }).catch(() => {})
+    })
 
     // Recompute cached customer stats (delivery affects total_order_value
     // and delivery_rate). Non-fatal.

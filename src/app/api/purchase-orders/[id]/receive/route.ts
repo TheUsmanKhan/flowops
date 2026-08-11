@@ -171,7 +171,7 @@ export async function POST(
       data: { status: newStatus },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'purchase_order.received',
       entityType: 'purchase_order',
       entityId: poId,
@@ -186,7 +186,7 @@ export async function POST(
       (sum, ri) => sum + ri.received_quantity * ri.actual_cost_per_unit,
       0,
     )
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'purchase_order',
       entityId: poId,

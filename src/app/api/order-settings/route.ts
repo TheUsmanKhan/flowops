@@ -98,7 +98,7 @@ export async function PUT(req: Request) {
       data: updateData,
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'company_order_settings.updated',
       entityType: 'company_order_settings',
       entityId: existing.id,
@@ -115,13 +115,13 @@ export async function PUT(req: Request) {
       newValues: updateData,
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'company_order_settings',
       entityId: existing.id,
       metricKey: 'company_order_settings.updated',
       numericValue: 1,
-    }).catch(() => {})
+    })
 
     return Response.json({ success: true })
   } catch (err) {

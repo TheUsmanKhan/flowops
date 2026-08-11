@@ -126,7 +126,7 @@ export async function POST(req: Request) {
       include: { role: true },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'employee.invited',
       entityType: 'invitation',
       entityId: invitation.id,

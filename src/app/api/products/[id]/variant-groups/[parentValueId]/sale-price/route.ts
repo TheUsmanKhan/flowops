@@ -85,7 +85,7 @@ export async function POST(
       updatedCount++
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'variant.parent_sale_price_updated',
       entityType: 'product',
       entityId: productId,
@@ -95,7 +95,7 @@ export async function POST(
       employeeId: caller.id,
       newValues: { parentValue: body.parent_value, salePrice: body.sale_price, affectedCount: updatedCount },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: productId,

@@ -27,7 +27,7 @@ export async function POST(req: Request) {
       where: { id: user.id },
       data: { passwordHash: hashPassword(body.password) },
     })
-    await insertAuditLog({
+    insertAuditLog({
       action: 'auth.password_reset',
       entityType: 'user',
       entityId: user.id,

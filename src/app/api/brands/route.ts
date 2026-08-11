@@ -82,7 +82,7 @@ export async function POST(req: Request) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'brand.created',
       entityType: 'brand',
       entityId: brand.id,

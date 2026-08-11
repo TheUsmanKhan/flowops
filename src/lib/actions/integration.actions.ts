@@ -250,7 +250,7 @@ export async function connectIntegration(input: {
         select: { id: true },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: existing.isActive ? 'integration.credentials_updated' : 'integration.reconnected',
         entityType: 'company_integration',
         entityId: integration.id,
@@ -288,7 +288,7 @@ export async function connectIntegration(input: {
       })
       isNewConnection = true
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'integration.connected',
         entityType: 'company_integration',
         entityId: integration.id,
@@ -374,7 +374,7 @@ export async function updateIntegrationCredentials(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: wasDisconnected ? 'integration.reconnected' : 'integration.credentials_updated',
       entityType: 'company_integration',
       entityId: companyIntegrationId,
@@ -520,7 +520,7 @@ export async function setDefaultIntegration(companyIntegrationId: string): Promi
       }),
     ])
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'integration.set_default',
       entityType: 'company_integration',
       entityId: companyIntegrationId,

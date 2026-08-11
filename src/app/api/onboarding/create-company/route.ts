@@ -130,7 +130,7 @@ export async function POST(req: Request) {
     })
 
     // 7. Audit logs (non-blocking — failures are logged but don't break flow).
-    await insertAuditLog({
+    insertAuditLog({
       action: 'organization.created',
       entityType: 'organization',
       entityId: org.id,
@@ -138,7 +138,7 @@ export async function POST(req: Request) {
       userId: user.id,
       newValues: { name: org.name, slug: org.slug },
     })
-    await insertAuditLog({
+    insertAuditLog({
       action: 'company.created',
       entityType: 'company',
       entityId: company.id,
@@ -152,7 +152,7 @@ export async function POST(req: Request) {
         baseCurrency: company.baseCurrency,
       },
     })
-    await insertAuditLog({
+    insertAuditLog({
       action: 'employee.joined',
       entityType: 'employee',
       entityId: employee.id,

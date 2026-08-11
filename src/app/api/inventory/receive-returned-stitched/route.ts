@@ -79,7 +79,7 @@ export async function POST(req: Request) {
         },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'inventory.stitched_return_received',
         entityType: 'stock_loss',
         entityId: lossRecord.id,
@@ -117,7 +117,7 @@ export async function POST(req: Request) {
       throw new ApiError(500, `Failed to receive returned item: ${txnResult.error}`)
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'inventory.stitched_return_received',
       entityType: 'variant',
       entityId: d.org_variant_id,
@@ -129,7 +129,7 @@ export async function POST(req: Request) {
     })
 
     // ── Metric event (CRITICAL — powers stitched-return / reverse-logistics KPIs) ──
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: d.org_variant_id,

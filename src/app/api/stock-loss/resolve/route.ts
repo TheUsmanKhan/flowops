@@ -95,7 +95,7 @@ export async function POST(req: Request) {
         },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'stock_loss.resolved',
         entityType: 'stock_loss',
         entityId: record.id,
@@ -107,7 +107,7 @@ export async function POST(req: Request) {
         newValues: { resolution: d.resolution, investigationStatus: 'closed' },
       })
 
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId: company.id,
         entityType: 'product',
         entityId: record.orgVariantId,
@@ -148,7 +148,7 @@ export async function POST(req: Request) {
         },
       })
 
-      await insertAuditLog({
+      insertAuditLog({
         action: 'stock_loss.transit_resolved',
         entityType: 'stock_loss',
         entityId: record.id,
@@ -159,7 +159,7 @@ export async function POST(req: Request) {
         newValues: { resolution: d.resolution, courierRecovered: d.courier_recovered ?? 0 },
       })
 
-      await insertMetricEvent({
+      insertMetricEvent({
         companyId: company.id,
         entityType: 'product',
         entityId: record.orgVariantId,

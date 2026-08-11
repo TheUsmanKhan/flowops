@@ -221,7 +221,7 @@ export async function cancelCourierBooking(
     }
 
     // ── 7. Audit log for the courier-side cancellation ──
-    await insertAuditLog({
+    insertAuditLog({
       action: 'courier.booking_cancelled',
       entityType: entityType,
       entityId: entityId,
@@ -234,7 +234,7 @@ export async function cancelCourierBooking(
         previousSubStatus: courierSubStatus,
         courierProvider: providerKey,
       },
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {

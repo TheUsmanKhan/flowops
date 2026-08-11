@@ -97,7 +97,7 @@ export async function POST(req: Request) {
 
     const result = { employee, company: invitation.company, role: invitation.role }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'invitation.accepted',
       entityType: 'invitation',
       entityId: invitation.id,
@@ -107,7 +107,7 @@ export async function POST(req: Request) {
       employeeId: result.employee.id,
       newValues: { role: result.role.name },
     })
-    await insertAuditLog({
+    insertAuditLog({
       action: 'employee.joined',
       entityType: 'employee',
       entityId: result.employee.id,

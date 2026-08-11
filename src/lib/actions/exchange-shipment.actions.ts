@@ -209,7 +209,7 @@ export async function createExchangeShipment(
     })
 
     // Audit + metric (non-fatal)
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange_shipment.created',
       entityType: 'exchange_shipment',
       entityId: shipment.id,
@@ -227,7 +227,7 @@ export async function createExchangeShipment(
       },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'exchange_shipment',
       entityId: shipment.id,
@@ -237,7 +237,7 @@ export async function createExchangeShipment(
         exchange_shipment_number: exchangeShipmentNumber,
         exchange_method: exchange.exchangeMethod,
       },
-    }).catch(() => {})
+    })
 
     return {
       success: true,
@@ -321,7 +321,7 @@ export async function reserveExchangeShipmentStock(
         if (reserveResult.success) {
           // Update shipment: mark as reserved (status stays 'confirmed' — no
           // separate 'reserved' state in the simplified lifecycle)
-          await insertAuditLog({
+          insertAuditLog({
             action: 'exchange_shipment.reserved',
             entityType: 'exchange_shipment',
             entityId: exchangeShipmentId,
@@ -332,14 +332,14 @@ export async function reserveExchangeShipmentStock(
             newValues: { locationId, quantity: shipment.quantity },
           })
 
-          await insertMetricEvent({
+          insertMetricEvent({
             companyId: ctx.company.id,
             entityType: 'exchange_shipment',
             entityId: exchangeShipmentId,
             metricKey: 'exchange_shipment.reserved',
             numericValue: shipment.quantity,
             dimensions: { variant_id: shipment.newOrgVariantId },
-          }).catch(() => {})
+          })
 
           return { success: true, data: { outcome: 'reserved' } }
         } else {
@@ -355,7 +355,7 @@ export async function reserveExchangeShipmentStock(
           },
         })
 
-        await insertAuditLog({
+        insertAuditLog({
           action: 'exchange_shipment.reserved',
           entityType: 'exchange_shipment',
           entityId: exchangeShipmentId,
@@ -366,14 +366,14 @@ export async function reserveExchangeShipmentStock(
           newValues: { status: 'backordered', available, required: shipment.quantity },
         })
 
-        await insertMetricEvent({
+        insertMetricEvent({
           companyId: ctx.company.id,
           entityType: 'exchange_shipment',
           entityId: exchangeShipmentId,
           metricKey: 'exchange_shipment.backordered',
           numericValue: shipment.quantity,
           dimensions: { variant_id: shipment.newOrgVariantId, available, required: shipment.quantity },
-        }).catch(() => {})
+        })
 
         return {
           success: true,
@@ -401,7 +401,7 @@ export async function reserveExchangeShipmentStock(
         })
 
         if (reserveResult.success) {
-          await insertAuditLog({
+          insertAuditLog({
             action: 'exchange_shipment.reserved',
             entityType: 'exchange_shipment',
             entityId: exchangeShipmentId,
@@ -417,7 +417,7 @@ export async function reserveExchangeShipmentStock(
         }
       } else if (mtoResult.source === 'fresh_production' && mtoResult.productionOrderId) {
         // Fresh production triggered — log and return reserved (production is queued)
-        await insertAuditLog({
+        insertAuditLog({
           action: 'exchange_shipment.reserved',
           entityType: 'exchange_shipment',
           entityId: exchangeShipmentId,
@@ -593,7 +593,7 @@ export async function performExchangeShipmentDispatch(
   })
 
   // 7. Audit + metric (tagged with dispatch_source)
-  await insertAuditLog({
+  insertAuditLog({
     action: 'exchange_shipment.dispatched',
     entityType: 'exchange_shipment',
     entityId: exchangeShipmentId,
@@ -610,7 +610,7 @@ export async function performExchangeShipmentDispatch(
     },
   })
 
-  await insertMetricEvent({
+  insertMetricEvent({
     companyId: shipment.companyId,
     entityType: 'exchange_shipment',
     entityId: exchangeShipmentId,
@@ -622,7 +622,7 @@ export async function performExchangeShipmentDispatch(
       dispatch_source: source,
       inventory_skipped: inventorySkipped,
     },
-  }).catch(() => {})
+  })
 
   return {
     success: true,
@@ -701,7 +701,7 @@ export async function markExchangeShipmentDelivered(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange_shipment.delivered',
       entityType: 'exchange_shipment',
       entityId: exchangeShipmentId,
@@ -711,7 +711,7 @@ export async function markExchangeShipmentDelivered(
       employeeId: ctx.employee.id,
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'exchange_shipment',
       entityId: exchangeShipmentId,
@@ -722,7 +722,7 @@ export async function markExchangeShipmentDelivered(
           ? Math.round((Date.now() - new Date(shipment.dispatchedAt).getTime()) / (1000 * 60 * 60 * 24))
           : 0,
       },
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {
@@ -866,7 +866,7 @@ export async function performExchangeShipmentRto(
   })
 
   // ── Audit + metric (tagged with rto_source) ──
-  await insertAuditLog({
+  insertAuditLog({
     action: 'exchange_shipment.rto',
     entityType: 'exchange_shipment',
     entityId: exchangeShipmentId,
@@ -886,7 +886,7 @@ export async function performExchangeShipmentRto(
     },
   })
 
-  await insertMetricEvent({
+  insertMetricEvent({
     companyId: shipment.companyId,
     entityType: 'exchange_shipment',
     entityId: exchangeShipmentId,
@@ -898,7 +898,7 @@ export async function performExchangeShipmentRto(
       transaction_type: transactionType,
       rto_source: context.source,
     },
-  }).catch(() => {})
+  })
 
   return { success: true, data: { inventoryTxnId: txnResult.transactionId } }
 }
@@ -1014,7 +1014,7 @@ export async function markExchangeShipmentCodCollected(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange_shipment.cod_collected',
       entityType: 'exchange_shipment',
       entityId: exchangeShipmentId,
@@ -1025,13 +1025,13 @@ export async function markExchangeShipmentCodCollected(
       newValues: { collectedAmount: amount, invoiceAmount: Number(shipment.invoiceAmount) },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'exchange_shipment',
       entityId: exchangeShipmentId,
       metricKey: 'exchange_shipment.cod_collected',
       numericValue: amount,
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {
@@ -1097,7 +1097,7 @@ export async function cancelExchangeShipment(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange_shipment.cancelled',
       entityType: 'exchange_shipment',
       entityId: exchangeShipmentId,
@@ -1108,14 +1108,14 @@ export async function cancelExchangeShipment(
       newValues: { reason, previousStatus: shipment.status },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: ctx.company.id,
       entityType: 'exchange_shipment',
       entityId: exchangeShipmentId,
       metricKey: 'exchange_shipment.cancelled',
       numericValue: 1,
       dimensions: { reason },
-    }).catch(() => {})
+    })
 
     return { success: true }
   } catch (err) {
@@ -1329,7 +1329,7 @@ export async function updateExchangeShipmentInvoiceAmount(
       data: { invoiceAmount },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'exchange_shipment.invoice_updated',
       entityType: 'exchange_shipment',
       entityId: exchangeShipmentId,

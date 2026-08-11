@@ -81,7 +81,7 @@ export async function POST(req: Request) {
       }
       transactionIds.push(txnResult.transactionId!)
 
-      await insertAuditLog({
+      insertAuditLog({
         action: txnType === 'opening_stock' ? 'stock.opening' : 'stock.received',
         entityType: 'variant',
         entityId: item.org_variant_id,
@@ -100,7 +100,7 @@ export async function POST(req: Request) {
     )
     const totalQuantity = d.items.reduce((sum, item) => sum + item.quantity, 0)
     const firstVariantId = d.items[0]?.org_variant_id ?? d.location_id
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: firstVariantId,

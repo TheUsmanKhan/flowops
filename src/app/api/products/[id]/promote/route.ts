@@ -96,7 +96,7 @@ export async function POST(
       }
     }
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'product.promoted',
       entityType: 'product',
       entityId: productId,
@@ -107,7 +107,7 @@ export async function POST(
       oldValues,
       newValues: { productScope: d.target_scope, selectedCompanies: d.selected_company_ids },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId,
       entityType: 'product',
       entityId: productId,

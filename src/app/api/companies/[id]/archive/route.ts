@@ -63,7 +63,7 @@ export async function POST(req: NextRequest) {
       data: { activeCompanyId: null, activeOrgId: null },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'company.archived',
       entityType: 'company',
       entityId: company.id,

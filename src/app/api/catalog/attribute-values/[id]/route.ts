@@ -57,7 +57,7 @@ export async function PATCH(
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'attribute_value.updated',
       entityType: 'attribute_value',
       entityId: id,
@@ -67,7 +67,7 @@ export async function PATCH(
       employeeId: caller.id,
       newValues: parsed.data,
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'catalog',
       entityId: id,
@@ -112,7 +112,7 @@ export async function DELETE(
 
     await db.orgAttributeValue.delete({ where: { id } })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'attribute_value.deleted',
       entityType: 'attribute_value',
       entityId: id,
@@ -122,7 +122,7 @@ export async function DELETE(
       employeeId: caller.id,
       oldValues: { value: value.value },
     })
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'catalog',
       entityId: id,

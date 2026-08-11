@@ -77,7 +77,7 @@ export async function POST(req: Request) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'stock_loss.theft_reported',
       entityType: 'stock_loss',
       entityId: lossRecord.id,
@@ -88,7 +88,7 @@ export async function POST(req: Request) {
       newValues: { quantity: d.quantity, subType: d.sub_type, quarantined: true },
     })
 
-    await insertMetricEvent({
+    insertMetricEvent({
       companyId: company.id,
       entityType: 'product',
       entityId: d.org_variant_id,

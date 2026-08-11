@@ -239,7 +239,7 @@ export async function checkAndFulfillBackorders(
             },
           })
 
-          await insertAuditLog({
+          insertAuditLog({
             action: 'order.backorder_fulfilled',
             entityType: 'order_item',
             entityId: entry.orderItemId,
@@ -255,14 +255,14 @@ export async function checkAndFulfillBackorders(
           const daysWaited = Math.round(
             (Date.now() - entry.backorderedAt.getTime()) / (1000 * 60 * 60 * 24),
           )
-          await insertMetricEvent({
+          insertMetricEvent({
             companyId: entry.companyId,
             entityType: 'product',
             entityId: orgVariantId,
             metricKey: 'order.backorder_fulfilled',
             numericValue: entry.quantity,
             dimensions: { order_id: entry.orderId, days_waited: daysWaited },
-          }).catch(() => {})
+          })
 
           // Recompute the parent order's status
           if (entry.orderId) {
@@ -281,7 +281,7 @@ export async function checkAndFulfillBackorders(
                 data: { status: 'confirmed' },
               })
 
-              await insertAuditLog({
+              insertAuditLog({
                 action: 'order.all_backorders_fulfilled',
                 entityType: 'order',
                 entityId: entry.orderId,
@@ -342,7 +342,7 @@ export async function checkAndFulfillBackorders(
             },
           })
 
-          await insertAuditLog({
+          insertAuditLog({
             action: 'exchange_shipment.backorder_fulfilled',
             entityType: 'exchange_shipment',
             entityId: entry.exchangeShipmentId,
@@ -359,7 +359,7 @@ export async function checkAndFulfillBackorders(
           const daysWaited = Math.round(
             (Date.now() - entry.backorderedAt.getTime()) / (1000 * 60 * 60 * 24),
           )
-          await insertMetricEvent({
+          insertMetricEvent({
             companyId: entry.companyId,
             entityType: 'exchange_shipment',
             entityId: entry.exchangeShipmentId,
@@ -369,7 +369,7 @@ export async function checkAndFulfillBackorders(
               exchange_shipment_number: entry.exchangeShipmentNumber,
               days_waited: daysWaited,
             },
-          }).catch(() => {})
+          })
 
           results.push({
             orderItemId: entry.exchangeShipmentId, // reuse field for result shape compat

@@ -140,7 +140,7 @@ export async function POST(req: NextRequest) {
       },
     })
 
-    await insertAuditLog({
+    insertAuditLog({
       action: 'returned_stitched.received',
       entityType: 'returned_stitched',
       entityId: record.id,
