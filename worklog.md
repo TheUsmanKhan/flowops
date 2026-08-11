@@ -7406,3 +7406,43 @@ Stage Summary:
 - Courier status sync is now RELIABLE: the bulk-to-single-track fallback handles PostEx's intermittent 400 errors, and the per-item failure branch surfaces real errors instead of hiding them. The 3-day backlog is cleared (all 5 active orders have fresh statuses). For ongoing operation, the poll cron needs an external scheduler (the vercel.json cron only works on Vercel deployments).
 - Scan module is now VISIBLE: markOrderPacked transitions the order to 'processing' (status badge updates), the ScanStation invalidates queries (other tabs refresh), and a "Packed" sub-badge appears on the order detail page.
 - All 5 fixes verified working. Lint passes.
+
+---
+Task ID: STATUS-AUTOPOLL-1
+Agent: main
+Task: Courier statuses still not coming — set up automated polling + trace PostEx API
+
+Work Log:
+- Traced the EXACT PostEx API response for all active Muzammal Collection orders via direct adapter.trackShipment() calls.
+- Found: PostEx's API returns `transactionStatus: "Booked"` for ALL 5 active orders (ORD-2026-00001, 04, 05, 07, 08). The `transactionStatusHistory` shows 2 entries, both "At Muzammil Embroidery & Collection Warehouse" — meaning PostEx's system has NOT registered a pickup yet for these orders.
+- Confirmed the status mapping is CORRECT: "Booked" → courierSubStatus='pickup_requested' (no dispatch trigger). When PostEx updates to "Picked By PostEx", the mapping correctly sets triggerDispatch=true → calls performOrderDispatch → sets order.status='dispatched'.
+- ROOT CAUSE of user's complaint: the poll was not running automatically. The vercel.json cron (*/30 * * * *) only works on Vercel deployments — this app runs on a long-lived Bun/Node server, so the cron NEVER fired. The 3-day gap (Aug 8 → Aug 11) was because there was no automated poller at all.
+
+FIX APPLIED:
+- Created /home/z/my-project/instrumentation.ts — Next.js's official server-side initialization hook. It starts an in-process setInterval that calls pollPostExOrderStatuses() every 30 minutes (matching the vercel.json schedule). The first poll fires 1 minute after server start (to let the server warm up). Subsequent polls fire every 30 minutes automatically.
+- The instrumentation hook is auto-detected by Next.js 16 from the project root — no next.config.ts change needed.
+- Verified: server log shows `[instrumentation] Starting PostEx status poller (every 30 min)` on boot. Manual poll trigger confirmed: `polledOrders: 5, statusChanges: 0, errors: []` (0 errors = the bulk-to-single-track fallback from the previous fix is working).
+
+VERIFICATION:
+- Direct PostEx API trace: all 5 orders return `transactionStatus: "Booked"` (PostEx's system hasn't registered pickup yet — this is a PostEx API lag, NOT a FlowOps bug)
+- Fresh poll run: all 5 orders updated `lastPolledAt=0min ago`, `courierSubStatus=pickup_requested` (correct mapping of "Booked")
+- Auto-poller: confirmed started via instrumentation.ts log output
+- Status map: verified "Picked By PostEx" → triggerDispatch=true → performOrderDispatch → order.status='dispatched' (will fire automatically when PostEx updates)
+- Lint: 0 errors
+
+KEY FINDING FOR USER:
+- PostEx's API is currently returning "Booked" for all 5 active orders. This means PostEx's system has NOT registered a pickup for these orders yet — the parcels may be physically picked up but PostEx's API hasn't updated (common with courier APIs in Pakistan — rider picks up the parcel but doesn't update the system immediately).
+- When PostEx's API DOES update to "Picked By PostEx" (which triggers dispatch) or "En-Route" / "Out For Delivery" / "Delivered", FlowOps will automatically:
+  1. Poll within 30 minutes (via the new auto-poller)
+  2. Map the status correctly
+  3. Transition the order (dispatch → deduct inventory, delivered → mark delivered, etc.)
+  4. Update courierSubStatus for display
+- The user can also click "Refresh Courier Status" on any order detail page for an instant single-order update (uses the reliable single-track endpoint).
+
+FILES MODIFIED:
+1. /home/z/my-project/instrumentation.ts — NEW: starts in-process PostEx poller every 30 min via setInterval
+
+Stage Summary:
+- Automated polling is now LIVE. The instrumentation.ts hook starts a 30-minute interval on server boot — no external scheduler needed. When PostEx's API reflects the real-world pickup/dispatch, FlowOps will catch it within 30 minutes and auto-transition the order (dispatch, delivered, RTO, etc.).
+- The previous fix (bulk-to-single-track fallback) ensures the poll actually succeeds — the PostEx bulk API's intermittent 400 errors are now handled gracefully.
+- The current "Booked" status is coming directly from PostEx's API — it's not a FlowOps issue. When PostEx updates their system, FlowOps will reflect it automatically.
