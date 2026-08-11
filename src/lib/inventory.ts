@@ -799,3 +799,144 @@ export async function dispatchOrder(input: {
   }
   return { success: true }
 }
+
+/**
+ * Restock inventory for an RTO (Return To Origin) order — session-free
+ * version for use by courier polling jobs and webhooks (which have no user
+ * session and therefore can't call processOrderReturn() which uses
+ * getWorkspace()).
+ *
+ * For each DISPATCHED order item:
+ *   - Looks up the original sale_dispatched transaction to recover the
+ *     cost-per-unit that was locked at dispatch time.
+ *   - Calls processInventoryTransaction with type 'return_resellable'
+ *     (for stock_based items) or 'return_stitched_received' (for
+ *     made_to_order items) — which increments onHand AND recalculates WAC.
+ *   - Marks the order item with fulfillmentStatus='returned' +
+ *     autoProcessedAsPerfect=true + needsReview=true so it surfaces in the
+ *     exception-review queue for physical spot-checking (same as the manual
+ *     processOrderReturn path).
+ *
+ * For CONFIRMED/PROCESSING (not-yet-dispatched) reserved items: calls
+ * unreserveStockForOrder to release the reservation (no onHand change since
+ * onHand was never decremented).
+ *
+ * This function is IDEMPOTENT — it skips items whose fulfillmentStatus is
+ * already 'returned' (set by a prior restock call) so re-running a poll
+ * cycle doesn't double-restock.
+ *
+ * @returns { success, itemsRestocked } — never throws (errors logged per-item).
+ */
+export async function restockOrderForRto(
+  orderId: string,
+  context: {
+    organizationId: string
+    companyId: string
+    employeeId?: string | null
+    returnReason?: string
+  },
+): Promise<{ success: boolean; itemsRestocked: number }> {
+  const order = await db.order.findUnique({
+    where: { id: orderId },
+    select: {
+      id: true,
+      status: true,
+      dispatchLocationId: true,
+      organizationId: true,
+      companyId: true,
+      items: {
+        include: {
+          orgVariant: {
+            select: { id: true, sku: true, costPrice: true, fulfillmentType: true },
+          },
+        },
+      },
+    },
+  })
+  if (!order) return { success: false, itemsRestocked: 0 }
+
+  const locationId = order.dispatchLocationId
+  if (!locationId) {
+    console.error(`[restockOrderForRto] Order ${orderId} has no dispatchLocationId — cannot restock`)
+    return { success: false, itemsRestocked: 0 }
+  }
+
+  let itemsRestocked = 0
+
+  for (const item of order.items) {
+    // Idempotency: skip items already processed (fulfillmentStatus='returned')
+    if (item.fulfillmentStatus === 'returned') continue
+
+    if (item.fulfillmentStatus === 'dispatched') {
+      // Dispatched item — onHand was decremented at dispatch. Restock it.
+      // Recover the cost-per-unit from the original sale_dispatched txn.
+      const dispatchTxn = await db.inventoryTransaction.findFirst({
+        where: {
+          orgVariantId: item.orgVariantId,
+          locationId,
+          transactionType: 'sale_dispatched',
+          referenceType: 'order',
+          referenceId: orderId,
+        },
+        select: { costPerUnit: true },
+        orderBy: { recordedAt: 'desc' },
+      })
+      const costPerUnit = dispatchTxn ? Number(dispatchTxn.costPerUnit) : Number(item.orgVariant.costPrice)
+
+      const txnType = item.fulfillmentTypeSnapshot === 'made_to_order'
+        ? 'return_stitched_received'
+        : 'return_resellable'
+
+      const txnResult = await processInventoryTransaction({
+        orgVariantId: item.orgVariantId,
+        locationId,
+        organizationId: order.organizationId,
+        companyId: order.companyId,
+        employeeId: context.employeeId ?? null,
+        transactionType: txnType,
+        quantity: item.quantity,
+        costPerUnit,
+        referenceType: 'order',
+        referenceId: orderId,
+        notes: `Auto-processed RTO return (assumed ${txnType === 'return_resellable' ? 'resellable' : 'perfect'}). Reason: ${context.returnReason ?? 'courier returned'}`,
+      })
+
+      if (txnResult.success) {
+        await db.orderItem.update({
+          where: { id: item.id },
+          data: {
+            fulfillmentStatus: 'returned',
+            autoProcessedAsPerfect: true,
+            needsReview: true,
+          },
+        })
+        itemsRestocked++
+      } else {
+        console.error(`[restockOrderForRto] Failed to restock item ${item.id}: ${txnResult.error}`)
+      }
+    } else if (item.fulfillmentStatus === 'reserved') {
+      // Reserved but not dispatched — just release the reservation.
+      const unreserveResult = await unreserveStockForOrder({
+        orgVariantId: item.orgVariantId,
+        locationId,
+        organizationId: order.organizationId,
+        companyId: order.companyId,
+        employeeId: context.employeeId ?? null,
+        quantity: item.quantity,
+        orderId,
+      })
+      if (unreserveResult.success) {
+        await db.orderItem.update({
+          where: { id: item.id },
+          data: { fulfillmentStatus: 'returned' },
+        })
+        itemsRestocked++
+      } else {
+        console.error(`[restockOrderForRto] Failed to unreserve item ${item.id}: ${unreserveResult.error}`)
+      }
+    }
+    // backordered / pending items: no inventory action needed
+  }
+
+  return { success: true, itemsRestocked }
+}

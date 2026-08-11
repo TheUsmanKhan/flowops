@@ -202,30 +202,21 @@ export async function processLeopardWebhookUpdates(
       if (mapping.triggerRto) {
         try {
           if (entityType === 'order') {
-            // For orders: if still confirmed/processing, release reservation;
-            // if already dispatched, call processOrderReturn (but it uses getWorkspace).
-            // Since webhook has no session, we use performOrderDispatch's pattern:
-            // update directly + release reservation (same as the polling job).
-            if (currentStatus === 'confirmed' || currentStatus === 'processing') {
-              // Release reservation (item never left)
-              const reservedItems = await db.orderItem.findMany({
-                where: { orderId: entityId, fulfillmentStatus: 'reserved' },
-              })
-              for (const item of reservedItems) {
-                const locationId = item.reservedLocationId
-                if (!locationId) continue
-                const { unreserveStockForOrder } = await import('@/lib/inventory')
-                await unreserveStockForOrder({
-                  orgVariantId: item.orgVariantId,
-                  locationId,
-                  organizationId,
-                  companyId,
-                  quantity: item.quantity,
-                  orderId: entityId,
-                }).catch(() => {})
-              }
+            // Restock inventory for the RTO — handles BOTH cases:
+            //   - confirmed/processing items: releases the reservation (unreserve)
+            //   - dispatched items: restocks onHand via return_resellable/return_stitched_received
+            // Previously the dispatched case was a GAP (onHand was decremented
+            // at dispatch but never restored on RTO → stock permanently lost).
+            const { restockOrderForRto } = await import('@/lib/inventory')
+            const restockResult = await restockOrderForRto(entityId, {
+              organizationId,
+              companyId,
+              returnReason: `Leopard webhook: ${rawStatus} (${update.reason ?? 'no reason provided'})`,
+            })
+            if (restockResult.itemsRestocked > 0) {
+              console.log(`[leopard-webhook] Restocked ${restockResult.itemsRestocked} item(s) for RTO order ${entityId}`)
             }
-            // Mark as RTO directly (processOrderReturn uses getWorkspace)
+            // Mark as RTO
             await db.order.update({
               where: { id: entityId },
               data: { status: 'rto', returnedAt: now },

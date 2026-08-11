@@ -30,7 +30,7 @@ import { mapPostExStatus } from '@/lib/integrations/couriers/postex.status-map'
 import type { TrackShipmentResult } from '@/lib/integrations/types'
 import { performOrderDispatch } from '@/lib/actions/order.actions'
 import { performExchangeShipmentDispatch, performExchangeShipmentRto } from '@/lib/actions/exchange-shipment.actions'
-import { unreserveStockForOrder } from '@/lib/inventory'
+import { unreserveStockForOrder, restockOrderForRto } from '@/lib/inventory'
 
 interface ActionResult<T = unknown> {
   success: boolean
@@ -258,33 +258,24 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
         }
       }
 
-      // returned → RTO (release reservation if still confirmed/processing)
+      // returned → RTO (restock inventory for both reserved AND dispatched items)
       if (trackResult.status === 'returned') {
         const freshOrder = await db.order.findUnique({
           where: { id: order.id },
-          select: { status: true, dispatchLocationId: true, organizationId: true },
+          select: { status: true, dispatchLocationId: true, organizationId: true, companyId: true },
         })
         if (freshOrder && freshOrder.status !== 'rto' && freshOrder.status !== 'cancelled' && freshOrder.status !== 'refunded') {
-          if (freshOrder.status === 'confirmed' || freshOrder.status === 'processing') {
-            const reservedItems = await db.orderItem.findMany({
-              where: { orderId: order.id, fulfillmentStatus: 'reserved' },
-            })
-            for (const item of reservedItems) {
-              const locationId = item.reservedLocationId ?? freshOrder.dispatchLocationId
-              if (!locationId) continue
-              try {
-                await unreserveStockForOrder({
-                  orgVariantId: item.orgVariantId,
-                  locationId,
-                  organizationId: freshOrder.organizationId,
-                  companyId: integration.companyId,
-                  quantity: item.quantity,
-                  orderId: order.id,
-                })
-              } catch (e) {
-                console.error(`[trackSingle] Failed to unreserve stock for item ${item.id}:`, e)
-              }
-            }
+          // Restock inventory — handles BOTH confirmed/processing (unreserve)
+          // AND dispatched (return_resellable/return_stitched_received) cases.
+          // Previously the dispatched case was a GAP (onHand never restored).
+          const restockResult = await restockOrderForRto(order.id, {
+            organizationId: freshOrder.organizationId,
+            companyId: freshOrder.companyId ?? integration.companyId,
+            employeeId: integration.createdBy ?? null,
+            returnReason: `PostEx courier returned (status: returned, detected via trackSingleOrderStatus)`,
+          })
+          if (restockResult.itemsRestocked > 0) {
+            console.log(`[trackSingle] Restocked ${restockResult.itemsRestocked} item(s) for RTO order ${order.flowopsOrderNumber}`)
           }
           await db.order.update({
             where: { id: order.id },
@@ -547,34 +538,26 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                 try {
                   const order = await db.order.findUnique({
                     where: { id: entry.id },
-                    select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true },
+                    select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true, companyId: true },
                   })
                   if (order && order.status !== 'rto' && order.status !== 'cancelled' && order.status !== 'refunded') {
-                    // If still confirmed/processing, release the reservation for
-                    // all reserved items (the item came back — don't dispatch it).
-                    if (order.status === 'confirmed' || order.status === 'processing') {
-                      const reservedItems = await db.orderItem.findMany({
-                        where: { orderId: entry.id, fulfillmentStatus: 'reserved' },
-                      })
-                      for (const item of reservedItems) {
-                        const locationId = item.reservedLocationId ?? order.dispatchLocationId
-                        if (!locationId) continue
-                        try {
-                          await unreserveStockForOrder({
-                            orgVariantId: item.orgVariantId,
-                            locationId,
-                            organizationId: order.organizationId,
-                            companyId: integration.companyId,
-                            quantity: item.quantity,
-                            orderId: entry.id,
-                          })
-                        } catch (e) {
-                          console.error(`[poll] Failed to unreserve stock for RTO item ${item.id}:`, e)
-                        }
-                      }
+                    // Restock inventory for the RTO — handles BOTH cases:
+                    //   - confirmed/processing items: releases the reservation (unreserve)
+                    //   - dispatched items: restocks onHand via return_resellable/return_stitched_received
+                    // Previously the dispatched case was a GAP (onHand was
+                    // decremented at dispatch but never restored on RTO →
+                    // stock permanently lost). Now fixed via restockOrderForRto().
+                    const restockResult = await restockOrderForRto(entry.id, {
+                      organizationId: order.organizationId,
+                      companyId: order.companyId ?? integration.companyId,
+                      employeeId: integration.createdBy ?? null,
+                      returnReason: `PostEx courier returned (status: returned, detected via single-order track)`,
+                    })
+                    if (restockResult.itemsRestocked > 0) {
+                      console.log(`[poll] Restocked ${restockResult.itemsRestocked} item(s) for RTO order ${order.flowopsOrderNumber}`)
                     }
-                    // Mark as RTO directly (bypass processOrderReturn's
-                    // getWorkspace() which breaks multi-tenant polling)
+
+                    // Mark as RTO
                     await db.order.update({
                       where: { id: entry.id },
                       data: {
@@ -582,7 +565,7 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                         returnedAt: new Date(),
                       },
                     })
-                    console.log(`[poll] Marked order ${order.flowopsOrderNumber} as RTO (PostEx returned; reservation released)`)
+                    console.log(`[poll] Marked order ${order.flowopsOrderNumber} as RTO (PostEx returned; inventory restocked)`)
                   }
                 } catch (e) {
                   console.error(`[poll] Failed to mark order ${entry.id} as RTO:`, e)

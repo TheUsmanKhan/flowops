@@ -637,7 +637,7 @@ export async function createManualOrder(
         quantity: itemData.quantity,
         unitPrice: itemData.unitPrice,
         lineTotal: itemData.lineTotal,
-        fulfillmentStatus: 'reserved', // PLACEHOLDER — reserveOrderStock validates/adjusts
+        fulfillmentStatus: 'pending', // 'pending' = not yet reserved. reserveOrderStock() flips to 'reserved'/'backordered' on confirmation.
         fulfillmentTypeSnapshot: itemData.fulfillmentTypeSnapshot,
         reservedLocationId: d.dispatch_location_id,
       })),
@@ -962,6 +962,14 @@ export async function createOrderFromShopifyWebhook(
     }
     const orderDetail = orderDetailParts.join(', ')
 
+    // Resolve the company's default dispatch location so Shopify orders
+    // can reserve stock against it (same as manual orders).
+    const companySettings = await db.companyOrderSetting.findUnique({
+      where: { companyId },
+      select: { defaultDispatchLocationId: true },
+    })
+    const shopifyDispatchLocationId = companySettings?.defaultDispatchLocationId ?? null
+
     const order = await db.order.create({
       data: {
         organizationId,
@@ -985,6 +993,10 @@ export async function createOrderFromShopifyWebhook(
         advancePaidAt,
         remainingCodAmount,
         confirmedAt,
+        // dispatchLocationId is required for stock reservation to know
+        // which inventory pool to reserve against. Falls back to the
+        // company's default dispatch location.
+        dispatchLocationId: shopifyDispatchLocationId,
         // delivery_address is the order's own editable snapshot. Use the
         // Shopify address if provided; otherwise fall back to the saved
         // default address's text (if any).
@@ -1008,8 +1020,11 @@ export async function createOrderFromShopifyWebhook(
           quantity: itemData.quantity,
           unitPrice: itemData.unitPrice,
           lineTotal: itemData.quantity * itemData.unitPrice,
-          fulfillmentStatus: 'reserved',
+          // 'pending' = not yet reserved. reserveOrderStock() (called below
+          // if the order is confirmed) flips to 'reserved'/'backordered'.
+          fulfillmentStatus: 'pending',
           fulfillmentTypeSnapshot: itemData.fulfillmentTypeSnapshot,
+          reservedLocationId: shopifyDispatchLocationId,
         },
       })
     }
@@ -1031,6 +1046,18 @@ export async function createOrderFromShopifyWebhook(
     })
 
     await updateCustomerStats(customerId)
+
+    // If the order auto-confirmed (paid/partially_paid OR company doesn't
+    // require confirmation), run stock reservation immediately — same as
+    // createManualOrder does. Previously this was MISSING, so confirmed
+    // Shopify orders never reserved stock.
+    if (orderStatus === 'confirmed') {
+      await reserveOrderStock(order.id, {
+        company: { id: companyId, organizationId },
+        user: { id: ctx.user.id },
+        employee: { id: ctx.employee.id },
+      })
+    }
 
     insertMetricEvent({
       companyId,
@@ -1195,6 +1222,19 @@ export async function convertPaymentStatus(
         status: updateData.status ?? order.status,
       },
     })
+
+    // If this payment conversion ALSO confirmed the order (was pending → now
+    // confirmed), run stock reservation — same as confirmOrder() does.
+    // Previously this was MISSING, so converting a pending COD order to
+    // prepaid/advance-paid confirmed it WITHOUT reserving any stock.
+    if (order.status === 'pending' && updateData.status === 'confirmed') {
+      const reserveResult = await reserveOrderStock(d.order_id, ctx)
+      if (!reserveResult.success) {
+        // Non-fatal — the order is confirmed + payment converted, but
+        // reservation had issues (insufficient stock, etc.). The items'
+        // fulfillmentStatus reflects the outcome (reserved/backordered/failed).
+      }
+    }
 
     insertMetricEvent({
       companyId: ctx.company.id,
