@@ -84,15 +84,33 @@ export async function bookOrderWithCourier(
     return { success: false, error: 'orderId and companyIntegrationId are required' }
   }
 
+  // ════════════════════════════════════════════════════════════════
+  // TEMPORARY DIAGNOSTIC INSTRUMENTATION — booking flow timing.
+  // Measures each step's wall-clock duration and logs a structured
+  // breakdown at the end. Will be removed after diagnosis.
+  // ════════════════════════════════════════════════════════════════
+  const T: Record<string, number> = {}
+  const marks: Record<string, number> = {}
+  function mark(label: string) { marks[label] = Date.now() }
+  function measure(from: string, to: string, key: string) { T[key] = marks[to] - marks[from] }
+  const flowStart = Date.now()
+  mark('start')
+
   try {
+    mark('authStart')
     const ctx = await getWorkspace()
     await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+    mark('authEnd')
+    measure('authStart', 'authEnd', '1_auth_resolution')
 
     // ── Fetch the integration ──
+    mark('integrationFetchStart')
     const integration = await db.companyIntegration.findFirst({
       where: { id: companyIntegrationId, companyId: ctx.company.id, isActive: true },
       include: { provider: true },
     })
+    mark('integrationFetchEnd')
+    measure('integrationFetchStart', 'integrationFetchEnd', '2a_integration_fetch')
     if (!integration) {
       const reason = `Courier integration not found or inactive (integrationId: ${companyIntegrationId}).`
       await db.order.update({
@@ -111,6 +129,7 @@ export async function bookOrderWithCourier(
     }
 
     // ── Fetch the order with items + variant weights + customer ──
+    mark('orderLoadStart')
     const order = await db.order.findFirst({
       where: { id: orderId, companyId: ctx.company.id },
       include: {
@@ -129,6 +148,8 @@ export async function bookOrderWithCourier(
         },
       },
     })
+    mark('orderLoadEnd')
+    measure('orderLoadStart', 'orderLoadEnd', '2b_order_load')
     if (!order) {
       return { success: false, error: 'Order not found.' }
     }
@@ -175,11 +196,14 @@ export async function bookOrderWithCourier(
     // ── Validate city (with live courier fallback + staleness check) ──
     // revalidateCityAtBookingTime() is provider-agnostic — it uses the
     // adapter's fetchOperationalCities() for the live fallback.
+    mark('cityValidateStart')
     const cityValid = await revalidateCityAtBookingTime(
       providerKey,
       deliveryCity,
       integration.id,
     )
+    mark('cityValidateEnd')
+    measure('cityValidateStart', 'cityValidateEnd', '4_city_validation')
     if (!cityValid) {
       const reason = `City not recognized: "${deliveryCity}" is not available for delivery with ${integration.provider.providerName}. The city may need to be resolved or the courier may not serve this area.`
       await db.order.update({
@@ -196,16 +220,20 @@ export async function bookOrderWithCourier(
     }
 
     // ── Compute weight ──
+    mark('weightStart')
     const weightResult = calculateOrderWeightKg(
       order.items.map((i) => ({
         quantity: i.quantity,
         variant: { weightKg: i.orgVariant.weightKg as { toNumber: () => number } | number | null },
       })),
     )
+    mark('weightEnd')
+    measure('weightStart', 'weightEnd', '3_weight_calc')
 
     // ── Compute orderType (PostEx-specific; Leopard doesn't use this concept) ──
     // Leopard's shipment_type field is a DIFFERENT thing (optional, defaults to "overnight")
     // — do NOT apply PostEx's Normal/Overland/Replacement logic to Leopard.
+    mark('orderTypeStart')
     let orderType: string | undefined
     if (providerKey === 'postex') {
       orderType = options.orderType || determinePostExOrderType(
@@ -216,10 +244,13 @@ export async function bookOrderWithCourier(
     } else {
       orderType = options.orderType // pass through for other couriers (may be undefined)
     }
+    mark('orderTypeEnd')
+    measure('orderTypeStart', 'orderTypeEnd', '5_orderType_calc')
 
     // ── Get pickup address code ──
     // Priority: per-call override > order's persisted pickupAddressId >
     // integration's default.
+    mark('pickupAddrStart')
     let pickupAddressCode = options.pickupAddressCode
     if (!pickupAddressCode && order.pickupAddressId) {
       const orderAddr = await db.courierPickupAddress.findFirst({
@@ -235,6 +266,8 @@ export async function bookOrderWithCourier(
       })
       pickupAddressCode = defaultAddr?.providerAddressCode
     }
+    mark('pickupAddrEnd')
+    measure('pickupAddrStart', 'pickupAddrEnd', '6_pickup_addr_resolution')
 
     // ── For Leopard: resolve delivery city NAME to numeric cityId ──
     // Leopard requires numeric city IDs (integers), NOT city name strings.
@@ -285,9 +318,31 @@ export async function bookOrderWithCourier(
     }
 
     // ── Call the courier adapter ──
+    // executeLoggedIntegrationAction wraps the adapter call AND does an
+    // awaited DB write (integration_action_logs insert) in its finally
+    // block. To isolate the EXTERNAL API call time from the log write, we
+    // measure the adapter call separately from the wrapper.
     const credentials = decryptCredentials(integration.credentialsEncrypted!)
     const adapter = getCourierAdapter(providerKey, credentials)
 
+    // Measure the adapter call (external API) in isolation
+    mark('adapterCallStart')
+    let adapterResult: BookShipmentResult
+    try {
+      adapterResult = await adapter.bookShipment(bookInput)
+    } catch (err) {
+      mark('adapterCallEnd')
+      measure('adapterCallStart', 'adapterCallEnd', '7_external_api_call')
+      T['7_external_api_call'] = marks['adapterCallEnd'] - marks['adapterCallStart']
+      throw err
+    }
+    mark('adapterCallEnd')
+    measure('adapterCallStart', 'adapterCallEnd', '7_external_api_call')
+
+    // Now wrap in the logged action — but the fn is a no-op since we
+    // already called the adapter. We pass the captured result so the
+    // logged-call wrapper only does its DB write (timing it separately).
+    mark('loggedActionWriteStart')
     const bookResult = await executeLoggedIntegrationAction<BookShipmentResult>({
       companyIntegrationId: integration.id,
       organizationId: ctx.company.organizationId,
@@ -295,8 +350,10 @@ export async function bookOrderWithCourier(
       direction: 'outbound',
       relatedEntityType: 'order',
       relatedEntityId: orderId,
-      fn: async () => adapter.bookShipment(bookInput),
+      fn: async () => adapterResult,
     })
+    mark('loggedActionWriteEnd')
+    measure('loggedActionWriteStart', 'loggedActionWriteEnd', '8_action_log_write')
 
     if (!bookResult.success || !bookResult.trackingNumber) {
       const reason = bookResult.error || 'Booking failed — no tracking number returned.'
@@ -349,6 +406,7 @@ export async function bookOrderWithCourier(
       }
     }
 
+    mark('orderUpdateStart')
     await db.order.update({
       where: { id: orderId },
       data: {
@@ -363,8 +421,11 @@ export async function bookOrderWithCourier(
         ...(courierSlipStoragePath ? { courierSlipStoragePath } : {}),
       },
     })
+    mark('orderUpdateEnd')
+    measure('orderUpdateStart', 'orderUpdateEnd', '9_order_update')
 
-    // Audit log
+    // Audit log (fire-and-forget — see src/lib/audit.ts)
+    mark('auditMetricStart')
     insertAuditLog({
       action: 'order.auto_booked',
       entityType: 'order',
@@ -382,6 +443,24 @@ export async function bookOrderWithCourier(
         courierSlipStoragePath,
       },
     })
+    mark('auditMetricEnd')
+    measure('auditMetricStart', 'auditMetricEnd', '10_audit_metric')
+
+    // ════════════════════════════════════════════════════════════════
+    // LOG THE TIMING BREAKDOWN
+    // ════════════════════════════════════════════════════════════════
+    const totalMs = Date.now() - flowStart
+    const codebaseMs = totalMs - (T['7_external_api_call'] ?? 0)
+    console.log(JSON.stringify({
+      __BOOKING_TIMING__: true,
+      orderId,
+      orderNumber: order.flowopsOrderNumber,
+      provider: providerKey,
+      steps_ms: T,
+      external_api_ms: T['7_external_api_call'] ?? 0,
+      codebase_ms: codebaseMs,
+      total_ms: totalMs,
+    }))
 
     return {
       success: true,
@@ -396,6 +475,13 @@ export async function bookOrderWithCourier(
     // Any uncaught error (credential decryption, network, etc.) — persist
     // the failure status so the order shows up in the Workbench for retry.
     const reason = err instanceof Error ? err.message : 'Failed to book order'
+    console.error(JSON.stringify({
+      __BOOKING_TIMING_ERROR__: true,
+      orderId,
+      steps_ms: T,
+      total_ms: Date.now() - flowStart,
+      error: reason,
+    }))
     try {
       await db.order.update({
         where: { id: orderId },

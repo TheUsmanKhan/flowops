@@ -5604,3 +5604,32 @@ PART D — Conclusions / next-action recommendations (research-only — no code 
 
   No code was modified. Findings are ready for a follow-up refactor task.
 
+
+---
+Task ID: BOOKING-DIAG-1
+Agent: main
+Task: Diagnose why courier booking is slower than other operations — timing instrumentation + 3 real test bookings + redundancy/blocking checks. Diagnosis only, no fixes.
+
+Work Log:
+- Read full booking flow: bookOrderWithCourier() (booking.actions.ts), executeLoggedIntegrationAction() (logged-call.ts), revalidateCityAtBookingTime() (city-matcher.ts), PostEx adapter.bookShipment(), Workbench book route.
+- Added temporary timing instrumentation to bookOrderWithCourier() measuring 10 steps: auth, integration fetch, order load, weight, city validation, orderType, pickup addr, external API call, action log write, order update, audit/metric.
+- Restructured adapter call to isolate external API time (step 7) from the logged-action DB write (step 8) — adapter called directly, then executeLoggedIntegrationAction runs with no-op fn to measure only its INSERT overhead.
+- Restored .env (was reverted to SQLite), reconnected PostEx token, ensured 873 cities cached (Lahore fresh 4min ago → Tier-1 fast path).
+- Ran 4 real test bookings with live PostEx API (all succeeded with real tracking numbers):
+  • TEST 1: Workbench booking ORD-2026-00001 → tracking 27150830016066
+  • TEST 2: Retry ORD-2026-00004 → tracking 20150830016067
+  • TEST 3: Retry ORD-2026-00005 → tracking 23150830016068
+  • TEST 4: Auto-booking via order creation ORD-2026-00008 → tracking 23150830016069
+- Collected per-step timing breakdown from console.log JSON output.
+- Checked city validation redundancy: matchCity() is NOT called inside booking flow — only revalidateCityAtBookingTime(). matchCity() is only used by /api/couriers/match-city (separate UI mismatch resolver). NO redundancy within a single booking request.
+- Confirmed audit/metric fire-and-forget status on booking path: insertAuditLog (line 368) + insertMetricEvent (lines 502, 512) are NOT awaited — they return void via fireAndForget(). Step 10 measured 0ms. BUT executeLoggedIntegrationAction's db.integrationActionLog.create() in the finally block IS awaited (blocking) — measured ~200ms per booking (step 8).
+
+Stage Summary:
+- EXTERNAL API (PostEx) call: 601-991ms (avg ~795ms) — outside codebase control.
+- CODEBASE overhead (everything else): 1804-4054ms (avg ~2597ms) — THIS is the fixable slowness.
+- Top codebase-time consumers: order load (594-1208ms, includes customer+phones+items+variants JOIN), auth resolution (481-980ms, single getWorkspace query post-optimization), integration fetch (198-398ms), pickup address resolution (196-839ms, up to 2 sequential queries), action log write (~200ms, blocking), order update (~200ms).
+- City validation: 101-201ms (Tier-1 fast path, cache hit). NOT redundant.
+- Audit/metric: 0ms (fire-and-forget confirmed working).
+- Total booking time: 2409-5045ms (avg ~3391ms). External API is only ~23% of total; codebase overhead is ~77%.
+- Root cause of booking being slower than other ops: (1) the PostEx external API call adds ~800ms that non-booking operations don't have, AND (2) booking makes 6-7 sequential DB round-trips (auth, integration, order load, city validate, pickup addr×2, action log, order update) each costing ~100-300ms on the Mumbai DB → ~1.5-2.5s of pure DB latency, which is 3-4x what a simple read endpoint takes.
+- Instrumentation left in place (clearly marked TEMPORARY) — remove after diagnosis accepted.
