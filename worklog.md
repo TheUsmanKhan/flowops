@@ -7543,3 +7543,36 @@ FILES MODIFIED:
 
 Stage Summary:
 - The existing Roles module now fully supports the new permission keys (Customers, Scan, Payroll, extended Employees) — they render automatically in the permission selector. The ordersDataScope toggle appears in the role editor only when the role has any orders.* permission. The getOrdersDataScope(ctx) helper is exported and ready for Phase 3. All changes are additive — no existing role behavior was changed. Verified end-to-end with create/toggle/save/reload/delete test.
+
+---
+Task ID: SALES-ATTRIBUTION-1
+Agent: main
+Task: Phase 3 — Auto-set salesEmployeeId on order creation + expose in order list/detail APIs
+
+Work Log:
+- In createManualOrder() (src/lib/actions/order.actions.ts), added `salesEmployeeId: ctx.employee.id` to the db.order.create() data object. Automatic — no manual step or UI control. Set once at creation, never changes (represents "who sold this", not "who is handling this").
+- createOrderFromShopifyWebhook() intentionally LEFT UNCHANGED — Shopify/Daraz webhook-created orders have no human salesperson to attribute to, so salesEmployeeId stays null for those (as designed).
+- Extended listOrders() (used by GET /api/orders):
+  • Added salesEmployeeId + salesEmployeeName to the return type
+  • Added salesEmployee relation to the Prisma include (selects id + user.fullName)
+  • Added salesEmployeeId + salesEmployeeName to the map output
+- Extended GET /api/orders/[id] detail route:
+  • Added salesEmployee relation to the Prisma include (selects id + designation + user.fullName)
+  • Added salesEmployeeId + salesEmployee object ({id, name, designation}) to the response
+- No changes to dispatch/cancel/RTO actions — salesEmployeeId is immutable after creation.
+
+VERIFICATION (ORD-2026-00012 created by Usman Khan / Owner role):
+- DB: salesEmployeeId = cmsn6x9cl0007jlrua8jqv1d8 (= createdBy = ctx.employee.id) ✅
+- DB: salesEmployee.name = "Usman Khan", designation = "Owner" ✅
+- DB: salesEmployeeId === createdBy → true ✅
+- GET /api/orders list: ORD-2026-00012 shows salesEmployeeId + salesEmployeeName="Usman Khan" ✅
+- GET /api/orders list: older orders (ORD-2026-00011, 00010) show salesEmployeeId=null (created before this fix) ✅
+- GET /api/orders/[id] detail: salesEmployeeId + salesEmployee={id, name, designation} all present ✅
+- Lint: 0 errors.
+
+FILES MODIFIED:
+1. src/lib/actions/order.actions.ts — createManualOrder: added salesEmployeeId to order.create; listOrders: added to type + include + map output
+2. src/app/api/orders/[id]/route.ts — GET: added salesEmployee to include + response
+
+Stage Summary:
+- Sales attribution is now automatic on every manual order creation. The salesEmployeeId field is set to ctx.employee.id (the authenticated employee creating the order) with no manual step. Exposed in both the order list (salesEmployeeId + salesEmployeeName) and order detail (salesEmployeeId + salesEmployee object with id/name/designation) APIs. Webhook-imported orders (Shopify/Daraz) correctly remain null. This is the single most important data-capture point — without it, none of the KPI, commission, or scoped-visibility features have any data to work from. Ready for Phase 4 (scoped order visibility using getOrdersDataScope).

@@ -55,6 +55,14 @@ export async function GET(
           orderBy: { createdAt: 'asc' },
         },
         dispatchLocation: { select: { id: true, name: true, city: true } },
+        // Phase 3: sales attribution — who sold this order
+        salesEmployee: {
+          select: {
+            id: true,
+            designation: true,
+            user: { select: { fullName: true } },
+          },
+        },
       },
     })
 
@@ -137,6 +145,18 @@ export async function GET(
         convertedAt: order.convertedAt?.toISOString() ?? null,
 
         createdAt: order.createdAt.toISOString(),
+
+        // Phase 3: sales attribution — who sold this order.
+        // Null for webhook-imported orders (Shopify/Daraz) which have no
+        // human salesperson to attribute to.
+        salesEmployeeId: order.salesEmployeeId,
+        salesEmployee: order.salesEmployee
+          ? {
+              id: order.salesEmployee.id,
+              name: order.salesEmployee.user.fullName,
+              designation: order.salesEmployee.designation,
+            }
+          : null,
       },
       customer: {
         ...order.customer,

@@ -623,6 +623,12 @@ export async function createManualOrder(
         skippedConfirmation,
         confirmedAt,
         createdBy: ctx.employee.id,
+        // ─── Sales attribution (Phase 3) ───────────────────────────────
+        // Whoever creates the order owns it — automatic, no manual step.
+        // This is the single most important data-capture point for KPI,
+        // commission, and scoped-visibility features. Set once at creation,
+        // never changes afterward (represents "who sold this").
+        salesEmployeeId: ctx.employee.id,
       },
     })
 
@@ -1532,6 +1538,9 @@ export async function listOrders(
     customerName: string
     customerPhone: string
     itemCount: number
+    /** Phase 3: sales attribution — who sold this order. Null for webhook-imported orders. */
+    salesEmployeeId: string | null
+    salesEmployeeName: string | null
   }>
   total: number
 }>> {
@@ -1636,6 +1645,13 @@ export async function listOrders(
               },
             },
           },
+          // Phase 3: fetch the attributed sales employee's name for display
+          salesEmployee: {
+            select: {
+              id: true,
+              user: { select: { fullName: true } },
+            },
+          },
           _count: { select: { items: true } },
         },
         orderBy: { createdAt: 'desc' },
@@ -1697,6 +1713,9 @@ export async function listOrders(
           customerName: o.customer.name,
           customerPhone: o.customer.phones[0]?.phoneRaw ?? null,
           itemCount: o._count.items,
+          // Phase 3: sales attribution
+          salesEmployeeId: o.salesEmployeeId,
+          salesEmployeeName: o.salesEmployee?.user?.fullName ?? null,
         })),
         total,
       },
