@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react'
 import { useAppStore, useCan } from '@/stores/app-store'
 import { api, FetchError, initials } from '@/lib/api-client'
 import type { EmployeePublic, RolePublic } from '@/lib/types'
-import { PERMISSIONS } from '@/lib/permissions'
+import { PERMISSIONS, PERMISSION_GROUPS, permissionLabel } from '@/lib/permissions'
 import { PageHeader } from '@/components/layout/dashboard-shell'
 import {
   Card,
@@ -32,9 +32,9 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from '@/components/ui/dialog'
 import { Textarea } from '@/components/ui/textarea'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   ArrowLeft,
   Loader2,
@@ -47,6 +47,11 @@ import {
   RotateCcw,
   Save,
   Building2,
+  Briefcase,
+  Lock,
+  TrendingUp,
+  Wallet,
+  Pencil,
 } from 'lucide-react'
 import { EmployeeStatusBadge } from '@/components/employees/employee-status-badge'
 import { toast } from 'sonner'
@@ -167,19 +172,18 @@ export function EmployeeDetailView({ employeeId }: { employeeId: string }) {
         actions={<EmployeeStatusBadge status={emp.status} />}
       />
 
-      <div className="grid gap-6 lg:grid-cols-3">
-        {/* Profile card */}
-        <Card className="lg:col-span-1">
-          <CardContent className="p-6 flex flex-col items-center text-center">
-            <Avatar className="h-20 w-20">
-              <AvatarImage src={emp.user.avatarUrl ?? undefined} />
-              <AvatarFallback className="bg-primary/10 text-primary text-xl">
-                {initials(emp.user.fullName)}
-              </AvatarFallback>
-            </Avatar>
-            <h3 className="mt-3 font-semibold text-lg">{emp.user.fullName}</h3>
-            <p className="text-sm text-muted-foreground">{emp.user.email}</p>
-            <div className="mt-2 flex flex-wrap items-center justify-center gap-1.5">
+      {/* Profile header card */}
+      <Card>
+        <CardContent className="p-6 flex flex-col sm:flex-row items-start sm:items-center gap-4">
+          <Avatar className="h-16 w-16">
+            <AvatarImage src={emp.user.avatarUrl ?? undefined} />
+            <AvatarFallback className="bg-primary/10 text-primary text-xl">
+              {initials(emp.user.fullName)}
+            </AvatarFallback>
+          </Avatar>
+          <div className="flex-1 min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="font-semibold text-lg">{emp.user.fullName}</h3>
               <Badge variant="secondary" className="gap-1">
                 {emp.role.isSystemRole && <ShieldCheck className="h-3 w-3" />}
                 {emp.role.name}
@@ -189,192 +193,346 @@ export function EmployeeDetailView({ employeeId }: { employeeId: string }) {
                   Elevated
                 </Badge>
               )}
-            </div>
-            <div className="mt-5 w-full space-y-2.5 text-sm text-left">
-              <InfoLine icon={Mail} label="Email" value={emp.user.email} />
-              {emp.user.phone && (
-                <InfoLine icon={Phone} label="Phone" value={emp.user.phone} />
-              )}
-              <InfoLine
-                icon={Calendar}
-                label="Joined"
-                value={format(new Date(emp.joinedAt), 'MMM d, yyyy')}
-              />
-              {emp.department && (
-                <InfoLine icon={Building2} label="Department" value={emp.department} />
-              )}
-              {emp.employeeCode && (
-                <InfoLine icon={ShieldCheck} label="Code" value={emp.employeeCode} />
+              {isSelf && (
+                <Badge variant="outline" className="text-xs">
+                  You
+                </Badge>
               )}
             </div>
+            <p className="text-sm text-muted-foreground mt-1">{emp.user.email}</p>
             {emp.terminatedAt && (
-              <div className="mt-4 w-full rounded-md bg-rose-50 border border-rose-200 p-3 text-left">
-                <p className="text-xs font-medium text-rose-700">Terminated</p>
-                <p className="text-xs text-rose-600 mt-0.5">
-                  {format(new Date(emp.terminatedAt), 'MMM d, yyyy')}
+              <div className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-rose-50 border border-rose-200 px-2 py-1">
+                <p className="text-xs font-medium text-rose-700">
+                  Terminated {format(new Date(emp.terminatedAt), 'MMM d, yyyy')}
                   {emp.terminatedBy && ` by ${emp.terminatedBy.fullName}`}
                 </p>
-                {emp.terminationReason && (
-                  <p className="text-xs text-rose-600 mt-1 italic">
-                    &ldquo;{emp.terminationReason}&rdquo;
-                  </p>
-                )}
               </div>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </CardContent>
+      </Card>
 
-        {/* Edit + actions */}
-        <div className="lg:col-span-2 space-y-6">
-          {(canManage || isSelf) && (
-            <Card>
+      {/* Tabbed profile */}
+      <Tabs defaultValue="overview">
+        <TabsList className="grid w-full grid-cols-2 sm:grid-cols-4 lg:w-[600px]">
+          <TabsTrigger value="overview" className="gap-1.5">
+            <Briefcase className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Overview</span>
+          </TabsTrigger>
+          <TabsTrigger value="access" className="gap-1.5">
+            <Lock className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Access</span>
+          </TabsTrigger>
+          <TabsTrigger value="performance" className="gap-1.5" disabled>
+            <TrendingUp className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Performance</span>
+          </TabsTrigger>
+          <TabsTrigger value="salary" className="gap-1.5" disabled>
+            <Wallet className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Salary</span>
+          </TabsTrigger>
+        </TabsList>
+
+        {/* ─── Overview Tab ─────────────────────────────────────────── */}
+        <TabsContent value="overview" className="space-y-6 mt-4">
+          <div className="grid gap-6 lg:grid-cols-3">
+            {/* Contact + info card */}
+            <Card className="lg:col-span-1">
               <CardHeader>
-                <CardTitle className="text-base">Employment details</CardTitle>
-                <CardDescription>
-                  {isSelf && !canManage
-                    ? 'You can edit your own department and designation.'
-                    : 'Update role, department, and HR metadata.'}
-                </CardDescription>
+                <CardTitle className="text-base">Contact information</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid sm:grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="employeeCode">Employee code</Label>
-                    <Input
-                      id="employeeCode"
-                      value={employeeCode}
-                      onChange={(e) => setEmployeeCode(e.target.value)}
-                      placeholder="EMP-001"
-                      disabled={!canManage}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="roleId">Role</Label>
-                    <Select
-                      value={roleId}
-                      onValueChange={setRoleId}
-                      disabled={!canManage}
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {roles.map((r) => (
-                          <SelectItem key={r.id} value={r.id}>
-                            {r.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="department">Department</Label>
-                    <Input
-                      id="department"
-                      value={department}
-                      onChange={(e) => setDepartment(e.target.value)}
-                      placeholder="Operations"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="designation">Designation</Label>
-                    <Input
-                      id="designation"
-                      value={designation}
-                      onChange={(e) => setDesignation(e.target.value)}
-                      placeholder="Sales Executive"
-                    />
+              <CardContent className="space-y-3 text-sm">
+                <InfoLine icon={Mail} label="Email" value={emp.user.email} />
+                {emp.user.phone && (
+                  <InfoLine icon={Phone} label="Phone" value={emp.user.phone} />
+                )}
+                <InfoLine
+                  icon={Calendar}
+                  label="Joined"
+                  value={format(new Date(emp.joinedAt), 'MMM d, yyyy')}
+                />
+                {emp.designation && (
+                  <InfoLine icon={Briefcase} label="Designation" value={emp.designation} />
+                )}
+                {emp.department && (
+                  <InfoLine icon={Building2} label="Department" value={emp.department} />
+                )}
+                {emp.employeeCode && (
+                  <InfoLine icon={ShieldCheck} label="Code" value={emp.employeeCode} />
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Edit employment details */}
+            <div className="lg:col-span-2 space-y-6">
+              {(canManage || isSelf) && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Employment details</CardTitle>
+                    <CardDescription>
+                      {isSelf && !canManage
+                        ? 'You can edit your own department and designation.'
+                        : 'Update role, department, and HR metadata.'}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="grid sm:grid-cols-2 gap-4">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="employeeCode">Employee code</Label>
+                        <Input
+                          id="employeeCode"
+                          value={employeeCode}
+                          onChange={(e) => setEmployeeCode(e.target.value)}
+                          placeholder="EMP-001"
+                          disabled={!canManage}
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="roleId">Role</Label>
+                        <Select
+                          value={roleId}
+                          onValueChange={setRoleId}
+                          disabled={!canManage}
+                        >
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {roles.map((r) => (
+                              <SelectItem key={r.id} value={r.id}>
+                                {r.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="department">Department</Label>
+                        <Input
+                          id="department"
+                          value={department}
+                          onChange={(e) => setDepartment(e.target.value)}
+                          placeholder="Operations"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="designation">Designation</Label>
+                        <Input
+                          id="designation"
+                          value={designation}
+                          onChange={(e) => setDesignation(e.target.value)}
+                          placeholder="Sales Executive"
+                        />
+                      </div>
+                    </div>
+                    {canManage && (
+                      <div className="flex justify-end">
+                        <Button onClick={saveChanges} disabled={saving}>
+                          {saving ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <>
+                              <Save className="h-4 w-4" /> Save changes
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Status actions */}
+              {canManage && !isSelf && emp.status !== 'terminated' && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">Employment status</CardTitle>
+                    <CardDescription>
+                      Suspend temporarily or terminate this employee. Terminated
+                      employees lose workspace access immediately.
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-wrap gap-2">
+                    {emp.status === 'active' && (
+                      <Button variant="outline" onClick={() => setTermDialog('suspend')}>
+                        <Ban className="h-4 w-4" /> Suspend
+                      </Button>
+                    )}
+                    {emp.status === 'suspended' && (
+                      <Button variant="outline" onClick={() => setTermDialog('reactivate')}>
+                        <RotateCcw className="h-4 w-4" /> Reactivate
+                      </Button>
+                    )}
+                    {canTerminate && (
+                      <Button variant="destructive" onClick={() => setTermDialog('terminate')}>
+                        <UserX className="h-4 w-4" /> Terminate
+                      </Button>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Subordinates */}
+              {emp.subordinates.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="text-base">
+                      Direct reports ({emp.subordinates.length})
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-2">
+                    {emp.subordinates.map((s) => (
+                      <button
+                        key={s.id}
+                        onClick={() => navigate({ name: 'employee-detail', id: s.id })}
+                        className="w-full flex items-center gap-3 rounded-md border px-3 py-2 hover:bg-muted/50 text-left"
+                      >
+                        <Avatar className="h-8 w-8">
+                          <AvatarFallback className="bg-muted text-xs">
+                            {initials(s.name)}
+                          </AvatarFallback>
+                        </Avatar>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium truncate">{s.name}</p>
+                          <p className="text-xs text-muted-foreground truncate">
+                            {s.designation ?? '—'}
+                          </p>
+                        </div>
+                      </button>
+                    ))}
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* ─── Access Tab ──────────────────────────────────────────── */}
+        <TabsContent value="access" className="space-y-6 mt-4">
+          <div className="grid gap-6 lg:grid-cols-3">
+            {/* Role summary card */}
+            <Card className="lg:col-span-1">
+              <CardHeader>
+                <CardTitle className="text-base">Current role</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck className="h-5 w-5 text-primary" />
+                  <div>
+                    <p className="text-sm font-medium">{emp.role.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {emp.role.roleTier === 'elevated'
+                        ? 'Elevated (full access)'
+                        : 'Standard role'}
+                    </p>
                   </div>
                 </div>
+                {emp.role.isSystemRole && (
+                  <Badge variant="secondary" className="text-xs">System role</Badge>
+                )}
+                <div className="pt-2">
+                  <p className="text-xs text-muted-foreground mb-1">Orders data scope</p>
+                  <Badge variant="outline" className="text-xs">
+                    {emp.role.ordersDataScope === 'own' ? 'Own orders only' : 'All company orders'}
+                  </Badge>
+                </div>
                 {canManage && (
-                  <div className="flex justify-end">
-                    <Button onClick={saveChanges} disabled={saving}>
-                      {saving ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <>
-                          <Save className="h-4 w-4" /> Save changes
-                        </>
-                      )}
-                    </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="w-full mt-3"
+                    onClick={() => navigate({ name: 'role-edit', id: emp.role.id })}
+                  >
+                    <Pencil className="h-3.5 w-3.5" /> Edit Role / Permissions
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Permission summary card */}
+            <Card className="lg:col-span-2">
+              <CardHeader>
+                <CardTitle className="text-base">Permission summary</CardTitle>
+                <CardDescription>
+                  {emp.role.roleTier === 'elevated'
+                    ? 'Elevated roles bypass all permission checks — full administrative access.'
+                    : `${emp.role.permissions.length} permission${emp.role.permissions.length === 1 ? '' : 's'} granted to this role.`}
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                {emp.role.roleTier === 'elevated' ? (
+                  <div className="flex items-center gap-2 rounded-md bg-primary/5 border border-primary/20 p-3">
+                    <ShieldCheck className="h-4 w-4 text-primary" />
+                    <p className="text-sm text-primary font-medium">
+                      Full access — all permissions bypassed
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3 max-h-96 overflow-y-auto scrollbar-thin">
+                    {PERMISSION_GROUPS.map((group) => {
+                      const groupPerms = group.permissions.filter((p) =>
+                        emp.role.permissions.includes(p.key),
+                      )
+                      if (groupPerms.length === 0) return null
+                      return (
+                        <div key={group.group}>
+                          <p className="text-xs font-medium text-muted-foreground mb-1">
+                            {group.group} ({groupPerms.length})
+                          </p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {groupPerms.map((p) => (
+                              <Badge key={p.key} variant="outline" className="text-[10px]">
+                                {p.label}
+                              </Badge>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                    {emp.role.permissions.length === 0 && (
+                      <p className="text-sm text-muted-foreground">No permissions granted.</p>
+                    )}
                   </div>
                 )}
               </CardContent>
             </Card>
-          )}
+          </div>
+        </TabsContent>
 
-          {/* Status actions */}
-          {canManage && !isSelf && emp.status !== 'terminated' && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Employment status</CardTitle>
-                <CardDescription>
-                  Suspend temporarily or terminate this employee. Terminated
-                  employees lose workspace access immediately.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-wrap gap-2">
-                {emp.status === 'active' && (
-                  <Button
-                    variant="outline"
-                    onClick={() => setTermDialog('suspend')}
-                  >
-                    <Ban className="h-4 w-4" /> Suspend
-                  </Button>
-                )}
-                {emp.status === 'suspended' && (
-                  <Button
-                    variant="outline"
-                    onClick={() => setTermDialog('reactivate')}
-                  >
-                    <RotateCcw className="h-4 w-4" /> Reactivate
-                  </Button>
-                )}
-                {canTerminate && (
-                  <Button
-                    variant="destructive"
-                    onClick={() => setTermDialog('terminate')}
-                  >
-                    <UserX className="h-4 w-4" /> Terminate
-                  </Button>
-                )}
-              </CardContent>
-            </Card>
-          )}
+        {/* ─── Performance Tab (placeholder — Phase 6) ─────────────── */}
+        <TabsContent value="performance" className="mt-4">
+          <Card>
+            <CardContent className="p-10 text-center">
+              <div className="mx-auto h-12 w-12 rounded-full bg-muted flex items-center justify-center mb-3">
+                <TrendingUp className="h-6 w-6 text-muted-foreground" />
+              </div>
+              <h3 className="text-sm font-semibold">Performance dashboard</h3>
+              <p className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
+                Employee performance metrics (orders, revenue, RTO rate,
+                delivery rate, items sold) will be available here in a future
+                phase. The data is already being captured via sales attribution.
+              </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
-          {/* Subordinates */}
-          {emp.subordinates.length > 0 && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">
-                  Direct reports ({emp.subordinates.length})
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-2">
-                {emp.subordinates.map((s) => (
-                  <button
-                    key={s.id}
-                    onClick={() => navigate({ name: 'employee-detail', id: s.id })}
-                    className="w-full flex items-center gap-3 rounded-md border px-3 py-2 hover:bg-muted/50 text-left"
-                  >
-                    <Avatar className="h-8 w-8">
-                      <AvatarFallback className="bg-muted text-xs">
-                        {initials(s.name)}
-                      </AvatarFallback>
-                    </Avatar>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{s.name}</p>
-                      <p className="text-xs text-muted-foreground truncate">
-                        {s.designation ?? '—'}
-                      </p>
-                    </div>
-                  </button>
-                ))}
-              </CardContent>
-            </Card>
-          )}
-        </div>
-      </div>
+        {/* ─── Salary Tab (placeholder — Phase 7) ──────────────────── */}
+        <TabsContent value="salary" className="mt-4">
+          <Card>
+            <CardContent className="p-10 text-center">
+              <div className="mx-auto h-12 w-12 rounded-full bg-muted flex items-center justify-center mb-3">
+                <Wallet className="h-6 w-6 text-muted-foreground" />
+              </div>
+              <h3 className="text-sm font-semibold">Salary & payroll</h3>
+              <p className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
+                Salary profile, commission rules, advances, and payslip history
+                will be available here in a future phase. The schema and
+                permissions are already in place.
+              </p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
 
       {/* Status action dialog */}
       <Dialog open={!!termDialog} onOpenChange={(o) => !o && setTermDialog(null)}>
@@ -451,7 +609,7 @@ function InfoLine({
   return (
     <div className="flex items-center gap-2.5">
       <Icon className="h-4 w-4 text-muted-foreground shrink-0" />
-      <span className="text-muted-foreground text-xs w-16 shrink-0">{label}</span>
+      <span className="text-muted-foreground text-xs w-20 shrink-0">{label}</span>
       <span className="font-medium truncate">{value}</span>
     </div>
   )

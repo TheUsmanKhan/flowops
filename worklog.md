@@ -7659,3 +7659,54 @@ FILES CREATED/MODIFIED:
 
 Stage Summary:
 - Server-side order scoping is fully enforced. Sales-role users (ordersDataScope='own') see only their attributed orders in the main Orders list, all 7 queue routes, and the Booking Workbench. The customer detail page uses row-level scoping: own orders show full detail + are clickable, other employees' orders show only order number/date/status as greyed-out non-clickable rows, with salesEmployeeId and all sensitive fields stripped from the API response entirely (not just hidden in the UI). Owner/elevated roles see everything. Verified end-to-end with real test users. Ready for Phase 5+.
+
+---
+Task ID: EMPLOYEE-PROFILE-TABS-1
+Agent: main
+Task: Phase 5 — Extend employee invite form with designation/department dropdowns + add filterable columns + build tabbed Employee Profile view
+
+Work Log:
+- Step 1: Extended invite-employee-view.tsx:
+  • Designation: converted from free-text to a dropdown with 5 predefined options (Sales, Sales Manager, Inventory Manager, Warehouse Staff, Manager) + "Other/Custom" option that reveals a free-text input
+  • Department: converted from free-text to a dropdown with 5 options (Sales, Inventory, Fulfillment, Support, Other)
+  • Role auto-default: when a designation is selected, the Role dropdown auto-selects the matching default role (by name match). Fully changeable by the user — a hint text explains this.
+  • Reordered: Designation + Department now appear BEFORE the Role field (so the role auto-default makes sense)
+- Step 2: Extended employees-view.tsx:
+  • Added designationFilter + departmentFilter state
+  • Added unique designation + department lists (derived from employee data via useMemo)
+  • Added two new Select dropdowns to the filter row (All designations / All departments)
+  • Added filtering logic: designationFilter + departmentFilter applied to the filtered list
+  • Split the Role column: Role is now its own column (no longer shows designation under it), Designation is a separate column, Department is a separate column
+  • Updated colspan from 6 → 7 for the new column
+- Step 3: Built tabbed Employee Profile (employee-detail-view.tsx):
+  • Replaced the old 2-column layout (profile card + edit) with a profile header card + Tabs component
+  • 4 tabs: Overview (active), Access (active), Performance (disabled placeholder), Salary (disabled placeholder)
+  • Overview tab: contact info card (email, phone, join date, designation, department, employee code) + employment details edit card + status actions + direct reports
+  • Access tab: role summary card (name, tier, system role badge, ordersDataScope badge, "Edit Role/Permissions" button that deep-links to role-edit-view) + permission summary card (grouped by PERMISSION_GROUPS, shows badge chips for each granted permission; elevated roles show "Full access — all permissions bypassed")
+  • Performance tab: placeholder with TrendingUp icon + "will be available here in a future phase"
+  • Salary tab: placeholder with Wallet icon + "will be available here in a future phase"
+- Step 4: Visibility rule unchanged — an employee can always view their own Overview tab (isSelf check), viewing OTHER employees requires employees.view permission (same as before, no change to the API gate).
+- Added ordersDataScope to:
+  • EmployeePublic type (src/lib/types.ts) — role.ordersDataScope
+  • GET /api/employees list route — Prisma select + response
+  • GET /api/employees/[id] detail route — response
+  • Employee detail Access tab — shows "Own orders only" / "All company orders" badge
+- Added imports: Tabs/TabsContent/TabsList/TabsTrigger, PERMISSION_GROUPS, permissionLabel, Briefcase/Lock/TrendingUp/Wallet/Pencil icons
+
+VERIFICATION:
+- TEST 1: Invited employee with designation='Sales' + department='Sales' → invitation created with metadata={department:"Sales",designation:"Sales"}, role auto-defaulted to Sales role ✅
+- TEST 2: Invitation metadata verified: {"department":"Sales","designation":"Sales"} ✅
+- TEST 3: Employees list shows 2 employees (1 Sales scope=own, 1 Owner scope=all), filterable by designation ✅
+- TEST 4: Employee detail returns designation + role + permissions + ordersDataScope ✅
+- Lint: 0 errors.
+
+FILES MODIFIED:
+1. src/components/employees/invite-employee-view.tsx — designation/department dropdowns + role auto-default
+2. src/components/employees/employees-view.tsx — designation/department filter dropdowns + split columns
+3. src/components/employees/employee-detail-view.tsx — tabbed profile (Overview + Access + Performance placeholder + Salary placeholder)
+4. src/lib/types.ts — EmployeePublic.role.ordersDataScope added
+5. src/app/api/employees/route.ts — GET list returns ordersDataScope
+6. src/app/api/employees/[id]/route.ts — GET detail returns ordersDataScope
+
+Stage Summary:
+- The employee invite form now captures designation + department via dropdowns with predefined options + auto-defaults the role to match. The employees directory has filterable designation + department columns. The Employee Profile is now a tabbed view with Overview (contact + employment details + status + reports), Access (role summary + permission summary + edit-role deep-link), and disabled Performance/Salary placeholders ready for Phases 6+7. ordersDataScope is exposed in both the employee list and detail APIs. Lint passes.

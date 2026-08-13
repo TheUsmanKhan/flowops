@@ -33,11 +33,31 @@ import {
 } from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 
+// Designation options — the 5 default roles + "Other/Custom" free-text.
+// Selecting a designation auto-defaults the Role dropdown to the matching
+// default role (but the user can still change it).
+const DESIGNATION_OPTIONS = [
+  'Sales',
+  'Sales Manager',
+  'Inventory Manager',
+  'Warehouse Staff',
+  'Manager',
+] as const
+
+const DEPARTMENT_OPTIONS = [
+  'Sales',
+  'Inventory',
+  'Fulfillment',
+  'Support',
+  'Other',
+] as const
+
 export function InviteEmployeeView() {
   const navigate = useAppStore((s) => s.navigate)
   const [roles, setRoles] = useState<RolePublic[]>([])
   const [submitting, setSubmitting] = useState(false)
   const [sentTo, setSentTo] = useState<string | null>(null)
+  const [customDesignation, setCustomDesignation] = useState('')
 
   useEffect(() => {
     api
@@ -51,6 +71,29 @@ export function InviteEmployeeView() {
     defaultValues: { email: '', roleId: '', department: '', designation: '', message: '' },
   })
 
+  // When a designation is selected, auto-default the Role dropdown to the
+  // matching default role (by name). The user can still change it afterward —
+  // this is a convenience default, not a force.
+  function onDesignationChange(value: string) {
+    if (value === '__custom__') {
+      form.setValue('designation', customDesignation || '')
+      return
+    }
+    form.setValue('designation', value)
+    // Find a role whose name matches the designation (e.g. "Sales" → "Sales" role)
+    const matchingRole = roles.find(
+      (r) => r.name.toLowerCase() === value.toLowerCase(),
+    )
+    if (matchingRole) {
+      form.setValue('roleId', matchingRole.id, { shouldValidate: true })
+    }
+  }
+
+  const currentDesignation = form.watch('designation')
+  const isCustomDesignation =
+    currentDesignation !== '' &&
+    !DESIGNATION_OPTIONS.includes(currentDesignation as any)
+
   async function onSubmit(values: InviteEmployeeInput) {
     setSubmitting(true)
     try {
@@ -58,6 +101,7 @@ export function InviteEmployeeView() {
       toast.success(`Invitation sent to ${values.email}`)
       setSentTo(values.email)
       form.reset()
+      setCustomDesignation('')
     } catch (err) {
       toast.error(
         err instanceof FetchError ? err.message : 'Failed to send invitation.',
@@ -127,6 +171,64 @@ export function InviteEmployeeView() {
               )}
             </div>
 
+            {/* Designation + Department — dropdowns with predefined options */}
+            <div className="grid sm:grid-cols-2 gap-4">
+              <div className="space-y-1.5">
+                <Label htmlFor="designation">Designation</Label>
+                <Select
+                  value={
+                    isCustomDesignation
+                      ? '__custom__'
+                      : currentDesignation || undefined
+                  }
+                  onValueChange={onDesignationChange}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select designation" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DESIGNATION_OPTIONS.map((d) => (
+                      <SelectItem key={d} value={d}>
+                        {d}
+                      </SelectItem>
+                    ))}
+                    <SelectItem value="__custom__">Other / Custom…</SelectItem>
+                  </SelectContent>
+                </Select>
+                {isCustomDesignation && (
+                  <Input
+                    placeholder="Enter custom designation"
+                    value={customDesignation}
+                    onChange={(e) => {
+                      setCustomDesignation(e.target.value)
+                      form.setValue('designation', e.target.value)
+                    }}
+                    className="mt-1.5"
+                  />
+                )}
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="department">Department</Label>
+                <Select
+                  value={form.watch('department') || undefined}
+                  onValueChange={(v) => form.setValue('department', v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select department" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {DEPARTMENT_OPTIONS.map((d) => (
+                      <SelectItem key={d} value={d}>
+                        {d}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+
+            {/* Role — auto-defaulted when a designation is selected, but
+                fully changeable by the user. */}
             <div className="space-y-1.5">
               <Label htmlFor="roleId">Role</Label>
               <Select
@@ -156,25 +258,10 @@ export function InviteEmployeeView() {
                   {form.formState.errors.roleId.message}
                 </p>
               )}
-            </div>
-
-            <div className="grid sm:grid-cols-2 gap-4">
-              <div className="space-y-1.5">
-                <Label htmlFor="department">Department (optional)</Label>
-                <Input
-                  id="department"
-                  placeholder="Operations"
-                  {...form.register('department')}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="designation">Designation (optional)</Label>
-                <Input
-                  id="designation"
-                  placeholder="Sales Executive"
-                  {...form.register('designation')}
-                />
-              </div>
+              <p className="text-[11px] text-muted-foreground">
+                Selecting a designation above auto-selects the matching default
+                role, but you can change it here.
+              </p>
             </div>
 
             <div className="space-y-1.5">

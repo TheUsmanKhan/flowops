@@ -69,6 +69,7 @@ export async function GET(
           roleTier: employee.role.roleTier,
           isSystemRole: employee.role.isSystemRole,
           systemRoleKey: employee.role.systemRoleKey,
+          ordersDataScope: employee.role.ordersDataScope as 'own' | 'all',
           permissions: employee.role.rolePermissions.map((p) => p.permissionKey),
         },
         directManager: employee.directManager

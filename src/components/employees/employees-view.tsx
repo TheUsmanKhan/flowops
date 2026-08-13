@@ -41,6 +41,8 @@ export function EmployeesView() {
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [roleFilter, setRoleFilter] = useState<string>('all')
+  const [designationFilter, setDesignationFilter] = useState<string>('all')
+  const [departmentFilter, setDepartmentFilter] = useState<string>('all')
 
   const refresh = () => {
     setLoading(true)
@@ -58,10 +60,25 @@ export function EmployeesView() {
     return Array.from(m.entries())
   }, [employees])
 
+  // Unique designations + departments present in the data (for filter dropdowns)
+  const designations = useMemo(() => {
+    const s = new Set<string>()
+    for (const e of employees) if (e.designation) s.add(e.designation)
+    return Array.from(s).sort()
+  }, [employees])
+
+  const departments = useMemo(() => {
+    const s = new Set<string>()
+    for (const e of employees) if (e.department) s.add(e.department)
+    return Array.from(s).sort()
+  }, [employees])
+
   const filtered = useMemo(() => {
     return employees.filter((e) => {
       if (statusFilter !== 'all' && e.status !== statusFilter) return false
       if (roleFilter !== 'all' && e.role.id !== roleFilter) return false
+      if (designationFilter !== 'all' && e.designation !== designationFilter) return false
+      if (departmentFilter !== 'all' && e.department !== departmentFilter) return false
       if (search) {
         const q = search.toLowerCase()
         return (
@@ -73,7 +90,7 @@ export function EmployeesView() {
       }
       return true
     })
-  }, [employees, search, statusFilter, roleFilter])
+  }, [employees, search, statusFilter, roleFilter, designationFilter, departmentFilter])
 
   return (
     <div className="space-y-6">
@@ -92,18 +109,18 @@ export function EmployeesView() {
       <Card>
         <CardContent className="p-4 space-y-4">
           {/* Filters */}
-          <div className="flex flex-col sm:flex-row gap-3">
-            <div className="relative flex-1">
+          <div className="flex flex-col sm:flex-row gap-3 flex-wrap">
+            <div className="relative flex-1 min-w-[200px]">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search by name, email, role…"
+                placeholder="Search by name, email, designation…"
                 className="pl-9"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="w-full sm:w-40">
+              <SelectTrigger className="w-full sm:w-36">
                 <SelectValue placeholder="Status" />
               </SelectTrigger>
               <SelectContent>
@@ -115,7 +132,7 @@ export function EmployeesView() {
               </SelectContent>
             </Select>
             <Select value={roleFilter} onValueChange={setRoleFilter}>
-              <SelectTrigger className="w-full sm:w-44">
+              <SelectTrigger className="w-full sm:w-40">
                 <SelectValue placeholder="Role" />
               </SelectTrigger>
               <SelectContent>
@@ -127,6 +144,32 @@ export function EmployeesView() {
                 ))}
               </SelectContent>
             </Select>
+            <Select value={designationFilter} onValueChange={setDesignationFilter}>
+              <SelectTrigger className="w-full sm:w-40">
+                <SelectValue placeholder="Designation" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All designations</SelectItem>
+                {designations.map((d) => (
+                  <SelectItem key={d} value={d}>
+                    {d}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Select value={departmentFilter} onValueChange={setDepartmentFilter}>
+              <SelectTrigger className="w-full sm:w-40">
+                <SelectValue placeholder="Department" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All departments</SelectItem>
+                {departments.map((d) => (
+                  <SelectItem key={d} value={d}>
+                    {d}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           {/* Table */}
@@ -134,8 +177,9 @@ export function EmployeesView() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-[30%]">Employee</TableHead>
+                  <TableHead className="w-[28%]">Employee</TableHead>
                   <TableHead>Role</TableHead>
+                  <TableHead className="hidden md:table-cell">Designation</TableHead>
                   <TableHead className="hidden md:table-cell">Department</TableHead>
                   <TableHead className="hidden lg:table-cell">Joined</TableHead>
                   <TableHead>Status</TableHead>
@@ -145,13 +189,13 @@ export function EmployeesView() {
               <TableBody>
                 {loading ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="h-32 text-center">
+                    <TableCell colSpan={7} className="h-32 text-center">
                       <Loader2 className="h-5 w-5 animate-spin mx-auto text-muted-foreground" />
                     </TableCell>
                   </TableRow>
                 ) : filtered.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="h-32 text-center text-muted-foreground">
+                    <TableCell colSpan={7} className="h-32 text-center text-muted-foreground">
                       {employees.length === 0
                         ? 'No employees yet. Invite your first team member.'
                         : 'No employees match your filters.'}
@@ -186,14 +230,10 @@ export function EmployeesView() {
                         </div>
                       </TableCell>
                       <TableCell>
-                        <div>
-                          <p className="text-sm">{e.role.name}</p>
-                          {e.designation && (
-                            <p className="text-xs text-muted-foreground">
-                              {e.designation}
-                            </p>
-                          )}
-                        </div>
+                        <p className="text-sm">{e.role.name}</p>
+                      </TableCell>
+                      <TableCell className="hidden md:table-cell text-sm text-muted-foreground">
+                        {e.designation ?? '—'}
                       </TableCell>
                       <TableCell className="hidden md:table-cell text-sm text-muted-foreground">
                         {e.department ?? '—'}

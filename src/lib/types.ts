@@ -75,6 +75,7 @@ export interface EmployeePublic {
     roleTier: string
     isSystemRole: boolean
     systemRoleKey: string | null
+    ordersDataScope: 'own' | 'all'
   }
   directManager: { id: string; user: { fullName: string } } | null
 }

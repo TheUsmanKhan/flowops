@@ -23,7 +23,7 @@ export async function GET() {
         user: {
           select: { id: true, fullName: true, email: true, avatarUrl: true, phone: true },
         },
-        role: { select: { id: true, name: true, roleTier: true, isSystemRole: true, systemRoleKey: true } },
+        role: { select: { id: true, name: true, roleTier: true, isSystemRole: true, systemRoleKey: true, ordersDataScope: true } },
         directManager: {
           select: { id: true, user: { select: { fullName: true } } },
         },
@@ -54,6 +54,7 @@ export async function GET() {
           roleTier: e.role.roleTier,
           isSystemRole: e.role.isSystemRole,
           systemRoleKey: e.role.systemRoleKey,
+          ordersDataScope: e.role.ordersDataScope as 'own' | 'all',
         },
         directManager: e.directManager
           ? { id: e.directManager.id, name: e.directManager.user.fullName }
