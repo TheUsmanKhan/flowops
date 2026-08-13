@@ -65,12 +65,13 @@ export async function PATCH(
     // Sequential operations (avoids interactive-transaction issues with the
     // Supabase pooled connection). Permission sync uses delete-then-create;
     // a brief empty window is acceptable for role edits.
-    if (d.name !== undefined || d.description !== undefined) {
+    if (d.name !== undefined || d.description !== undefined || d.ordersDataScope !== undefined) {
       await db.role.update({
         where: { id: role.id },
         data: {
           ...(d.name !== undefined && !role.isSystemRole ? { name: d.name } : {}),
           ...(d.description !== undefined ? { description: d.description || null } : {}),
+          ...(d.ordersDataScope !== undefined ? { ordersDataScope: d.ordersDataScope } : {}),
         },
       })
     }

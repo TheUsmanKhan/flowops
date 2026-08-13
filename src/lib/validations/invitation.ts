@@ -7,6 +7,7 @@ export const createRoleSchema = z.object({
     .max(60),
   description: z.string().max(280).optional().or(z.literal('')),
   permissions: z.array(z.string()).default([]),
+  ordersDataScope: z.enum(['own', 'all']).default('all'),
 })
 export type CreateRoleInput = z.infer<typeof createRoleSchema>
 
@@ -14,6 +15,7 @@ export const updateRoleSchema = z.object({
   name: z.string().min(2).max(60).optional(),
   description: z.string().max(280).optional().or(z.literal('')),
   permissions: z.array(z.string()).optional(),
+  ordersDataScope: z.enum(['own', 'all']).optional(),
 })
 export type UpdateRoleInput = z.infer<typeof updateRoleSchema>
 

@@ -7507,3 +7507,39 @@ FILES CREATED/MODIFIED:
 
 Stage Summary:
 - HR/Payroll/Commission schema fully added and applied. 7 new tables, 3 extended models, 11 new permission keys, 5 default roles seeded for all 10 existing companies + auto-seeded for all future companies. Existing data 100% intact (orders, employees, customers unchanged). Idempotent — safe to re-run. Lint passes. Ready for the HR/Payroll UI + API module to be built on top of this schema.
+
+---
+Task ID: ROLE-PERM-EXTEND-1
+Agent: main
+Task: Extend existing Role & Permission management module — add new permission keys to selector, add ordersDataScope toggle to role editor, add getOrdersDataScope() helper. Additive only, no behavior change for existing roles.
+
+Work Log:
+- Verified Phase 1 already added the 11 new permission keys + 3 new groups (Customers, Scan, Payroll) + extended Employees group to PERMISSION_GROUPS in src/lib/permissions.ts. The PermissionKeySelector component is fully data-driven (maps over PERMISSION_GROUPS), so the new keys render automatically with NO component changes needed.
+- Extended RolePublic type (src/lib/types.ts) to include ordersDataScope: 'own' | 'all'.
+- Updated GET /api/roles to return ordersDataScope in the response.
+- Updated createRoleSchema + updateRoleSchema (src/lib/validations/invitation.ts) to accept ordersDataScope (z.enum(['own','all']), default 'all').
+- Updated POST /api/roles to persist ordersDataScope on create + include it in audit log.
+- Updated PATCH /api/roles/[id] to persist ordersDataScope on update.
+- Added getOrdersDataScope(ctx: WorkspaceContext): 'own' | 'all' helper to src/lib/workspace.ts. Returns 'all' for elevated roles (Owner/Founder/Co-Founder/Investor) regardless of stored value. For standard roles, reads ctx.employee.role.ordersDataScope. Exported and ready for Phase 3 (order creation) + later phases (order queries, KPI queries).
+- Updated WorkspaceContext interface to include ordersDataScope on the role sub-object.
+- Updated getWorkspace() Prisma select to fetch ordersDataScope + the return object to include it.
+- Added ordersDataScope toggle to role-edit-view.tsx — a two-option card-style toggle ("All company orders" / "Only their own orders") that maps to 'all'/'own'. Uses useMemo to detect hasOrdersPermission (any permissions.* key) and only shows the toggle when true (meaningless without order access). Sends ordersDataScope in the PATCH payload.
+- Tested end-to-end:
+  • TEST 1: Created "Test HR Role" with 8 permissions (including new keys: customers.*, scan.operate, payroll.view_all, employees.view_salary) + ordersDataScope='own' → 201 Created, all permissions persisted, scope='own' ✅
+  • TEST 2: Fetched roles → Test HR Role found with correct ordersDataScope + 8 permissions ✅
+  • TEST 3: PATCH — changed ordersDataScope to 'all' + new permission set (6 keys including payroll.manage, payroll.manage_advances, scan.view_reports, employees.manage_salary) → 200 ✅
+  • TEST 4: Verified — ordersDataScope='all' (changed), 6 permissions correct ✅
+  • TEST 5: Deleted test role → 200 ✅
+- Tested getOrdersDataScope() logic: Owner (elevated) → 'all' (bypass), Sales (scope='own') → 'own', Manager (scope='all') → 'all'. All correct.
+- Lint: 0 errors. Existing roles/companies unaffected (additive only — no existing role's permissions or scope was changed).
+
+FILES MODIFIED:
+1. src/lib/types.ts — RolePublic: added ordersDataScope field
+2. src/lib/validations/invitation.ts — createRoleSchema + updateRoleSchema: added ordersDataScope
+3. src/app/api/roles/route.ts — GET: return ordersDataScope; POST: persist ordersDataScope + audit log
+4. src/app/api/roles/[id]/route.ts — PATCH: persist ordersDataScope
+5. src/lib/workspace.ts — WorkspaceContext: added ordersDataScope to role; getWorkspace(): fetch + return ordersDataScope; NEW getOrdersDataScope() helper exported
+6. src/components/roles/role-edit-view.tsx — added ordersDataScope state + two-option toggle UI (shown only when hasOrdersPermission)
+
+Stage Summary:
+- The existing Roles module now fully supports the new permission keys (Customers, Scan, Payroll, extended Employees) — they render automatically in the permission selector. The ordersDataScope toggle appears in the role editor only when the role has any orders.* permission. The getOrdersDataScope(ctx) helper is exported and ready for Phase 3. All changes are additive — no existing role behavior was changed. Verified end-to-end with create/toggle/save/reload/delete test.

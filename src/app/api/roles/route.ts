@@ -37,6 +37,7 @@ export async function GET() {
         isActive: r.isActive,
         companyId: r.companyId,
         permissions: r.rolePermissions.map((p) => p.permissionKey),
+        ordersDataScope: r.ordersDataScope as 'own' | 'all',
         employeeCount: r._count.employees,
       })),
     })
@@ -76,7 +77,7 @@ export async function POST(req: Request) {
     if (!parsed.success) {
       throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     }
-    const { name, description, permissions } = parsed.data
+    const { name, description, permissions, ordersDataScope } = parsed.data
 
     const existing = await db.role.findFirst({
       where: { companyId: company.id, name: { equals: name, mode: 'insensitive' } },
@@ -90,6 +91,7 @@ export async function POST(req: Request) {
         description: description || null,
         roleTier: 'standard',
         isSystemRole: false,
+        ordersDataScope,
         createdById: user.id,
         rolePermissions: {
           create: permissions.map((key) => ({
@@ -109,7 +111,7 @@ export async function POST(req: Request) {
       organizationId: company.organizationId,
       userId: user.id,
       employeeId: caller.id,
-      newValues: { name, description, permissions },
+      newValues: { name, description, permissions, ordersDataScope },
     })
 
     return Response.json({

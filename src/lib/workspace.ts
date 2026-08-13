@@ -31,6 +31,8 @@ export interface WorkspaceContext {
       roleTier: string
       isSystemRole: boolean
       systemRoleKey: string | null
+      /** Orders data scope: "own" = see only own orders, "all" = see all company orders. */
+      ordersDataScope: 'own' | 'all'
     }
   }
   company: {
@@ -115,6 +117,7 @@ export async function getWorkspace(): Promise<WorkspaceContext> {
               roleTier: true,
               isSystemRole: true,
               systemRoleKey: true,
+              ordersDataScope: true,
             },
           },
         },
@@ -159,6 +162,7 @@ export async function getWorkspace(): Promise<WorkspaceContext> {
         roleTier: employee.role.roleTier,
         isSystemRole: employee.role.isSystemRole,
         systemRoleKey: employee.role.systemRoleKey,
+        ordersDataScope: employee.role.ordersDataScope as 'own' | 'all',
       },
     },
     company: {
@@ -174,6 +178,29 @@ export async function getWorkspace(): Promise<WorkspaceContext> {
 
 export function isElevated(ctx: WorkspaceContext): boolean {
   return ctx.employee.role.roleTier === 'elevated'
+}
+
+/**
+ * Resolve the caller's Orders data scope — determines which orders they can
+ * see in order-list and KPI queries.
+ *
+ *   'all' → sees ALL orders in the company (managers, inventory staff, etc.)
+ *   'own' → sees only orders where salesEmployeeId === ctx.employee.id
+ *
+ * Elevated roles (Owner, Founder, Co-Founder, Investor) ALWAYS return 'all'
+ * regardless of the stored ordersDataScope value — they bypass scoping
+ * entirely, consistent with how they bypass all other permission checks.
+ *
+ * For standard roles, reads ctx.employee.role.ordersDataScope. Falls back
+ * to 'all' if the field is somehow null/undefined (defensive — should never
+ * happen since the schema defaults to 'all').
+ *
+ * Used by Phase 3 (order creation — to auto-set salesEmployeeId) and later
+ * phases (order queries, KPI queries — to filter by salesEmployeeId).
+ */
+export function getOrdersDataScope(ctx: WorkspaceContext): 'own' | 'all' {
+  if (isElevated(ctx)) return 'all'
+  return ctx.employee.role.ordersDataScope === 'own' ? 'own' : 'all'
 }
 
 /** Check a single permission key. Elevated roles always pass. */

@@ -54,6 +54,8 @@ export interface RolePublic {
   isActive: boolean
   companyId: string
   permissions: string[]
+  /** Data scope for the Orders module: "own" = see only own orders, "all" = see all company orders. Elevated roles always behave as "all". */
+  ordersDataScope: 'own' | 'all'
   employeeCount?: number
 }
 

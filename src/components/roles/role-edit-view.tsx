@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useMemo } from 'react'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
 import type { RolePublic } from '@/lib/types'
@@ -25,8 +25,10 @@ import {
   Crown,
   ShieldCheck,
   Users,
+  Eye,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
 
 export function RoleEditView({ roleId }: { roleId: string }) {
   const navigate = useAppStore((s) => s.navigate)
@@ -35,6 +37,7 @@ export function RoleEditView({ roleId }: { roleId: string }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [permissions, setPermissions] = useState<string[]>([])
+  const [ordersDataScope, setOrdersDataScope] = useState<'own' | 'all'>('all')
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -51,15 +54,28 @@ export function RoleEditView({ roleId }: { roleId: string }) {
         setName(found.name)
         setDescription(found.description ?? '')
         setPermissions(found.permissions)
+        setOrdersDataScope(found.ordersDataScope ?? 'all')
       })
       .catch(() => navigate({ name: 'roles' }))
       .finally(() => setLoading(false))
   }, [roleId, navigate])
 
+  // Show the ordersDataScope toggle only when the role has ANY orders.*
+  // permission checked — it's meaningless without order access.
+  const hasOrdersPermission = useMemo(
+    () => permissions.some((p) => p.startsWith('orders.')),
+    [permissions],
+  )
+
   async function save() {
     setSaving(true)
     try {
-      await api.patch(`/api/roles/${roleId}`, { name, description, permissions })
+      await api.patch(`/api/roles/${roleId}`, {
+        name,
+        description,
+        permissions,
+        ordersDataScope,
+      })
       toast.success('Role updated')
       navigate({ name: 'roles' })
     } catch (err) {
@@ -164,6 +180,56 @@ export function RoleEditView({ roleId }: { roleId: string }) {
                 onChange={setPermissions}
               />
             </div>
+
+            {/* ─── Orders data scope toggle ─────────────────────────────── */}
+            {/* Only shown when the role has any orders.* permission — the
+                scope is meaningless without order access. */}
+            {hasOrdersPermission && (
+              <div className="space-y-2 rounded-lg border bg-muted/20 p-3">
+                <div className="flex items-center gap-2">
+                  <Eye className="h-4 w-4 text-muted-foreground" />
+                  <Label className="text-sm font-medium">
+                    Orders data scope
+                  </Label>
+                </div>
+                <p className="text-xs text-muted-foreground -mt-1">
+                  Controls which orders this role can see in order lists and
+                  KPI dashboards.
+                </p>
+                <div className="grid grid-cols-2 gap-2 mt-1">
+                  <button
+                    type="button"
+                    onClick={() => setOrdersDataScope('all')}
+                    className={cn(
+                      'rounded-md border p-2.5 text-left transition-colors',
+                      ordersDataScope === 'all'
+                        ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+                        : 'hover:bg-muted/50',
+                    )}
+                  >
+                    <div className="text-sm font-medium">All company orders</div>
+                    <div className="text-[11px] text-muted-foreground mt-0.5">
+                      Full visibility — managers, inventory, owners
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrdersDataScope('own')}
+                    className={cn(
+                      'rounded-md border p-2.5 text-left transition-colors',
+                      ordersDataScope === 'own'
+                        ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
+                        : 'hover:bg-muted/50',
+                    )}
+                  >
+                    <div className="text-sm font-medium">Only their own orders</div>
+                    <div className="text-[11px] text-muted-foreground mt-0.5">
+                      Sales agents see only orders they created/are attributed
+                    </div>
+                  </button>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
       )}
