@@ -26,6 +26,8 @@ import { OrganizationView } from '@/components/settings/organization-view'
 import { CompanySettingsView } from '@/components/settings/company-settings-view'
 import { SettingsView } from '@/components/settings/settings-view'
 import { AuditLogView } from '@/components/settings/audit-log-view'
+import { PayrollView } from '@/components/payroll/payroll-view'
+import { PayrollRunDetailView } from '@/components/payroll/payroll-run-detail-view'
 import { ProductsView } from '@/components/products/products-view'
 import { ProductCreateView } from '@/components/products/product-create-view'
 import { ProductDetailView } from '@/components/products/product-detail-view'
@@ -252,6 +254,10 @@ function renderRoute(
       return <SettingsView />
     case 'audit':
       return <AuditLogView />
+    case 'payroll':
+      return <PayrollView />
+    case 'payroll-run-detail':
+      return <PayrollRunDetailView runId={route.id} />
     case 'create-organization':
       return <CreateOrganizationViewWithBack />
     case 'create-company':

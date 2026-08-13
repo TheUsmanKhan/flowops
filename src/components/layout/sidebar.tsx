@@ -37,6 +37,7 @@ import {
   XCircle,
   Send,
   ScanLine,
+  Receipt,
   type LucideIcon,
 } from 'lucide-react'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -113,6 +114,7 @@ const NAV: NavItem[] = [
   { route: { name: 'integrations' }, label: 'Integrations', icon: Plug, elevatedOnly: true, matchPrefixes: ['integrations'] },
   { route: { name: 'integration-logs' }, label: 'Integration Logs', icon: Webhook, elevatedOnly: true, matchPrefixes: ['integration-logs'] },
   { route: { name: 'employees' }, label: 'Employees', icon: Users, permission: PERMISSIONS.EMPLOYEES_VIEW, matchPrefixes: ['employees'] },
+  { route: { name: 'payroll' }, label: 'Payroll', icon: Receipt, permission: PERMISSIONS.PAYROLL_MANAGE, matchPrefixes: ['payroll'] },
   { route: { name: 'roles' }, label: 'Roles & Permissions', icon: ShieldCheck, permission: PERMISSIONS.SETTINGS_ROLES_MANAGE, matchPrefixes: ['roles'] },
   { route: { name: 'org-catalog' }, label: 'Org Catalog', icon: Globe, elevatedOnly: true, matchPrefixes: ['org-catalog'] },
   { route: { name: 'organization' }, label: 'Organization', icon: Building2, matchPrefixes: ['organization', 'create-company'] },

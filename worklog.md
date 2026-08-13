@@ -7818,3 +7818,61 @@ FILES CREATED/MODIFIED:
 
 Stage Summary:
 - Salary & Commission tab is live. HR/Owner can set base salary (with revision history) + configure commission rules (basis + rate + trigger status). The employee sees a LIVE "earned so far this month" preview computed from real order data — base salary + commission earned = estimated total, clearly labeled as an estimate (official figures only exist once Finance runs payroll in Phase 8). Commission calculation correctly handles: delivered orders earn commission, cancelled-before-dispatch orders contribute 0 (naturally, not via special-case code), and once earned, commission is permanent (no clawback). Visibility rules enforced server-side (own always view-only; others need employees.view_salary; edit needs employees.manage_salary). Ready for Phase 8 (payroll runs).
+
+---
+Task ID: PAYROLL-RUNS-1
+Agent: main
+Task: Phase 8 — Payroll runs (generate, review/adjust, finalize, mark-paid) + employee own-payslips API
+
+Work Log:
+- Created src/lib/actions/payroll.actions.ts with 8 server actions:
+  • generatePayrollRun(month, year) — creates a draft PayrollRun + one Payslip per active employee with a salary profile. Commission computed via computeCommissionEarned for the exact period. Enforces unique constraint (one run per company per month). advanceDeduction defaults to 0 (Phase 9 not built yet).
+  • listPayrollRuns() — lists all runs for the company with payslip count + total net pay
+  • getPayrollRunDetail(runId) — full run + all payslips with employee names
+  • adjustPayslip(payslipId, {otherAllowances, otherDeductions}) — draft-only, recalculates grossPay/netPay live
+  • finalizePayrollRun(runId) — locks the run (status → 'finalized', sets finalizedByEmployeeId + finalizedAt). After this, payslips are IMMUTABLE.
+  • markPayslipPaid(payslipId, {paymentMethod, paymentReference}) — finalized-only, sets paymentStatus → 'paid'
+  • markAllPayslipsPaid(runId, ...) — bulk mark all pending payslips as paid
+  • getOwnPayslips() — employee-facing, returns their own payslips (identity check, no special permission)
+  All actions use payroll.* permissions (NOT finance.*) so salary visibility stays restricted.
+- Created 3 API routes:
+  • GET/POST /api/payroll — list runs + generate new run
+  • GET/PATCH/PUT /api/payroll/[id] — get detail + finalize/mark-all-paid (PATCH) + adjust/mark-individual-paid (PUT)
+  • GET /api/payroll/payslips/own — employee's own payslips (identity check only)
+- Built 2 UI components:
+  • PayrollView (src/components/payroll/payroll-view.tsx) — list of runs with status badges + "Generate Run" dialog (month/year selectors)
+  • PayrollRunDetailView (src/components/payroll/payroll-run-detail-view.tsx) — summary cards (payslips, total net, total commission, pending) + payslips table with per-row adjust (draft) / mark-paid (finalized) actions + "Finalize" button + "Mark All Paid" button + Adjust dialog (live gross/net recalculation) + Mark Paid dialog (payment method + reference)
+- Wired into navigation:
+  • Added 'payroll' + 'payroll-run-detail' routes to app-store.ts
+  • Added Payroll nav item to sidebar (permission: PAYROLL_MANAGE, icon: Receipt)
+  • Added PayrollView + PayrollRunDetailView imports to page.tsx
+
+VERIFICATION:
+- STEP 1: Generate run for Aug 2026 → 201 Created, runId + payslipCount=1 ✅
+- STEP 2: Run detail shows Sales Test User: base=30000, commission=0 (no delivered orders in Aug — test orders were cleaned up), gross=30000, net=30000, status=draft ✅
+- STEP 3: Finalize → {"success":true} ✅
+- STEP 4: Try to adjust AFTER finalization → {"error":"Cannot adjust a payslip in a finalized/paid run"} ✅ (immutability enforced)
+- STEP 5: Mark all as paid → {"markedCount":1} ✅
+- STEP 6: Final state → run status=finalized, payslip payment=paid via bank_transfer ✅
+- STEP 7: Employee fetches own payslips → 8/2026, base=30000, commission=0, net=30000, payment=paid, run=finalized ✅
+- Lint: 0 errors.
+
+KEY DESIGN DECISIONS:
+- Uses payroll.* permissions (NOT finance.*) — a Manager with finance.view does NOT see payroll
+- Once finalized, payslips are IMMUTABLE — corrections must be in a later run (audit-log immutability pattern)
+- Employee-facing payslip API uses identity check (employeeId === ctx.employee.id), no special permission
+- payroll.view_all required to view other employees' payslips (not tested here but enforced in the salary/commission routes from Phase 7)
+
+FILES CREATED/MODIFIED:
+1. src/lib/actions/payroll.actions.ts — NEW: 8 server actions
+2. src/app/api/payroll/route.ts — NEW: GET list + POST generate
+3. src/app/api/payroll/[id]/route.ts — NEW: GET detail + PATCH finalize/mark-all + PUT adjust/mark-paid
+4. src/app/api/payroll/payslips/own/route.ts — NEW: GET own payslips
+5. src/components/payroll/payroll-view.tsx — NEW: list + generate dialog
+6. src/components/payroll/payroll-run-detail-view.tsx — NEW: detail + adjust + finalize + mark-paid
+7. src/stores/app-store.ts — added payroll routes
+8. src/components/layout/sidebar.tsx — added Payroll nav item
+9. src/app/page.tsx — added PayrollView + PayrollRunDetailView route rendering
+
+Stage Summary:
+- Payroll runs are fully functional. Finance/Owner can generate a run (creates payslips with live commission computation), review/adjust in draft mode, finalize (locking all amounts), and mark as paid (individual or bulk). Employees can fetch their own payslips via API. All actions use dedicated payroll.* permissions. Finalized payslips are immutable — corrections must be in a later run. Ready for Phase 9 (salary advances) and Phase 10 (employee-facing payslip UI).

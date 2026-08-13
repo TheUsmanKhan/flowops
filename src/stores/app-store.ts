@@ -31,6 +31,8 @@ export type AppRoute =
   | { name: 'integrations' }
   | { name: 'integration-logs' }
   | { name: 'audit' }
+  | { name: 'payroll' }
+  | { name: 'payroll-run-detail'; id: string }
   | { name: 'create-organization' }
   | { name: 'create-company'; orgId?: string }
   | { name: 'products' }
