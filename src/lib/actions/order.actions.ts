@@ -12,7 +12,7 @@
 
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { getWorkspace, requirePermission, isElevated, ApiError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, isElevated, ApiError, getOrdersDataScope } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -1551,6 +1551,15 @@ export async function listOrders(
 
     const where: Prisma.OrderWhereInput = {
       companyId: ctx.company.id,
+    }
+
+    // Phase 4 — Server-side scoping: if the caller's role has
+    // ordersDataScope='own', filter to only their attributed orders.
+    // Elevated roles (Owner/Founder/etc.) bypass this (getOrdersDataScope
+    // returns 'all' for them). NEVER trust a frontend filter alone — this
+    // is the authoritative enforcement point.
+    if (getOrdersDataScope(ctx) === 'own') {
+      where.salesEmployeeId = ctx.employee.id
     }
 
     // Status filter — prefer multi-select `statuses`, fall back to single `status`

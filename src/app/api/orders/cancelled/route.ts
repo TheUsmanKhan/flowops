@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { handleError } from '@/lib/workspace'
+import { resolveOrderScope } from '@/lib/order-scope'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -8,14 +8,10 @@ export const dynamic = 'force-dynamic'
 /** List cancelled orders (read-only history). */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    const { ctx, scopeFilter } = await resolveOrderScope()
 
     const orders = await db.order.findMany({
-      where: { companyId, status: 'cancelled' },
+      where: { companyId: ctx.company.id, status: 'cancelled', ...scopeFilter },
       include: {
         customer: {
           select: {

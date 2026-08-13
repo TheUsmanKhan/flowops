@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { handleError } from '@/lib/workspace'
+import { resolveOrderScope } from '@/lib/order-scope'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -11,17 +11,13 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET(req: Request) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    const { ctx, scopeFilter } = await resolveOrderScope()
 
     const url = new URL(req.url)
     const needsReviewOnly = url.searchParams.get('filter') === 'needs_review'
 
     let orders = await db.order.findMany({
-      where: { companyId, status: 'rto' },
+      where: { companyId: ctx.company.id, status: 'rto', ...scopeFilter },
       include: {
         customer: {
           select: {

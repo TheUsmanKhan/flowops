@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { handleError } from '@/lib/workspace'
+import { resolveOrderItemScope } from '@/lib/order-scope'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -8,16 +8,12 @@ export const dynamic = 'force-dynamic'
 /** List backordered order items grouped by variant (FIFO by backorderedAt). */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    const { ctx, orderScopeFilter } = await resolveOrderItemScope()
 
     const items = await db.orderItem.findMany({
       where: {
         fulfillmentStatus: 'backordered',
-        order: { companyId, status: { notIn: ['cancelled', 'refunded'] } },
+        order: { companyId: ctx.company.id, status: { notIn: ['cancelled', 'refunded'] }, ...orderScopeFilter },
       },
       include: {
         order: {

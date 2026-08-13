@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { handleError } from '@/lib/workspace'
+import { resolveOrderItemScope } from '@/lib/order-scope'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -18,16 +18,12 @@ const STATUS_ORDER = ['pending', 'fabric_reserved', 'in_production']
 /** List order items whose linked production order is NOT completed/cancelled/dispatched. */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    const { ctx, orderScopeFilter } = await resolveOrderItemScope()
 
     const items = await db.orderItem.findMany({
       where: {
         productionOrderId: { not: null },
-        order: { companyId },
+        order: { companyId: ctx.company.id, ...orderScopeFilter },
         productionOrder: {
           status: { notIn: ['completed', 'cancelled', 'dispatched'] },
         },

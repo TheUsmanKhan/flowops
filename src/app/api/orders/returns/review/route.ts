@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { handleError } from '@/lib/workspace'
+import { resolveOrderItemScope } from '@/lib/order-scope'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -8,14 +8,10 @@ export const dynamic = 'force-dynamic'
 /** List order_items WHERE needsReview=true (exception review queue). */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    const { ctx, orderScopeFilter } = await resolveOrderItemScope()
 
     const items = await db.orderItem.findMany({
-      where: { needsReview: true, order: { companyId } },
+      where: { needsReview: true, order: { companyId: ctx.company.id, ...orderScopeFilter } },
       include: {
         order: {
           select: { id: true, flowopsOrderNumber: true, returnedAt: true, status: true },

@@ -24,7 +24,7 @@
  */
 
 import { db } from '@/lib/db'
-import { getWorkspace, requirePermission, ApiError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError, getOrdersDataScope } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -1503,6 +1503,12 @@ export async function getCustomerDetail(
     // matches the stat card's totalOrdersCount. The Orders tab renders a
     // scrollable table (max-h-96 overflow-y-auto) so even 100+ orders are
     // manageable in the UI.
+    //
+    // Phase 4 — Row-level scoping: includes salesEmployeeId so we can compute
+    // isOwnOrder per row. For rows where isOwnOrder is false AND the viewer's
+    // ordersDataScope is 'own', the response strips detail down to only
+    // {orderNumber, date, status} and OMITS salesEmployeeId/employee name
+    // entirely (not just hidden in the UI — not sent over the network).
     const recentOrders = await db.order.findMany({
       where: { customerId },
       select: {
@@ -1516,9 +1522,15 @@ export async function getCustomerDetail(
         deliveryCity: true,
         usedCustomerAddressId: true,
         usedCustomerPhoneId: true,
+        salesEmployeeId: true,
       },
       orderBy: { createdAt: 'desc' },
     })
+
+    // Resolve the viewer's orders data scope — determines row-level stripping.
+    // Elevated roles (Owner/Founder/etc.) always get 'all' (full detail on every row).
+    const viewerScope = getOrdersDataScope(ctx)
+    const viewerEmployeeId = ctx.employee.id
 
     return {
       success: true,
@@ -1545,18 +1557,42 @@ export async function getCustomerDetail(
           matchedVia: e.matchedVia,
           createdAt: e.createdAt,
         })),
-        recentOrders: recentOrders.map((o) => ({
-          id: o.id,
-          flowopsOrderNumber: o.flowopsOrderNumber,
-          status: o.status,
-          totalOrderValue: Number(o.totalOrderValue),
-          createdAt: o.createdAt,
-          recipientName: o.recipientName,
-          deliveryAddress: o.deliveryAddress,
-          deliveryCity: o.deliveryCity,
-          usedCustomerAddressId: o.usedCustomerAddressId,
-          usedCustomerPhoneId: o.usedCustomerPhoneId,
-        })),
+        // Each order row gets isOwnOrder + is scoped down for non-own rows
+        // when the viewer's scope is 'own'. The salesEmployeeId/employee name
+        // is NEVER sent for non-own rows when scope='own'.
+        recentOrders: recentOrders.map((o) => {
+          const isOwnOrder = o.salesEmployeeId === viewerEmployeeId
+          // Full-detail rows: own orders OR viewer has 'all' scope
+          if (isOwnOrder || viewerScope === 'all') {
+            return {
+              id: o.id,
+              flowopsOrderNumber: o.flowopsOrderNumber,
+              status: o.status,
+              totalOrderValue: Number(o.totalOrderValue),
+              createdAt: o.createdAt,
+              recipientName: o.recipientName,
+              deliveryAddress: o.deliveryAddress,
+              deliveryCity: o.deliveryCity,
+              usedCustomerAddressId: o.usedCustomerAddressId,
+              usedCustomerPhoneId: o.usedCustomerPhoneId,
+              salesEmployeeId: o.salesEmployeeId,
+              isOwnOrder,
+              isLimitedView: false,
+            }
+          }
+          // Limited-detail row: non-own order + viewer scope='own'.
+          // Strip to ONLY {orderNumber, date, status} — omit line items,
+          // payment, tracking, address, AND salesEmployeeId/employee name.
+          return {
+            id: o.id,
+            flowopsOrderNumber: o.flowopsOrderNumber,
+            status: o.status,
+            // createdAt kept as the date (needed for the summary row display)
+            createdAt: o.createdAt,
+            isOwnOrder,
+            isLimitedView: true,
+          }
+        }),
       },
     }
   } catch (err) {

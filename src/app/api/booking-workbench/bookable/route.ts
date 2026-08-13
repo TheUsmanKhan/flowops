@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { ApiError, handleError, getOrdersDataScope } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
@@ -31,6 +31,19 @@ export async function GET(_req: NextRequest) {
     })
     if (!caller) throw new ApiError(403, 'Not a member of this company.')
 
+    // Phase 4 — Defensive scoping: if a custom role with ordersDataScope='own'
+    // + booking permissions ever exists, filter bookable orders to only the
+    // caller's attributed orders. Currently no default role combines these,
+    // but the check exists defensively for future custom roles.
+    const callerScope =
+      caller.role.roleTier === 'elevated'
+        ? 'all'
+        : caller.role.ordersDataScope === 'own'
+          ? 'own'
+          : 'all'
+    const salesEmployeeFilter =
+      callerScope === 'own' ? { salesEmployeeId: caller.id } : {}
+
     // ── Bookable Orders ──
     // Status IN ('confirmed', 'processing'), courierBookingStatus != 'booked',
     // AND all order items have fulfillmentStatus='reserved' (no backordered items).
@@ -39,6 +52,7 @@ export async function GET(_req: NextRequest) {
         companyId,
         status: { in: ['confirmed', 'processing'] },
         courierBookingStatus: { not: 'booked' },
+        ...salesEmployeeFilter,
       },
       include: {
         customer: {

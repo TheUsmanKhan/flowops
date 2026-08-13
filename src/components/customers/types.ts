@@ -51,6 +51,12 @@ export interface RecentOrderDTO {
   deliveryCity: string | null
   usedCustomerAddressId: string | null
   usedCustomerPhoneId: string | null
+  /** Phase 4: sales attribution — present on full-detail rows, OMITTED on limited rows. */
+  salesEmployeeId?: string | null
+  /** True if this order was attributed to the current viewer (salesEmployeeId === viewer's employeeId). */
+  isOwnOrder?: boolean
+  /** True if this row is a limited-view row (non-own order + viewer scope='own'). Limited rows show only orderNumber/date/status. */
+  isLimitedView?: boolean
 }
 
 /** Customer row in the list view (primary phone + default address joined in). */

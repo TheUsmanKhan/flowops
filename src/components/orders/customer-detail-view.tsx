@@ -65,6 +65,7 @@ import {
   AlertTriangle,
   CheckCircle2,
   Info,
+  Lock,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatPKR, formatDate, getErrorMessage, badgeForStatus } from './_shared'
@@ -1398,6 +1399,39 @@ function OrderHistoryTab({ orders }: { orders: RecentOrderDTO[] }) {
                   o.deliveryAddress || o.deliveryCity
                     ? [o.deliveryAddress, o.deliveryCity].filter(Boolean).join(', ')
                     : null
+
+                // Phase 4 — Limited-view rows: non-own orders when the viewer's
+                // scope is 'own'. The API strips these to only {orderNumber,
+                // date, status} — no total value, recipient, address, or
+                // salesEmployeeId. Render as greyed-out, non-clickable summary
+                // rows so it's visually clear why less detail is shown.
+                if (o.isLimitedView) {
+                  return (
+                    <TableRow key={o.id} className="opacity-50">
+                      <TableCell>
+                        <span className="text-sm font-medium text-muted-foreground">
+                          {o.flowopsOrderNumber}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
+                        {formatDate(o.createdAt)}
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className={`text-[10px] ${badge.className}`}>
+                          {badge.label}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right text-xs text-muted-foreground">
+                        <Lock className="inline h-3 w-3 mr-1" />
+                        Hidden
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">—</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">—</TableCell>
+                    </TableRow>
+                  )
+                }
+
+                // Full-detail row: own order OR viewer has 'all' scope — clickable
                 return (
                   <TableRow key={o.id}>
                     <TableCell>
@@ -1445,6 +1479,11 @@ function OrderHistoryTab({ orders }: { orders: RecentOrderDTO[] }) {
         </div>
         <p className="text-xs text-muted-foreground p-3">
           {orders.length} order{orders.length === 1 ? '' : 's'}
+          {orders.some((o) => o.isLimitedView) && (
+            <span className="ml-2 text-muted-foreground/70">
+              (some orders show limited detail — not attributed to you)
+            </span>
+          )}
         </p>
       </CardContent>
     </Card>

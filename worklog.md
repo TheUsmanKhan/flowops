@@ -7576,3 +7576,86 @@ FILES MODIFIED:
 
 Stage Summary:
 - Sales attribution is now automatic on every manual order creation. The salesEmployeeId field is set to ctx.employee.id (the authenticated employee creating the order) with no manual step. Exposed in both the order list (salesEmployeeId + salesEmployeeName) and order detail (salesEmployeeId + salesEmployee object with id/name/designation) APIs. Webhook-imported orders (Shopify/Daraz) correctly remain null. This is the single most important data-capture point — without it, none of the KPI, commission, or scoped-visibility features have any data to work from. Ready for Phase 4 (scoped order visibility using getOrdersDataScope).
+
+---
+Task ID: ORDER-SCOPING-1
+Agent: main
+Task: Phase 4 — Server-side order scoping (ordersDataScope='own' filters to salesEmployeeId) + customer detail row-level scoping (limited rows for non-own orders)
+
+Work Log:
+
+PART A — Main Orders module scoping (server-side filtered):
+- Created src/lib/order-scope.ts with two shared helpers:
+  • resolveOrderScope() → returns { ctx, scopeFilter } where scopeFilter = { salesEmployeeId: ctx.employee.id } when scope='own', {} when 'all'. Uses getWorkspace() + requireOrdersView(ORDERS_VIEW).
+  • resolveOrderItemScope() → same but for OrderItem-level queries (filter applied to `order` relation). Used by backordered + awaiting-production + returns/review queues.
+- listOrders() (src/lib/actions/order.actions.ts) — added scope filter: if getOrdersDataScope(ctx)==='own', adds WHERE salesEmployeeId = ctx.employee.id. Authoritative server-side enforcement.
+- Refactored all 7 queue routes to use resolveOrderScope() / resolveOrderItemScope():
+  • /api/orders/pending → resolveOrderScope + ...scopeFilter
+  • /api/orders/cancelled → resolveOrderScope + ...scopeFilter
+  • /api/orders/backordered → resolveOrderItemScope + ...orderScopeFilter
+  • /api/orders/awaiting-production → resolveOrderItemScope + ...orderScopeFilter
+  • /api/orders/ready-to-dispatch → resolveOrderScope + ...scopeFilter
+  • /api/orders/returns → resolveOrderScope + ...scopeFilter
+  • /api/orders/returns/review → resolveOrderItemScope + ...orderScopeFilter
+- Booking Workbench bookable route (/api/booking-workbench/bookable) — added defensive scoping: reads caller.role.ordersDataScope inline + adds salesEmployeeId filter when scope='own'. No default role combines booking + scope='own' today, but the check exists for future custom roles.
+
+PART B — Customer page order table row-level scoping:
+- getCustomerDetail() (src/lib/actions/customer.actions.ts):
+  • Added salesEmployeeId to the recentOrders Prisma select
+  • Added getOrdersDataScope(ctx) call to resolve viewer's scope
+  • Each order row gets isOwnOrder (salesEmployeeId === ctx.employee.id) + isLimitedView
+  • Full-detail rows (isOwnOrder=true OR scope='all'): return all fields including salesEmployeeId
+  • Limited rows (isOwnOrder=false AND scope='own'): strip to ONLY {id, flowopsOrderNumber, status, createdAt, isOwnOrder, isLimitedView} — omit totalOrderValue, recipientName, deliveryAddress, deliveryCity, usedCustomerAddressId, usedCustomerPhoneId, AND salesEmployeeId entirely (not sent over the network)
+- RecentOrderDTO type (src/components/customers/types.ts) — added optional salesEmployeeId, isOwnOrder, isLimitedView fields
+- OrderHistoryTab component (src/components/orders/customer-detail-view.tsx):
+  • Limited rows rendered as greyed-out (opacity-50), non-clickable summary rows showing only order number + date + status badge
+  • Total Value column shows "Hidden" with a Lock icon
+  • Recipient + Address columns show "—"
+  • Footer note appears when any limited rows exist: "(some orders show limited detail — not attributed to you)"
+  • Full-detail rows remain clickable (navigate to order-detail) with all fields visible
+  • Added Lock icon import from lucide-react
+
+VERIFICATION (tested with Sales-role test user + Owner):
+- Created test Sales employee (salestest@flowops.pk) with Sales role (ordersDataScope='own')
+- Sales user created ORD-2026-00013 → attributed to Sales employee ✅
+- Owner created ORD-2026-00014 → attributed to Owner ✅
+
+STEP 3 — Sales user lists orders (GET /api/orders):
+  • Total visible: 1 (only ORD-2026-00013, their own) ✅
+  • Owner's order (ORD-2026-00014) NOT visible ✅
+STEP 4 — Owner lists orders:
+  • Total visible: 14 (all orders) ✅
+  • Shows both their own + Sales user's order + legacy null-attribution orders ✅
+
+STEP 5 — Sales user views customer detail (row-level scoping):
+  • 8 orders total on the customer
+  • 1 own order (ORD-2026-00013): isLimitedView=false, full detail, salesEmployeeId present ✅
+  • 7 non-own orders: isLimitedView=true, stripped to {id, flowopsOrderNumber, status, createdAt, isOwnOrder, isLimitedView} ✅
+  • salesEmployeeId NOT in limited rows (verified via "in" operator) ✅
+  • totalOrderValue NOT in limited rows ✅
+  • recipientName NOT in limited rows ✅
+
+STEP 6 — Owner views same customer detail:
+  • All 8 rows: isLimitedView=false (full detail) ✅
+  • All show totalOrderValue + salesEmployeeId ✅
+  • isOwnOrder correctly true for Owner's orders, false for Sales user's order ✅
+
+- Lint: 0 errors.
+
+FILES CREATED/MODIFIED:
+1. src/lib/order-scope.ts — NEW: resolveOrderScope() + resolveOrderItemScope() shared helpers
+2. src/lib/actions/order.actions.ts — listOrders: added salesEmployeeId scope filter
+3. src/lib/actions/customer.actions.ts — getCustomerDetail: added row-level scoping (isOwnOrder + isLimitedView + field stripping)
+4. src/components/customers/types.ts — RecentOrderDTO: added salesEmployeeId, isOwnOrder, isLimitedView
+5. src/components/orders/customer-detail-view.tsx — OrderHistoryTab: limited rows rendered as greyed-out non-clickable summary rows
+6. src/app/api/orders/pending/route.ts — refactored to resolveOrderScope
+7. src/app/api/orders/cancelled/route.ts — refactored to resolveOrderScope
+8. src/app/api/orders/backordered/route.ts — refactored to resolveOrderItemScope
+9. src/app/api/orders/awaiting-production/route.ts — refactored to resolveOrderItemScope
+10. src/app/api/orders/ready-to-dispatch/route.ts — refactored to resolveOrderScope
+11. src/app/api/orders/returns/route.ts — refactored to resolveOrderScope
+12. src/app/api/orders/returns/review/route.ts — refactored to resolveOrderItemScope
+13. src/app/api/booking-workbench/bookable/route.ts — added defensive scoping
+
+Stage Summary:
+- Server-side order scoping is fully enforced. Sales-role users (ordersDataScope='own') see only their attributed orders in the main Orders list, all 7 queue routes, and the Booking Workbench. The customer detail page uses row-level scoping: own orders show full detail + are clickable, other employees' orders show only order number/date/status as greyed-out non-clickable rows, with salesEmployeeId and all sensitive fields stripped from the API response entirely (not just hidden in the UI). Owner/elevated roles see everything. Verified end-to-end with real test users. Ready for Phase 5+.
