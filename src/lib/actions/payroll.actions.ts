@@ -15,6 +15,7 @@ import { getWorkspace, requirePermission, ApiError } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
 import { insertAuditLog } from '@/lib/audit'
 import { computeCommissionEarned } from '@/lib/analytics/commission'
+import { computeAndSettleAdvanceDeduction } from '@/lib/actions/advance.actions'
 
 interface ActionResult<T = unknown> {
   success: boolean
@@ -96,9 +97,10 @@ export async function generatePayrollRun(
         const commission = await computeCommissionEarned(emp.id, periodStart, periodEnd)
         const commissionEarned = commission.totalEarned
 
-        // Phase 9: advanceDeduction will be computed from active EmployeeAdvance records.
-        // For now, default to 0 (Phase 9 not built yet).
-        const advanceDeduction = 0
+        // Phase 9 — Compute + settle advance deductions from active EmployeeAdvance
+        // records. This settles the advances (updates remainingBalance + status)
+        // INSIDE the transaction so the advance updates + payslip creation are atomic.
+        const advanceDeduction = await computeAndSettleAdvanceDeduction(tx, emp.id)
 
         const otherAllowances = 0
         const otherDeductions = 0

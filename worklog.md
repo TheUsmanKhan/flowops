@@ -7876,3 +7876,50 @@ FILES CREATED/MODIFIED:
 
 Stage Summary:
 - Payroll runs are fully functional. Finance/Owner can generate a run (creates payslips with live commission computation), review/adjust in draft mode, finalize (locking all amounts), and mark as paid (individual or bulk). Employees can fetch their own payslips via API. All actions use dedicated payroll.* permissions. Finalized payslips are immutable — corrections must be in a later run. Ready for Phase 9 (salary advances) and Phase 10 (employee-facing payslip UI).
+
+---
+Task ID: SALARY-ADVANCES-1
+Agent: main
+Task: Phase 9 — Salary advances (record, auto-deduct from payroll runs, list, employee-facing view)
+
+Work Log:
+- Created src/lib/actions/advance.actions.ts with 4 exports:
+  • recordAdvance(input) — creates EmployeeAdvance with amount, reason, dateGiven, repaymentPlan (lump_sum/installments), installmentAmount. Sets remainingBalance=amount, status='active'. Requires payroll.manage_advances.
+  • listAdvances(filter?) — lists advances for the company, optionally filtered by employeeId/status. Requires payroll.manage_advances.
+  • getOwnAdvances() — employee-facing, returns their own advances (identity check only — transparency, not permission-gated).
+  • computeAndSettleAdvanceDeduction(tx, employeeId) — INTERNAL helper called inside generatePayrollRun's transaction. For each active advance: lump_sum deducts full remainingBalance (→ 0, settled), installments deducts min(installmentAmount, remainingBalance) (handles final partial installment → settled when 0). Returns total deduction.
+- Wired into generatePayrollRun() (payroll.actions.ts): replaced the Phase 8 placeholder `advanceDeduction = 0` with `computeAndSettleAdvanceDeduction(tx, emp.id)`. The advance settlement happens INSIDE the payroll run's transaction so advance updates + payslip creation are atomic.
+- Created 2 API routes:
+  • GET/POST /api/advances — list (with employeeId/status filters) + record new advance
+  • GET /api/advances/own — employee's own advances (identity check)
+- Built AdvancesView component (src/components/payroll/advances-view.tsx):
+  • Status filter dropdown (all/active/settled)
+  • Outstanding balance badge
+  • Advances table: employee, amount, remaining, plan (lump_sum/installment per run), reason, date, status
+  • "Record Advance" dialog: employee selector, amount, repayment plan (lump_sum/installments), installment amount (conditional), reason
+- Wired into PayrollView as a tabbed layout: "Payroll Runs" tab + "Advances" tab
+
+VERIFICATION:
+INSTALLMENT SCENARIO (5000 PKR, 2000/run):
+- Run 1: deduction=2000, remaining=3000, status=active ✅
+- Run 2: deduction=2000, remaining=1000, status=active ✅
+- Run 3: deduction=1000 (PARTIAL FINAL), remaining=0, status=settled ✅
+- Run 4: deduction=0 (no active advances) ✅
+- Total deducted: 5000 (= original amount) ✅
+
+LUMP_SUM SCENARIO (8000 PKR):
+- Run 1: deduction=8000 (full), remaining=0, status=settled ✅
+- Match: YES ✅
+
+KEY DESIGN: the final partial installment is handled correctly — min(installmentAmount, remainingBalance) ensures the last deduction is exactly the remaining amount (1000, not 2000), and the status flips to 'settled' only when remainingBalance reaches exactly 0.
+
+FILES CREATED/MODIFIED:
+1. src/lib/actions/advance.actions.ts — NEW: recordAdvance + listAdvances + getOwnAdvances + computeAndSettleAdvanceDeduction
+2. src/lib/actions/payroll.actions.ts — wired computeAndSettleAdvanceDeduction into generatePayrollRun (replaced placeholder)
+3. src/app/api/advances/route.ts — NEW: GET list + POST record
+4. src/app/api/advances/own/route.ts — NEW: GET own advances
+5. src/components/payroll/advances-view.tsx — NEW: list + record dialog
+6. src/components/payroll/payroll-view.tsx — added tabs (Payroll Runs + Advances)
+
+Stage Summary:
+- Salary advances are fully functional. HR/Owner can record advances (lump_sum or installments), which are automatically deducted from future payroll runs. The deduction logic handles the final partial installment correctly (min(installmentAmount, remainingBalance)), and the advance flips to 'settled' exactly when remainingBalance reaches 0. The settlement happens inside the payroll run's transaction (atomic). Employees can view their own advances (transparency, no permission needed). Lint passes.

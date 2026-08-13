@@ -19,9 +19,11 @@ import {
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table'
-import { Loader2, Plus, Receipt, ChevronRight, Calendar } from 'lucide-react'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { Loader2, Plus, Receipt, ChevronRight, Calendar, Wallet } from 'lucide-react'
 import { toast } from 'sonner'
 import { formatPKR } from '@/components/orders/_shared'
+import { AdvancesView } from '@/components/payroll/advances-view'
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -53,6 +55,18 @@ export function PayrollView() {
     queryFn: () => api.get<PayrollListData>('/api/payroll'),
   })
 
+  // Fetch employees for the advance recording dialog
+  const { data: empData } = useQuery<{ employees: Array<{ id: string; user: { fullName: string }; designation: string | null }> }>({
+    queryKey: ['employees-for-advances'],
+    queryFn: () => api.get<{ employees: Array<{ id: string; user: { fullName: string }; designation: string | null }> }>('/api/employees'),
+  })
+
+  const employees = (empData?.employees ?? []).map((e) => ({
+    id: e.id,
+    fullName: e.user.fullName,
+    designation: e.designation,
+  }))
+
   const statusBadge = (status: string) => {
     switch (status) {
       case 'draft': return <Badge variant="outline" className="text-amber-700 border-amber-200 bg-amber-50">Draft</Badge>
@@ -65,72 +79,92 @@ export function PayrollView() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Payroll"
-        description="Generate payroll runs, review payslips, finalize, and mark as paid."
-        actions={
-          <Button onClick={() => setGenerateOpen(true)}>
-            <Plus className="h-4 w-4" /> Generate Run
-          </Button>
-        }
+        title="Finance & Payroll"
+        description="Generate payroll runs, manage salary advances, finalize, and mark as paid."
       />
 
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Period</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Payslips</TableHead>
-                <TableHead className="text-right">Total Net Pay</TableHead>
-                <TableHead>Generated</TableHead>
-                <TableHead className="w-8" />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {isLoading ? (
-                <TableRow>
-                  <TableCell colSpan={6} className="h-32 text-center">
-                    <Loader2 className="h-5 w-5 animate-spin mx-auto text-muted-foreground" />
-                  </TableCell>
-                </TableRow>
-              ) : !data?.runs?.length ? (
-                <TableRow>
-                  <TableCell colSpan={6} className="h-32 text-center text-muted-foreground">
-                    <Receipt className="h-8 w-8 mx-auto mb-2 opacity-40" />
-                    No payroll runs yet. Generate your first run.
-                  </TableCell>
-                </TableRow>
-              ) : (
-                data.runs.map((run) => (
-                  <TableRow
-                    key={run.id}
-                    className="cursor-pointer hover:bg-muted/50"
-                    onClick={() => navigate({ name: 'payroll-run-detail', id: run.id })}
-                  >
-                    <TableCell className="font-medium">
-                      {MONTHS[run.periodMonth - 1]} {run.periodYear}
-                    </TableCell>
-                    <TableCell>{statusBadge(run.status)}</TableCell>
-                    <TableCell className="text-right tabular-nums">{run.payslipCount}</TableCell>
-                    <TableCell className="text-right tabular-nums font-medium">
-                      {formatPKR(run.totalNetPay)}
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {run.generatedAt
-                        ? new Date(run.generatedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-                        : '—'}
-                    </TableCell>
-                    <TableCell>
-                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                    </TableCell>
+      <Tabs defaultValue="runs">
+        <TabsList>
+          <TabsTrigger value="runs" className="gap-1.5">
+            <Receipt className="h-3.5 w-3.5" /> Payroll Runs
+          </TabsTrigger>
+          <TabsTrigger value="advances" className="gap-1.5">
+            <Wallet className="h-3.5 w-3.5" /> Advances
+          </TabsTrigger>
+        </TabsList>
+
+        {/* ─── Payroll Runs Tab ───────────────────────────────────── */}
+        <TabsContent value="runs" className="space-y-4 mt-4">
+          <div className="flex justify-end">
+            <Button onClick={() => setGenerateOpen(true)}>
+              <Plus className="h-4 w-4" /> Generate Run
+            </Button>
+          </div>
+
+          <Card>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Period</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead className="text-right">Payslips</TableHead>
+                    <TableHead className="text-right">Total Net Pay</TableHead>
+                    <TableHead>Generated</TableHead>
+                    <TableHead className="w-8" />
                   </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
+                </TableHeader>
+                <TableBody>
+                  {isLoading ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="h-32 text-center">
+                        <Loader2 className="h-5 w-5 animate-spin mx-auto text-muted-foreground" />
+                      </TableCell>
+                    </TableRow>
+                  ) : !data?.runs?.length ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="h-32 text-center text-muted-foreground">
+                        <Receipt className="h-8 w-8 mx-auto mb-2 opacity-40" />
+                        No payroll runs yet. Generate your first run.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    data.runs.map((run) => (
+                      <TableRow
+                        key={run.id}
+                        className="cursor-pointer hover:bg-muted/50"
+                        onClick={() => navigate({ name: 'payroll-run-detail', id: run.id })}
+                      >
+                        <TableCell className="font-medium">
+                          {MONTHS[run.periodMonth - 1]} {run.periodYear}
+                        </TableCell>
+                        <TableCell>{statusBadge(run.status)}</TableCell>
+                        <TableCell className="text-right tabular-nums">{run.payslipCount}</TableCell>
+                        <TableCell className="text-right tabular-nums font-medium">
+                          {formatPKR(run.totalNetPay)}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {run.generatedAt
+                            ? new Date(run.generatedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+                            : '—'}
+                        </TableCell>
+                        <TableCell>
+                          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ─── Advances Tab ──────────────────────────────────────── */}
+        <TabsContent value="advances" className="mt-4">
+          <AdvancesView employees={employees} />
+        </TabsContent>
+      </Tabs>
 
       {generateOpen && (
         <GenerateRunDialog
