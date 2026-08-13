@@ -7446,3 +7446,64 @@ Stage Summary:
 - Automated polling is now LIVE. The instrumentation.ts hook starts a 30-minute interval on server boot — no external scheduler needed. When PostEx's API reflects the real-world pickup/dispatch, FlowOps will catch it within 30 minutes and auto-transition the order (dispatch, delivered, RTO, etc.).
 - The previous fix (bulk-to-single-track fallback) ensures the poll actually succeeds — the PostEx bulk API's intermittent 400 errors are now handled gracefully.
 - The current "Booked" status is coming directly from PostEx's API — it's not a FlowOps issue. When PostEx updates their system, FlowOps will reflect it automatically.
+
+---
+Task ID: HR-PAYROLL-SCHEMA-1
+Agent: main
+Task: Add HR/Payroll/Commission schema (7 new models + extend Employee/Order/Role + 11 new permission keys + 5 default roles)
+
+Work Log:
+- Extended Role model: added ordersDataScope String @default("all") — defaults to "all" for every existing row (preserves current behavior). Values: "own" | "all".
+- Extended Order model: added salesEmployeeId String? + salesEmployee Employee? relation ("OrderSalesEmployee") + @@index([salesEmployeeId]). Nullable for legacy orders.
+- Extended Employee model: added @@index([companyId, designation]) + 9 new back-relations for the HR models (salesOrders, employeeStats, salaryProfile, salaryRevisions, salaryRevisionsMade, commissionRules, payslips, advancesReceived, advancesCreatedBy, payrollRunsFinalized). designation + department fields already existed.
+- Extended Company model: added payrollRuns PayrollRun[] back-relation.
+- Created 7 new models (all with cuid() ids, createdAt/updatedAt, @@index where queried):
+  1. EmployeeStats (1:1 with Employee) — totalOrders, cancelledCount, dispatchedCount, deliveredCount, rtoCount, inTransitCount, cancellationRate/deliveryRate/rtoRate (Decimal 5,4), itemsSoldQty, damageLossCount, revenueGenerated
+  2. EmployeeSalaryProfile (1:1 with Employee) — baseSalary, currency (default PKR), effectiveFrom, status (active|inactive)
+  3. SalaryRevision (1:N with Employee, append-only) — oldAmount?, newAmount, effectiveFrom, changedByEmployeeId. Named relations ("SalaryRevisionEmployee" + "SalaryRevisionChangedBy") to resolve ambiguity.
+  4. CommissionRule (1:N with Employee) — basisType (per_order|per_item_sold|percentage_of_revenue), rateValue Decimal(10,4), triggerStatus (plain String, validated at app layer), isActive
+  5. PayrollRun (1:N with Company) — periodMonth (1-12), periodYear, status (draft|finalized|paid), finalizedByEmployeeId. @@unique([companyId, periodMonth, periodYear]).
+  6. Payslip (1:N with PayrollRun, 1:N with Employee) — baseSalary, commissionEarned, advanceDeduction, otherDeductions, otherAllowances, grossPay, netPay (all computed at generation time), paymentStatus (pending|paid), paymentDate, paymentMethod, paymentReference. @@unique([payrollRunId, employeeId]).
+  7. EmployeeAdvance (1:N with Employee) — amount, reason, dateGiven, repaymentPlan (lump_sum|installments), installmentAmount?, remainingBalance, status (active|settled), createdByEmployeeId. Named relation ("AdvanceCreatedBy").
+- Applied via `prisma db push` — successful (11.11s). All 7 tables + new fields + indexes created.
+- Added 11 new permission keys to src/lib/permissions.ts:
+  • customers.view, customers.create, customers.edit
+  • scan.operate, scan.view_reports
+  • employees.manage_salary, employees.view_salary
+  • payroll.manage, payroll.view_all, payroll.manage_advances
+  Also added 3 new groups to PERMISSION_GROUPS (Customers, Scan, Payroll) + extended Employees group with the 2 new salary keys. All new keys now appear in the role editor UI.
+- Created src/lib/seed-default-roles.ts — shared helper with DEFAULT_ROLES array (5 role definitions) + seedDefaultRolesForCompany(companyId, createdById) function. Idempotent (skips roles that already exist by companyId+name). Each role created in a transaction with its permission grants.
+- Wired seedDefaultRolesForCompany into BOTH company-create routes:
+  • src/app/api/companies/create/route.ts (existing user adds a company)
+  • src/app/api/onboarding/create-company/route.ts (new user onboarding)
+  Both call it after the system roles + order settings are seeded. Non-blocking (try/catch).
+- Created scripts/seed-default-roles.ts — one-time backfill script for existing companies.
+- Ran the backfill: 10 companies × 5 roles = 50 new roles created. All 5 default roles (Sales, Sales Manager, Inventory Manager, Warehouse Staff, Manager) now exist for every company.
+- Verified idempotency: re-ran the script → 0 created (all skipped).
+- Verified data integrity:
+  • 7 new tables all exist (0 rows each — ready for use)
+  • Role.ordersDataScope = 'all' on existing Owner role (default preserved)
+  • Order.salesEmployeeId = null on existing orders (nullable, no breakage)
+  • Employee.designation/department unchanged
+  • Orders: 135, Employees: 12, Customers: 15 (all unchanged)
+  • Roles: 97 (was 47, now +50 from the 5 default roles × 10 companies)
+  • Indexes confirmed: Order_salesEmployeeId_idx, Employee_companyId_designation_idx
+- Lint: 0 errors.
+
+VERIFICATION DETAILS:
+- Muzammal Collection now has 9 roles: 4 system (Owner/Founder/Co-Founder/Investor, all scope=all, 0 perms) + 5 default (Sales scope=own 6 perms, Sales Manager scope=all 14 perms, Inventory Manager scope=all 18 perms, Warehouse Staff scope=own 5 perms, Manager scope=all 14 perms).
+- Sales role permissions: customers.create, customers.edit, customers.view, orders.create, orders.view, products.view ✅
+- Warehouse Staff perms: inventory.cycle_count, inventory.receive, inventory.transfer, inventory.view, scan.operate ✅
+- Owner role unchanged: isSystemRole=true, ordersDataScope='all' ✅
+- None of the 5 default roles have Employees/Settings/Integrations/Payroll permissions (reserved for Owner/elevated) ✅
+
+FILES CREATED/MODIFIED:
+1. prisma/schema.prisma — extended Role (ordersDataScope), Order (salesEmployeeId+index), Employee (index+9 back-relations), Company (payrollRuns back-relation); added 7 new models
+2. src/lib/permissions.ts — added 11 new permission keys + 3 new groups (Customers, Scan, Payroll) + extended Employees group
+3. src/lib/seed-default-roles.ts — NEW: shared helper with 5 role definitions + seedDefaultRolesForCompany()
+4. src/app/api/companies/create/route.ts — wired seedDefaultRolesForCompany after order-settings
+5. src/app/api/onboarding/create-company/route.ts — wired seedDefaultRolesForCompany after order-settings
+6. scripts/seed-default-roles.ts — NEW: one-time backfill script
+
+Stage Summary:
+- HR/Payroll/Commission schema fully added and applied. 7 new tables, 3 extended models, 11 new permission keys, 5 default roles seeded for all 10 existing companies + auto-seeded for all future companies. Existing data 100% intact (orders, employees, customers unchanged). Idempotent — safe to re-run. Lint passes. Ready for the HR/Payroll UI + API module to be built on top of this schema.

@@ -40,11 +40,27 @@ export const PERMISSIONS = {
   ORDERS_CANCEL: 'orders.cancel',
   ORDERS_MANAGE: 'orders.manage',
 
+  // Customers
+  CUSTOMERS_VIEW: 'customers.view',
+  CUSTOMERS_CREATE: 'customers.create',
+  CUSTOMERS_EDIT: 'customers.edit',
+
+  // Scan
+  SCAN_OPERATE: 'scan.operate',
+  SCAN_VIEW_REPORTS: 'scan.view_reports',
+
   // Employees
   EMPLOYEES_VIEW: 'employees.view',
   EMPLOYEES_INVITE: 'employees.invite',
   EMPLOYEES_TERMINATE: 'employees.terminate',
   EMPLOYEES_MANAGE: 'employees.manage',
+  EMPLOYEES_MANAGE_SALARY: 'employees.manage_salary',
+  EMPLOYEES_VIEW_SALARY: 'employees.view_salary',
+
+  // Payroll
+  PAYROLL_MANAGE: 'payroll.manage',
+  PAYROLL_VIEW_ALL: 'payroll.view_all',
+  PAYROLL_MANAGE_ADVANCES: 'payroll.manage_advances',
 
   // Finance
   FINANCE_VIEW: 'finance.view',
@@ -101,6 +117,23 @@ export const PERMISSION_GROUPS: {
     ],
   },
   {
+    group: 'Customers',
+    icon: 'UserCircle',
+    permissions: [
+      { key: PERMISSIONS.CUSTOMERS_VIEW, label: 'View customers', description: 'See the customer directory and their order history' },
+      { key: PERMISSIONS.CUSTOMERS_CREATE, label: 'Create customers', description: 'Add new customers with phone + address' },
+      { key: PERMISSIONS.CUSTOMERS_EDIT, label: 'Edit customers', description: 'Update customer details, phones, addresses' },
+    ],
+  },
+  {
+    group: 'Scan',
+    icon: 'ScanLine',
+    permissions: [
+      { key: PERMISSIONS.SCAN_OPERATE, label: 'Operate scan station', description: 'Scan parcels (mark packed, dispatch, handover)' },
+      { key: PERMISSIONS.SCAN_VIEW_REPORTS, label: 'View scan reports', description: 'Access daily scan reports and history' },
+    ],
+  },
+  {
     group: 'Employees',
     icon: 'Users',
     permissions: [
@@ -108,6 +141,17 @@ export const PERMISSION_GROUPS: {
       { key: PERMISSIONS.EMPLOYEES_INVITE, label: 'Invite employees', description: 'Send invitation emails to new hires' },
       { key: PERMISSIONS.EMPLOYEES_TERMINATE, label: 'Terminate employees', description: 'Set employee status to terminated' },
       { key: PERMISSIONS.EMPLOYEES_MANAGE, label: 'Manage employees', description: 'Change roles, suspend, and edit employees' },
+      { key: PERMISSIONS.EMPLOYEES_VIEW_SALARY, label: 'View employee salary', description: 'See salary profiles and revision history for employees (every employee can view their OWN salary without this — this key is for viewing OTHERS)' },
+      { key: PERMISSIONS.EMPLOYEES_MANAGE_SALARY, label: 'Manage employee salary', description: 'Set base salary, create revisions, configure commission rules' },
+    ],
+  },
+  {
+    group: 'Payroll',
+    icon: 'Receipt',
+    permissions: [
+      { key: PERMISSIONS.PAYROLL_MANAGE, label: 'Manage payroll', description: 'Create, generate, finalize, and mark-paid payroll runs' },
+      { key: PERMISSIONS.PAYROLL_VIEW_ALL, label: 'View all payslips', description: 'See every employee payslip (every employee can view their OWN without this — this key is for viewing all)' },
+      { key: PERMISSIONS.PAYROLL_MANAGE_ADVANCES, label: 'Manage salary advances', description: 'Record, edit, and settle employee salary advances' },
     ],
   },
   {

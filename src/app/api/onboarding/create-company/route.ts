@@ -171,6 +171,16 @@ export async function POST(req: Request) {
       console.error('[order-settings] Failed to auto-create (non-blocking):', e)
     }
 
+    // 7c. Seed the 5 default HR roles (Sales, Sales Manager, Inventory Manager,
+    // Warehouse Staff, Manager) so the new company is immediately usable for
+    // non-Owner employees. Idempotent.
+    try {
+      const { seedDefaultRolesForCompany } = await import('@/lib/seed-default-roles')
+      await seedDefaultRolesForCompany(company.id, user.id)
+    } catch (e) {
+      console.error('[seed-default-roles] Failed to seed (non-blocking):', e)
+    }
+
     // 8. Return the fresh session payload.
     const payload = await buildSessionPayload(user.id)
     return Response.json(payload)

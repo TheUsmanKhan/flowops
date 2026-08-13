@@ -199,6 +199,9 @@ model Company {
 
   // Load Sheets back-relation (migration 020)
   loadSheets             LoadSheet[]
+
+  // HR / Payroll back-relation
+  payrollRuns            PayrollRun[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -214,6 +217,12 @@ model Role {
   systemRoleKey String?  // owner | founder | co_founder | investor | null
   // NOTE: systemRoleKey is unique PER COMPANY (not globally), so every
   // company can seed its own owner/founder/co_founder/investor roles.
+  // ─── Data scope for the Orders module ───────────────────────────────
+  // "all"  → role sees ALL orders in the company (default, preserves
+  //          existing behavior for every row after migration)
+  // "own"  → role sees only orders where salesEmployeeId === the caller's
+  //          own Employee.id (enforced at the query layer, not in SQL)
+  ordersDataScope String  @default("all") // "own" | "all"
   isActive      Boolean  @default(true)
   createdById   String?
   createdBy     Profile? @relation("RoleCreator", fields: [createdById], references: [id])
@@ -335,7 +344,30 @@ model Employee {
   scanEvents                      ScanEvent[] @relation("ScanEventScannedBy")
   loadSheetsGenerated             LoadSheet[] @relation("LoadSheetGenerator")
 
+  // ─── HR / Payroll back-relations ────────────────────────────────────
+  // Orders where this employee is the attributed salesperson (Order.salesEmployeeId).
+  salesOrders                     Order[] @relation("OrderSalesEmployee")
+  // Cached rollup of this employee's sales performance (1:1).
+  employeeStats                   EmployeeStats?
+  // Active salary profile (1:1, the current effective base salary).
+  salaryProfile                   EmployeeSalaryProfile?
+  // Append-only salary revision history (1:N — as the employee whose salary changed).
+  salaryRevisions                 SalaryRevision[] @relation("SalaryRevisionEmployee")
+  // Salary revisions this employee made for others (1:N — as the changer).
+  salaryRevisionsMade             SalaryRevision[] @relation("SalaryRevisionChangedBy")
+  // Commission rules configured for this employee (1:N).
+  commissionRules                 CommissionRule[]
+  // Payslips generated for this employee (1:N).
+  payslips                        Payslip[]
+  // Salary advances given to this employee (1:N).
+  advancesReceived                EmployeeAdvance[]
+  // Salary advances created BY this employee (1:N — the staff member who recorded it).
+  advancesCreatedBy               EmployeeAdvance[] @relation("AdvanceCreatedBy")
+  // Payroll runs this employee finalized (1:N).
+  payrollRunsFinalized            PayrollRun[] @relation("PayrollFinalizer")
+
   @@unique([companyId, userId])
+  @@index([companyId, designation])
 }
 
 /// Token-based email invitations. Works whether user exists or not.
@@ -1957,6 +1989,14 @@ model Order {
 
   createdBy                   String?
   createdByEmployee           Employee? @relation("OrderCreator", fields: [createdBy], references: [id])
+  // ─── Sales attribution (HR/KPI module) ─────────────────────────────
+  // The employee attributed as the salesperson for this order. Distinct from
+  // createdBy (who typed the order) — a manager may create an order on behalf
+  // of a sales agent, in which case salesEmployeeId = the agent and
+  // createdBy = the manager. Nullable for legacy/Shopify-imported orders.
+  // Queried on every order-list + KPI request → MUST be indexed.
+  salesEmployeeId             String?
+  salesEmployee               Employee? @relation("OrderSalesEmployee", fields: [salesEmployeeId], references: [id], onDelete: SetNull)
   createdAt                   DateTime @default(now())
   updatedAt                   DateTime @updatedAt
 
@@ -1975,6 +2015,7 @@ model Order {
   @@index([usedCustomerAddressId])
   @@index([usedCustomerPhoneId])
   @@index([courierCompanyIntegrationId])
+  @@index([salesEmployeeId])
 
   // ─── Order Scan Module fields (Phase 1) ────────────────────────────
   // warehouseHandoverScannedAt: set when warehouse staff scans the
@@ -2344,4 +2385,202 @@ model LoadSheet {
   @@index([companyIntegrationId])
   @@index([providerKey])
   @@map("load_sheets")
+}
+
+// ============================================================================
+// HR / PAYROLL / COMMISSION MODULE
+// ============================================================================
+// These models add employee performance tracking, salary management,
+// commission rules, payroll runs, payslips, and salary advances.
+// All status fields are plain Strings (validated at the application layer),
+// consistent with how Order.status / OrderItem.fulfillmentStatus work.
+// ============================================================================
+
+/// Cached rollup of an employee's sales performance — mirrors the
+/// Customer.totalOrdersCount / totalRtoCount caching pattern. One row per
+/// employee (1:1). Recomputed by updateEmployeeStats() on every order mutation.
+model EmployeeStats {
+  id              String   @id @default(cuid())
+  employeeId      String   @unique
+  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  // Order count rollups (excludes cancelled orders from "total" per the
+  // same convention as Customer.totalOrdersCount)
+  totalOrders     Int      @default(0)
+  cancelledCount  Int      @default(0)
+  dispatchedCount Int      @default(0)
+  deliveredCount  Int      @default(0)
+  rtoCount        Int      @default(0)
+  inTransitCount  Int      @default(0) // dispatched but not yet delivered
+
+  // Computed rates (0-1 range). Recomputed at write-time, NOT read-time,
+  // so the cached values stay consistent with the counts above.
+  cancellationRate Decimal @default(0) @db.Decimal(5, 4) // 0.0000 - 1.0000
+  deliveryRate     Decimal @default(0) @db.Decimal(5, 4)
+  rtoRate          Decimal @default(0) @db.Decimal(5, 4)
+
+  // Volume rollups
+  itemsSoldQty    Int      @default(0) // sum of OrderItem.quantity for delivered+dispatched
+  damageLossCount Int      @default(0) // count of stock_loss_records reported by this employee
+  revenueGenerated Decimal @default(0) @db.Decimal(14, 2) // sum of totalOrderValue for delivered+dispatched
+
+  updatedAt       DateTime @updatedAt
+
+  @@index([employeeId])
+}
+
+/// Active salary profile for an employee (1:1). Only the LATEST profile is
+/// "active" — when a salary changes, a new EmployeeSalaryProfile row is
+/// created with effectiveFrom=now and the old one's status flips to
+/// "inactive". A SalaryRevision row is also appended for the audit trail.
+model EmployeeSalaryProfile {
+  id           String   @id @default(cuid())
+  employeeId   String   @unique
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  baseSalary   Decimal  @db.Decimal(14, 2)
+  currency     String   @default("PKR") // defaults to the company's baseCurrency at creation
+  effectiveFrom DateTime
+  status       String   @default("active") // "active" | "inactive"
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([employeeId])
+  @@index([status])
+}
+
+/// Append-only salary revision history. NEVER edit an existing row —
+/// every salary change creates a new row here. oldAmount is null for the
+/// first-ever revision (employee's initial salary).
+model SalaryRevision {
+  id                   String    @id @default(cuid())
+  employeeId           String
+  employee             Employee  @relation("SalaryRevisionEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+
+  oldAmount            Decimal?  @db.Decimal(14, 2) // null for first-ever revision
+  newAmount            Decimal   @db.Decimal(14, 2)
+  effectiveFrom        DateTime
+  changedByEmployeeId  String
+  changedBy            Employee  @relation("SalaryRevisionChangedBy", fields: [changedByEmployeeId], references: [id])
+  createdAt            DateTime  @default(now())
+
+  @@index([employeeId, effectiveFrom])
+  @@index([changedByEmployeeId])
+}
+
+/// Commission rule for an employee. An employee can have multiple active
+/// rules (e.g. "PKR 50 per dispatched order" + "5% of delivered revenue").
+/// The payroll generator sums all matching rules when computing commission.
+///
+/// rateValue interpretation depends on basisType:
+///   per_order              → currency amount (e.g. 50 = PKR 50 per order)
+///   per_item_sold          → currency amount per item (e.g. 10 = PKR 10/item)
+///   percentage_of_revenue  → 0-1 fraction (e.g. 0.05 = 5% of revenue)
+///
+/// triggerStatus: which Order.status or OrderItem.fulfillmentStatus value
+/// triggers this commission. Validated at the app layer (not a DB enum) to
+/// stay consistent with how other status fields work in this codebase.
+model CommissionRule {
+  id           String   @id @default(cuid())
+  employeeId   String
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  basisType    String   // "per_order" | "per_item_sold" | "percentage_of_revenue"
+  rateValue    Decimal  @db.Decimal(10, 4) // currency amount OR 0-1 fraction
+  triggerStatus String  // e.g. "dispatched", "delivered", "confirmed"
+  isActive     Boolean  @default(true)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([employeeId, isActive])
+  @@index([triggerStatus])
+}
+
+/// A payroll run for a specific company + month + year. Only ONE run per
+/// company per month (enforced by unique constraint). A run progresses:
+/// draft → finalized → paid. Once finalized, the payslips are locked.
+model PayrollRun {
+  id                   String    @id @default(cuid())
+  companyId            String
+  company              Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  periodMonth          Int       // 1-12
+  periodYear           Int
+  status               String    @default("draft") // "draft" | "finalized" | "paid"
+
+  generatedAt          DateTime?
+  finalizedByEmployeeId String?
+  finalizedBy          Employee? @relation("PayrollFinalizer", fields: [finalizedByEmployeeId], references: [id], onDelete: SetNull)
+  finalizedAt          DateTime?
+
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  payslips             Payslip[]
+
+  @@unique([companyId, periodMonth, periodYear])
+  @@index([companyId, periodYear, periodMonth])
+  @@index([status])
+}
+
+/// A single employee's payslip within a PayrollRun. grossPay and netPay are
+/// computed at generation time (base + commission + otherAllowances, then
+/// minus advanceDeduction + otherDeductions) and stored — NOT recomputed
+/// on read, so the numbers stay frozen once finalized.
+model Payslip {
+  id                String    @id @default(cuid())
+  payrollRunId      String
+  payrollRun        PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  employeeId        String
+  employee          Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  baseSalary        Decimal   @db.Decimal(14, 2)
+  commissionEarned  Decimal   @default(0) @db.Decimal(14, 2)
+  advanceDeduction  Decimal   @default(0) @db.Decimal(14, 2)
+  otherDeductions   Decimal   @default(0) @db.Decimal(14, 2)
+  otherAllowances   Decimal   @default(0) @db.Decimal(14, 2)
+
+  // Computed at generation time (NOT a DB generated column):
+  //   grossPay = baseSalary + commissionEarned + otherAllowances
+  //   netPay   = grossPay - advanceDeduction - otherDeductions
+  grossPay          Decimal   @db.Decimal(14, 2)
+  netPay            Decimal   @db.Decimal(14, 2)
+
+  paymentStatus     String    @default("pending") // "pending" | "paid"
+  paymentDate       DateTime?
+  paymentMethod     String?   // e.g. "bank_transfer", "cash", "cheque"
+  paymentReference  String?   // e.g. transaction ID / cheque number
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([payrollRunId, employeeId]) // one payslip per employee per run
+  @@index([employeeId])
+  @@index([paymentStatus])
+}
+
+/// Salary advance given to an employee. Tracks repayment plan + remaining
+/// balance. When remainingBalance reaches 0, status flips to "settled".
+/// The payroll generator deducts from active advances when computing netPay.
+model EmployeeAdvance {
+  id                   String    @id @default(cuid())
+  employeeId           String
+  employee             Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  amount               Decimal   @db.Decimal(14, 2) // original advance amount
+  reason               String
+  dateGiven            DateTime
+  repaymentPlan        String    // "lump_sum" | "installments"
+  installmentAmount    Decimal?  @db.Decimal(14, 2) // required if repaymentPlan = "installments"
+  remainingBalance     Decimal   @db.Decimal(14, 2) // decremented as deductions are applied
+  status               String    @default("active") // "active" | "settled"
+
+  createdByEmployeeId  String
+  createdBy            Employee  @relation("AdvanceCreatedBy", fields: [createdByEmployeeId], references: [id])
+  createdAt            DateTime  @default(now())
+
+  @@index([employeeId, status])
+  @@index([createdByEmployeeId])
 }
