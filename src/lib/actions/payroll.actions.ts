@@ -509,7 +509,12 @@ export async function getOwnPayslips(): Promise<ActionResult<{
     const ctx = await getWorkspace()
 
     const payslips = await db.payslip.findMany({
-      where: { employeeId: ctx.employee.id },
+      where: {
+        employeeId: ctx.employee.id,
+        // Phase 10: only show finalized/paid runs — never draft figures
+        // (draft payslips are not official, employees shouldn't see them)
+        payrollRun: { status: { in: ['finalized', 'paid'] } },
+      },
       include: {
         payrollRun: {
           select: { periodMonth: true, periodYear: true, status: true },

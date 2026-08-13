@@ -7923,3 +7923,56 @@ FILES CREATED/MODIFIED:
 
 Stage Summary:
 - Salary advances are fully functional. HR/Owner can record advances (lump_sum or installments), which are automatically deducted from future payroll runs. The deduction logic handles the final partial installment correctly (min(installmentAmount, remainingBalance)), and the advance flips to 'settled' exactly when remainingBalance reaches 0. The settlement happens inside the payroll run's transaction (atomic). Employees can view their own advances (transparency, no permission needed). Lint passes.
+
+---
+Task ID: EMPLOYEE-PAYSLIPS-1
+Agent: main
+Task: Phase 10 — Employee-facing Salary & Payslips tab + PDF generation
+
+Work Log:
+- Created src/lib/utils/payslip-pdf.ts:
+  • PayslipPdf React component (using @react-pdf/renderer — same dependency as scan reports)
+  • Layout: company name header, employee name/designation, pay period, earnings table (base, commission, allowances, gross), deductions table (advance, other, total), net pay highlighted box, footer with generated timestamp
+  • generatePayslipPdfBuffer(data) — renders to buffer for streaming to client
+  • generateAndStorePayslipPdf(data, companyId) — renders + stores under public/uploads/payslips/<companyId>/ (same pattern as scan reports)
+- Created GET /api/payroll/payslips/own/[payslipId] route:
+  • Returns payslip detail as JSON (default) OR streams PDF (when ?format=pdf)
+  • Identity check: payslip MUST belong to ctx.employee.id (employeeId === current employee)
+  • Only returns finalized/paid runs — draft payslips return 403 ("not yet finalized")
+  • PDF response: Content-Type: application/pdf, Content-Disposition: attachment
+- Updated getOwnPayslips() (payroll.actions.ts): now filters to only finalized/paid runs (payrollRun.status IN ['finalized', 'paid']). Draft payslips are never shown to employees.
+- Built MyPayslipsTab component (src/components/employees/my-payslips-tab.tsx):
+  • Active advance balance display (amber card) if any active advances exist
+  • Payslip history table: period, gross pay, deductions, net pay, payment status
+  • Click a row → detail dialog with full breakdown (earnings + deductions + net pay + payment info)
+  • "Download PDF" button — fetches from /api/payroll/payslips/own/[id]?format=pdf, creates blob, triggers browser download
+  • Uses fetch() directly (not api.get) for the PDF to handle binary response
+- Added "Payslips" tab to employee-detail-view:
+  • Tab trigger (Receipt icon) only shown when isSelf === true (viewing own profile)
+  • Tab content: MyPayslipsTab component
+  • TabsList grid changes from 4 to 5 columns when isSelf
+  • Added Receipt icon import + cn import
+
+VERIFICATION:
+- STEP 1: Sales user lists own payslips → 1 payslip (Aug 2026, base=30000, commission=0, net=30000, payment=paid, run=finalized) ✅
+- STEP 2: Get payslip detail (JSON) → all fields correct (base=30000, commission=0, allowances=0, deductions=0, gross=30000, net=30000, payment=paid, run=finalized) ✅
+- STEP 3: Download PDF → HTTP 200, 3239 bytes, Content-Type: application/pdf, starts with %PDF ✅
+- STEP 4: Owner tries to access Sales user's payslip via /own endpoint → HTTP 404 (identity check prevents cross-employee access) ✅
+- STEP 5: Sales user fetches own advances → 0 advances (correctly empty — test advances were cleaned up in Phase 9) ✅
+- Lint: 0 errors.
+
+ACCESS CONTROL:
+- An employee can ONLY view/download their OWN payslips (identity check: employeeId === ctx.employee.id)
+- Draft payslips are never shown (only finalized/paid)
+- payroll.view_all is NOT needed here — that's for the Finance-side admin views (Phase 8)
+- The /own endpoint returns 404 if the payslip belongs to a different employee (no data leakage)
+
+FILES CREATED/MODIFIED:
+1. src/lib/utils/payslip-pdf.ts — NEW: PayslipPdf component + generatePayslipPdfBuffer + generateAndStorePayslipPdf
+2. src/app/api/payroll/payslips/own/[payslipId]/route.ts — NEW: GET payslip detail + PDF download
+3. src/lib/actions/payroll.actions.ts — getOwnPayslips: filter to finalized/paid only
+4. src/components/employees/my-payslips-tab.tsx — NEW: payslip list + detail dialog + PDF download
+5. src/components/employees/employee-detail-view.tsx — added "Payslips" tab (isSelf only) + imports
+
+Stage Summary:
+- Employee-facing payslips are fully functional. An employee viewing their own profile sees a "Payslips" tab (only visible when isSelf). The tab lists their finalized/paid payslips, shows a detail dialog with full breakdown (base, commission, allowances, deductions, advance, net pay), and includes a "Download PDF" button that generates a clean payslip PDF via @react-pdf/renderer. Access control is identity-based (employeeId === current employee) — no one can view another employee's payslips via this tab. Draft payslips are never shown. The PDF renders with company name, employee info, pay period, earnings/deductions tables, and net pay total. Ready for production use.

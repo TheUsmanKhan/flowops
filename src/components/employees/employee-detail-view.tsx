@@ -52,12 +52,15 @@ import {
   TrendingUp,
   Wallet,
   Pencil,
+  Receipt,
 } from 'lucide-react'
 import { EmployeeStatusBadge } from '@/components/employees/employee-status-badge'
 import { PerformanceTab } from '@/components/employees/performance-tab'
 import { SalaryTab } from '@/components/employees/salary-tab'
+import { MyPayslipsTab } from '@/components/employees/my-payslips-tab'
 import { toast } from 'sonner'
 import { format } from 'date-fns'
+import { cn } from '@/lib/utils'
 
 interface EmployeeDetail extends EmployeePublic {
   role: EmployeePublic['role'] & { permissions: string[] }
@@ -216,7 +219,7 @@ export function EmployeeDetailView({ employeeId }: { employeeId: string }) {
 
       {/* Tabbed profile */}
       <Tabs defaultValue="overview">
-        <TabsList className="grid w-full grid-cols-2 sm:grid-cols-4 lg:w-[600px]">
+        <TabsList className={cn('grid w-full', isSelf ? 'grid-cols-2 sm:grid-cols-5 lg:w-[700px]' : 'grid-cols-2 sm:grid-cols-4 lg:w-[600px]')}>
           <TabsTrigger value="overview" className="gap-1.5">
             <Briefcase className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Overview</span>
@@ -233,6 +236,12 @@ export function EmployeeDetailView({ employeeId }: { employeeId: string }) {
             <Wallet className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Salary</span>
           </TabsTrigger>
+          {isSelf && (
+            <TabsTrigger value="my-payslips" className="gap-1.5">
+              <Receipt className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Payslips</span>
+            </TabsTrigger>
+          )}
         </TabsList>
 
         {/* ─── Overview Tab ─────────────────────────────────────────── */}
@@ -510,6 +519,13 @@ export function EmployeeDetailView({ employeeId }: { employeeId: string }) {
         <TabsContent value="salary" className="mt-4">
           <SalaryTab employeeId={emp.id} isSelf={isSelf} />
         </TabsContent>
+
+        {/* ─── My Payslips Tab (own profile only) ──────────────────── */}
+        {isSelf && (
+          <TabsContent value="my-payslips" className="mt-4">
+            <MyPayslipsTab employeeId={emp.id} />
+          </TabsContent>
+        )}
       </Tabs>
 
       {/* Status action dialog */}
