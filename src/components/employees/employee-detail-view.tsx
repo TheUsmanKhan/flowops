@@ -55,6 +55,7 @@ import {
 } from 'lucide-react'
 import { EmployeeStatusBadge } from '@/components/employees/employee-status-badge'
 import { PerformanceTab } from '@/components/employees/performance-tab'
+import { SalaryTab } from '@/components/employees/salary-tab'
 import { toast } from 'sonner'
 import { format } from 'date-fns'
 
@@ -228,7 +229,7 @@ export function EmployeeDetailView({ employeeId }: { employeeId: string }) {
             <TrendingUp className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Performance</span>
           </TabsTrigger>
-          <TabsTrigger value="salary" className="gap-1.5" disabled>
+          <TabsTrigger value="salary" className="gap-1.5">
             <Wallet className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Salary</span>
           </TabsTrigger>
@@ -505,21 +506,9 @@ export function EmployeeDetailView({ employeeId }: { employeeId: string }) {
           <PerformanceTab employeeId={emp.id} isSelf={isSelf} />
         </TabsContent>
 
-        {/* ─── Salary Tab (placeholder — Phase 7) ──────────────────── */}
+        {/* ─── Salary & Commission Tab ─────────────────────────────── */}
         <TabsContent value="salary" className="mt-4">
-          <Card>
-            <CardContent className="p-10 text-center">
-              <div className="mx-auto h-12 w-12 rounded-full bg-muted flex items-center justify-center mb-3">
-                <Wallet className="h-6 w-6 text-muted-foreground" />
-              </div>
-              <h3 className="text-sm font-semibold">Salary & payroll</h3>
-              <p className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
-                Salary profile, commission rules, advances, and payslip history
-                will be available here in a future phase. The schema and
-                permissions are already in place.
-              </p>
-            </CardContent>
-          </Card>
+          <SalaryTab employeeId={emp.id} isSelf={isSelf} />
         </TabsContent>
       </Tabs>
 

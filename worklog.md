@@ -7772,3 +7772,49 @@ FILES CREATED/MODIFIED:
 
 Stage Summary:
 - The order funnel analytics engine is built as ONE reusable function (computeOrderFunnelStats) that can be scoped by employee, customer, or company. updateEmployeeStats() caches all-time totals to the EmployeeStats table (fire-and-forget, called on every order status transition). The Performance tab shows 8 KPI cards + a colored funnel chart + date range filter that runs live queries. All rates are guarded against division by zero. Damage/loss count is tracking-only. Visibility rules enforced server-side. Ready for Phase 7 (salary/payroll).
+
+---
+Task ID: SALARY-COMMISSION-1
+Agent: main
+Task: Phase 7 — Salary & Commission tab (base salary profile + commission rules + live monthly preview)
+
+Work Log:
+- Created src/lib/analytics/commission.ts:
+  • computeCommissionEarned(employeeId, periodStart, periodEnd) — fetches the employee's active CommissionRule, queries orders where the trigger timestamp field (confirmedAt/dispatchedAt/deliveredAt/etc.) is non-null AND within the period, applies the basis calculation (per_order × count, per_item_sold × qty, percentage_of_revenue × revenue).
+  • KEY PRINCIPLE: once an order crosses the trigger status, it counts PERMANENTLY — no clawback. An order that never reached the trigger (e.g. cancelled before dispatch when trigger="delivered") naturally contributes 0 because the timestamp is null. No special-case code.
+  • getCurrentMonthRange() helper for the "This Month So Far" preview.
+  • triggerStatusToTimestampField() maps status strings to Order timestamp fields.
+- Created 3 API routes:
+  • GET/PATCH /api/employees/[id]/salary — view/update base salary. PATCH creates a new EmployeeSalaryProfile + SalaryRevision row (never silently overwrites). Deactivates old profile. Visibility: own always (view-only); others need employees.view_salary. Edit needs employees.manage_salary.
+  • GET/POST/DELETE /api/employees/[id]/commission-rules — list/add/deactivate commission rules. POST deactivates existing active rules (v1: one active rule). Same visibility/permission gates.
+  • GET /api/employees/[id]/commission-preview — live "This Month So Far" preview: base salary + commission earned (computed live via computeCommissionEarned) + estimated total. Labeled as ESTIMATE.
+- Built SalaryTab component (src/components/employees/salary-tab.tsx):
+  • "This Month So Far" preview card (highlighted) — base salary + commission earned + estimated total, clearly labeled as ESTIMATE
+  • Base Salary card — current amount, effective date, revision history (last 5), Edit button (opens dialog)
+  • Commission Rules card — list of rules (basis, rate, trigger, active/inactive), Add Rule button (opens dialog with basis/rate/trigger selectors), Delete (deactivate) button
+  • Edit Salary Dialog — amount input, creates revision record
+  • Add Rule Dialog — basis type (per_order/per_item_sold/percentage_of_revenue), rate value, trigger status dropdown (confirmed/dispatched/delivered/rto/cancelled)
+- Enabled Salary tab in employee-detail-view.tsx (was disabled placeholder, now active)
+- Added SalaryTab import
+
+VERIFICATION (via direct module calls):
+- TEST 1: Set base salary = PKR 30,000 + commission rule: per_item_sold @ PKR 50, trigger=delivered ✅
+- TEST 2: Commission BEFORE any delivered orders = 0 (0 qualifying orders) ✅
+- TEST 3: Create 2-item order → dispatch → deliver → Commission = 100 (2 items × 50 PKR) ✅
+  • Qualifying orders: 1, Qualifying items: 2, Qualifying revenue: 3,000 ✅
+- TEST 4: Create 5-item order → cancel before dispatch ✅
+- TEST 5: Commission AFTER cancellation = 100 (unchanged — cancelled order contributes 0, no clawback) ✅
+  • Qualifying orders: still 1, Qualifying items: still 2 ✅
+- Edge case: cancelled order never crossed "delivered" → deliveredAt is null → naturally excluded, no special-case code ✅
+- Lint: 0 errors.
+
+FILES CREATED/MODIFIED:
+1. src/lib/analytics/commission.ts — NEW: computeCommissionEarned + getCurrentMonthRange
+2. src/app/api/employees/[id]/salary/route.ts — NEW: GET/PATCH salary profile
+3. src/app/api/employees/[id]/commission-rules/route.ts — NEW: GET/POST/DELETE commission rules
+4. src/app/api/employees/[id]/commission-preview/route.ts — NEW: GET live monthly preview
+5. src/components/employees/salary-tab.tsx — NEW: salary + commission UI with live preview
+6. src/components/employees/employee-detail-view.tsx — enabled Salary tab + import
+
+Stage Summary:
+- Salary & Commission tab is live. HR/Owner can set base salary (with revision history) + configure commission rules (basis + rate + trigger status). The employee sees a LIVE "earned so far this month" preview computed from real order data — base salary + commission earned = estimated total, clearly labeled as an estimate (official figures only exist once Finance runs payroll in Phase 8). Commission calculation correctly handles: delivered orders earn commission, cancelled-before-dispatch orders contribute 0 (naturally, not via special-case code), and once earned, commission is permanent (no clawback). Visibility rules enforced server-side (own always view-only; others need employees.view_salary; edit needs employees.manage_salary). Ready for Phase 8 (payroll runs).
