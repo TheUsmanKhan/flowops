@@ -24,6 +24,7 @@ import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
 import { updateCustomerStats, flagCustomer } from './customer.actions'
+import { updateEmployeeStats } from './employee-stats.actions'
 import { z } from 'zod'
 
 // ──────────────────────────────────────────────────────────────
@@ -192,6 +193,12 @@ export async function processOrderReturn(
 
     // Update customer stats (increments totalRtoCount)
     await updateCustomerStats(order.customerId)
+
+    // Phase 6 — Fire-and-forget: recompute the sales employee's funnel stats
+    // (RTO changes rtoCount, rtoRate, inTransitCount)
+    if (order.salesEmployeeId) {
+      updateEmployeeStats(order.salesEmployeeId).catch(() => {})
+    }
 
     // Auto-flag customer if RTO count crosses threshold (3+)
     const customer = await db.customer.findUnique({

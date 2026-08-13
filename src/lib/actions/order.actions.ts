@@ -37,6 +37,7 @@ import {
   type UpdatePaymentScreenshotInput,
 } from '@/lib/validations/order.schemas'
 import { updateCustomerStats, createCustomer, createCustomerInternal, markAddressAsUsed, matchOrCreateExternalCustomer } from './customer.actions'
+import { updateEmployeeStats } from './employee-stats.actions'
 import type { Prisma } from '@prisma/client'
 
 // ──────────────────────────────────────────────────────────────
@@ -714,6 +715,11 @@ export async function createManualOrder(
       await updateCustomerStats(customerId)
     }
 
+    // Phase 6 — Fire-and-forget: recompute the sales employee's funnel stats
+    // (order was just created, affects their totalOrders count). Only when the
+    // order has a salesEmployeeId (manual orders always do; webhook orders don't).
+    updateEmployeeStats(ctx.employee.id).catch(() => {})
+
     // 13. If the order auto-confirmed, run the stock reservation logic.
     //     Sequential — reserveOrderStock reads the order items created above.
     if (orderStatus === 'confirmed') {
@@ -1140,6 +1146,11 @@ export async function confirmOrder(orderId: string): Promise<ActionResult> {
     // Non-fatal — never break the confirm action on a stats failure.
     await updateCustomerStats(order.customerId).catch(() => {})
 
+    // Phase 6 — Fire-and-forget: recompute the sales employee's funnel stats
+    if (order.salesEmployeeId) {
+      updateEmployeeStats(order.salesEmployeeId).catch(() => {})
+    }
+
     return { success: true }
   } catch (err) {
     return {
@@ -1491,6 +1502,11 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
     // Recompute cached customer stats (cancelled orders are excluded from
     // total_orders_count, so this count drops). Non-fatal.
     await updateCustomerStats(order.customerId).catch(() => {})
+
+    // Phase 6 — Fire-and-forget: recompute the sales employee's funnel stats
+    if (order.salesEmployeeId) {
+      updateEmployeeStats(order.salesEmployeeId).catch(() => {})
+    }
 
     return { success: true }
   } catch (err) {
@@ -2094,6 +2110,12 @@ export async function performOrderDispatch(
     )
   }
 
+  // Phase 6 — Fire-and-forget: recompute the sales employee's funnel stats
+  // (dispatch changes dispatchedCount, inTransitCount, deliveryRate, rtoRate)
+  if (order.salesEmployeeId) {
+    updateEmployeeStats(order.salesEmployeeId).catch(() => {})
+  }
+
   return {
     success: true,
     skipped: inventorySkipped,
@@ -2339,6 +2361,12 @@ export async function markOrderDelivered(orderId: string): Promise<ActionResult>
     // Recompute cached customer stats (delivery affects total_order_value
     // and delivery_rate). Non-fatal.
     await updateCustomerStats(order.customerId).catch(() => {})
+
+    // Phase 6 — Fire-and-forget: recompute the sales employee's funnel stats
+    // (delivery changes deliveredCount, deliveryRate, inTransitCount)
+    if (order.salesEmployeeId) {
+      updateEmployeeStats(order.salesEmployeeId).catch(() => {})
+    }
 
     return { success: true }
   } catch (err) {

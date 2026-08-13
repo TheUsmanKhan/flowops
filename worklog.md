@@ -7710,3 +7710,65 @@ FILES MODIFIED:
 
 Stage Summary:
 - The employee invite form now captures designation + department via dropdowns with predefined options + auto-defaults the role to match. The employees directory has filterable designation + department columns. The Employee Profile is now a tabbed view with Overview (contact + employment details + status + reports), Access (role summary + permission summary + edit-role deep-link), and disabled Performance/Salary placeholders ready for Phases 6+7. ordersDataScope is exposed in both the employee list and detail APIs. Lint passes.
+
+---
+Task ID: PERFORMANCE-FUNNEL-1
+Agent: main
+Task: Phase 6 — Order funnel analytics (computeOrderFunnelStats) + updateEmployeeStats + Performance tab UI
+
+Work Log:
+- Created src/lib/analytics/order-funnel.ts:
+  • computeOrderFunnelStats(filter: { employeeId?, customerId?, companyId, dateFrom?, dateTo? }) — ONE reusable function, scoped by employee/customer/company. Returns totalOrders, cancelledCount, cancellationRate, dispatchedCount, deliveredCount, deliveryRate, rtoRate, inTransitCount, itemsSoldQty, damageLossCount, revenueGenerated.
+  • Rate definitions: cancellationRate = cancelled/total, deliveryRate = delivered/dispatched (NOT total), rtoRate = rto/dispatched (NOT total), inTransit = dispatched - delivered - rto.
+  • Division-by-zero guard: returns 0 (not NaN) when denominator is 0.
+  • damageLossCount = count of StockLossRecord where reportedById = employeeId (tracking only, never affects monetary figures per Usman's decision).
+  • itemsSoldQty = sum of OrderItem.quantity via aggregate query.
+  • computeFunnelBreakdown() helper for chart data.
+- Created src/lib/actions/employee-stats.actions.ts:
+  • updateEmployeeStats(employeeId) — calls computeOrderFunnelStats scoped to the employee + upserts the EmployeeStats table (1:1 with Employee). Fire-and-forget pattern (never throws, errors logged). Mirrors updateCustomerStats().
+- Wired updateEmployeeStats() as fire-and-forget into 5 order status transitions:
+  • createManualOrder() — after updateCustomerStats
+  • confirmOrder() — after updateCustomerStats (guarded by order.salesEmployeeId)
+  • cancelOrder() — after updateCustomerStats (guarded)
+  • performOrderDispatch() — after updateCustomerStats (guarded)
+  • markOrderDelivered() — after updateCustomerStats (guarded)
+  • processOrderReturn() in order-return.actions.ts — after updateCustomerStats (guarded)
+  All calls are non-blocking (.catch(() => {})), only fire when order.salesEmployeeId is non-null.
+- Created GET /api/employees/[id]/performance route:
+  • Returns live-computed funnel stats (not cached) for any date range
+  • Also returns the cached EmployeeStats row for all-time comparison
+  • Visibility: own profile always; others require employees.view or kpi.view or elevated
+  • Supports date_from + date_to query params
+- Built PerformanceTab component (src/components/employees/performance-tab.tsx):
+  • 8 KPI cards: Total Orders, Dispatched, Delivered, Cancelled, RTO, Items Sold, Damage/Loss, Revenue
+  • Funnel bar chart (recharts): Created → Confirmed → Dispatched → Delivered/RTO/Cancelled with colored bars
+  • Date range filter (From/To date inputs + Apply/Clear buttons)
+  • Rate definitions footnote explaining the calculations
+  • Uses TanStack Query for live data fetching with 30s staleTime
+- Enabled Performance tab in employee-detail-view.tsx (was disabled placeholder, now active)
+- Added PerformanceTab import
+
+VERIFICATION:
+- TEST 1 (computeOrderFunnelStats for Sales employee):
+  • totalOrders=1, cancelledCount=0, cancellationRate=0%, dispatchedCount=0, deliveredCount=0, deliveryRate=0%, rtoCount=0, rtoRate=0%, inTransitCount=0, itemsSoldQty=1, damageLossCount=0, revenueGenerated=0 ✅
+- TEST 2 (edge case — zero dispatched):
+  • deliveryRate=0 (not NaN), rtoRate=0 (not NaN), Is NaN? false ✅
+- TEST 3 (updateEmployeeStats):
+  • SUCCESS — EmployeeStats row created with correct values matching the computed stats ✅
+- TEST 4 (API route):
+  • GET /api/employees/[id]/performance returns stats + statusBreakdown + cachedAllTime ✅
+  • Date range filter works (date_from=2026-08-01&date_to=2026-08-31 → totalOrders=1) ✅
+  • Status breakdown: {pending:0, confirmed:1, dispatched:0, delivered:0, rto:0, cancelled:0} ✅
+- Lint: 0 errors.
+
+FILES CREATED/MODIFIED:
+1. src/lib/analytics/order-funnel.ts — NEW: computeOrderFunnelStats + computeFunnelBreakdown
+2. src/lib/actions/employee-stats.actions.ts — NEW: updateEmployeeStats
+3. src/lib/actions/order.actions.ts — wired updateEmployeeStats into 5 transitions (create, confirm, cancel, dispatch, deliver)
+4. src/lib/actions/order-return.actions.ts — wired updateEmployeeStats into processOrderReturn
+5. src/app/api/employees/[id]/performance/route.ts — NEW: GET performance stats API
+6. src/components/employees/performance-tab.tsx — NEW: KPI cards + funnel chart + date range filter
+7. src/components/employees/employee-detail-view.tsx — enabled Performance tab + import
+
+Stage Summary:
+- The order funnel analytics engine is built as ONE reusable function (computeOrderFunnelStats) that can be scoped by employee, customer, or company. updateEmployeeStats() caches all-time totals to the EmployeeStats table (fire-and-forget, called on every order status transition). The Performance tab shows 8 KPI cards + a colored funnel chart + date range filter that runs live queries. All rates are guarded against division by zero. Damage/loss count is tracking-only. Visibility rules enforced server-side. Ready for Phase 7 (salary/payroll).

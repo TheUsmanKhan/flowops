@@ -54,6 +54,7 @@ import {
   Pencil,
 } from 'lucide-react'
 import { EmployeeStatusBadge } from '@/components/employees/employee-status-badge'
+import { PerformanceTab } from '@/components/employees/performance-tab'
 import { toast } from 'sonner'
 import { format } from 'date-fns'
 
@@ -223,7 +224,7 @@ export function EmployeeDetailView({ employeeId }: { employeeId: string }) {
             <Lock className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Access</span>
           </TabsTrigger>
-          <TabsTrigger value="performance" className="gap-1.5" disabled>
+          <TabsTrigger value="performance" className="gap-1.5">
             <TrendingUp className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">Performance</span>
           </TabsTrigger>
@@ -499,21 +500,9 @@ export function EmployeeDetailView({ employeeId }: { employeeId: string }) {
           </div>
         </TabsContent>
 
-        {/* ─── Performance Tab (placeholder — Phase 6) ─────────────── */}
+        {/* ─── Performance Tab ─────────────────────────────────────── */}
         <TabsContent value="performance" className="mt-4">
-          <Card>
-            <CardContent className="p-10 text-center">
-              <div className="mx-auto h-12 w-12 rounded-full bg-muted flex items-center justify-center mb-3">
-                <TrendingUp className="h-6 w-6 text-muted-foreground" />
-              </div>
-              <h3 className="text-sm font-semibold">Performance dashboard</h3>
-              <p className="text-xs text-muted-foreground mt-1 max-w-sm mx-auto">
-                Employee performance metrics (orders, revenue, RTO rate,
-                delivery rate, items sold) will be available here in a future
-                phase. The data is already being captured via sales attribution.
-              </p>
-            </CardContent>
-          </Card>
+          <PerformanceTab employeeId={emp.id} isSelf={isSelf} />
         </TabsContent>
 
         {/* ─── Salary Tab (placeholder — Phase 7) ──────────────────── */}
