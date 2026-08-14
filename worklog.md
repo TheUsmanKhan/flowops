@@ -8667,3 +8667,63 @@ Stage Summary:
 - LCP measured at ~741ms (warm cache) — significant improvement over 2,768ms pre-regression baseline.
 - No duplicate component chunks remain (verified via grep).
 - App works end-to-end across 6 views with zero errors.
+
+---
+Task ID: PRODUCTS-TABLE-CONVERSION
+Agent: main
+Task: Convert Products view from grid cards to responsive table (desktop) + stacked list (mobile)
+
+Work Log:
+
+1. ANALYZED existing code:
+   - products-view.tsx: 380 lines, used a 4-column card grid (sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4)
+   - Existing React.memo: FulfillmentBadge was the only memoized sub-component (re-exported for use elsewhere)
+   - shadcn Table component: already used in 5 other files (employees-view, returned-stitched-view, product-create-view, product-detail-view, org-catalog-view)
+   - Data: ProductPublic interface has id, title, slug, productType, productScope, isStitchable, isFeatured, category, brand, primaryImage, variantCount, variants, isOwner — NO separate "tags" field. The spec's "Tags" column maps to category + brand names (shown with Tag icon in current cards).
+
+2. IMPLEMENTED new layout (single file rewrite, same query/filter logic):
+   - Desktop table (hidden md:block): 8 columns — Img (52px), Product (name+slug), Type (badges, hidden below lg), Status (Featured/Stitchable/Owner badges, hidden below xl), Variants (count, hidden below lg), Tags (category+brand chips with +N more, hidden below xl), Price Range (right-aligned), Actions (chevron)
+   - Mobile stacked list (block md:hidden): compact horizontal cards — 56x56px thumbnail (left), name+slug, type/status badges (wrap naturally), tags+price bottom row, chevron (right). Min tap target ~64px. Entire card tappable.
+   - Skeleton: dual skeleton (desktop table skeleton + mobile card skeleton) — both wrapped in hidden/block classes
+   - Memoization: ProductsTable, ProductTableRow, ProductMobileCard all wrapped in memo() — consistent pattern
+
+3. PRESERVED existing functionality:
+   - useQuery data fetching (queryKey: ['products'], staleTime: 30s) — unchanged
+   - useMemo filtering (search + typeFilter) — unchanged
+   - Search input + "All types" Select filter — unchanged
+   - "New Product" button + navigation — unchanged
+   - "9 of 9 products" count display — unchanged
+   - EmptyState + error states — unchanged
+   - FulfillmentBadge re-export — unchanged
+
+4. TESTING (production dev server, Agent Browser):
+   Created 9 test products via API (mix of simple/variable, featured/non-featured, stitchable/non-stitchable, with prices 100-900).
+
+   Breakpoint tests:
+   - 375px (mobile): Table=none, Mobile=block, 9 mobile cards rendered ✅
+   - 767px (below md): Table=none, Mobile=block ✅
+   - 768px (md boundary): Table=block, Mobile=none ✅ (table appears, columns Type/Status/Variants/Tags hidden below lg/xl)
+   - 1280px (desktop): Table=block, 9 rows, 8 columns all visible ✅
+
+   Functional tests:
+   - Search "Product 3": filtered to 1 row ✅
+   - Clear search: 9 rows restored ✅
+   - Click row: navigates to ?view=product-detail&id=... ✅
+   - Zero browser errors across all breakpoints ✅
+
+   Lint: 0 errors. tsc: 0 errors in products-view.tsx.
+
+DEVIATIONS FROM SPEC:
+- The spec mentioned a "Tags" column with examples like "Testing Lawn", "Sapphire Test". The ProductPublic interface has no separate tags field — the existing cards showed category + brand with a Tag icon. I used category + brand as the "tags" (with +N more truncation at MAX_TAGS=3). This matches the data model and the existing card behavior.
+- At 768px (md), the table shows but with fewer columns (Img, Product, Price Range). Type/Status columns appear at lg (1024px+), Variants at lg, Tags at xl (1280px+). This progressive disclosure keeps the table usable at all widths without horizontal scroll.
+
+FILES MODIFIED:
+1. src/components/products/products-view.tsx — full rewrite of the results rendering (grid cards → desktop table + mobile stacked list). Preserved all query/filter/navigation logic and FulfillmentBadge re-export.
+
+Stage Summary:
+- Desktop (md+): proper data table with 8 columns, compact rows, progressive column visibility (lg/xl)
+- Mobile (below md): single-column stacked cards, full-width, comfortable touch targets, no horizontal scroll
+- Both views read from the same useQuery data — only presentation switches via Tailwind responsive classes (hidden md:block / block md:hidden)
+- All new sub-components (ProductsTable, ProductTableRow, ProductMobileCard) wrapped in memo()
+- Existing search/filter/navigation/count display all work unchanged
+- Tested at 375px, 767px, 768px, 1280px — clean switch at md boundary, no layout break, zero errors

@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
 import { api } from '@/lib/api-client'
@@ -17,6 +17,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table'
 import {
   Loader2,
   Package,
@@ -63,6 +71,9 @@ interface ProductPublic {
 
 type FilterType = 'all' | 'simple' | 'variable' | 'bundle' | 'service'
 
+/** Maximum number of tag chips to show before "+N more". */
+const MAX_TAGS = 3
+
 /** Compute the price range (min sale price → max sale price) across variants. */
 function priceRange(variants: ProductVariant[]): { min: number; max: number } | null {
   const prices = variants
@@ -74,6 +85,21 @@ function priceRange(variants: ProductVariant[]): { min: number; max: number } | 
 
 function formatPrice(n: number): string {
   return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n)
+}
+
+/** Format the price range as a compact string (used by both desktop + mobile). */
+function formatPriceRange(range: { min: number; max: number } | null): string {
+  if (!range) return '—'
+  if (range.min === range.max) return formatPrice(range.min)
+  return `${formatPrice(range.min)} – ${formatPrice(range.max)}`
+}
+
+/** Build the list of tag labels (category + brand) for a product. */
+function productTags(product: ProductPublic): string[] {
+  const tags: string[] = []
+  if (product.category) tags.push(product.category.name)
+  if (product.brand) tags.push(product.brand.name)
+  return tags
 }
 
 export function ProductsView() {
@@ -106,6 +132,11 @@ export function ProductsView() {
       return true
     })
   }, [products, search, typeFilter])
+
+  const navigateToProduct = useMemo(
+    () => (id: string) => navigate({ name: 'product-detail', id }),
+    [navigate],
+  )
 
   return (
     <div className="space-y-6">
@@ -149,7 +180,7 @@ export function ProductsView() {
 
       {/* States */}
       {isLoading ? (
-        <ProductsGridSkeleton />
+        <ProductsTableSkeleton />
       ) : isError ? (
         <Card>
           <CardContent className="p-10 text-center">
@@ -173,9 +204,16 @@ export function ProductsView() {
               {isFetching ? 'Refreshing…' : `${filtered.length} of ${products.length} products`}
             </p>
           </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+
+          {/* Desktop table (md and up) */}
+          <div className="hidden md:block rounded-md border">
+            <ProductsTable products={filtered} onNavigate={navigateToProduct} />
+          </div>
+
+          {/* Mobile stacked list (below md) */}
+          <div className="block md:hidden space-y-3">
             {filtered.map((p) => (
-              <ProductCard key={p.id} product={p} onClick={() => navigate({ name: 'product-detail', id: p.id })} />
+              <ProductMobileCard key={p.id} product={p} onClick={() => navigateToProduct(p.id)} />
             ))}
           </div>
         </>
@@ -184,7 +222,39 @@ export function ProductsView() {
   )
 }
 
-function ProductCard({
+// ─── Desktop table ─────────────────────────────────────────────────
+
+const ProductsTable = memo(function ProductsTable({
+  products,
+  onNavigate,
+}: {
+  products: ProductPublic[]
+  onNavigate: (id: string) => void
+}) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead className="w-[52px]">Img</TableHead>
+          <TableHead className="min-w-[200px]">Product</TableHead>
+          <TableHead className="hidden lg:table-cell">Type</TableHead>
+          <TableHead className="hidden xl:table-cell">Status</TableHead>
+          <TableHead className="hidden lg:table-cell text-center">Variants</TableHead>
+          <TableHead className="hidden xl:table-cell">Tags</TableHead>
+          <TableHead className="text-right">Price Range</TableHead>
+          <TableHead className="w-8" />
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {products.map((p) => (
+          <ProductTableRow key={p.id} product={p} onClick={() => onNavigate(p.id)} />
+        ))}
+      </TableBody>
+    </Table>
+  )
+})
+
+const ProductTableRow = memo(function ProductTableRow({
   product,
   onClick,
 }: {
@@ -192,6 +262,135 @@ function ProductCard({
   onClick: () => void
 }) {
   const range = priceRange(product.variants)
+  const tags = productTags(product)
+  const visibleTags = tags.slice(0, MAX_TAGS)
+  const remainingTags = tags.length - visibleTags.length
+
+  return (
+    <TableRow
+      className="cursor-pointer hover:bg-muted/50 group"
+      onClick={onClick}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onClick()
+        }
+      }}
+      tabIndex={0}
+    >
+      {/* Thumbnail */}
+      <TableCell className="py-2">
+        <div className="h-10 w-10 rounded-md overflow-hidden bg-muted flex items-center justify-center shrink-0">
+          {product.primaryImage ? (
+            <img
+              src={product.primaryImage}
+              alt={product.title}
+              className="h-full w-full object-cover"
+            />
+          ) : (
+            <Package className="h-5 w-5 text-muted-foreground opacity-50" />
+          )}
+        </div>
+      </TableCell>
+
+      {/* Product name + slug */}
+      <TableCell className="min-w-[200px]">
+        <div className="min-w-0">
+          <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">
+            {product.title}
+          </p>
+          <p className="text-xs text-muted-foreground font-mono truncate">{product.slug}</p>
+        </div>
+      </TableCell>
+
+      {/* Type (hidden below lg) */}
+      <TableCell className="hidden lg:table-cell">
+        <div className="flex flex-wrap gap-1">
+          <Badge variant="secondary" className="text-[10px]">
+            {PRODUCT_TYPE_LABELS[product.productType] ?? product.productType}
+          </Badge>
+          <Badge variant="outline" className="text-[10px]">
+            {PRODUCT_SCOPE_LABELS[product.productScope] ?? product.productScope}
+          </Badge>
+        </div>
+      </TableCell>
+
+      {/* Status (hidden below xl) */}
+      <TableCell className="hidden xl:table-cell">
+        <div className="flex flex-wrap gap-1">
+          {product.isFeatured && (
+            <Badge className="bg-amber-500/90 hover:bg-amber-500 text-white border-transparent text-[10px]">
+              Featured
+            </Badge>
+          )}
+          {product.isStitchable && (
+            <Badge className="bg-emerald-600/90 hover:bg-emerald-600 text-white border-transparent text-[10px] gap-1">
+              <Shirt className="h-2.5 w-2.5" /> Stitchable
+            </Badge>
+          )}
+          {product.isOwner && (
+            <Badge variant="outline" className="text-[10px]">
+              Owner
+            </Badge>
+          )}
+          {!product.isFeatured && !product.isStitchable && !product.isOwner && (
+            <span className="text-xs text-muted-foreground">—</span>
+          )}
+        </div>
+      </TableCell>
+
+      {/* Variants (hidden below lg) */}
+      <TableCell className="hidden lg:table-cell text-center text-sm text-muted-foreground">
+        {product.variantCount}
+      </TableCell>
+
+      {/* Tags (hidden below xl) */}
+      <TableCell className="hidden xl:table-cell">
+        {tags.length === 0 ? (
+          <span className="text-xs text-muted-foreground">—</span>
+        ) : (
+          <div className="flex flex-wrap gap-1 items-center">
+            {visibleTags.map((t) => (
+              <Badge key={t} variant="outline" className="text-[10px] gap-1">
+                <Tag className="h-2.5 w-2.5" />
+                {t}
+              </Badge>
+            ))}
+            {remainingTags > 0 && (
+              <span className="text-[10px] text-muted-foreground">+{remainingTags} more</span>
+            )}
+          </div>
+        )}
+      </TableCell>
+
+      {/* Price range (right-aligned) */}
+      <TableCell className="text-right font-semibold text-sm whitespace-nowrap">
+        {range ? (
+          formatPriceRange(range)
+        ) : (
+          <span className="text-muted-foreground font-normal">—</span>
+        )}
+      </TableCell>
+
+      {/* Actions */}
+      <TableCell>
+        <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary group-hover:translate-x-0.5 transition-all" />
+      </TableCell>
+    </TableRow>
+  )
+})
+
+// ─── Mobile stacked list ───────────────────────────────────────────
+
+const ProductMobileCard = memo(function ProductMobileCard({
+  product,
+  onClick,
+}: {
+  product: ProductPublic
+  onClick: () => void
+}) {
+  const range = priceRange(product.variants)
+  const tags = productTags(product)
 
   return (
     <Card
@@ -204,129 +403,152 @@ function ProductCard({
           onClick()
         }
       }}
-      className="group cursor-pointer overflow-hidden py-0 gap-0 transition-all hover:shadow-md hover:border-primary/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      className="group cursor-pointer transition-all hover:shadow-md hover:border-primary/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
     >
-      {/* Image / placeholder */}
-      <div className="relative aspect-[4/3] bg-muted overflow-hidden">
-        {product.primaryImage ? (
-          <img
-            src={product.primaryImage}
-            alt={product.title}
-            className="h-full w-full object-cover transition-transform group-hover:scale-105"
-          />
-        ) : (
-          <div className="h-full w-full flex flex-col items-center justify-center text-muted-foreground">
-            <Package className="h-10 w-10 mb-1.5 opacity-50" />
-            <span className="text-xs">No image</span>
-          </div>
-        )}
-        {/* Top-left badges */}
-        <div className="absolute top-2 left-2 flex flex-wrap gap-1.5 max-w-[calc(100%-1rem)]">
-          {product.isFeatured && (
-            <Badge className="bg-amber-500/90 hover:bg-amber-500 text-white border-transparent">
-              Featured
-            </Badge>
-          )}
-          {product.isStitchable && (
-            <Badge className="bg-emerald-600/90 hover:bg-emerald-600 text-white border-transparent gap-1">
-              <Shirt className="h-3 w-3" /> Stitchable
-            </Badge>
+      <CardContent className="p-3 flex gap-3 items-start">
+        {/* Thumbnail (left) */}
+        <div className="h-14 w-14 rounded-md overflow-hidden bg-muted flex items-center justify-center shrink-0">
+          {product.primaryImage ? (
+            <img
+              src={product.primaryImage}
+              alt={product.title}
+              className="h-full w-full object-cover"
+            />
+          ) : (
+            <Package className="h-6 w-6 text-muted-foreground opacity-50" />
           )}
         </div>
-        {/* Top-right owner badge */}
-        {product.isOwner && (
-          <div className="absolute top-2 right-2">
-            <Badge variant="outline" className="bg-background/90 backdrop-blur text-xs">
-              Owner
-            </Badge>
-          </div>
-        )}
-      </div>
 
-      <CardContent className="p-4 space-y-3">
-        {/* Title */}
-        <div className="space-y-1">
-          <h3 className="font-medium text-sm leading-snug line-clamp-2 group-hover:text-primary transition-colors">
-            {product.title}
-          </h3>
-          <p className="text-xs text-muted-foreground font-mono truncate">{product.slug}</p>
-        </div>
-
-        {/* Type + scope + variant count */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Badge variant="secondary" className="text-[10px]">
-            {PRODUCT_TYPE_LABELS[product.productType] ?? product.productType}
-          </Badge>
-          <Badge variant="outline" className="text-[10px]">
-            {PRODUCT_SCOPE_LABELS[product.productScope] ?? product.productScope}
-          </Badge>
-          <Badge variant="outline" className="text-[10px] gap-1">
-            <Package className="h-3 w-3" /> {product.variantCount} variant
-            {product.variantCount === 1 ? '' : 's'}
-          </Badge>
-        </div>
-
-        {/* Category + brand */}
-        {(product.category || product.brand) && (
-          <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-            {product.category && (
-              <span className="inline-flex items-center gap-1">
-                <Tag className="h-3 w-3" />
-                {product.category.name}
-              </span>
-            )}
-            {product.category && product.brand && <span>·</span>}
-            {product.brand && <span>{product.brand.name}</span>}
-          </div>
-        )}
-
-        {/* Price range + chevron */}
-        <div className="flex items-end justify-between pt-1 border-t">
-          <div>
-            <p className="text-[10px] uppercase text-muted-foreground tracking-wide">
-              Price range
+        {/* Content (right) */}
+        <div className="flex-1 min-w-0 space-y-1.5">
+          {/* Name + slug */}
+          <div className="min-w-0">
+            <p className="text-sm font-medium leading-snug truncate group-hover:text-primary transition-colors">
+              {product.title}
             </p>
-            <p className="text-sm font-semibold">
+            <p className="text-xs text-muted-foreground font-mono truncate">{product.slug}</p>
+          </div>
+
+          {/* Badges (wrap naturally) */}
+          <div className="flex flex-wrap gap-1">
+            <Badge variant="secondary" className="text-[10px]">
+              {PRODUCT_TYPE_LABELS[product.productType] ?? product.productType}
+            </Badge>
+            {product.isFeatured && (
+              <Badge className="bg-amber-500/90 hover:bg-amber-500 text-white border-transparent text-[10px]">
+                Featured
+              </Badge>
+            )}
+            {product.isStitchable && (
+              <Badge className="bg-emerald-600/90 hover:bg-emerald-600 text-white border-transparent text-[10px] gap-1">
+                <Shirt className="h-2.5 w-2.5" /> Stitchable
+              </Badge>
+            )}
+            {product.isOwner && (
+              <Badge variant="outline" className="text-[10px]">
+                Owner
+              </Badge>
+            )}
+          </div>
+
+          {/* Bottom row: tags + price */}
+          <div className="flex items-center justify-between gap-2 pt-1">
+            {/* Tags / variant summary */}
+            <div className="min-w-0 flex-1">
+              {tags.length > 0 ? (
+                <p className="text-xs text-muted-foreground truncate">
+                  {tags.join(' · ')}
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  {product.variantCount} variant{product.variantCount === 1 ? '' : 's'}
+                </p>
+              )}
+            </div>
+            {/* Price */}
+            <p className="text-sm font-semibold whitespace-nowrap">
               {range ? (
-                range.min === range.max ? (
-                  formatPrice(range.min)
-                ) : (
-                  <>
-                    {formatPrice(range.min)}
-                    <span className="text-muted-foreground mx-1">–</span>
-                    {formatPrice(range.max)}
-                  </>
-                )
+                formatPriceRange(range)
               ) : (
                 <span className="text-muted-foreground font-normal">—</span>
               )}
             </p>
           </div>
-          <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary group-hover:translate-x-0.5 transition-all" />
         </div>
+
+        {/* Chevron (far right) */}
+        <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary shrink-0 mt-1" />
       </CardContent>
     </Card>
   )
-}
+})
 
-function ProductsGridSkeleton() {
+// ─── Skeleton + empty state ────────────────────────────────────────
+
+function ProductsTableSkeleton() {
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-      {Array.from({ length: 8 }).map((_, i) => (
-        <Card key={i} className="overflow-hidden py-0 gap-0">
-          <Skeleton className="aspect-[4/3] rounded-none" />
-          <CardContent className="p-4 space-y-3">
-            <Skeleton className="h-4 w-3/4" />
-            <Skeleton className="h-3 w-1/2" />
-            <div className="flex gap-1.5">
-              <Skeleton className="h-4 w-14 rounded-full" />
-              <Skeleton className="h-4 w-14 rounded-full" />
-            </div>
-            <Skeleton className="h-4 w-full" />
-          </CardContent>
-        </Card>
-      ))}
-    </div>
+    <>
+      {/* Desktop skeleton */}
+      <div className="hidden md:block rounded-md border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="w-[52px]">Img</TableHead>
+              <TableHead>Product</TableHead>
+              <TableHead className="hidden lg:table-cell">Type</TableHead>
+              <TableHead className="hidden xl:table-cell">Status</TableHead>
+              <TableHead className="hidden lg:table-cell text-center">Variants</TableHead>
+              <TableHead className="hidden xl:table-cell">Tags</TableHead>
+              <TableHead className="text-right">Price Range</TableHead>
+              <TableHead className="w-8" />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {Array.from({ length: 8 }).map((_, i) => (
+              <TableRow key={i}>
+                <TableCell><Skeleton className="h-10 w-10 rounded-md" /></TableCell>
+                <TableCell>
+                  <Skeleton className="h-4 w-3/4 mb-1" />
+                  <Skeleton className="h-3 w-1/2" />
+                </TableCell>
+                <TableCell className="hidden lg:table-cell">
+                  <div className="flex gap-1">
+                    <Skeleton className="h-4 w-14 rounded-full" />
+                    <Skeleton className="h-4 w-14 rounded-full" />
+                  </div>
+                </TableCell>
+                <TableCell className="hidden xl:table-cell">
+                  <Skeleton className="h-4 w-16 rounded-full" />
+                </TableCell>
+                <TableCell className="hidden lg:table-cell"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
+                <TableCell className="hidden xl:table-cell"><Skeleton className="h-4 w-24" /></TableCell>
+                <TableCell className="text-right"><Skeleton className="h-4 w-20 ml-auto" /></TableCell>
+                <TableCell><Skeleton className="h-4 w-4" /></TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+
+      {/* Mobile skeleton */}
+      <div className="block md:hidden space-y-3">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <Card key={i}>
+            <CardContent className="p-3 flex gap-3">
+              <Skeleton className="h-14 w-14 rounded-md shrink-0" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-3 w-1/2" />
+                <div className="flex gap-1">
+                  <Skeleton className="h-4 w-14 rounded-full" />
+                  <Skeleton className="h-4 w-14 rounded-full" />
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </>
   )
 }
 
