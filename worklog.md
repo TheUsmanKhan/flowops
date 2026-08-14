@@ -8091,3 +8091,50 @@ FILES CREATED:
 3. .env.local-db — NEW (gitignored)
 4. DOCKER.md — NEW: comprehensive Docker guide (Phase 1 + Phase 2)
 5. .gitignore — MODIFIED: added .env.local-db
+
+---
+Task ID: DOCKER-PHASE-3
+Agent: main
+Task: Phase 3 — Prepare the PostEx poller for horizontal scaling (mini-services groundwork)
+
+Work Log:
+
+3.1 — Environment toggle (instrumentation.ts):
+- Added ENABLE_IN_PROCESS_POLLER env var check in instrumentation.ts.
+- Default: true (preserves current single-instance behavior — poller starts normally).
+- When set to 'false': logs "[instrumentation] PostEx poller DISABLED (ENABLE_IN_PROCESS_POLLER=false)" and returns early without starting setInterval.
+- The toggle does NOT change polling logic — only gates whether setInterval starts.
+- Added comprehensive JSDoc comment explaining: why the toggle exists (multi-replica duplicate polls), how to use it (set false on all but one replica, or use the dedicated worker), and that actual extraction is a separate future task.
+- Updated .env.docker + .env.docker.example to include ENABLE_IN_PROCESS_POLLER=true (default).
+- Updated DOCKER.md env var reference table + file reference table.
+
+3.2 — Stub mini-service (mini-services/postex-poller/):
+- Created mini-services/postex-poller/package.json — minimal Bun project (name, scripts for dev/start, prisma + @prisma/client deps).
+- Created mini-services/postex-poller/README.md — explains: this is SCAFFOLD ONLY, what the service WILL do (import pollPostExOrderStatuses, run on setInterval, connect to same DB), what is OUT OF SCOPE (actual extraction, compose wiring, cron vs interval, webhook vs polling precedence), and how to use the toggle.
+- Created mini-services/postex-poller/Dockerfile — placeholder (CMD is just an echo). Real COPY/RUN/CMD are commented out with a note that they'll be activated when the extraction happens.
+- The .gitkeep that was previously in mini-services/ is no longer needed (replaced by real files).
+
+3.3 — Explicitly out of scope (stated in README.md + instrumentation.ts + this report):
+- Actually moving pollPostExOrderStatuses() out of instrumentation.ts into the new service
+- Wiring the service into docker-compose.yml or docker-compose.prod.yml
+- Implementing the actual polling logic in index.ts (does not exist yet)
+- Deciding cron scheduling vs. setInterval vs. external scheduler
+- Webhook vs. polling precedence (PostEx webhooks may eventually replace polling entirely)
+These are ALL separate, future tasks requiring their own discussion. Phase 3 only prepares the toggle + folder structure.
+
+VERIFICATION:
+- TEST 1 (ENABLE_IN_PROCESS_POLLER not set / default): poller STARTS → "[instrumentation] Starting PostEx status poller (every 30 min)" ✅
+- TEST 2 (ENABLE_IN_PROCESS_POLLER=false): poller DISABLED → "[instrumentation] PostEx poller DISABLED (ENABLE_IN_PROCESS_POLLER=false)" ✅
+- TEST 3 (ENABLE_IN_PROCESS_POLLER=true): poller STARTS → "[instrumentation] Starting PostEx status poller (every 30 min)" ✅
+- Lint: 0 errors ✅
+- No Prisma schema, business logic, API routes, or src/ application code modified (only instrumentation.ts which is infrastructure) ✅
+- All existing package.json scripts preserved ✅
+
+FILES CREATED/MODIFIED:
+1. instrumentation.ts — MODIFIED: added ENABLE_IN_PROCESS_POLLER toggle
+2. .env.docker — MODIFIED: added ENABLE_IN_PROCESS_POLLER="true"
+3. .env.docker.example — MODIFIED: added ENABLE_IN_PROCESS_POLLER=true
+4. DOCKER.md — MODIFIED: added env var to reference table + file reference
+5. mini-services/postex-poller/package.json — NEW
+6. mini-services/postex-poller/README.md — NEW
+7. mini-services/postex-poller/Dockerfile — NEW (placeholder)

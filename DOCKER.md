@@ -244,6 +244,7 @@ docker compose -f docker-compose.local-db.yml down -v
 | `SESSION_SECRET` | `.env.docker` | `.env.docker` | Any random string |
 | `CRON_SECRET` | `.env.docker` | `.env.docker` | Any random string |
 | `APP_URL` | `.env.docker` | `.env.docker` | `http://localhost:3000` |
+| `ENABLE_IN_PROCESS_POLLER` | `.env.docker` (default: `true`) | `.env.docker` (default: `true`) | Not needed |
 
 ## File Reference
 
@@ -260,3 +261,5 @@ docker compose -f docker-compose.local-db.yml down -v
 | `.env.local-db` | Local DB credentials — gitignored |
 | `.env.local-db.example` | Template for `.env.local-db` |
 | `src/app/api/health/route.ts` | Health check endpoint for Docker HEALTHCHECK |
+| `mini-services/postex-poller/` | Scaffold for future standalone poller worker (Phase 3 groundwork) |
+| `instrumentation.ts` | In-process poller toggle (`ENABLE_IN_PROCESS_POLLER` env var) |

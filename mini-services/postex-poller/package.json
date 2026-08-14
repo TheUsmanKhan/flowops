@@ -1,0 +1,17 @@
+{
+  "name": "flowops-postex-poller",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Standalone PostEx status poller worker for FlowOps ERP — eventual replacement for the in-process poller in instrumentation.ts",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.11.1"
+  },
+  "devDependencies": {
+    "prisma": "^6.11.1",
+    "bun-types": "latest"
+  }
+}

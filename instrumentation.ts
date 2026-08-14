@@ -12,17 +12,40 @@
  *
  * The interval is guarded so it only starts in the Node.js runtime (not
  * during build/edge) and only starts ONCE per process.
+ *
+ * ─── HORIZONTAL SCALING TOGGLE (Phase 3) ─────────────────────────────
+ * When FlowOps eventually runs multiple app replicas (e.g. behind a load
+ * balancer), the in-process poller would run on EVERY replica, causing
+ * duplicate PostEx API calls and duplicate dispatch/RTO triggers.
+ *
+ * The ENABLE_IN_PROCESS_POLLER env var controls whether this instance
+ * starts the poller. Default: 'true' (preserves current single-instance
+ * behavior). Set to 'false' on all but one replica, OR set to 'false' on
+ * all replicas and run the poller as a separate mini-service (see
+ * mini-services/postex-poller/).
+ *
+ * This toggle does NOT change polling logic — it only gates whether the
+ * setInterval starts. The actual extraction of pollPostExOrderStatuses()
+ * into a standalone service is a SEPARATE, FUTURE task.
  */
 
 let pollerStarted = false
 
 export async function register() {
   // Only run in the Node.js runtime, not during build or in edge.
-  // Next.js 16: the instrumentation hook's `register` function is called
-  // once per runtime initialization.
   if (process.env.NEXT_RUNTIME !== 'nodejs') return
   if (pollerStarted) return
   pollerStarted = true
+
+  // ─── Phase 3: Horizontal scaling toggle ───────────────────────────
+  // Default: 'true' (poller runs in-process, current behavior).
+  // Set ENABLE_IN_PROCESS_POLLER=false to disable (for multi-replica
+  // setups where only one instance or a dedicated worker should poll).
+  const enablePoller = process.env.ENABLE_IN_PROCESS_POLLER !== 'false'
+  if (!enablePoller) {
+    console.log('[instrumentation] PostEx poller DISABLED (ENABLE_IN_PROCESS_POLLER=false)')
+    return
+  }
 
   const POLL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes (matches vercel.json schedule)
   const INITIAL_DELAY_MS = 60 * 1000 // 1 minute after server start (let the server warm up)
