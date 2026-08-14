@@ -8727,3 +8727,57 @@ Stage Summary:
 - All new sub-components (ProductsTable, ProductTableRow, ProductMobileCard) wrapped in memo()
 - Existing search/filter/navigation/count display all work unchanged
 - Tested at 375px, 767px, 768px, 1280px — clean switch at md boundary, no layout break, zero errors
+
+---
+Task ID: PRODUCT-CREATE-SCROLL-HYDRATION-FIX
+Agent: main
+Task: Fix scroll position on step 3 (Scope & Confirm) + fix Next.js hydration mismatch error
+
+Work Log:
+
+ISSUE 1 — Scroll position on step 3 (Scope & Confirm):
+- Problem: When navigating from step 2 (Variants & Pricing) to step 3 (Scope & Confirm) in the product create form, the page stayed scrolled to the bottom (where the "Continue" button was). The user had to manually scroll up to see the form at the top.
+- Root cause: The `goNext()` function in product-create-view.tsx (line 410) changes the step via `setStep()` but never resets the scroll position. The browser preserves the scroll position from the previous step, which was at the bottom (where the Continue button is).
+- Fix: Added a `useEffect` in product-create-view.tsx that watches the `step` state and scrolls to top whenever it changes:
+  ```ts
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }, [step])
+  ```
+  This covers ALL step changes: Continue (forward), Back (backward), and draft-restore (which sets step from loaded draft data).
+- Verified: Step 1→2 transition shows scroll Y = 0 (was previously at the bottom). Same effect fires for step 2→3.
+
+ISSUE 2 — Next.js hydration mismatch on <body> tag:
+- Error message: "A tree hydrated but some attributes of the server rendered HTML didn't match the client properties."
+- Diff showed:
+  ```
+  - data-new-gr-c-s-check-loaded="14.1320.0"
+  - data-gr-ext-installed=""
+  ```
+- Root cause: Browser extensions (specifically Grammarly) inject `data-gr-ext-installed` and `data-new-gr-c-s-check-loaded` attributes into the `<body>` tag on the client side BEFORE React hydrates. The server-rendered HTML doesn't have these attributes, causing a mismatch.
+- Fix: Added `suppressHydrationWarning` to the `<body>` tag in src/app/layout.tsx (it was already on `<html>`):
+  ```tsx
+  <body
+    className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
+    suppressHydrationWarning
+  >
+  ```
+  This tells React to ignore attribute mismatches on `<body>` (browser extensions commonly modify this tag). This is the official Next.js recommendation for this class of error.
+- Verified: 0 hydration errors in the dev log after the fix.
+
+VERIFICATION:
+- bun run lint: 0 errors ✅
+- tsc --noEmit: 0 errors in changed files ✅
+- Dev log hydration errors: 0 (was 1+ before fix) ✅
+- Step 1→2 scroll position: 0 (was at bottom before fix) ✅
+- Agent Browser: no console errors after fix ✅
+
+FILES MODIFIED:
+1. src/components/products/product-create-view.tsx — added useEffect to scroll to top on step change (lines 344-352)
+2. src/app/layout.tsx — added suppressHydrationWarning to <body> tag (line 35)
+
+Stage Summary:
+- Scroll fix: Users now see the top of the form immediately when navigating to any step (especially step 3 Scope & Confirm), instead of starting at the bottom.
+- Hydration fix: The Grammarly/browser-extension hydration mismatch error is eliminated by adding suppressHydrationWarning to <body>.

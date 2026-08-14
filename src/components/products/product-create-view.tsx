@@ -341,6 +341,16 @@ export function ProductCreateView({ onBack, draftId: initialDraftId }: { onBack:
     }
   }, [productType, isStitchable])
 
+  // Scroll to top whenever the step changes (Continue/Back/draft-restore).
+  // Without this, navigating to step 3 (Scope & Confirm) leaves the page
+  // scrolled to the bottom (where the Continue button was), so the user
+  // sees the bottom of the form instead of the top.
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  }, [step])
+
   // ---- Helpers
   function validateStep(s: number): string | null {
     if (s === 0) {
