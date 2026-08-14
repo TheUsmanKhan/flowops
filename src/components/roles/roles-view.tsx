@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppStore, useCan } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
 import type { RolePublic } from '@/lib/types'
@@ -34,35 +35,31 @@ import { PermissionKeySelector } from '@/components/roles/permission-key-selecto
 export function RolesView() {
   const navigate = useAppStore((s) => s.navigate)
   const can = useCan()
-  const [roles, setRoles] = useState<RolePublic[]>([])
-  const [loading, setLoading] = useState(true)
+  const queryClient = useQueryClient()
+  const { data, isLoading } = useQuery<{ roles: RolePublic[] }>({
+    queryKey: ['roles'],
+    queryFn: () => api.get<{ roles: RolePublic[] }>('/api/roles'),
+    staleTime: 60_000,
+  })
+  const roles = data?.roles ?? []
   const [createOpen, setCreateOpen] = useState(false)
   const [deleteTarget, setDeleteTarget] = useState<RolePublic | null>(null)
 
   const canManage = can(PERMISSIONS.SETTINGS_ROLES_MANAGE)
 
-  const refresh = () => {
-    setLoading(true)
-    api
-      .get<{ roles: RolePublic[] }>('/api/roles')
-      .then((r) => setRoles(r.roles))
-      .catch(() => setRoles([]))
-      .finally(() => setLoading(false))
-  }
-   
-  useEffect(refresh, [])
-
-  async function deleteRole(role: RolePublic) {
-    try {
-      await api.delete(`/api/roles/${role.id}`)
+  const deleteMutation = useMutation({
+    mutationFn: async (role: RolePublic) => api.delete(`/api/roles/${role.id}`),
+    onSuccess: (_data, role) => {
       toast.success(`Role "${role.name}" deleted`)
       setDeleteTarget(null)
-      refresh()
-    } catch (err) {
-      toast.error(
-        err instanceof FetchError ? err.message : 'Failed to delete role.',
-      )
-    }
+      void queryClient.invalidateQueries({ queryKey: ['roles'] })
+    },
+    onError: (err) =>
+      toast.error(err instanceof FetchError ? err.message : 'Failed to delete role.'),
+  })
+
+  function deleteRole(role: RolePublic) {
+    deleteMutation.mutate(role)
   }
 
   return (
@@ -81,7 +78,7 @@ export function RolesView() {
               <CreateRoleDialog
                 onCreated={() => {
                   setCreateOpen(false)
-                  refresh()
+                  void queryClient.invalidateQueries({ queryKey: ['roles'] })
                 }}
               />
             </Dialog>
@@ -90,7 +87,7 @@ export function RolesView() {
       />
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {loading ? (
+        {isLoading ? (
           Array.from({ length: 3 }).map((_, i) => (
             <Card key={i}>
               <CardContent className="p-5">
@@ -216,8 +213,9 @@ export function RolesView() {
             <Button
               variant="destructive"
               onClick={() => deleteTarget && deleteRole(deleteTarget)}
+              disabled={deleteMutation.isPending}
             >
-              <Trash2 className="h-4 w-4" /> Delete role
+              {deleteMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />} Delete role
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -230,25 +228,26 @@ function CreateRoleDialog({ onCreated }: { onCreated: () => void }) {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [permissions, setPermissions] = useState<string[]>([])
-  const [saving, setSaving] = useState(false)
 
-  async function create() {
+  const createMutation = useMutation({
+    mutationFn: async (input: { name: string; description: string; permissions: string[] }) =>
+      api.post('/api/roles', input),
+    onSuccess: (_data, input) => {
+      toast.success(`Role "${input.name}" created`)
+      onCreated()
+    },
+    onError: (err) =>
+      toast.error(err instanceof FetchError ? err.message : 'Failed to create role.'),
+  })
+
+  const saving = createMutation.isPending
+
+  function create() {
     if (!name.trim()) {
       toast.error('Role name is required.')
       return
     }
-    setSaving(true)
-    try {
-      await api.post('/api/roles', { name, description, permissions })
-      toast.success(`Role "${name}" created`)
-      onCreated()
-    } catch (err) {
-      toast.error(
-        err instanceof FetchError ? err.message : 'Failed to create role.',
-      )
-    } finally {
-      setSaving(false)
-    }
+    createMutation.mutate({ name, description, permissions })
   }
 
   return (

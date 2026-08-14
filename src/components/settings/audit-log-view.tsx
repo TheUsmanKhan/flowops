@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
 import { api, initials } from '@/lib/api-client'
 import { PageHeader } from '@/components/layout/dashboard-shell'
@@ -45,40 +46,26 @@ interface AuditRow {
 const ENTITY_TYPES = ['', 'user', 'company', 'organization', 'employee', 'invitation', 'role', 'audit']
 
 export function AuditLogView() {
-  const [rows, setRows] = useState<AuditRow[]>([])
-  const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
-  const [total, setTotal] = useState(0)
   const [action, setAction] = useState('')
   const [entityType, setEntityType] = useState('')
   const pageSize = 25
   const activeCompany = useAppStore((s) => s.activeCompany)
 
-  useEffect(() => {
-    let active = true
-    const params = new URLSearchParams({
-      page: String(page),
-      pageSize: String(pageSize),
-    })
-    if (action) params.set('action', action)
-    if (entityType) params.set('entityType', entityType)
-    api
-      .get<{ rows: AuditRow[]; total: number }>(`/api/audit-logs?${params}`)
-      .then((r) => {
-        if (!active) return
-        setRows(r.rows)
-        setTotal(r.total)
-      })
-      .catch(() => {
-        if (active) setRows([])
-      })
-      .finally(() => {
-        if (active) setLoading(false)
-      })
-    return () => {
-      active = false
-    }
-  }, [page, action, entityType, activeCompany?.id])
+  const params = new URLSearchParams({
+    page: String(page),
+    pageSize: String(pageSize),
+  })
+  if (action) params.set('action', action)
+  if (entityType) params.set('entityType', entityType)
+
+  const { data, isLoading } = useQuery<{ rows: AuditRow[]; total: number }>({
+    queryKey: ['audit-logs', page, action, entityType, activeCompany?.id],
+    queryFn: () => api.get<{ rows: AuditRow[]; total: number }>(`/api/audit-logs?${params}`),
+    staleTime: 15_000,
+  })
+  const rows = data?.rows ?? []
+  const total = data?.total ?? 0
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
@@ -137,7 +124,7 @@ export function AuditLogView() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {loading ? (
+                {isLoading ? (
                   <TableRow>
                     <TableCell colSpan={5} className="h-32 text-center">
                       <Loader2 className="h-5 w-5 animate-spin mx-auto text-muted-foreground" />

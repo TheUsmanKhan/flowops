@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError, initials } from '@/lib/api-client'
 import type { SessionResponse } from '@/lib/types'
@@ -43,15 +44,41 @@ interface CompanyRow {
   _count: { employees: number }
 }
 
+interface WorkspacesResponse {
+  workspaces: {
+    org_id: string
+    companies: {
+      company_id: string
+      company_name: string
+      company_logo_url: string | null
+      base_currency: string
+    }[]
+  }[]
+}
+
 export function OrganizationView() {
   const activeCompany = useAppStore((s) => s.activeCompany)
   const user = useAppStore((s) => s.user)
   const setSession = useAppStore((s) => s.setSession)
   const navigate = useAppStore((s) => s.navigate)
-  const [org, setOrg] = useState<OrgData | null>(null)
+  const queryClient = useQueryClient()
+
+  const companyQuery = useQuery<{ company: { organizationId: string }; organization: OrgData | null }>({
+    queryKey: ['company', activeCompany?.id],
+    queryFn: () => api.get<{ company: { organizationId: string }; organization: OrgData | null }>('/api/company'),
+    staleTime: 60_000,
+  })
+
+  const workspacesQuery = useQuery<WorkspacesResponse>({
+    queryKey: ['workspaces'],
+    queryFn: () => api.get<WorkspacesResponse>('/api/workspaces'),
+    staleTime: 60_000,
+    enabled: !!companyQuery.data?.organization,
+  })
+
+  const org = companyQuery.data?.organization ?? null
+
   const [companies, setCompanies] = useState<CompanyRow[]>([])
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
   const [tab, setTab] = useState('profile')
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [archiveConfirm, setArchiveConfirm] = useState('')
@@ -60,63 +87,79 @@ export function OrganizationView() {
   const [website, setWebsite] = useState('')
   const [logoUrl, setLogoUrl] = useState<string | null>(null)
 
+  // Sync form state + derived companies list when org / workspaces data arrives
   useEffect(() => {
-    api
-      .get<{ company: { organizationId: string }; organization: OrgData | null }>('/api/company')
-      .then(async (d) => {
-        if (!d.organization) return
-        setOrg(d.organization)
-        setName(d.organization.name)
-        setLogoUrl(d.organization.logoUrl)
-        // Fetch companies under this org
-        const ws = await api.get<{ workspaces: { org_id: string; companies: { company_id: string; company_name: string; company_logo_url: string | null; base_currency: string }[] }[] }>('/api/workspaces')
-        const group = ws.workspaces.find((g) => g.org_id === d.organization!.id)
-        if (group) {
-          setCompanies(group.companies.map((c) => ({
-            id: c.company_id,
-            name: c.company_name,
-            baseCurrency: c.base_currency,
-            logoUrl: c.company_logo_url,
-            isActive: true,
-            _count: { employees: 0 },
-          })))
-        }
-      })
-      .catch(() => toast.error('Failed to load organization.'))
-      .finally(() => setLoading(false))
-  }, [activeCompany?.id])
+    if (org) {
+      setName(org.name)
+      setLogoUrl(org.logoUrl)
+    }
+  }, [org?.id, org?.name, org?.logoUrl])
 
-  async function saveProfile() {
-    if (!org) return
-    setSaving(true)
-    try {
-      const session = await api.patch<SessionResponse>('/api/organizations/' + org.id, {
-        org_id: org.id,
-        name,
-        description,
-        website,
-        logoUrl,
-      })
+  useEffect(() => {
+    if (!org) {
+      setCompanies([])
+      return
+    }
+    const group = workspacesQuery.data?.workspaces.find((g) => g.org_id === org.id)
+    if (group) {
+      setCompanies(group.companies.map((c) => ({
+        id: c.company_id,
+        name: c.company_name,
+        baseCurrency: c.base_currency,
+        logoUrl: c.company_logo_url,
+        isActive: true,
+        _count: { employees: 0 },
+      })))
+    } else {
+      setCompanies([])
+    }
+  }, [org?.id, workspacesQuery.data])
+
+  const saveProfileMutation = useMutation({
+    mutationFn: async (input: { orgId: string; name: string; description: string; website: string; logoUrl: string | null }) =>
+      api.patch<SessionResponse>('/api/organizations/' + input.orgId, {
+        org_id: input.orgId,
+        name: input.name,
+        description: input.description,
+        website: input.website,
+        logoUrl: input.logoUrl,
+      }),
+    onSuccess: (session) => {
       setSession({ user, activeCompany: session.activeCompany, companies: session.companies, employee: session.employee ?? undefined })
       toast.success('Organization profile saved')
-    } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to save.')
-    } finally { setSaving(false) }
-  }
+      void queryClient.invalidateQueries({ queryKey: ['company', activeCompany?.id] })
+      void queryClient.invalidateQueries({ queryKey: ['workspaces'] })
+    },
+    onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed to save.'),
+  })
 
-  async function archiveOrg() {
-    if (!org) return
-    setSaving(true)
-    try {
-      const session = await api.post<SessionResponse>('/api/organizations/' + org.id, { id: org.id, confirmation_text: archiveConfirm })
+  const archiveMutation = useMutation({
+    mutationFn: async (input: { orgId: string; confirmationText: string }) =>
+      api.post<SessionResponse>('/api/organizations/' + input.orgId, { id: input.orgId, confirmation_text: input.confirmationText }),
+    onSuccess: (session) => {
       setSession({ user, activeCompany: session.activeCompany, companies: session.companies, employee: session.employee ?? undefined })
       toast.success('Organization archived')
       setArchiveOpen(false)
+      void queryClient.invalidateQueries({ queryKey: ['company', activeCompany?.id] })
+      void queryClient.invalidateQueries({ queryKey: ['workspaces'] })
       if (!session.activeCompany) navigate({ name: 'onboarding' })
       else navigate({ name: 'dashboard' })
-    } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to archive.')
-    } finally { setSaving(false) }
+    },
+    onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed to archive.'),
+  })
+
+  const loading = companyQuery.isLoading || !org
+  const savePending = saveProfileMutation.isPending
+  const archivePending = archiveMutation.isPending
+
+  function saveProfile() {
+    if (!org) return
+    saveProfileMutation.mutate({ orgId: org.id, name, description, website, logoUrl })
+  }
+
+  function archiveOrg() {
+    if (!org) return
+    archiveMutation.mutate({ orgId: org.id, confirmationText: archiveConfirm })
   }
 
   if (loading || !org) {
@@ -160,7 +203,7 @@ export function OrganizationView() {
                 <Label>Website (optional)</Label>
                 <Input value={website} onChange={(e) => setWebsite(e.target.value)} placeholder="https://…" />
               </div>
-              <div className="flex justify-end"><Button onClick={saveProfile} disabled={saving}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save Profile</Button></div>
+              <div className="flex justify-end"><Button onClick={saveProfile} disabled={savePending}>{savePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save Profile</Button></div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -246,8 +289,8 @@ export function OrganizationView() {
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => { setArchiveOpen(false); setArchiveConfirm('') }}>Cancel</Button>
-            <Button variant="destructive" onClick={archiveOrg} disabled={saving || archiveConfirm !== org.name}>
-              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />} Archive Organization
+            <Button variant="destructive" onClick={archiveOrg} disabled={archivePending || archiveConfirm !== org.name}>
+              {archivePending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />} Archive Organization
             </Button>
           </DialogFooter>
         </DialogContent>

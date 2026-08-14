@@ -1,8 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
-import { api, FetchError } from '@/lib/api-client'
+import { api } from '@/lib/api-client'
 import type { InvitationPublic, SessionResponse } from '@/lib/types'
 import { OnboardingSelector } from '@/components/onboarding/onboarding-selector'
 import { CreateCompanyWizard } from '@/components/onboarding/create-company-wizard'
@@ -14,18 +15,14 @@ export function OnboardingView() {
   const user = useAppStore((s) => s.user)
   const setSession = useAppStore((s) => s.setSession)
   const navigate = useAppStore((s) => s.navigate)
-  const [invitations, setInvitations] = useState<InvitationPublic[]>([])
-  const [loading, setLoading] = useState(true)
+  const { data, isLoading } = useQuery<{ invitations: InvitationPublic[] }>({
+    queryKey: ['onboarding-invitations'],
+    queryFn: () => api.get<{ invitations: InvitationPublic[] }>('/api/onboarding/invitations'),
+    staleTime: 30_000,
+  })
+  const invitations = data?.invitations ?? []
   const [mode, setMode] = useState<'selector' | 'create' | 'accept'>('selector')
   const [activeInvite, setActiveInvite] = useState<InvitationPublic | null>(null)
-
-  useEffect(() => {
-    api
-      .get<{ invitations: InvitationPublic[] }>('/api/onboarding/invitations')
-      .then((r) => setInvitations(r.invitations))
-      .catch(() => setInvitations([]))
-      .finally(() => setLoading(false))
-  }, [])
 
   function handleDone(session: SessionResponse) {
     setSession({
@@ -48,7 +45,7 @@ export function OnboardingView() {
       </header>
       <main className="flex-1 flex items-start justify-center px-4 py-10 sm:py-16">
         <div className="w-full max-w-3xl">
-          {loading ? (
+          {isLoading ? (
             <div className="flex items-center justify-center py-20 text-muted-foreground">
               <Loader2 className="h-5 w-5 animate-spin" />
             </div>

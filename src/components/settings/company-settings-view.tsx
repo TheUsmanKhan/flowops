@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
 import type { SessionResponse } from '@/lib/types'
@@ -56,9 +57,15 @@ export function CompanySettingsView() {
   const user = useAppStore((s) => s.user)
   const setSession = useAppStore((s) => s.setSession)
   const navigate = useAppStore((s) => s.navigate)
-  const [data, setData] = useState<CompanyData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
+  const queryClient = useQueryClient()
+
+  const { data, isLoading } = useQuery<{ company: CompanyData }>({
+    queryKey: ['company', activeCompany?.id],
+    queryFn: () => api.get<{ company: CompanyData }>('/api/company'),
+    staleTime: 60_000,
+  })
+  const company = data?.company ?? null
+
   const [tab, setTab] = useState('profile')
   const [archiveOpen, setArchiveOpen] = useState(false)
   const [archiveConfirm, setArchiveConfirm] = useState('')
@@ -70,111 +77,116 @@ export function CompanySettingsView() {
   const [address, setAddress] = useState({ addressStreet: '', addressCity: '', addressProvince: '', addressPostalCode: '', addressCountry: 'PK', phone: '', email: '', website: '' })
   const [financial, setFinancial] = useState({ baseCurrency: 'PKR', fiscalYearStart: 1, timezone: 'Asia/Karachi' })
 
+  // Sync form state when company data arrives
   useEffect(() => {
-    api
-      .get<{ company: CompanyData }>('/api/company')
-      .then((d) => {
-        setData(d.company)
-        setProfile({ name: d.company.name, legalName: d.company.legalName ?? '', logoUrl: d.company.logoUrl })
-        setTax({ taxId: d.company.taxId ?? '', taxIdType: d.company.taxIdType ?? 'NTN' })
-        setAddress({
-          addressStreet: d.company.addressStreet ?? '',
-          addressCity: d.company.addressCity ?? '',
-          addressProvince: d.company.addressProvince ?? '',
-          addressPostalCode: d.company.addressPostalCode ?? '',
-          addressCountry: d.company.addressCountry ?? d.company.countryCode,
-          phone: d.company.phone ?? '',
-          email: d.company.email ?? '',
-          website: d.company.website ?? '',
-        })
-        setFinancial({
-          baseCurrency: d.company.baseCurrency,
-          fiscalYearStart: d.company.fiscalYearStart,
-          timezone: d.company.timezone,
-        })
-      })
-      .catch(() => toast.error('Failed to load company settings.'))
-      .finally(() => setLoading(false))
-  }, [activeCompany?.id])
+    if (!company) return
+    setProfile({ name: company.name, legalName: company.legalName ?? '', logoUrl: company.logoUrl })
+    setTax({ taxId: company.taxId ?? '', taxIdType: company.taxIdType ?? 'NTN' })
+    setAddress({
+      addressStreet: company.addressStreet ?? '',
+      addressCity: company.addressCity ?? '',
+      addressProvince: company.addressProvince ?? '',
+      addressPostalCode: company.addressPostalCode ?? '',
+      addressCountry: company.addressCountry ?? company.countryCode,
+      phone: company.phone ?? '',
+      email: company.email ?? '',
+      website: company.website ?? '',
+    })
+    setFinancial({
+      baseCurrency: company.baseCurrency,
+      fiscalYearStart: company.fiscalYearStart,
+      timezone: company.timezone,
+    })
+  }, [company?.id])
 
-  async function saveProfile() {
-    setSaving(true)
-    try {
-      const session = await api.patch<SessionResponse>('/api/company', {
-        name: profile.name,
-        legalName: profile.legalName,
-        logoUrl: profile.logoUrl,
-      })
+  // ── Mutations ─────────────────────────────────────────────────────────────
+  const invalidateCompany = () =>
+    void queryClient.invalidateQueries({ queryKey: ['company', activeCompany?.id] })
+
+  const profileMutation = useMutation({
+    mutationFn: async (input: { name: string; legalName: string; logoUrl: string | null }) =>
+      api.patch<SessionResponse>('/api/company', input),
+    onSuccess: (session) => {
       setSession({ user, activeCompany: session.activeCompany, companies: session.companies, employee: session.employee ?? undefined })
       toast.success('Profile saved')
-    } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to save.')
-    } finally { setSaving(false) }
-  }
+      invalidateCompany()
+    },
+    onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed to save.'),
+  })
 
-  async function saveTax() {
-    setSaving(true)
-    try {
-      await api.patch('/api/company', { taxId: tax.taxId, taxIdType: tax.taxIdType })
+  const taxMutation = useMutation({
+    mutationFn: async (input: { taxId: string; taxIdType: string }) =>
+      api.patch('/api/company', input),
+    onSuccess: () => {
       toast.success('Tax information saved')
-    } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to save.')
-    } finally { setSaving(false) }
-  }
+      invalidateCompany()
+    },
+    onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed to save.'),
+  })
 
-  async function saveAddress() {
-    setSaving(true)
-    try {
-      await api.patch('/api/company', {
-        addressStreet: address.addressStreet,
-        addressCity: address.addressCity,
-        addressProvince: address.addressProvince,
-        addressPostalCode: address.addressPostalCode,
-        addressCountry: address.addressCountry,
-        phone: address.phone,
-        email: address.email,
-        website: address.website,
-      })
+  const addressMutation = useMutation({
+    mutationFn: async (input: typeof address) => api.patch('/api/company', input),
+    onSuccess: () => {
       toast.success('Address & contact saved')
-    } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to save.')
-    } finally { setSaving(false) }
-  }
+      invalidateCompany()
+    },
+    onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed to save.'),
+  })
 
-  async function saveFinancial() {
-    setSaving(true)
-    try {
-      const session = await api.patch<SessionResponse>('/api/company', {
-        baseCurrency: financial.baseCurrency,
-        fiscalYearStart: financial.fiscalYearStart,
-        timezone: financial.timezone,
-      })
+  const financialMutation = useMutation({
+    mutationFn: async (input: { baseCurrency: string; fiscalYearStart: number; timezone: string }) =>
+      api.patch<SessionResponse>('/api/company', input),
+    onSuccess: (session) => {
       setSession({ user, activeCompany: session.activeCompany, companies: session.companies, employee: session.employee ?? undefined })
       setCurrencyWarning(null)
       toast.success('Financial settings saved')
-    } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to save.')
-    } finally { setSaving(false) }
-  }
+      invalidateCompany()
+    },
+    onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed to save.'),
+  })
 
-  async function archiveCompany() {
-    setSaving(true)
-    try {
-      const session = await api.post<SessionResponse>('/api/companies/' + data?.id + '/archive', { id: data?.id, confirmation_text: archiveConfirm })
+  const archiveMutation = useMutation({
+    mutationFn: async (input: { id: string; confirmationText: string }) =>
+      api.post<SessionResponse>(`/api/companies/${input.id}/archive`, { id: input.id, confirmation_text: input.confirmationText }),
+    onSuccess: (session) => {
       setSession({ user, activeCompany: session.activeCompany, companies: session.companies, employee: session.employee ?? undefined })
       toast.success('Company archived')
       setArchiveOpen(false)
+      invalidateCompany()
       if (!session.activeCompany) {
         navigate({ name: 'onboarding' })
       } else {
         navigate({ name: 'dashboard' })
       }
-    } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to archive.')
-    } finally { setSaving(false) }
+    },
+    onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed to archive.'),
+  })
+
+  const saving =
+    profileMutation.isPending ||
+    taxMutation.isPending ||
+    addressMutation.isPending ||
+    financialMutation.isPending ||
+    archiveMutation.isPending
+
+  function saveProfile() {
+    profileMutation.mutate({ name: profile.name, legalName: profile.legalName, logoUrl: profile.logoUrl })
+  }
+  function saveTax() {
+    taxMutation.mutate({ taxId: tax.taxId, taxIdType: tax.taxIdType })
+  }
+  function saveAddress() {
+    addressMutation.mutate(address)
+  }
+  function saveFinancial() {
+    financialMutation.mutate({ baseCurrency: financial.baseCurrency, fiscalYearStart: financial.fiscalYearStart, timezone: financial.timezone })
+  }
+  function archiveCompany() {
+    if (!company) return
+    archiveMutation.mutate({ id: company.id, confirmationText: archiveConfirm })
   }
 
-  if (loading || !data) {
+  if (isLoading || !company) {
     return <div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
   }
 
@@ -197,7 +209,7 @@ export function CompanySettingsView() {
             <CardHeader><CardTitle className="text-base">Company Profile</CardTitle><CardDescription>Logo, name, and display info.</CardDescription></CardHeader>
             <CardContent className="space-y-5">
               <div className="flex justify-center">
-                <LogoUpload type="companies" id={data.id} name={data.name} currentUrl={profile.logoUrl} onChange={(url) => setProfile((p) => ({ ...p, logoUrl: url }))} size={120} />
+                <LogoUpload type="companies" id={company.id} name={company.name} currentUrl={profile.logoUrl} onChange={(url) => setProfile((p) => ({ ...p, logoUrl: url }))} size={120} />
               </div>
               <div className="space-y-1.5">
                 <Label>Company Display Name</Label>
@@ -210,7 +222,7 @@ export function CompanySettingsView() {
               <div className="space-y-1.5">
                 <Label>Company Slug</Label>
                 <div className="flex items-center gap-2">
-                  <Input value={data.slug} readOnly className="bg-muted/50 font-mono text-sm" />
+                  <Input value={company.slug} readOnly className="bg-muted/50 font-mono text-sm" />
                   <Lock className="h-4 w-4 text-muted-foreground" />
                 </div>
                 <p className="text-xs text-muted-foreground">Cannot be changed after creation — used in URLs.</p>
@@ -293,17 +305,17 @@ export function CompanySettingsView() {
               <div className="space-y-1.5">
                 <Label>Base Currency</Label>
                 <CurrencySelector value={financial.baseCurrency} onChange={(c) => {
-                  if (c !== data.baseCurrency) setCurrencyWarning(c)
+                  if (c !== company.baseCurrency) setCurrencyWarning(c)
                   setFinancial((f) => ({ ...f, baseCurrency: c }))
                 }} />
                 <p className="text-xs text-muted-foreground">Primary currency for all financial reports.</p>
               </div>
-              {currencyWarning && currencyWarning !== data.baseCurrency && (
+              {currencyWarning && currencyWarning !== company.baseCurrency && (
                 <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm">
                   <p className="font-medium text-amber-800 flex items-center gap-1.5"><AlertTriangle className="h-4 w-4" /> Currency change warning</p>
                   <p className="text-xs text-amber-700 mt-1">Changing base currency does NOT convert existing monetary values — only the display label changes going forward. Are you sure?</p>
                   <div className="flex gap-2 mt-2">
-                    <Button variant="outline" size="sm" onClick={() => { setFinancial((f) => ({ ...f, baseCurrency: data.baseCurrency })); setCurrencyWarning(null) }}>Cancel Change</Button>
+                    <Button variant="outline" size="sm" onClick={() => { setFinancial((f) => ({ ...f, baseCurrency: company.baseCurrency })); setCurrencyWarning(null) }}>Cancel Change</Button>
                     <Button size="sm" onClick={() => setCurrencyWarning(null)}>Yes, Change Currency</Button>
                   </div>
                 </div>
@@ -345,17 +357,17 @@ export function CompanySettingsView() {
       <Dialog open={archiveOpen} onOpenChange={setArchiveOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle className="text-destructive">Archive {data.name}?</DialogTitle>
+            <DialogTitle className="text-destructive">Archive {company.name}?</DialogTitle>
             <DialogDescription>This will disable access for all employees, stop all operations, and preserve historical data. This cannot be undone.</DialogDescription>
           </DialogHeader>
           <div className="space-y-1.5">
             <Label>Type the company name to confirm:</Label>
-            <Input value={archiveConfirm} onChange={(e) => setArchiveConfirm(e.target.value)} placeholder={data.name} />
-            <p className="text-xs text-muted-foreground">Must type: <code className="font-mono">{data.name}</code></p>
+            <Input value={archiveConfirm} onChange={(e) => setArchiveConfirm(e.target.value)} placeholder={company.name} />
+            <p className="text-xs text-muted-foreground">Must type: <code className="font-mono">{company.name}</code></p>
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => { setArchiveOpen(false); setArchiveConfirm('') }}>Cancel</Button>
-            <Button variant="destructive" onClick={archiveCompany} disabled={saving || archiveConfirm !== data.name}>
+            <Button variant="destructive" onClick={archiveCompany} disabled={saving || archiveConfirm !== company.name}>
               {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />} Archive Company
             </Button>
           </DialogFooter>

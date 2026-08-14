@@ -1,6 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useAppStore, useCan } from '@/stores/app-store'
 import { api, initials } from '@/lib/api-client'
 import type { EmployeePublic } from '@/lib/types'
@@ -36,23 +37,17 @@ import { format } from 'date-fns'
 export function EmployeesView() {
   const navigate = useAppStore((s) => s.navigate)
   const can = useCan()
-  const [employees, setEmployees] = useState<EmployeePublic[]>([])
-  const [loading, setLoading] = useState(true)
+  const { data, isLoading } = useQuery<{ employees: EmployeePublic[] }>({
+    queryKey: ['employees'],
+    queryFn: () => api.get<{ employees: EmployeePublic[] }>('/api/employees'),
+    staleTime: 30_000,
+  })
+  const employees = data?.employees ?? []
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [roleFilter, setRoleFilter] = useState<string>('all')
   const [designationFilter, setDesignationFilter] = useState<string>('all')
   const [departmentFilter, setDepartmentFilter] = useState<string>('all')
-
-  const refresh = () => {
-    setLoading(true)
-    api
-      .get<{ employees: EmployeePublic[] }>('/api/employees')
-      .then((r) => setEmployees(r.employees))
-      .catch(() => setEmployees([]))
-      .finally(() => setLoading(false))
-  }
-  useEffect(refresh, [])
 
   const roles = useMemo(() => {
     const m = new Map<string, string>()
@@ -187,7 +182,7 @@ export function EmployeesView() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {loading ? (
+                {isLoading ? (
                   <TableRow>
                     <TableCell colSpan={7} className="h-32 text-center">
                       <Loader2 className="h-5 w-5 animate-spin mx-auto text-muted-foreground" />

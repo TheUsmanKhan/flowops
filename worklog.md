@@ -8221,3 +8221,81 @@ NOTE: The duplicate trg_customers_updatedAt definition (in both migration 001 an
 FILES CREATED/MODIFIED:
 1. supabase/functions-only.sql — NEW: consolidated 23 functions + 2 sequences + 12 triggers
 2. DOCKER.md — MODIFIED: updated apply-SQL-functions step to use the consolidated file
+
+---
+Task ID: TANSTACK-MIGRATION
+Agent: main
+Task: Step 3 — Migrate 6 tech-debt views from raw useEffect+api.get() to TanStack Query
+
+Work Log:
+- Read reference patterns from orders-view.tsx (useQuery with queryKey/queryFn/staleTime) and suppliers-view.tsx (useMutation with onSuccess invalidate + toast). Surveyed staleTime conventions across 64 existing components: 10s=detail pages, 15s=queue-like, 30s=directories, 60s=slow-changing settings.
+- Migrated all 6 views following the established conventions:
+
+1. employees-view.tsx (read-only, 30s staleTime):
+   - Replaced useEffect+api.get+useState with useQuery(['employees'], staleTime:30s)
+   - Removed `employees`/`loading` useState; derived `employees = data?.employees ?? []` and `isLoading` from query
+   - Client-side filtering (search/status/role/designation/department) preserved via useMemo
+
+2. roles-view.tsx (read + 2 mutations, 60s staleTime):
+   - useQuery(['roles'], staleTime:60s) for the list
+   - deleteRole → useMutation with onSuccess: toast.success + invalidate(['roles']); onError: toast.error
+   - CreateRoleDialog.create → useMutation with onSuccess: toast.success + onCreated callback (which invalidates ['roles'])
+   - Removed `roles`/`loading`/`saving` useState; uses `deleteMutation.isPending` / `createMutation.isPending`
+
+3. organization-view.tsx (2 read queries + 2 mutations, 60s staleTime):
+   - Split the chained useEffect fetch into 2 independent useQuery calls: ['company', activeCompany?.id] and ['workspaces'] (enabled only when org exists)
+   - Form state (name/description/website/logoUrl) synced from query data via useEffect keyed on org?.id
+   - saveProfile → useMutation (PATCH /api/organizations/:id) with onSuccess: setSession + toast + invalidate(['company'] + ['workspaces'])
+   - archiveOrg → useMutation (POST) with onSuccess: setSession + toast + invalidate + navigate
+
+4. company-settings-view.tsx (1 read query + 5 mutations, 60s staleTime):
+   - useQuery(['company', activeCompany?.id], staleTime:60s)
+   - Form state (profile/tax/address/financial) synced from query data via useEffect keyed on company?.id
+   - 5 mutations: profileMutation, taxMutation, addressMutation, financialMutation, archiveMutation — each with onSuccess: toast + invalidate(['company']); profile/financial/archive also call setSession
+   - Replaced all `data.` references in JSX with `company.` (10 references)
+
+5. audit-log-view.tsx (read-only, 15s staleTime):
+   - useQuery(['audit-logs', page, action, entityType, activeCompany?.id], staleTime:15s) — queryKey includes all filter deps so refetch happens automatically on filter change
+   - Removed `rows`/`loading`/`total` useState; derived from query data
+   - Eliminated the manual `active` flag / cleanup function (TanStack Query handles this internally)
+
+6. onboarding-view.tsx (read-only, 30s staleTime):
+   - useQuery(['onboarding-invitations'], staleTime:30s)
+   - Removed `invitations`/`loading` useState + unused FetchError import
+
+- staleTime rationale:
+  - employees: 30s (directory, moderate change — matches suppliers-view at 30s)
+  - roles: 60s (rarely change — matches sidebar/workspace at 60s)
+  - organization: 60s (slow-changing settings)
+  - company-settings: 60s (slow-changing settings)
+  - audit-log: 15s (queue-like, append-only — matches losses/cycle-counts at 15s)
+  - onboarding invitations: 30s (moderate, short-lived)
+
+VERIFICATION:
+- tsc --noEmit: 0 errors in all 6 migrated files (19 pre-existing errors in OTHER files: examples/, api routes, lib/actions — none touched by this task) ✅
+- bun run lint: 0 errors, 11 pre-existing warnings (all React Hook Form watch() in other files) ✅
+- Dev server (Turbopack): compiles and serves root page HTTP 200 ✅
+- Agent Browser end-to-end verification (after fixing a pre-existing env issue: shell had stale DATABASE_URL=file:... overriding .env's postgresql://; fixed with `env -u DATABASE_URL -u DIRECT_URL bun run dev`):
+  - Onboarding view: renders "Let's set up your workspace", useQuery fetches /api/onboarding/invitations → {"invitations":[]} ✅
+  - Employees view: renders "Test Migration" employee (Owner role, Active status), "1 of 1 employee" ✅
+  - Roles view: renders Co-Founder/Founder/Investor system roles with Elevated badges ✅
+  - Organization view: renders "Manage Test Org" with Profile/Companies/Subscription/Danger tabs ✅
+  - Company Settings view: renders Profile/Tax/Address/Financial/Danger tabs with form data ✅
+  - Audit Log view: renders 2 entries (employee.joined, company.created) with "2 entries · page 1 of 1" ✅
+  - Mutation test: changed company name → clicked Save Profile → toast "Profile saved" appeared → API confirms "name":"Test Company Renamed" persisted → query invalidation refetched updated data ✅
+  - Zero browser errors / console errors across all 6 views ✅
+
+FILES MODIFIED:
+1. src/components/employees/employees-view.tsx — useQuery migration
+2. src/components/roles/roles-view.tsx — useQuery + 2 useMutation (create, delete)
+3. src/components/settings/organization-view.tsx — 2 useQuery + 2 useMutation (saveProfile, archiveOrg)
+4. src/components/settings/company-settings-view.tsx — useQuery + 5 useMutation (profile, tax, address, financial, archive)
+5. src/components/settings/audit-log-view.tsx — useQuery with filter-dependent queryKey
+6. src/components/onboarding/onboarding-view.tsx — useQuery migration
+
+Stage Summary:
+- All 6 tech-debt views migrated from raw useEffect+api.get()+setState to TanStack Query (useQuery/useMutation), matching the patterns used by the other 64 components in the codebase.
+- Each view uses appropriate staleTime (10s detail / 15s queue / 30s directory / 60s slow-changing settings).
+- All mutations use useMutation with onSuccess (toast.success + queryClient.invalidateQueries) and onError (toast.error).
+- Removed all now-unused local state (useState for fetched data + loading flags).
+- Verified end-to-end in the browser: all 6 views render data correctly, mutations persist + invalidate + toast, zero errors.
