@@ -261,3 +261,48 @@ Additional optimizations to consider after code-splitting:
 - Add `React.memo` to large list components
 - Migrate 6 views from `useEffect + api.get()` to TanStack Query
 - Lazy-load rarely-used shadcn/ui components (carousel, calendar, etc.)
+
+---
+
+## UPDATE — After Code-Splitting (Step 1)
+
+**Date**: August 14, 2026 (same day)
+**Change**: Replaced all 62 static imports in `src/app/page.tsx` with `next/dynamic` lazy imports.
+
+### Before/After Comparison
+
+| Metric | BEFORE (baseline) | AFTER (code-split) | Change |
+|---|---|---|---|
+| **First Load JS** | **3,148 KB (3.1 MB)** | **1,070 KB (1.0 MB)** | **↓ 66% (2,078 KB saved)** |
+| SPA page chunk | 2,638 KB (all 62 views) | 561 KB (page shell only) | ↓ 79% |
+| Number of JS chunks | 10 (all loaded upfront) | 95 (5 upfront + 90 lazy) | ↑ 85 new lazy chunks |
+| Largest individual chunk | 2,638 KB | 561 KB | ↓ 79% |
+| Total JS (all chunks) | 3,247 KB | 4,800 KB | ↑ 48% (module duplication in split chunks — expected) |
+| Build time | 44s | 37s | ↓ 16% |
+| CSS | 168 KB | 168 KB | unchanged |
+
+### What the user now downloads on first visit
+
+| Component | Size | Loaded when? |
+|---|---|---|
+| Root main JS (React + framework) | 400 KB | Always (first load) |
+| Polyfill | 110 KB | Always (first load) |
+| Page shell (page.tsx + DashboardShell + AuthShell + providers) | 561 KB | Always (first load) |
+| **First Load JS Total** | **1,070 KB** | **↓ 66% from 3,148 KB** |
+| Individual view chunks (62 views) | 10–383 KB each | On-demand (when user navigates) |
+
+### Largest lazy chunks (loaded only when that specific view is opened)
+
+| Chunk | Size | Likely content |
+|---|---|---|
+| 383 KB | orders-view.tsx (recharts + 2599 LOC) |
+| 383 KB | order-create-view.tsx (2390 LOC + form deps) |
+| 266 KB | product-create-view.tsx (2321 LOC) |
+| 114 KB | catalog-settings-view.tsx (2289 LOC) |
+| 111 KB | losses-view.tsx (2249 LOC) |
+| 84 KB | order-detail-view.tsx (2040 LOC) |
+| 81 KB | cycle-counts-view.tsx (2249 LOC) |
+
+### Note on total JS increase
+
+Total JS across all chunks increased from 3,247 KB to 4,800 KB (+48%). This is expected and normal — when modules are split into separate chunks, shared dependencies (React Hook Form, Zod, recharts, etc.) may be duplicated across chunks that can't be deduplicated at the chunk level. The tradeoff is correct: total bundle is larger, but the user only downloads what they actually use. The First Load JS (what matters for initial page render) dropped 66%.

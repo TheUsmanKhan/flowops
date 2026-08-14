@@ -1,76 +1,106 @@
 'use client'
 
 import { useEffect } from 'react'
+import dynamic from 'next/dynamic'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
 import { queryToRoute, replaceRouteInURL } from '@/lib/routing/url-sync'
 import type { SessionResponse } from '@/lib/types'
 import { Loader2 } from 'lucide-react'
 
+// ─── Always-needed (NOT lazy-loaded) ────────────────────────────────
 import { AuthShell } from '@/components/auth/auth-shell'
-import { LoginForm } from '@/components/auth/login-form'
-import { RegisterForm } from '@/components/auth/register-form'
-import { ForgotPasswordForm } from '@/components/auth/forgot-password-form'
-import { ResetPasswordForm } from '@/components/auth/reset-password-form'
-import { OnboardingView } from '@/components/onboarding/onboarding-view'
-import { CreateOrganizationView } from '@/components/onboarding/create-organization-view'
-import { CreateCompanyView } from '@/components/onboarding/create-company-view'
-import { DashboardShell, PageHeader } from '@/components/layout/dashboard-shell'
-import { DashboardHome } from '@/components/dashboard/dashboard-home'
-import { EmployeesView } from '@/components/employees/employees-view'
-import { InviteEmployeeView } from '@/components/employees/invite-employee-view'
-import { EmployeeDetailView } from '@/components/employees/employee-detail-view'
-import { RolesView } from '@/components/roles/roles-view'
-import { RoleEditView } from '@/components/roles/role-edit-view'
-import { OrganizationView } from '@/components/settings/organization-view'
-import { CompanySettingsView } from '@/components/settings/company-settings-view'
-import { SettingsView } from '@/components/settings/settings-view'
-import { AuditLogView } from '@/components/settings/audit-log-view'
-import { PayrollView } from '@/components/payroll/payroll-view'
-import { PayrollRunDetailView } from '@/components/payroll/payroll-run-detail-view'
-import { ProductsView } from '@/components/products/products-view'
-import { ProductCreateView } from '@/components/products/product-create-view'
-import { ProductDetailView } from '@/components/products/product-detail-view'
-import { CatalogSettingsView } from '@/components/products/catalog-settings-view'
-import { ReturnedStitchedView } from '@/components/products/returned-stitched-view'
-import { OrgCatalogView } from '@/components/products/org-catalog-view'
-import { InventoryDashboardView } from '@/components/inventory/inventory-dashboard-view'
-import { LocationsView } from '@/components/inventory/locations-view'
-import { LocationDetailView } from '@/components/inventory/location-detail-view'
-import { SuppliersView } from '@/components/inventory/suppliers-view'
-import { SupplierDetailView } from '@/components/inventory/supplier-detail-view'
-import { ReceiveStockView } from '@/components/inventory/receive-stock-view'
-import { AdjustStockView } from '@/components/inventory/adjust-stock-view'
-import { TransferStockView } from '@/components/inventory/transfer-stock-view'
-import { PurchaseOrdersView } from '@/components/inventory/purchase-orders-view'
-import { PoCreateView } from '@/components/inventory/po-create-view'
-import { PoDetailView } from '@/components/inventory/po-detail-view'
-import { SupplierReturnsView } from '@/components/inventory/supplier-returns-view'
-import { ProductionOrdersView } from '@/components/inventory/production-orders-view'
-import { LossesView } from '@/components/inventory/losses-view'
-import { LossDetailView } from '@/components/inventory/loss-detail-view'
-import { CycleCountsView } from '@/components/inventory/cycle-counts-view'
-import { OrdersView } from '@/components/orders/orders-view'
-import { OrderCreateView } from '@/components/orders/order-create-view'
-import { OrderDetailView } from '@/components/orders/order-detail-view'
-import { OrdersPendingConfirmationView } from '@/components/orders/orders-pending-confirmation-view'
-import { OrdersBackorderedView } from '@/components/orders/orders-backordered-view'
-import { OrdersAwaitingProductionView } from '@/components/orders/orders-awaiting-production-view'
-import { OrdersReadyToDispatchView } from '@/components/orders/orders-ready-to-dispatch-view'
-import { OrdersReturnsView } from '@/components/orders/orders-returns-view'
-import { OrdersReturnsReviewView } from '@/components/orders/orders-returns-review-view'
-import { OrdersCancelledView } from '@/components/orders/orders-cancelled-view'
-import { ExchangesView } from '@/components/orders/exchanges-view'
-import { ExchangeDetailView } from '@/components/orders/exchange-detail-view'
-import { CustomersView } from '@/components/orders/customers-view'
-import { CustomerDetailView } from '@/components/orders/customer-detail-view'
-import { OrderWorkflowSettingsView } from '@/components/orders/order-workflow-settings-view'
-import { BookingWorkbenchView } from '@/components/orders/booking-workbench-view'
-import { OrderScanView } from '@/components/orders/order-scan-view'
-import { IntegrationsView } from '@/components/settings/integrations-view'
-import { IntegrationLogsView } from '@/components/settings/integration-logs-view'
-import { DraftsView } from '@/components/shared/drafts-view'
-import { Card, CardContent } from '@/components/ui/card'
+import { DashboardShell } from '@/components/layout/dashboard-shell'
+
+// ─── Loading fallback (reused for all lazy components) ─────────────
+const LoadingFallback = () => (
+  <div className="flex items-center justify-center py-20">
+    <Loader2 className="h-6 w-6 animate-spin text-primary" />
+  </div>
+)
+
+// ─── Auth views (small, but lazy-loaded to keep login page fast) ────
+const LoginForm = dynamic(() => import('@/components/auth/login-form').then(m => ({ default: m.LoginForm })), { ssr: false, loading: LoadingFallback })
+const RegisterForm = dynamic(() => import('@/components/auth/register-form').then(m => ({ default: m.RegisterForm })), { ssr: false, loading: LoadingFallback })
+const ForgotPasswordForm = dynamic(() => import('@/components/auth/forgot-password-form').then(m => ({ default: m.ForgotPasswordForm })), { ssr: false, loading: LoadingFallback })
+const ResetPasswordForm = dynamic(() => import('@/components/auth/reset-password-form').then(m => ({ default: m.ResetPasswordForm })), { ssr: false, loading: LoadingFallback })
+
+// ─── Onboarding views ──────────────────────────────────────────────
+const OnboardingView = dynamic(() => import('@/components/onboarding/onboarding-view').then(m => ({ default: m.OnboardingView })), { ssr: false, loading: LoadingFallback })
+const CreateOrganizationView = dynamic(() => import('@/components/onboarding/create-organization-view').then(m => ({ default: m.CreateOrganizationView })), { ssr: false, loading: LoadingFallback })
+const CreateCompanyView = dynamic(() => import('@/components/onboarding/create-company-view').then(m => ({ default: m.CreateCompanyView })), { ssr: false, loading: LoadingFallback })
+
+// ─── Dashboard ─────────────────────────────────────────────────────
+const DashboardHome = dynamic(() => import('@/components/dashboard/dashboard-home').then(m => ({ default: m.DashboardHome })), { ssr: false, loading: LoadingFallback })
+
+// ─── Employees ─────────────────────────────────────────────────────
+const EmployeesView = dynamic(() => import('@/components/employees/employees-view').then(m => ({ default: m.EmployeesView })), { ssr: false, loading: LoadingFallback })
+const InviteEmployeeView = dynamic(() => import('@/components/employees/invite-employee-view').then(m => ({ default: m.InviteEmployeeView })), { ssr: false, loading: LoadingFallback })
+const EmployeeDetailView = dynamic(() => import('@/components/employees/employee-detail-view').then(m => ({ default: m.EmployeeDetailView })), { ssr: false, loading: LoadingFallback })
+
+// ─── Roles ─────────────────────────────────────────────────────────
+const RolesView = dynamic(() => import('@/components/roles/roles-view').then(m => ({ default: m.RolesView })), { ssr: false, loading: LoadingFallback })
+const RoleEditView = dynamic(() => import('@/components/roles/role-edit-view').then(m => ({ default: m.RoleEditView })), { ssr: false, loading: LoadingFallback })
+
+// ─── Settings ──────────────────────────────────────────────────────
+const OrganizationView = dynamic(() => import('@/components/settings/organization-view').then(m => ({ default: m.OrganizationView })), { ssr: false, loading: LoadingFallback })
+const CompanySettingsView = dynamic(() => import('@/components/settings/company-settings-view').then(m => ({ default: m.CompanySettingsView })), { ssr: false, loading: LoadingFallback })
+const SettingsView = dynamic(() => import('@/components/settings/settings-view').then(m => ({ default: m.SettingsView })), { ssr: false, loading: LoadingFallback })
+const AuditLogView = dynamic(() => import('@/components/settings/audit-log-view').then(m => ({ default: m.AuditLogView })), { ssr: false, loading: LoadingFallback })
+const IntegrationsView = dynamic(() => import('@/components/settings/integrations-view').then(m => ({ default: m.IntegrationsView })), { ssr: false, loading: LoadingFallback })
+const IntegrationLogsView = dynamic(() => import('@/components/settings/integration-logs-view').then(m => ({ default: m.IntegrationLogsView })), { ssr: false, loading: LoadingFallback })
+
+// ─── Payroll ───────────────────────────────────────────────────────
+const PayrollView = dynamic(() => import('@/components/payroll/payroll-view').then(m => ({ default: m.PayrollView })), { ssr: false, loading: LoadingFallback })
+const PayrollRunDetailView = dynamic(() => import('@/components/payroll/payroll-run-detail-view').then(m => ({ default: m.PayrollRunDetailView })), { ssr: false, loading: LoadingFallback })
+
+// ─── Products (largest: product-create 2321, catalog-settings 2289, product-detail 1949) ──
+const ProductsView = dynamic(() => import('@/components/products/products-view').then(m => ({ default: m.ProductsView })), { ssr: false, loading: LoadingFallback })
+const ProductCreateView = dynamic(() => import('@/components/products/product-create-view').then(m => ({ default: m.ProductCreateView })), { ssr: false, loading: LoadingFallback })
+const ProductDetailView = dynamic(() => import('@/components/products/product-detail-view').then(m => ({ default: m.ProductDetailView })), { ssr: false, loading: LoadingFallback })
+const CatalogSettingsView = dynamic(() => import('@/components/products/catalog-settings-view').then(m => ({ default: m.CatalogSettingsView })), { ssr: false, loading: LoadingFallback })
+const ReturnedStitchedView = dynamic(() => import('@/components/products/returned-stitched-view').then(m => ({ default: m.ReturnedStitchedView })), { ssr: false, loading: LoadingFallback })
+const OrgCatalogView = dynamic(() => import('@/components/products/org-catalog-view').then(m => ({ default: m.OrgCatalogView })), { ssr: false, loading: LoadingFallback })
+
+// ─── Inventory (largest: losses 2249, cycle-counts 2249) ───────────
+const InventoryDashboardView = dynamic(() => import('@/components/inventory/inventory-dashboard-view').then(m => ({ default: m.InventoryDashboardView })), { ssr: false, loading: LoadingFallback })
+const LocationsView = dynamic(() => import('@/components/inventory/locations-view').then(m => ({ default: m.LocationsView })), { ssr: false, loading: LoadingFallback })
+const LocationDetailView = dynamic(() => import('@/components/inventory/location-detail-view').then(m => ({ default: m.LocationDetailView })), { ssr: false, loading: LoadingFallback })
+const SuppliersView = dynamic(() => import('@/components/inventory/suppliers-view').then(m => ({ default: m.SuppliersView })), { ssr: false, loading: LoadingFallback })
+const SupplierDetailView = dynamic(() => import('@/components/inventory/supplier-detail-view').then(m => ({ default: m.SupplierDetailView })), { ssr: false, loading: LoadingFallback })
+const ReceiveStockView = dynamic(() => import('@/components/inventory/receive-stock-view').then(m => ({ default: m.ReceiveStockView })), { ssr: false, loading: LoadingFallback })
+const AdjustStockView = dynamic(() => import('@/components/inventory/adjust-stock-view').then(m => ({ default: m.AdjustStockView })), { ssr: false, loading: LoadingFallback })
+const TransferStockView = dynamic(() => import('@/components/inventory/transfer-stock-view').then(m => ({ default: m.TransferStockView })), { ssr: false, loading: LoadingFallback })
+const PurchaseOrdersView = dynamic(() => import('@/components/inventory/purchase-orders-view').then(m => ({ default: m.PurchaseOrdersView })), { ssr: false, loading: LoadingFallback })
+const PoCreateView = dynamic(() => import('@/components/inventory/po-create-view').then(m => ({ default: m.PoCreateView })), { ssr: false, loading: LoadingFallback })
+const PoDetailView = dynamic(() => import('@/components/inventory/po-detail-view').then(m => ({ default: m.PoDetailView })), { ssr: false, loading: LoadingFallback })
+const SupplierReturnsView = dynamic(() => import('@/components/inventory/supplier-returns-view').then(m => ({ default: m.SupplierReturnsView })), { ssr: false, loading: LoadingFallback })
+const ProductionOrdersView = dynamic(() => import('@/components/inventory/production-orders-view').then(m => ({ default: m.ProductionOrdersView })), { ssr: false, loading: LoadingFallback })
+const LossesView = dynamic(() => import('@/components/inventory/losses-view').then(m => ({ default: m.LossesView })), { ssr: false, loading: LoadingFallback })
+const LossDetailView = dynamic(() => import('@/components/inventory/loss-detail-view').then(m => ({ default: m.LossDetailView })), { ssr: false, loading: LoadingFallback })
+const CycleCountsView = dynamic(() => import('@/components/inventory/cycle-counts-view').then(m => ({ default: m.CycleCountsView })), { ssr: false, loading: LoadingFallback })
+
+// ─── Orders (largest: orders-view 2599, order-create 2390, order-detail 2040) ──
+const OrdersView = dynamic(() => import('@/components/orders/orders-view').then(m => ({ default: m.OrdersView })), { ssr: false, loading: LoadingFallback })
+const OrderCreateView = dynamic(() => import('@/components/orders/order-create-view').then(m => ({ default: m.OrderCreateView })), { ssr: false, loading: LoadingFallback })
+const OrderDetailView = dynamic(() => import('@/components/orders/order-detail-view').then(m => ({ default: m.OrderDetailView })), { ssr: false, loading: LoadingFallback })
+const OrdersPendingConfirmationView = dynamic(() => import('@/components/orders/orders-pending-confirmation-view').then(m => ({ default: m.OrdersPendingConfirmationView })), { ssr: false, loading: LoadingFallback })
+const OrdersBackorderedView = dynamic(() => import('@/components/orders/orders-backordered-view').then(m => ({ default: m.OrdersBackorderedView })), { ssr: false, loading: LoadingFallback })
+const OrdersAwaitingProductionView = dynamic(() => import('@/components/orders/orders-awaiting-production-view').then(m => ({ default: m.OrdersAwaitingProductionView })), { ssr: false, loading: LoadingFallback })
+const OrdersReadyToDispatchView = dynamic(() => import('@/components/orders/orders-ready-to-dispatch-view').then(m => ({ default: m.OrdersReadyToDispatchView })), { ssr: false, loading: LoadingFallback })
+const OrdersReturnsView = dynamic(() => import('@/components/orders/orders-returns-view').then(m => ({ default: m.OrdersReturnsView })), { ssr: false, loading: LoadingFallback })
+const OrdersReturnsReviewView = dynamic(() => import('@/components/orders/orders-returns-review-view').then(m => ({ default: m.OrdersReturnsReviewView })), { ssr: false, loading: LoadingFallback })
+const OrdersCancelledView = dynamic(() => import('@/components/orders/orders-cancelled-view').then(m => ({ default: m.OrdersCancelledView })), { ssr: false, loading: LoadingFallback })
+const ExchangesView = dynamic(() => import('@/components/orders/exchanges-view').then(m => ({ default: m.ExchangesView })), { ssr: false, loading: LoadingFallback })
+const ExchangeDetailView = dynamic(() => import('@/components/orders/exchange-detail-view').then(m => ({ default: m.ExchangeDetailView })), { ssr: false, loading: LoadingFallback })
+const CustomersView = dynamic(() => import('@/components/orders/customers-view').then(m => ({ default: m.CustomersView })), { ssr: false, loading: LoadingFallback })
+const CustomerDetailView = dynamic(() => import('@/components/orders/customer-detail-view').then(m => ({ default: m.CustomerDetailView })), { ssr: false, loading: LoadingFallback })
+const OrderWorkflowSettingsView = dynamic(() => import('@/components/orders/order-workflow-settings-view').then(m => ({ default: m.OrderWorkflowSettingsView })), { ssr: false, loading: LoadingFallback })
+const BookingWorkbenchView = dynamic(() => import('@/components/orders/booking-workbench-view').then(m => ({ default: m.BookingWorkbenchView })), { ssr: false, loading: LoadingFallback })
+const OrderScanView = dynamic(() => import('@/components/orders/order-scan-view').then(m => ({ default: m.OrderScanView })), { ssr: false, loading: LoadingFallback })
+
+// ─── Shared ────────────────────────────────────────────────────────
+const DraftsView = dynamic(() => import('@/components/shared/drafts-view').then(m => ({ default: m.DraftsView })), { ssr: false, loading: LoadingFallback })
 
 export default function Page() {
   const { hydrated, loading, route, user, activeCompany, employee, setSession, setHydrated, navigate, reset } =
