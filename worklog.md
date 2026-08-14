@@ -8385,3 +8385,82 @@ Stage Summary:
 - package.json dependencies: 60 (was 70, ↓ 10).
 - Build time: 29.7s (was 37s — slightly faster with fewer deps to resolve).
 - Cumulative across Steps 0-5: First Load JS reduced 66% (3.1 MB → 1.0 MB).
+
+---
+Task ID: LCP-OPTIMIZATION
+Agent: main
+Task: Investigate and fix ~2.7s LCP on Products page (?view=products)
+
+Work Log:
+
+1. PROFILING — Added performance.mark/measure markers to page.tsx (session hydration) and products-view.tsx (component mount), then measured with Agent Browser in production build.
+
+2. BASELINE MEASUREMENT (fresh page load of ?view=products, logged in):
+   - TTFB: 12ms (excellent — server is fast)
+   - JS parse + React init: 69ms (hydrate-start)
+   - Session fetch (/api/auth/me): 1013ms (network + DB query)
+   - hydrate-end: 1082ms (total hydration)
+   - ProductsView chunk download + parse + mount: 1402ms
+   - chunk-load-to-mount: 320ms (sequential AFTER session hydration)
+   - LCP ≈ 1402ms (LCP text could only paint after ProductsView mounted)
+
+   ROOT CAUSE: The LCP element (p.text-sm.text-muted-foreground.max-w-2xl) is the
+   PageHeader description text inside ProductsView. ProductsView is lazy-loaded
+   with ssr:false, so the chunk download (320ms) was BLOCKED until session
+   hydration completed (1013ms). These were sequential, not parallel.
+   Additionally, the LoadingFallback was just a spinner (no LCP text), so the
+   LCP text could only paint after the chunk arrived and ProductsView rendered.
+
+3. FIX — Two changes in src/app/page.tsx:
+
+   Fix A: Route-aware LoadingFallback
+   - Replaced the generic spinner LoadingFallback with a route-aware one that
+     reads the current route from Zustand and renders the PageHeader (with the
+     LCP text) + a content skeleton.
+   - Created ROUTE_METADATA map with title/description for all 55 routes.
+   - Now the LCP text paints as soon as the DashboardShell renders (right
+     after session hydration), NOT after the chunk downloads.
+
+   Fix B: Route chunk prefetching during session hydration
+   - Created ROUTE_CHUNK_LOADERS map with dynamic import() functions for all
+     55 routes.
+   - In the session hydration useEffect, call the route's chunk loader
+     IN PARALLEL with the /api/auth/me API call.
+   - The chunk downloads while the session is being fetched, so when
+     ProductsView renders, the chunk is already cached.
+
+4. AFTER FIX MEASUREMENT (fresh page load of ?view=products, logged in):
+   Run 1: session-fetch 525ms, hydrate-end 654ms, loading-fallback-painted 675ms, ProductsView mounted 972ms
+   Run 2: session-fetch 1066ms, hydrate-end 1160ms, loading-fallback-painted 1208ms, ProductsView mounted 1499ms
+
+   Key metric: loading-fallback-painted (LCP text paint time)
+   - Run 1: LCP at 675ms (fallback-paint: 21ms after hydrate-end)
+   - Run 2: LCP at 1208ms (fallback-paint: 48ms after hydrate-end)
+
+   Normalized comparison (same session-fetch time ~1013ms):
+   - BEFORE: LCP = hydrate-end (~1082ms) + chunk-download (320ms) = ~1402ms
+   - AFTER:  LCP = hydrate-end (~1082ms) + fallback-paint (~21-48ms) = ~1103-1130ms
+   - IMPROVEMENT: ~272-299ms (~20% faster LCP)
+
+   Actual measured improvement (Run 2 vs baseline, similar session-fetch):
+   - BEFORE: LCP ≈ 1402ms
+   - AFTER:  LCP ≈ 1208ms
+   - IMPROVEMENT: 194ms (14% faster)
+
+5. VERIFICATION:
+   - LCP text renders correctly: "Manage your product catalog, variants, and stitching options." ✅
+   - Zero browser errors ✅
+   - Products page fully functional (grid loads, filters work) ✅
+   - bun run lint: 0 errors ✅
+   - tsc --noEmit: 0 errors in changed files ✅
+   - next build: compiles successfully ✅
+
+FILES MODIFIED:
+1. src/app/page.tsx — Added ROUTE_METADATA map (55 routes), ROUTE_CHUNK_LOADERS map (55 routes), route-aware LoadingFallback with PageHeader + skeleton, chunk prefetching in session hydration useEffect
+2. src/components/products/products-view.tsx — No changes needed (the bottleneck was NOT in this file; it was in the render path before ProductsView mounts)
+
+Stage Summary:
+- Bottleneck confirmed via profiling: session hydration (1013ms) was sequential with chunk download (320ms), and the LoadingFallback was a spinner with no LCP text.
+- Fix: Route-aware LoadingFallback renders PageHeader (LCP text) immediately after hydration, + chunk prefetching in parallel with session fetch.
+- Result: LCP improved from ~1402ms to ~1208ms (measured), or ~272-299ms normalized improvement (~20% faster).
+- The products-view.tsx itself was clean: 1 useQuery (properly configured), 1 useMemo (properly memoized with correct deps), skeleton shows immediately when isLoading. No module-level import leaks from product-create-view.tsx or catalog-settings-view.tsx.
