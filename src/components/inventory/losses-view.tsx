@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState , memo} from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
@@ -704,7 +704,7 @@ export function LossesView() {
 // Sub-components: StatCard, CountCard, EmptyState
 // ─────────────────────────────────────────────────────────────────────────────
 
-function StatCard({
+const StatCard = memo(function StatCard({
   label,
   count,
   value,
@@ -749,14 +749,14 @@ function StatCard({
       </CardContent>
     </Card>
   )
-}
+})
 
 const COUNT_TONE_CLASSES: Record<'sky' | 'purple', { wrap: string; value: string }> = {
   sky: { wrap: 'bg-sky-50 text-sky-600', value: 'text-sky-700' },
   purple: { wrap: 'bg-purple-50 text-purple-600', value: 'text-purple-700' },
 }
 
-function CountCard({
+const CountCard = memo(function CountCard({
   label,
   count,
   icon,
@@ -792,9 +792,9 @@ function CountCard({
       </CardContent>
     </Card>
   )
-}
+})
 
-function EmptyState({
+const EmptyState = memo(function EmptyState({
   hasRecords,
   canReport,
   onReport,
@@ -825,7 +825,7 @@ function EmptyState({
       </CardContent>
     </Card>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Variant picker — shared by Damaged/Theft/Transit forms

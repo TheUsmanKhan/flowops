@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import {
   Bar,
@@ -1344,7 +1344,7 @@ function buildIntervalBuckets(range: DateRange, monthly: boolean): Bucket[] {
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────────────
 
-function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
+const FilterChip = memo(function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
   return (
     <span className="inline-flex items-center gap-1 rounded-full border bg-background px-2.5 py-1 text-xs font-medium text-foreground">
       {label}
@@ -1358,7 +1358,7 @@ function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }
       </button>
     </span>
   )
-}
+})
 
 type StatTone = 'emerald' | 'amber' | 'rose' | 'sky'
 
@@ -1376,7 +1376,7 @@ const STAT_ACTIVE_RING: Record<StatTone, string> = {
   sky: 'ring-sky-400/60 bg-sky-50/40',
 }
 
-function StatCard({
+const StatCard = memo(function StatCard({
   label,
   sublabel,
   value,
@@ -1443,7 +1443,7 @@ function StatCard({
       </CardContent>
     </Card>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chart panel
@@ -1935,7 +1935,7 @@ function ProductAutocomplete({
   )
 }
 
-function FulfillmentBadge({ type }: { type: string | null }) {
+const FulfillmentBadge = memo(function FulfillmentBadge({ type }: { type: string | null }) {
   if (!type) return null
   const map: Record<string, { label: string; cls: string }> = {
     stock_based: { label: 'In Stock', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
@@ -1951,7 +1951,7 @@ function FulfillmentBadge({ type }: { type: string | null }) {
       {meta.label}
     </Badge>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // City autocomplete (datalist of distinct cities from loaded orders)
@@ -2098,7 +2098,7 @@ function CityAutocomplete({
 // Skeletons + empty states
 // ─────────────────────────────────────────────────────────────────────────────
 
-function OrdersTableSkeleton() {
+const OrdersTableSkeleton = memo(function OrdersTableSkeleton() {
   return (
     <div className="space-y-2 p-4">
       {Array.from({ length: 7 }).map((_, i) => (
@@ -2106,9 +2106,9 @@ function OrdersTableSkeleton() {
       ))}
     </div>
   )
-}
+})
 
-function EmptyState({
+const EmptyState = memo(function EmptyState({
   hasFilters,
   canCreate,
   onCreate,
@@ -2144,7 +2144,7 @@ function EmptyState({
       </div>
     </div>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Filters slide-over (Sheet)
@@ -2580,7 +2580,7 @@ function FiltersSheet({
   )
 }
 
-function FilterSection({
+const FilterSection = memo(function FilterSection({
   title,
   children,
 }: {
@@ -2595,4 +2595,4 @@ function FilterSection({
       {children}
     </section>
   )
-}
+})

@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState , memo} from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
@@ -1073,14 +1073,14 @@ export function ProductCreateView({ onBack, draftId: initialDraftId }: { onBack:
 // ----------------------------------------------------------------------------
 // Sub-components
 // ----------------------------------------------------------------------------
-function Row({ label, value }: { label: string; value: string }) {
+const Row = memo(function Row({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-dashed pb-1.5 last:border-0">
       <dt className="text-muted-foreground text-xs">{label}</dt>
       <dd className="font-medium text-right truncate max-w-[60%]">{value}</dd>
     </div>
   )
-}
+})
 
 function ToggleRow({
   label,
@@ -1978,7 +1978,7 @@ function RegularVariantOpeningStock({
 // (Bug 2 + Bug 3 fix). Cost is read-only (set via the grouped pricing table
 // above); made-to-order variants collapse to a [+ Add stock] button.
 // ----------------------------------------------------------------------------
-function OpeningStockTable({
+const OpeningStockTable = memo(function OpeningStockTable({
   variants,
   locations,
   noLocations,
@@ -2237,7 +2237,7 @@ function OpeningStockTable({
       </div>
     </div>
   )
-}
+})
 
 // ----------------------------------------------------------------------------
 // Utilities

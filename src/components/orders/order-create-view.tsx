@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState , memo} from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, FetchError, getSessionToken } from '@/lib/api-client'
@@ -1647,7 +1647,7 @@ function formatLastUsedShort(iso: string | null): string {
   return date.toLocaleDateString('en-PK', { day: '2-digit', month: 'short' })
 }
 
-function StatCell({
+const StatCell = memo(function StatCell({
   label,
   value,
   sub,
@@ -1673,7 +1673,7 @@ function StatCell({
       )}
     </div>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 2: Items
@@ -1865,7 +1865,7 @@ function ItemsSection({
   )
 }
 
-function VariantThumbnail({ url, title }: { url: string | null; title: string }) {
+const VariantThumbnail = memo(function VariantThumbnail({ url, title }: { url: string | null; title: string }) {
   if (url) {
     return (
        
@@ -1881,7 +1881,7 @@ function VariantThumbnail({ url, title }: { url: string | null; title: string })
       <Package className="h-5 w-5 text-muted-foreground/50" />
     </div>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SECTION 3: Payment
@@ -2133,7 +2133,7 @@ function PaymentSection({
   )
 }
 
-function PaymentTypeCard({
+const PaymentTypeCard = memo(function PaymentTypeCard({
   active,
   onClick,
   title,
@@ -2184,7 +2184,7 @@ function PaymentTypeCard({
       </div>
     </button>
   )
-}
+})
 
 /**
  * ProofFileInput

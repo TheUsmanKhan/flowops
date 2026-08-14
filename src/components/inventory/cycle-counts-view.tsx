@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState , memo} from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
@@ -877,7 +877,7 @@ function CycleCountDetailPanel({
 // Opens an inline dialog where each item's counted qty can be entered
 // ─────────────────────────────────────────────────────────────────────────────
 
-function SubmitCountsButton({
+const SubmitCountsButton = memo(function SubmitCountsButton({
   countId,
   items,
 }: {
@@ -1135,13 +1135,13 @@ function SubmitCountsButton({
       </Dialog>
     </>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Empty state + create dialog
 // ─────────────────────────────────────────────────────────────────────────────
 
-function EmptyState({
+const EmptyState = memo(function EmptyState({
   hasCounts,
   canManage,
   onCreate,
@@ -1172,7 +1172,7 @@ function EmptyState({
       </CardContent>
     </Card>
   )
-}
+})
 
 function CreateCountDialog({
   open,

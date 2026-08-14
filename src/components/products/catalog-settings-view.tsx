@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState , memo} from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -195,7 +195,7 @@ export function CatalogSettingsView() {
 // Shared bits
 // ─────────────────────────────────────────────────────────────────────────────
 
-function InsufficientPermissions() {
+const InsufficientPermissions = memo(function InsufficientPermissions() {
   return (
     <div className="flex min-h-[60vh] items-center justify-center px-4">
       <Card className="max-w-md w-full">
@@ -213,9 +213,9 @@ function InsufficientPermissions() {
       </Card>
     </div>
   )
-}
+})
 
-function ErrorState({ onRetry }: { onRetry: () => void }) {
+const ErrorState = memo(function ErrorState({ onRetry }: { onRetry: () => void }) {
   return (
     <Card>
       <CardContent className="p-10 text-center space-y-3">
@@ -231,9 +231,9 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
       </CardContent>
     </Card>
   )
-}
+})
 
-function EmptyState({
+const EmptyState = memo(function EmptyState({
   icon: Icon,
   title,
   description,
@@ -262,10 +262,10 @@ function EmptyState({
       </CardContent>
     </Card>
   )
-}
+})
 
 /** Standardised delete-confirmation dialog that surfaces 409 reference errors inline. */
-function DeleteConfirmDialog({
+const DeleteConfirmDialog = memo(function DeleteConfirmDialog({
   open,
   onOpenChange,
   title,
@@ -322,7 +322,7 @@ function DeleteConfirmDialog({
       </DialogContent>
     </Dialog>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Categories tab
@@ -567,7 +567,7 @@ function CategoriesTab() {
   )
 }
 
-function CategoryRow({
+const CategoryRow = memo(function CategoryRow({
   category,
   isRoot,
   hasChildren,
@@ -671,7 +671,7 @@ function CategoryRow({
       </div>
     </div>
   )
-}
+})
 
 function CategoryDialog({
   open,
@@ -859,7 +859,7 @@ function CategoryDialog({
   )
 }
 
-function CategoriesSkeleton() {
+const CategoriesSkeleton = memo(function CategoriesSkeleton() {
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
@@ -885,7 +885,7 @@ function CategoriesSkeleton() {
       </Card>
     </div>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Brands tab
@@ -1101,7 +1101,7 @@ function BrandsTab() {
   )
 }
 
-function BrandAvatar({ brand }: { brand: Brand }) {
+const BrandAvatar = memo(function BrandAvatar({ brand }: { brand: Brand }) {
   const initials = brand.name
     .split(' ')
     .map((p) => p[0])
@@ -1123,7 +1123,7 @@ function BrandAvatar({ brand }: { brand: Brand }) {
       {initials || '?'}
     </div>
   )
-}
+})
 
 function BrandDialog({
   open,
@@ -1249,7 +1249,7 @@ function BrandDialog({
   )
 }
 
-function BrandsSkeleton() {
+const BrandsSkeleton = memo(function BrandsSkeleton() {
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
@@ -1281,7 +1281,7 @@ function BrandsSkeleton() {
       </Card>
     </div>
   )
-}
+})
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Attributes tab — two-panel layout
@@ -2239,7 +2239,7 @@ function AttributeValueDialog({
   )
 }
 
-function AttributesSkeleton() {
+const AttributesSkeleton = memo(function AttributesSkeleton() {
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
@@ -2285,4 +2285,4 @@ function AttributesSkeleton() {
       </div>
     </div>
   )
-}
+})
