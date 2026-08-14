@@ -8138,3 +8138,44 @@ FILES CREATED/MODIFIED:
 5. mini-services/postex-poller/package.json — NEW
 6. mini-services/postex-poller/README.md — NEW
 7. mini-services/postex-poller/Dockerfile — NEW (placeholder)
+
+---
+Task ID: DOCKER-FIX-1
+Agent: main
+Task: Fix two issues found in Phase 1 Docker setup after review
+
+Fix 1 — Remove named volume from dev docker-compose.yml:
+- REMOVED the `flowops_uploads:/app/public/uploads` named volume mount from docker-compose.yml (dev only).
+- REMOVED the top-level `volumes:` section (which defined `flowops_uploads`).
+- Updated the header comment to explain: uploads persist NATURALLY on the host filesystem via the bind-mount (.:/app) — no separate named volume is needed in dev. The named volume exists ONLY in docker-compose.prod.yml where there is no bind-mount.
+- docker-compose.prod.yml was NOT touched (still has the named volume, which is correct).
+
+Fix 2 — Build-time env var requirement check:
+- Tested `bun run build` with ALL env vars unset (DATABASE_URL, DIRECT_URL, INTEGRATION_ENCRYPTION_KEY, SESSION_SECRET, CRON_SECRET, APP_URL all unset).
+- Result: build SUCCEEDS (exit 0), produces valid .next/standalone/server.js + static + public.
+- Tested `bunx prisma generate` with DATABASE_URL unset.
+- Result: prisma generate SUCCEEDS (exit 0) — the Prisma schema's `env("DATABASE_URL")` is resolved at RUNTIME, not at generate time.
+- Root cause analysis:
+  • `next.config.ts` does NOT read any env vars at build time (just sets `output: 'standalone'` + `ignoreBuildErrors: true`).
+  • No Zod-based env validation schema exists anywhere in the codebase.
+  • No `generateStaticParams` / `getStaticProps` / `getServerSideProps` (no SSG that would execute DB queries at build time).
+  • `instrumentation.ts` guards with `if (process.env.NEXT_RUNTIME !== 'nodejs') return` — does NOT run during build.
+  • `src/lib/db.ts` reads `process.env.DATABASE_URL` at module-load time, but the module is only imported when an API route is called at RUNTIME, not during build.
+  • `src/lib/utils/encryption.ts` has `getEncryptionKey()` that throws if INTEGRATION_ENCRYPTION_KEY is missing, but this function is only called when encrypting/decrypting integration credentials at RUNTIME, not during build.
+  • `.dockerignore` excludes `.env*` from the build context, so the builder stage runs WITHOUT any .env file — and the build still succeeds.
+- CONCLUSION: No Dockerfile changes needed. `bun run build` does NOT require DATABASE_URL or any other env var to be present at build time. The builder stage is correct as-is. Env vars are only needed at RUNTIME (when the server starts and handles requests).
+
+VERIFICATION:
+- docker-compose.yml: no top-level `volumes:` key, no `flowops_uploads` reference ✅
+- docker-compose.prod.yml: still has `flowops_uploads` named volume (untouched) ✅
+- `bun run build` without env vars: exit 0, valid standalone output ✅
+- `bunx prisma generate` without DATABASE_URL: exit 0 ✅
+- Lint: 0 errors ✅
+
+⚠️ STRUCTURAL FIXES ONLY — Docker is not available in this sandbox. These fixes must be verified by actually running `docker compose up --build` on a machine with Docker installed before being trusted. Specifically:
+  1. Verify uploaded files land in the host's `public/uploads/` (not a Docker internal volume)
+  2. Verify `docker compose -f docker-compose.prod.yml up --build` still works (named volume intact)
+  3. Verify the production Dockerfile build succeeds without env vars baked in
+
+FILES MODIFIED:
+1. docker-compose.yml — removed named volume mount + top-level volumes section
