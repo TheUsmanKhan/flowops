@@ -55,3 +55,6 @@ server.log
 
 # Docker env (contains secrets — never commit)
 .env.docker
+
+# Local DB env (not production secrets, but keep out of git)
+.env.local-db

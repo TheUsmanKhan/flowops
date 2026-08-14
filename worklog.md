@@ -8043,3 +8043,51 @@ VERIFICATION CHECKLIST (for user to run on Docker-enabled machine):
 □ public/uploads/ files survive a docker compose down && docker compose up
 □ The /api/health endpoint returns 200 when DB is reachable
 □ Building the production Dockerfile succeeds and docker run on that image serves the app correctly with NODE_ENV=production
+
+---
+Task ID: DOCKER-PHASE-2
+Agent: main
+Task: Phase 2 — Optional local PostgreSQL for safe schema experimentation
+
+Work Log:
+- Checked Supabase Postgres version: PostgreSQL 17.6 (x86_64, GCC 15.2.0). Used postgres:17-alpine for the local container (same major version).
+- Cataloged all SQL functions/sequences/triggers NOT in the Prisma schema that must be applied manually after db push:
+  • 23 functions (generate_order_number, normalize_phone, recompute_order_status, match_or_create_customer, RLS helpers, updatedAt triggers, etc.)
+  • 2 sequences (draft_order_number_seq, exchange_shipment_number_seq)
+  • 12 triggers (backfill_order_timestamps, various updatedAt triggers)
+  These live across 8 migration files (001-008) and are applied via `docker exec -i flowops-local-db psql` or `cat *.sql | psql`.
+- Created .env.local-db.example — template with POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD
+- Created .env.local-db — real values (flowops_local / flowops / flowops_local_dev_password), gitignored
+- Updated .gitignore — added .env.local-db
+- Created docker-compose.local-db.yml:
+  • Image: postgres:17-alpine (matches Supabase v17)
+  • Port: 5433:5432 (NOT 5432, to avoid clashing with local Postgres or Supabase pooler)
+  • Named volume: flowops_local_pgdata (persists across `down`, destroyed with `down -v`)
+  • Healthcheck: pg_isready
+  • Safety warnings in comments (NOT production data, disposable, schema testing only)
+  • env_file: .env.local-db
+- Created DOCKER.md (10KB comprehensive guide):
+  • Phase 1: dev/prod container usage (commands, how it works, health check, file upload persistence)
+  • Phase 2: local DB workflow (start, point Prisma, db push, apply SQL functions, seed, test, switch back, destroy)
+  • Complete list of all 23 SQL functions + 2 sequences + 12 triggers with their source migration files
+  • Exact psql command patterns to apply functions against the containerized DB
+  • Environment variable reference table (dev vs prod vs local DB)
+  • File reference table
+  • Safety warnings throughout
+
+VERIFICATION:
+- Lint: 0 errors ✅
+- .env.local-db gitignored ✅
+- .env.docker gitignored ✅
+- Postgres version match: Supabase 17.6 ↔ local postgres:17-alpine ✅
+- Port 5433 (avoids clash) ✅
+- Named volume for persistence ✅
+- DOCKER.md documents all 23 functions + 2 sequences + 12 triggers ✅
+- Safety warnings in compose file + DOCKER.md ✅
+
+FILES CREATED:
+1. docker-compose.local-db.yml — NEW: local Postgres container
+2. .env.local-db.example — NEW: template
+3. .env.local-db — NEW (gitignored)
+4. DOCKER.md — NEW: comprehensive Docker guide (Phase 1 + Phase 2)
+5. .gitignore — MODIFIED: added .env.local-db
