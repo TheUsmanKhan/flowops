@@ -8179,3 +8179,45 @@ VERIFICATION:
 
 FILES MODIFIED:
 1. docker-compose.yml — removed named volume mount + top-level volumes section
+
+---
+Task ID: DOCKER-FIX-2
+Agent: main
+Task: Fix Phase 2 local-DB bug — consolidate all SQL functions into supabase/functions-only.sql
+
+Work Log:
+- Bug: The DOCKER.md apply-SQL command used `supabase/migrations/00{1..8}_*.sql` which only covered files 001-008. The project has 19 migration files (001-021, with 015 and 017 missing), and the 23 functions + 2 sequences + 12 triggers are spread across ALL of them (though only migrations 001-008 actually contain functions/triggers/sequences — migrations 009-021 contain only tables/columns/indexes/CHECKs).
+- Used a parallel Explore agent to read ALL 19 migration files and extract every CREATE FUNCTION, CREATE TRIGGER, and CREATE SEQUENCE statement (plus their DROP IF EXISTS counterparts).
+- Findings: 23 functions, 2 sequences, 13 trigger statements (12 unique triggers — trg_customers_updatedAt is defined in both migration 001 and 002, functionally identical). Zero DROP FUNCTION / DROP SEQUENCE. Zero function-bearing indexes. Migrations 009-021 contain NO functions/triggers/sequences.
+- Created supabase/functions-only.sql — consolidated file with ALL 23 functions + 2 sequences + 12 unique triggers, ordered so dependencies are satisfied:
+  1. Sequences first (draft_order_number_seq, exchange_shipment_number_seq)
+  2. Functions dependency-ordered: RLS helpers (get_active_company_id, get_active_org_id, get_active_user_id) → functions that depend on them (is_elevated_employee, has_permission) → order number/status functions → trigger functions (11 × update_*_updatedAt + backfill_order_timestamps) → normalize_phone → match_or_create_customer (depends on normalize_phone) → generate_draft_number + generate_exchange_shipment_number (depend on sequences)
+  3. Triggers last (after their referenced trigger functions) — each preceded by DROP TRIGGER IF EXISTS for idempotency
+  All statements use CREATE OR REPLACE / IF NOT EXISTS / DROP IF EXISTS — safe to re-run.
+- Updated DOCKER.md: replaced the old multi-file `cat 00{1..8}_*.sql | psql` command with `cat supabase/functions-only.sql | docker exec -i flowops-local-db psql -U flowops -d flowops_local`. Also added a generic `psql "$DATABASE_URL"` variant.
+
+CROSS-CHECK against FLOWOPS_BRIEFING.md section 5:
+All 23 functions confirmed present in functions-only.sql:
+  ✅ generate_order_number, generate_exchange_shipment_number, generate_draft_number
+  ✅ normalize_phone, recompute_order_status, match_or_create_customer
+  ✅ get_active_company_id, get_active_org_id, get_active_user_id
+  ✅ has_permission, is_elevated_employee, backfill_order_timestamps
+  ✅ update_customers_updatedAt, update_company_order_settings_updatedAt, update_order_items_updatedAt
+  ✅ update_customer_addresses_updatedAt, update_order_exchanges_updatedAt
+  ✅ update_integration_providers_updatedAt, update_company_integrations_updatedAt
+  ✅ update_form_drafts_updatedAt, update_courier_operational_cities_updatedAt
+  ✅ update_courier_pickup_addresses_updatedAt, update_exchange_shipments_updatedAt
+Both sequences confirmed:
+  ✅ draft_order_number_seq, exchange_shipment_number_seq
+All 12 unique triggers confirmed:
+  ✅ trg_backfill_order_timestamps, trg_customers_updatedAt, trg_company_order_settings_updatedAt
+  ✅ trg_order_items_updatedAt, trg_customer_addresses_updatedAt, trg_order_exchanges_updatedAt
+  ✅ trg_integration_providers_updatedAt, trg_company_integrations_updatedAt, trg_form_drafts_updatedAt
+  ✅ trg_courier_operational_cities_updatedAt, trg_courier_pickup_addresses_updatedAt, trg_exchange_shipments_updatedAt
+NONE MISSING. ✅
+
+NOTE: The duplicate trg_customers_updatedAt definition (in both migration 001 and 002) was deduplicated — only one CREATE TRIGGER statement appears in functions-only.sql. Both migrations define the same trigger on the same table referencing the same function, so the duplicate is unnecessary.
+
+FILES CREATED/MODIFIED:
+1. supabase/functions-only.sql — NEW: consolidated 23 functions + 2 sequences + 12 triggers
+2. DOCKER.md — MODIFIED: updated apply-SQL-functions step to use the consolidated file

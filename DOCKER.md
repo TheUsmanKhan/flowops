@@ -153,29 +153,19 @@ The following SQL objects are NOT in the Prisma schema and must be applied manua
 - `trg_form_drafts_updatedAt` — on FormDraft
 - `trg_order_exchanges_updatedAt` — on OrderExchange
 
-**Apply all functions from the migration files:**
+**Apply all functions, sequences, and triggers:**
+
+All 23 functions, 2 sequences, and 12 triggers have been consolidated into a single file: `supabase/functions-only.sql`. This file contains ONLY `CREATE FUNCTION`, `CREATE TRIGGER`, and `CREATE SEQUENCE` statements (no `CREATE TABLE` / `ALTER TABLE` — those are handled by `prisma db push`). Statements are ordered so dependencies are satisfied (sequences → functions → triggers).
 
 ```bash
-# Apply each migration file that contains CREATE OR REPLACE FUNCTION / CREATE TRIGGER / CREATE SEQUENCE
-# These are idempotent (CREATE OR REPLACE) so safe to re-run.
+# Apply the consolidated SQL functions file:
+cat supabase/functions-only.sql | docker exec -i flowops-local-db psql -U flowops -d flowops_local
 
-# The fastest way — pipe all migration files through psql:
-cat supabase/migrations/001_oms_schema.sql \
-    supabase/migrations/002_customer_system_schema.sql \
-    supabase/migrations/003_exchange_system_schema.sql \
-    supabase/migrations/004_integration_framework_schema.sql \
-    supabase/migrations/005_draft_status_support.sql \
-    supabase/migrations/006_draft_numbering.sql \
-    supabase/migrations/007_city_address_book_schema.sql \
-    supabase/migrations/008_exchange_shipments_schema.sql \
-  | docker exec -i flowops-local-db psql -U flowops -d flowops_local
-
-# Or apply them one by one (useful for debugging):
-for f in supabase/migrations/0*.sql; do
-  echo "Applying $f..."
-  docker exec -i flowops-local-db psql -U flowops -d flowops_local < "$f"
-done
+# Or against any Postgres instance:
+cat supabase/functions-only.sql | psql "$DATABASE_URL"
 ```
+
+All statements are idempotent (`CREATE OR REPLACE`, `IF NOT EXISTS`, `DROP IF EXISTS` before `CREATE`) — safe to re-run.
 
 **Alternative — apply via Prisma:**
 ```bash
