@@ -8609,3 +8609,61 @@ FILES MODIFIED (diagnostic markers added then removed):
 2. src/components/products/products-view.tsx — added mount marker, then removed
 
 No fix applied. Awaiting direction on whether to fix in place (e.g. remove ROUTE_CHUNK_LOADERS, keep route-aware LoadingFallback) or revert entirely to the Step 1 spinner-only fallback.
+
+---
+Task ID: LCP-REGRESSION-FIX
+Agent: main
+Task: Remove ROUTE_CHUNK_LOADERS (duplicate-chunk regression) while keeping route-aware LoadingFallback
+
+Work Log:
+
+1. REMOVED ROUTE_CHUNK_LOADERS from src/app/page.tsx:
+   - Deleted the entire ROUTE_CHUNK_LOADERS map definition (55 entries, ~60 lines)
+   - Removed the prefetch invocation in the session hydration useEffect (the `chunkLoader().catch(() => {})` call + the routeName/chunkLoader variable declarations)
+   - Kept ROUTE_METADATA map (55 route title/description entries) — this is just a static data object, no import() calls, no bundling side effects
+   - Kept the route-aware LoadingFallback component (reads ROUTE_METADATA[route.name] to render PageHeader with LCP text immediately)
+   - Kept all 55 dynamic() imports unchanged (these are the ONLY place each route's component code is imported)
+   - Lint: 0 errors. tsc: 0 errors in page.tsx.
+
+2. REBUILD + CHUNK METRICS CONFIRM REGRESSION ELIMINATED:
+   - Build: ✓ Compiled successfully in 32.9s
+   - Chunk count: 95 (was 150 with ROUTE_CHUNK_LOADERS, Step 1 baseline was 95) ✅ MATCHES BASELINE
+   - Total JS: 4,665 KB (was 5,973 KB, Step 1 baseline was 4,670 KB) ✅ MATCHES BASELINE (-5KB variance)
+   - First Load JS: 1,070 KB (was 1,071 KB, Step 1 baseline was 1,070 KB) ✅ UNCHANGED
+
+3. DUPLICATE CHUNK CHECK (grep for route-specific strings):
+   - products-view ("Manage your product catalog"): found in 2 chunks (9KB component + 42KB shared ROUTE_METADATA)
+   - employees-view ("Manage your company directory"): found in 2 chunks (26KB component + 42KB shared ROUTE_METADATA)
+   - roles-view ("System roles have elevated"): found in 2 chunks (41KB component + 42KB shared ROUTE_METADATA)
+   - audit-log-view ("Immutable, append-only"): found in 2 chunks (24KB component + 42KB shared ROUTE_METADATA)
+   - catalog-settings ("Configure categories, brands"): found in 1 chunk (42KB shared ROUTE_METADATA only)
+   - VERIFIED: The 42KB shared chunk (f9400d458380e099.js) is the ROUTE_METADATA map containing all description strings. Each component has exactly ONE chunk with its actual code. This is NOT duplication — the string appears in both because the component renders its own PageHeader with the same description text (expected behavior). The component chunks do NOT contain other routes' strings.
+   - Before the fix: each route's code was in 3 chunks (dynamic + ROUTE_CHUNK_LOADERS + shared). After: 2 chunks (component + metadata). ✅ DUPLICATION ELIMINATED.
+
+4. LCP MEASUREMENT (production, warm cache due to agent-browser shared profile):
+   - TTFB: 9-16ms
+   - LCP element (p.text-sm.text-muted-foreground.max-w-2xl) found at ~741ms (first poll at 500ms showed it already present)
+   - Chunks downloaded: 16 (12KB transfer — mostly 304 cached)
+   - Fresh chunks: c5b641f7e7a86c1b.js (8.6KB, 46ms) + 2c12fe2d5fe13702.js (3.6KB, 45ms) — small route-specific chunks
+   - NOTE: agent-browser cannot simulate a true Incognito cold cache (shares browser profile), but the chunk count reduction from 17→16 per navigation + elimination of 55 duplicate chunks confirms the fix.
+   - The LCP at ~741ms is significantly better than the pre-fix baseline of 2,768ms (warm cache benefits from LoadingFallback rendering LCP text immediately).
+
+5. END-TO-END VERIFICATION (6 views navigated, zero errors):
+   - Dashboard: "Welcome back, Test" ✅
+   - Products: "Manage your product catalog, variants, and stitching options." ✅
+   - Employees: "Manage your company directory, roles, and employment status." ✅
+   - Roles: "System roles have elevated access and bypass all permission checks." ✅
+   - Company Settings: "Manage your company profile, legal info, and preferences." ✅
+   - Audit Log: "Immutable, append-only record of every action in this company." ✅
+   - Back to Products: LCP text renders correctly ✅
+   - Zero browser errors across all 6 views ✅
+
+FILES MODIFIED:
+1. src/app/page.tsx — removed ROUTE_CHUNK_LOADERS map (55 entries) + prefetch invocation in useEffect. Kept ROUTE_METADATA + route-aware LoadingFallback.
+
+Stage Summary:
+- Regression eliminated: chunk count 150→95, total JS 5,973KB→4,665KB (matches Step 1 baseline).
+- Route-aware LoadingFallback retained: LCP text paints immediately at Suspense boundary.
+- LCP measured at ~741ms (warm cache) — significant improvement over 2,768ms pre-regression baseline.
+- No duplicate component chunks remain (verified via grep).
+- App works end-to-end across 6 views with zero errors.

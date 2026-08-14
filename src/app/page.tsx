@@ -103,68 +103,6 @@ const LoadingFallback = () => {
   )
 }
 
-// ─── Route chunk prefetcher ───────────────────────────────────────
-// Starts downloading the lazy chunk for the current route IN PARALLEL
-// with the session hydration API call. Without this, the chunk download
-// is blocked until session hydration completes (sequential, not parallel).
-const ROUTE_CHUNK_LOADERS: Record<string, () => Promise<unknown>> = {
-  dashboard: () => import('@/components/dashboard/dashboard-home'),
-  products: () => import('@/components/products/products-view'),
-  'product-create': () => import('@/components/products/product-create-view'),
-  'product-detail': () => import('@/components/products/product-detail-view'),
-  'product-settings': () => import('@/components/products/catalog-settings-view'),
-  'product-drafts': () => import('@/components/shared/drafts-view'),
-  'returned-stitched': () => import('@/components/products/returned-stitched-view'),
-  'org-catalog': () => import('@/components/products/org-catalog-view'),
-  inventory: () => import('@/components/inventory/inventory-dashboard-view'),
-  'inventory-locations': () => import('@/components/inventory/locations-view'),
-  'inventory-location-detail': () => import('@/components/inventory/location-detail-view'),
-  'inventory-suppliers': () => import('@/components/inventory/suppliers-view'),
-  'inventory-supplier-detail': () => import('@/components/inventory/supplier-detail-view'),
-  'inventory-receive': () => import('@/components/inventory/receive-stock-view'),
-  'inventory-adjust': () => import('@/components/inventory/adjust-stock-view'),
-  'inventory-transfer': () => import('@/components/inventory/transfer-stock-view'),
-  'inventory-purchase-orders': () => import('@/components/inventory/purchase-orders-view'),
-  'inventory-po-create': () => import('@/components/inventory/po-create-view'),
-  'inventory-po-detail': () => import('@/components/inventory/po-detail-view'),
-  'inventory-supplier-returns': () => import('@/components/inventory/supplier-returns-view'),
-  'inventory-production-orders': () => import('@/components/inventory/production-orders-view'),
-  'inventory-losses': () => import('@/components/inventory/losses-view'),
-  'inventory-loss-detail': () => import('@/components/inventory/loss-detail-view'),
-  'inventory-cycle-counts': () => import('@/components/inventory/cycle-counts-view'),
-  orders: () => import('@/components/orders/orders-view'),
-  'order-create': () => import('@/components/orders/order-create-view'),
-  'order-detail': () => import('@/components/orders/order-detail-view'),
-  'order-drafts': () => import('@/components/shared/drafts-view'),
-  'orders-pending-confirmation': () => import('@/components/orders/orders-pending-confirmation-view'),
-  'orders-backordered': () => import('@/components/orders/orders-backordered-view'),
-  'orders-awaiting-production': () => import('@/components/orders/orders-awaiting-production-view'),
-  'orders-ready-to-dispatch': () => import('@/components/orders/orders-ready-to-dispatch-view'),
-  'orders-returns': () => import('@/components/orders/orders-returns-view'),
-  'orders-returns-review': () => import('@/components/orders/orders-returns-review-view'),
-  'orders-cancelled': () => import('@/components/orders/orders-cancelled-view'),
-  exchanges: () => import('@/components/orders/exchanges-view'),
-  'exchange-detail': () => import('@/components/orders/exchange-detail-view'),
-  customers: () => import('@/components/orders/customers-view'),
-  'customer-detail': () => import('@/components/orders/customer-detail-view'),
-  'order-workflow-settings': () => import('@/components/orders/order-workflow-settings-view'),
-  'booking-workbench': () => import('@/components/orders/booking-workbench-view'),
-  'order-scan': () => import('@/components/orders/order-scan-view'),
-  employees: () => import('@/components/employees/employees-view'),
-  'employees-invite': () => import('@/components/employees/invite-employee-view'),
-  'employee-detail': () => import('@/components/employees/employee-detail-view'),
-  roles: () => import('@/components/roles/roles-view'),
-  'role-edit': () => import('@/components/roles/role-edit-view'),
-  organization: () => import('@/components/settings/organization-view'),
-  'company-settings': () => import('@/components/settings/company-settings-view'),
-  settings: () => import('@/components/settings/settings-view'),
-  audit: () => import('@/components/settings/audit-log-view'),
-  payroll: () => import('@/components/payroll/payroll-view'),
-  'payroll-run-detail': () => import('@/components/payroll/payroll-run-detail-view'),
-  integrations: () => import('@/components/settings/integrations-view'),
-  'integration-logs': () => import('@/components/settings/integration-logs-view'),
-}
-
 // ─── Auth views (small, but lazy-loaded to keep login page fast) ────
 const LoginForm = dynamic(() => import('@/components/auth/login-form').then(m => ({ default: m.LoginForm })), { ssr: false, loading: LoadingFallback })
 const RegisterForm = dynamic(() => import('@/components/auth/register-form').then(m => ({ default: m.RegisterForm })), { ssr: false, loading: LoadingFallback })
@@ -255,25 +193,13 @@ export default function Page() {
   // Hydrate session on first load.
   useEffect(() => {
     let cancelled = false
-
-    // PREFETCH: Start downloading the route-specific lazy chunk IN PARALLEL
-    // with the session API call. Without this, the chunk download is blocked
-    // until session hydration completes (sequential, not parallel).
-    // We read the route from the URL (not the store) because the store's
-    // default route is 'login' — the URL may have ?view=products.
-    const urlRoute = queryToRoute()
-    const routeName = urlRoute?.name ?? 'login'
-    const chunkLoader = ROUTE_CHUNK_LOADERS[routeName]
-    if (chunkLoader) {
-      chunkLoader().catch(() => {}) // fire-and-forget; errors handled by dynamic()
-    }
-
     ;(async () => {
       try {
         const session = await api.get<SessionResponse>('/api/auth/me')
         if (cancelled) return
 
         // URL sync: restore route from URL query string on initial load/refresh
+        const urlRoute = queryToRoute()
         const currentRoute = useAppStore.getState().route
 
         setSession({
