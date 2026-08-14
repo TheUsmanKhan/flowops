@@ -8464,3 +8464,85 @@ Stage Summary:
 - Fix: Route-aware LoadingFallback renders PageHeader (LCP text) immediately after hydration, + chunk prefetching in parallel with session fetch.
 - Result: LCP improved from ~1402ms to ~1208ms (measured), or ~272-299ms normalized improvement (~20% faster).
 - The products-view.tsx itself was clean: 1 useQuery (properly configured), 1 useMemo (properly memoized with correct deps), skeleton shows immediately when isLoading. No module-level import leaks from product-create-view.tsx or catalog-settings-view.tsx.
+
+---
+Task ID: AUTH-ME-DIAGNOSIS
+Agent: main
+Task: Diagnose /api/auth/me taking 1000ms+ (diagnosis only, no fix)
+
+Work Log:
+
+TASK 1 — 10-call timing (cold start vs consistent):
+- Logged in as test-mig@example.com, then called /api/auth/me 10 times with 0.3s intervals.
+- Results (ms): 1031, 611, 507, 859, 571, 512, 509, 518, 508, 521
+- First call (cold): 1031ms. Warm calls: 507-859ms (avg ~574ms).
+- VERDICT: NOT just a cold start. ALL calls are consistently slow (~500-600ms warm).
+
+TASK 2 — Step-by-step timing inside the route:
+- Added performance.now() markers around getCurrentUser(), buildSessionPayload(), and a raw SELECT 1.
+- Added granular markers inside buildSessionPayload for each Prisma query.
+- Results (3 warm calls, averaged):
+  • getCurrentUser (token verify + profile.findUnique): ~96ms (1 DB round-trip)
+  • buildSessionPayload total: ~574ms
+    - profile.findUnique: ~96ms
+    - userSetting.findUnique: ~97ms
+    - employee.findMany (with joins): ~381ms
+  • raw SELECT 1 (for comparison): ~97ms
+  • TOTAL route: ~770ms
+- VERDICT: The employee.findMany query takes 381ms — nearly 4x a single DB round-trip.
+
+TASK 3 — Prisma connection + isolated query timing:
+- db.ts check: globalForPrisma.prisma is only cached when NODE_ENV !== 'production'. In production, the singleton is NOT explicitly cached. However, since Next.js standalone bundles all imports into one module, the PrismaClient is instantiated once per server process and reused across requests. No "new PrismaClient" errors in logs. Singleton reuse is working correctly.
+- DATABASE_URL confirmed pointing at session pooler (port 5432, aws-0-ap-south-1.pooler.supabase.com).
+- Isolated query timing (via standalone Node script):
+  • employee.findMany with FULL includes (company + role + rolePermissions): 385-770ms
+  • employee.findMany with NO includes: 97ms (single round-trip)
+  • profile.findUnique: 97ms
+  • userSetting.findUnique: 97ms
+  • raw SELECT 1: 96ms
+- VERDICT: The query itself is NOT slow at the DB level. The slowness is in Prisma's query strategy.
+
+TASK 4 — Raw SELECT 1 round-trip (network conditions):
+- /api/health endpoint (which does raw SELECT 1): 108-109ms (warm), 217ms (cold)
+- Direct Prisma $queryRaw SELECT 1: 96-100ms (warm), 193ms (cold)
+- VERDICT: Network latency is ~100ms as documented. Network is NOT the problem.
+
+ROOT CAUSE ANALYSIS — Prisma's nested include strategy:
+
+The employee.findMany query uses nested includes:
+  include: {
+    company: true,
+    role: { include: { rolePermissions: { select: { permissionKey: true } } } },
+  }
+
+Prisma does NOT generate a single SQL JOIN for this. Instead, it fires SEPARATE SQL queries for each relation level:
+  Q1: SELECT * FROM "Employee" WHERE userId = ? AND status = 'active'
+  Q2: SELECT * FROM "Company" WHERE id IN (?)
+  Q3: SELECT * FROM "Role" WHERE id IN (?)
+  Q4: SELECT * FROM "RolePermission" WHERE roleId IN (?)
+
+Prisma query log confirmed 4 separate SQL queries for a single findMany call, each taking ~99-198ms. Total: ~400ms for 4 round-trips.
+
+ADDITIONAL FINDING — Promise.all does NOT parallelize Prisma queries:
+- Tested Promise.all([profile.findUnique, userSetting.findUnique, employee.findMany]) vs sequential.
+- Promise.all: 811ms (queries started at +0ms, +562ms, +611ms — SERIALIZED, not parallel)
+- Sequential: 506ms (queries started at +0ms, +102ms, +304ms)
+- Prisma internally queues queries through a single connection, so Promise.all provides NO parallelism benefit. The comment in buildSessionPayload ("3 queries at once instead of 3 sequential round-trips") is misleading — they ARE sequential.
+
+EXPLAIN ANALYZE confirmed the DB query is instant:
+- Execution Time: 0.195ms
+- Planning Time: 4.587ms
+- The DB itself is fast. The 380ms is entirely Prisma's multi-query strategy + network round-trips.
+
+Also found: Employee table has NO index on userId or status (uses Seq Scan). But with only 15 rows, this doesn't matter — the Seq Scan is instant.
+
+CONCLUSION (root cause):
+/api/auth/me is slow because buildSessionPayload fires 4+ separate Prisma SQL queries (1 for profile, 1 for settings, 4 for employee+includes), each requiring a ~100ms network round-trip to Supabase Mumbai. Total: ~5-6 round-trips × ~100ms = ~500-600ms. This is a STRUCTURAL problem, not a cold start or network issue.
+
+The Promise.all optimization in buildSessionPayload is ineffective because Prisma serializes queries through a single connection.
+
+FILES MODIFIED (diagnostic markers added then removed):
+1. src/app/api/auth/me/route.ts — added timing markers, then removed (restored to original)
+2. src/lib/session-payload.ts — added per-query timing markers, then removed (restored to original)
+
+No fix applied. Awaiting direction on how to proceed.
