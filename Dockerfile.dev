@@ -1,0 +1,46 @@
+# ════════════════════════════════════════════════════════════════════
+# FlowOps ERP — Development Dockerfile
+# ════════════════════════════════════════════════════════════════════
+#
+# WHY A SEPARATE DEV DOCKERFILE:
+#   - Dev needs full devDependencies (eslint, prisma, etc.)
+#   - Dev needs the SOURCE CODE bind-mounted (for Turbopack hot reload)
+#   - Dev does NOT run `bun run build` — it uses `bun run dev` (Turbopack)
+#   - Prod needs ONLY the compiled standalone bundle (no source, no devDeps)
+#   - Mixing them would either bloat the prod image with devDeps + source,
+#     or break hot reload by using the compiled bundle for dev.
+#   - Separation keeps each image lean and purpose-built.
+#
+# Bun version is pinned to 1.3.14 (same as production Dockerfile).
+# ════════════════════════════════════════════════════════════════════
+
+FROM oven/bun:1.3.14 AS dev
+
+WORKDIR /app
+
+# Install dependencies (including devDependencies) — this layer is cached
+# and only rebuilt when package.json or bun.lock changes.
+# The source code is bind-mounted at runtime (see docker-compose.yml),
+# so we DON'T copy it here — just install deps.
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+
+# Generate Prisma Client (needed for dev server)
+COPY prisma ./prisma
+RUN bunx prisma generate
+
+# Install curl for the healthcheck
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# The source code is bind-mounted via docker-compose.yml (volume).
+# node_modules from this image is preserved via anonymous volume.
+# .next is ephemeral (Turbopack rebuilds on changes).
+
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD curl -f http://localhost:3000/api/health || exit 1
+
+# Run the dev server with Turbopack — bind-mounted source enables hot reload
+CMD ["bun", "run", "dev"]
