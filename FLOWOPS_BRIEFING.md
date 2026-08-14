@@ -1000,54 +1000,334 @@ Leopard uses 2-character status codes: RC, SP, DP, AR, AC, DV, PN1, PN2, RO, RN1
 
 ## 11. Frontend Architecture
 
-### Single-Page App
-- **One route**: `/` (`src/app/page.tsx`) — the entire app is a client-side SPA
-- **Routing**: Zustand `navigate(route)` with URL sync (`src/lib/routing/url-sync.ts`)
-- **~75 named routes**: login, register, dashboard, products, product-detail, orders, order-detail, exchanges, customers, inventory-*, booking-workbench, order-scan, employees, roles, settings, etc.
+### 11.1 Single-Page App Structure
 
-### State Management (`src/stores/app-store.ts`)
-- **Single Zustand store**: `useAppStore`
-- **Session**: `user`, `activeCompany`, `companies`, `employee` (id, roleTier, roleName, permissions[], isElevated), `hydrated`, `loading`
-- **Actions**: `setSession`, `navigate(route)`, `reset` (logout)
-- **`useCan(key)`**: permission check hook (bypasses for elevated roles)
+The entire app is a **single Next.js page** at `/` (`src/app/page.tsx`, 375 lines). All "pages" are route cases inside a `switch(route.name)` in `renderRoute()`.
 
-### API Client (`src/lib/api-client.ts`)
-- `SESSION_TOKEN_KEY = 'flowops_session_token'` (localStorage)
-- `request<T>()` — central fetch wrapper:
-  - Sends `Authorization: Bearer <token>` + `credentials: 'include'`
-  - `cache: 'no-store'`
-  - Throws `FetchError(status, message)` on non-2xx
-- Exports `api.get/post/put/patch/delete`
+**Pre-switch gating logic:**
+1. **Hydration**: On mount, fires `GET /api/auth/me`. If URL has `?view=...`, restores that route. Listens to `popstate` for browser back/forward.
+2. **Loading screen**: `<Loader2 className="animate-spin">` while `!hydrated`.
+3. **Unauthenticated** (`!user`): login/register/forgot/reset forms, all wrapped in `AuthShell`.
+4. **Authenticated but not onboarded**: `OnboardingView` / `CreateOrganizationView` / `CreateCompanyView`.
+5. **Authenticated + onboarded**: `<DashboardShell>{renderRoute(route)}</DashboardShell>`.
 
-### Component Structure (~137 components in 14 directories)
+**62 named routes** in the `AppRoute` discriminated union, each mapping to a component:
 
-| Directory | Count | Key Components |
+| Category | Routes |
+|---|---|
+| Auth (4) | `login`, `register`, `forgot`, `reset` |
+| Onboarding (4) | `onboarding`, `accept-invite`, `create-organization`, `create-company` |
+| Core (12) | `dashboard`, `employees`, `employees-invite`, `employee-detail`, `roles`, `role-edit`, `organization`, `company-settings`, `settings`, `integrations`, `integration-logs`, `audit` |
+| Payroll (2) | `payroll`, `payroll-run-detail` |
+| Products (7) | `products`, `product-create`, `product-drafts`, `product-detail`, `product-settings`, `returned-stitched`, `org-catalog` |
+| Inventory (15) | `inventory`, `inventory-locations`, `inventory-location-detail`, `inventory-suppliers`, `inventory-supplier-detail`, `inventory-receive`, `inventory-adjust`, `inventory-transfer`, `inventory-purchase-orders`, `inventory-po-create`, `inventory-po-detail`, `inventory-supplier-returns`, `inventory-losses`, `inventory-loss-detail`, `inventory-production-orders`, `inventory-cycle-counts` |
+| OMS (18) | `orders`, `order-create`, `order-drafts`, `order-detail`, `orders-pending-confirmation`, `orders-backordered`, `orders-awaiting-production`, `orders-ready-to-dispatch`, `orders-returns`, `orders-returns-review`, `orders-cancelled`, `exchanges`, `exchange-detail`, `customers`, `customer-detail`, `order-workflow-settings`, `booking-workbench`, `order-scan` |
+
+### 11.2 State Management (Zustand)
+
+**Single store**: `useAppStore` (`src/stores/app-store.ts`, 171 lines).
+
+| State Field | Type | Purpose |
 |---|---|---|
-| `auth/` | 5 | auth-shell, login-form, register-form, forgot/reset-password |
-| `onboarding/` | 6 | onboarding-view, create-org, create-company, accept-invite |
-| `dashboard/` | 1 | dashboard-home |
-| `layout/` | 5 | dashboard-shell, sidebar, navbar, mobile-nav, brand |
-| `workspace/` | 1 | workspace-switcher |
-| `employees/` | 4 | employees-view, invite, detail, status-badge |
-| `roles/` | 3 | roles-view, role-edit, permission-selector |
-| `products/` | 13 | products-view, org-catalog, product-create/detail, catalog-settings, variant-tables, attribute-selector |
-| `inventory/` | 16 | dashboard, locations, suppliers, POs, production-orders, cycle-counts, receive/adjust/transfer stock, losses |
-| `orders/` | 24 | orders-view, queues (7), order-create, order-detail, order-scan, booking-workbench, load-sheets, customers, exchanges, shipment-tracking |
-| `customers/` | 5 | CreateCustomerForm, CustomerSearchAutocomplete, AddressSelector |
-| `couriers/` | 3 | pickup-addresses, city-autocomplete, city-mismatch-resolver |
-| `settings/` | 6 | settings-view, organization, company, integrations, integration-logs, audit-log |
-| `shared/` | 2 | unsaved-changes-modal, drafts-view |
-| `ui/` | 52 | shadcn/ui primitives |
+| `user` | `UserPublic \| null` | Logged-in user |
+| `activeCompany` | `CompanyPublic \| null` | Current workspace |
+| `companies` | `CompanyPublic[]` | All companies user has access to |
+| `employee` | `{ id, roleTier, roleName, systemRoleKey, permissions[], isElevated } \| null` | Permission context |
+| `hydrated` | `boolean` | Session bootstrap complete |
+| `loading` | `boolean` | Generic loading flag |
+| `route` | `AppRoute` | Current route (default: `{ name: 'login' }`) |
 
-### UI Conventions
-- **Styling**: Tailwind CSS 4, shadcn/ui (New York style)
-- **NO indigo or blue colors** (per design rules)
-- **Responsive**: mobile-first, `sm:`/`md:`/`lg:` breakpoints
-- **Sticky footer**: `min-h-screen flex flex-col` + `mt-auto` on footer
-- **Toasts**: Sonner for notifications
-- **Dark mode**: next-themes
-- **Tables**: TanStack Table 8
-- **Forms**: React Hook Form + Zod
+| Action | Behavior |
+|---|---|
+| `setSession(s)` | Sets user/company/companies/employee + `hydrated=true` |
+| `navigate(route)` | Sets route + scrolls to top + pushes to browser history via `pushRouteToURL()` |
+| `reset()` | Clears all session fields + removes token from localStorage + redirects to login |
+
+**`useCan()` hook**: Returns a function `(key: string) => boolean`. Elevated roles (Owner/Founder/Co-Founder/Investor) always return `true`. Standard roles check `employee.permissions.includes(key)`.
+
+### 11.3 URL Sync (`src/lib/routing/url-sync.ts`)
+
+**Strategy**: Query-string navigation. Routes are encoded as URL query params: `/?view=<route_name>&id=<optional>&token=<optional>`.
+
+| Function | Purpose |
+|---|---|
+| `routeToQuery(route)` | Serializes an `AppRoute` to `URLSearchParams` |
+| `queryToRoute()` | Reads `window.location.search`, validates `view` against known route lists |
+| `pushRouteToURL(route)` | `window.history.pushState()` — new history entry |
+| `replaceRouteInURL(route)` | `window.history.replaceState()` — used on initial load + logout |
+
+**Known bug**: `payroll-run-detail` is missing from `routesWithId` in `url-sync.ts` — navigating to it won't carry the `id` in the URL, so a refresh would lose context.
+
+### 11.4 API Client (`src/lib/api-client.ts`)
+
+- **Token storage**: `localStorage` key `'flowops_session_token'`
+- **Request flow**: `fetch(url, { credentials: 'include', cache: 'no-store', headers: { Authorization: Bearer <token> } })`
+- **Dual-channel auth**: Bearer header (works in iframes/cross-origin) + cookie fallback
+- **Error handling**: Throws `FetchError(status, message)` on non-2xx, reads `body.error` for server message
+- **Exports**: `api.get/post/put/patch/delete` typed helpers
+- **No retry, no timeout, no abort, no multipart/form-data helper**
+
+### 11.5 Component Inventory — 153 files (101 non-UI + 52 shadcn/ui)
+
+#### `auth/` (5 files)
+| Component | Description | API Calls |
+|---|---|---|
+| `auth-shell.tsx` | Split-screen layout (brand panel + form panel) | — |
+| `login-form.tsx` | Email/password login | `POST /api/auth/login` |
+| `register-form.tsx` | New account registration | `POST /api/auth/register` |
+| `forgot-password-form.tsx` | Send reset email | `POST /api/auth/forgot-password` |
+| `reset-password-form.tsx` | Set new password with token | `POST /api/auth/reset-password` |
+
+#### `layout/` (5 files)
+| Component | Description |
+|---|---|
+| `dashboard-shell.tsx` | Top-level layout: sidebar (w-60) + sticky header (h-16, backdrop-blur) + main scroll area (max-w-7xl) |
+| `sidebar.tsx` | Desktop left nav with 3 collapsible groups (Products/Inventory/Orders) + 14 flat items. Permission-gated. Draft-count badges (60s refetch). |
+| `navbar.tsx` | User menu dropdown (avatar, name, role, logout). Re-exports WorkspaceSwitcher. |
+| `mobile-nav.tsx` | Sheet-based nav (md:hidden), flattened list, closes on navigate |
+| `brand.tsx` | FlowOpsLogo SVG (3 nodes + curved connector, 40×40 viewBox) |
+
+#### `dashboard/` (1 file)
+| Component | Description | API |
+|---|---|---|
+| `dashboard-home.tsx` | 4 stat cards + recent activity + metrics | `GET /api/dashboard` |
+
+#### `onboarding/` (6 files)
+| Component | Description |
+|---|---|
+| `onboarding-view.tsx` | Routes between selector / create / accept based on invitations |
+| `onboarding-selector.tsx` | Choose "create company" or "accept invite" |
+| `create-organization-view.tsx` | Combined org+company creation (3-step wizard) |
+| `create-company-view.tsx` | Add company to existing org (3-step wizard) |
+| `create-company-wizard.tsx` | Reusable 3-step wizard with zod validation |
+| `accept-invite-card.tsx` | Card UI for accepting a single invitation |
+
+#### `employees/` (7 files)
+| Component | Description | Key Features |
+|---|---|---|
+| `employees-view.tsx` | Table with search + 4 filters (status/role/designation/department) | `useMemo`, manual `api.get` (tech debt) |
+| `invite-employee-view.tsx` | Invite form with designation dropdown auto-defaulting role | |
+| `employee-detail-view.tsx` | 5-tab profile: Overview, Access, Performance, Salary, My Payslips | Tabs only for `isSelf` |
+| `employee-status-badge.tsx` | Colored badge for active/suspended/terminated/on_leave | |
+| `salary-tab.tsx` | Salary profile + commission rules + live monthly preview | 5 `useQuery`, `useMemo` |
+| `performance-tab.tsx` | Order funnel analytics with recharts BarChart + date range filter | 2 `useQuery`, `useMemo` |
+| `my-payslips-tab.tsx` | Employee-facing payslip history + PDF download | 3 `useQuery`, `fetch()` for PDF binary |
+
+#### `roles/` (3 files)
+| Component | Description |
+|---|---|
+| `roles-view.tsx` | Role list + create/delete dialogs |
+| `role-edit-view.tsx` | Edit role name/permissions + ordersDataScope toggle (2-option card) |
+| `permission-key-selector.tsx` | Collapsible checkbox group driven by `PERMISSION_GROUPS` |
+
+#### `payroll/` (3 files)
+| Component | Description | Key Features |
+|---|---|---|
+| `payroll-view.tsx` | Tabbed: Payroll Runs list + Advances tab. Generate run dialog. | 4 `useQuery` |
+| `payroll-run-detail-view.tsx` | Payslips table + finalize + mark-all-paid + per-payslip adjust dialog + mark-paid dialog | 5 `useMutation` |
+| `advances-view.tsx` | Advances list + record dialog (lump_sum/installments) | 3 `useQuery` |
+
+#### `products/` (13 files)
+| Component | Description | Key Features |
+|---|---|---|
+| `products-view.tsx` | Searchable product list with type/scope/brand filters | `useMemo`, 2 `useQuery` |
+| `product-create-view.tsx` | 2321-line creation wizard with draft autosave | 7 `useQuery`, `useMemo`, `useCallback`, `useFormGuard` |
+| `product-detail-view.tsx` | Tabs: variants, pricing, images, inventory | 16 `useQuery`/`useMutation` |
+| `catalog-settings-view.tsx` | 2289-line tabbed CRUD: Categories, Brands, Attributes, Values | 22 `useQuery`/`useMutation`, `useMemo` |
+| `parent-child-variant-table.tsx` | Variant table with override/resync/toggle | 9 `useQuery`, `useMemo` |
+| `client-side-parent-child-variant-table.tsx` | Pure local-state variant table for creation wizard | `useMemo` |
+| `variant-table-parts.tsx` | Shared presentational sub-components | — |
+| `attribute-selector.tsx` | Multi-select with inline create | 5 `useQuery`, `useMemo`, `useCallback`, `useRef` |
+| `returned-stitched-view.tsx` | Returned-stitched inventory management | 8 `useQuery` |
+| `org-catalog-view.tsx` | Org-level catalog view (elevated only) | 8 `useQuery` |
+| `fulfillment-type-badge.tsx` | Stock Based / Made to Order badge | — |
+| `product-scope-badge.tsx` | Private/Org/Selective/Archived badge | — |
+| `returned-stock-banner.tsx` | Inline banner for returned-stitched stock | 2 `useQuery` |
+
+#### `inventory/` (17 files)
+| Component | Description | Key Features |
+|---|---|---|
+| `inventory-dashboard-view.tsx` | KPI cards + low/out-of-stock/overstock tables | `useMemo`, 2 `useQuery` |
+| `locations-view.tsx` | CRUD for inventory locations | 8 `useQuery`, `useMemo` |
+| `location-detail-view.tsx` | Per-location stock levels + transfers | 2 `useQuery` |
+| `suppliers-view.tsx` | Suppliers CRUD | 6 `useQuery`, `useMemo` |
+| `supplier-detail-view.tsx` | Supplier profile + PO history + edit | 5 `useQuery`, `useMemo` |
+| `receive-stock-view.tsx` | Receive PO stock into a location | 5 `useQuery`, `useMemo` |
+| `adjust-stock-view.tsx` | Manual stock +/- adjustment | 6 `useQuery`, `useMemo` |
+| `transfer-stock-view.tsx` | Inter-location transfer | 6 `useQuery`, `useMemo` |
+| `purchase-orders-view.tsx` | PO list with status filter | 2 `useQuery` |
+| `po-create-view.tsx` | Create PO with line items | 7 `useQuery`, `useMemo` |
+| `po-detail-view.tsx` | PO detail with confirm/cancel/receive | 6 `useQuery`, `useMemo` |
+| `supplier-returns-view.tsx` | Returns to supplier + dispute flow | 9 `useQuery` |
+| `production-orders-view.tsx` | MTO production orders + status transitions | 5 `useQuery` |
+| `losses-view.tsx` | Stock losses: damaged/theft/transit + resolve (2249 lines) | 12 `useQuery` |
+| `loss-detail-view.tsx` | Loss detail with resolve action | 5 `useQuery` |
+| `cycle-counts-view.tsx` | Cycle count creation + workflows (2249 lines) | 11 `useQuery`, `useMemo` |
+
+#### `orders/` (24 files)
+| Component | Description | Key Features |
+|---|---|---|
+| `_shared.ts` | Helpers: `formatPKR`, `formatDate`, `badgeForStatus`, `ORDER_STATUS_BADGE` | — |
+| `orders-view.tsx` | Master orders list (2599 lines) with recharts Bar+Line charts, customer/product autocomplete | 8 `useQuery`, `useMemo`, `useCallback`, 300ms debounce |
+| `order-create-view.tsx` | 2390-line creation wizard with draft autosave, customer search, address selection | 7 `useQuery`, `useMemo`, `useCallback`, `useFormGuard` |
+| `order-detail-view.tsx` | 2040-line detail with 9 mutations (confirm/dispatch/deliver/cancel/rto/etc.) | 13 `useQuery`/`useMutation`, `useMemo` |
+| `orders-pending-confirmation-view.tsx` | Confirm/cancel/convert-payment queue | 7 `useQuery`, `useMemo` |
+| `orders-backordered-view.tsx` | Backordered item queue (collapsible) | 2 `useQuery`, `useMemo` |
+| `orders-awaiting-production-view.tsx` | MTO items grouped by production status | 2 `useQuery` |
+| `orders-ready-to-dispatch-view.tsx` | Bulk dispatch with checkbox selection | 5 `useQuery`, `useMemo` |
+| `orders-returns-view.tsx` | RTO list with review flags | 2 `useQuery`, `useMemo` |
+| `orders-returns-review-view.tsx` | Per-item review: dismiss or correct | 5 `useQuery`, `useMemo` |
+| `orders-cancelled-view.tsx` | Cancelled orders list | 2 `useQuery` |
+| `exchanges-view.tsx` | Exchange list with bulk actions | 7 `useQuery`, `useMemo` |
+| `exchange-detail-view.tsx` | Exchange detail with shipment cards + settlement | 5 `useQuery` |
+| `customers-view.tsx` | Customer list with flagging + search debounce | 4 `useQuery` |
+| `customer-detail-view.tsx` | Customer profile: phones, addresses, recent orders, flag | 12 `useQuery` |
+| `order-workflow-settings-view.tsx` | Configure order workflow + courier defaults | 6 `useQuery` |
+| `booking-workbench-view.tsx` | 3-tab bulk booking: Orders / Shipments / Activity | 6 `useQuery` |
+| `order-scan-view.tsx` | Barcode scanner with 6 modes + reports + PDF download | 7 `useQuery` |
+| `load-sheets-tab.tsx` | Generate + download pickup manifests | 6 `useQuery` |
+| `cancel-courier-booking-button.tsx` | Reusable confirm-then-cancel button | 2 `useQuery` |
+| `request-exchange-dialog.tsx` | Inline exchange request from order detail | 5 `useQuery`, `useMemo` |
+| `send-exchange-shipment-modal.tsx` | Dispatch replacement shipment (6-step) | 7 `useQuery` |
+| `verify-old-item-dialog.tsx` | Verify condition of returned old item | 3 `useQuery` |
+| `shipment-tracking-card.tsx` | Read-only shipment card (status, tracking, timestamps) | — |
+
+#### `couriers/` (3 files)
+| Component | Description | Key Features |
+|---|---|---|
+| `city-autocomplete.tsx` | City search with live-fallback when cache misses | 3 `useQuery`, 200ms debounce, auto `?live=true` on 0 results |
+| `city-mismatch-resolver.tsx` | Fuzzy-match suggestions + manual fallback | 2 `useQuery` |
+| `pickup-addresses-section.tsx` | Pickup address CRUD embedded in integrations card | 7 `useQuery` |
+
+#### `customers/` (5 files)
+| Component | Description | Key Features |
+|---|---|---|
+| `CustomerSearchAutocomplete.tsx` | Debounced phone/name search dropdown | 2 `useQuery`, `useCallback`, `useMemo`, `useRef`, 300ms debounce |
+| `CreateCustomerForm.tsx` | Multi-phone / multi-address creation form | 2 `useQuery` |
+| `AddressSelector.tsx` | Saved-address radio group + inline new-address with CityAutocomplete | — |
+| `types.ts` | Shared DTOs + helpers (`formatLastUsed`, `PLATFORM_LABELS`) | — |
+| `index.ts` | Barrel re-exports | — |
+
+#### `settings/` (6 files)
+| Component | Description |
+|---|---|
+| `settings-view.tsx` | Personal profile card (read-only) |
+| `organization-view.tsx` | Org details + companies list + archive |
+| `company-settings-view.tsx` | Company profile, tax IDs, currency, logo |
+| `audit-log-view.tsx` | Audit log table with filters + pagination |
+| `integrations-view.tsx` | Courier integration cards: connect/disconnect/set-default |
+| `integration-logs-view.tsx` | Integration call log with expandable rows |
+
+#### `workspace/` (1 file)
+| Component | Description | Key Features |
+|---|---|---|
+| `workspace-switcher.tsx` | Dropdown switcher for org→company tree | **Optimistic updates** (`setQueryData`), **prefetch** (`prefetchQuery` for dashboard), **targeted invalidation** (5 specific keys) |
+
+#### `shared/` (2 files)
+| Component | Description |
+|---|---|
+| `drafts-view.tsx` | Reusable drafts list (products + orders) with restore/delete |
+| `unsaved-changes-modal.tsx` | AlertDialog: Save Draft / Discard / Keep Editing |
+
+#### `ui/` (52 shadcn/ui components)
+Standard shadcn/ui (New York style) + 4 custom FlowOps components:
+- `country-selector.tsx` — Pakistan-aware country dropdown
+- `currency-selector.tsx` — currency dropdown
+- `initials-avatar.tsx` — avatar with auto initials
+- `logo-upload.tsx` — image upload with preview
+- `chart.tsx` — recharts wrapper
+
+### 11.6 Theme System
+
+- **Provider**: `next-themes` with `attribute="class"`, `defaultTheme="light"`, `enableSystem={false}` (does NOT auto-detect OS preference)
+- **No theme toggle UI exists** — dark mode is defined but not user-accessible
+- **CSS**: Tailwind v4 with `@theme inline` mapping. 28 CSS variables in OKLCH color space.
+- **Primary color**: Emerald (`oklch(0.52 0.13 165)`) — distinctive, NOT blue/indigo per design rules
+- **Sidebar**: Dark navy (`oklch(0.17 0.015 250)`) in light mode
+- **Custom utilities**: `.scrollbar-thin` (8px scrollbar), `.bg-grid` (radial-gradient dot pattern for AuthShell)
+- **Fonts**: Geist Sans + Geist Mono (via `next/font/google`)
+
+### 11.7 Performance Analysis
+
+#### What's optimized ✅
+- **Zustand atomic subscriptions**: `useAppStore((s) => s.field)` — only re-renders when the specific field changes
+- **TanStack Query caching**: Global `staleTime: 30_000`, `refetchOnWindowFocus: false`, `retry: 1`. 100+ per-query overrides (10s for detail pages, 60s for slow-changing data, 0s for force-refetch)
+- **`useMemo`**: Used in 41 component files for expensive computations (filtering, sorting, derived data)
+- **`useCallback`**: Used in 8 files for stable handler references
+- **Debounced search**: 300ms debounce on customer/product/city autocomplete (7 instances)
+- **Optimistic workspace switch**: `setQueryData` flips `is_active_workspace` before server responds
+- **Targeted cache invalidation**: Workspace switcher invalidates exactly 5 keys (not whole cache)
+- **Prefetch**: Dashboard data prefetched after workspace switch
+- **Fire-and-forget audit/metric writes**: Non-blocking DB writes (see §9)
+
+#### What needs improvement ⚠️
+- **NO code-splitting**: All 62+ view components are statically imported in `page.tsx`. Every user downloads the entire ~62,000 LOC bundle. **Highest-impact optimization**: replace static imports with `next/dynamic(() => import(...), { ssr: false })` keyed off `route.name`.
+- **NO `React.memo`**: Zero usage anywhere. Combined with large list components, every Zustand state change re-renders the entire active view tree.
+- **Mixed data-fetching**: 64 components use TanStack Query correctly, but ~6 older views (`employees-view`, `roles-view`, `organization-view`, `company-settings-view`, `audit-log-view`, `onboarding-view`) use raw `api.get()` inside `useEffect` — tech debt.
+- **10 files = 34% of bundle**: The 10 largest components total ~21,500 LOC (orders-view: 2599, order-create: 2390, product-create: 2321, catalog-settings: 2289, losses: 2249, cycle-counts: 2249, order-detail: 2040, product-detail: 1949, org-catalog: 1221, returned-stitched: 1349).
+- **Dead dependencies** (installed but unused in `src/components/`): `@mdxeditor/editor`, `@tanstack/react-table`, `@dnd-kit/*` (3 pkgs), `framer-motion`, `react-syntax-highlighter`, `react-markdown`, `next-intl`, `next-auth`.
+
+### 11.8 Layout Dimensions
+
+| Element | Size | Behavior |
+|---|---|---|
+| Sidebar | `w-60` (240px) | `hidden md:flex` — desktop only |
+| Header | `h-16` (64px) | `sticky top-0 z-30`, `backdrop-blur`, `bg-background/80` |
+| Content | `max-w-7xl` (1280px) | Centered, `px-4 sm:px-6 lg:px-8 py-6 lg:py-8` |
+| Mobile nav | Sheet `w-64` | `md:hidden` hamburger, flattened list |
+| Breakpoint | `md` (768px) | Below: mobile nav + no sidebar. Above: sidebar + no hamburger |
+
+### 11.9 Data Fetching Patterns
+
+**TanStack Query** (primary — 64 components):
+```typescript
+const { data, isLoading } = useQuery({
+  queryKey: ['orders', filters],
+  queryFn: () => api.get('/api/orders?' + params),
+  staleTime: 15_000, // 15s for queue views, 60s for slow-changing data
+})
+```
+
+**Raw `api.get()` in `useEffect`** (tech debt — 6 older views):
+```typescript
+useEffect(() => {
+  api.get('/api/employees').then(r => setEmployees(r.employees))
+}, [])
+```
+
+**Mutations** (42 components use `useMutation`):
+```typescript
+const mutation = useMutation({
+  mutationFn: (data) => api.post('/api/orders', data),
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['orders'] })
+    toast.success('Order created')
+    navigate({ name: 'orders' })
+  },
+  onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed')
+})
+```
+
+### 11.10 Form Handling
+
+- **React Hook Form** + **Zod** validation (shared schemas between client + server)
+- **`useFormGuard`** hook (in `src/hooks/form-guard/`): intercepts navigation when forms are dirty. Coordinates with `page.tsx`'s `popstate` handler via `window.__formGuardIntercepting` flag. Used by `product-create-view` and `order-create-view`.
+- **Draft autosave**: Form drafts saved to `FormDraft` table via `/api/drafts` — survives page refresh.
+
+### 11.11 Bundle Size Summary
+
+| Metric | Value |
+|---|---|
+| Non-UI component files | 101 |
+| shadcn/ui components | 52 |
+| Total component files | 153 |
+| Total LOC in `src/components/` | ~62,309 |
+| Largest 10 files LOC | ~21,500 (34% of total) |
+| `useQuery`/`useMutation` usage | 64 files |
+| `useMemo` usage | 41 files |
+| `React.memo` usage | 0 files |
+| Dynamic imports | 0 |
+| Dead dependencies | 8+ packages |
 
 ---
 
