@@ -1322,7 +1322,7 @@ Standard shadcn/ui (New York style) + 4 custom FlowOps components:
 - **Fire-and-forget audit/metric writes**: Non-blocking DB writes (see §9).
 
 #### Known performance issue ⚠️
-- **`/api/auth/me` takes 500-1000ms**: This runs on every authenticated page load. Root cause confirmed via profiling: `buildSessionPayload()` fires 5-6 separate Prisma SQL queries (1 `profile.findUnique` + 1 `userSetting.findUnique` + 4 for `employee.findMany` with nested includes), each requiring a ~100ms network round-trip to Supabase Mumbai. `Promise.all` does NOT parallelize them (Prisma serializes through a single connection). EXPLAIN ANALYZE shows the DB query itself is 0.195ms — the latency is entirely network round-trips. **Not yet fixed** — potential fixes: raw SQL JOIN query, or client-side session caching with revalidation.
+- ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw SQL JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement, then groups flat rows back into the nested TypeScript shape in JS. See `src/lib/session-payload.ts` for the implementation + JSDoc explaining the root cause.
 
 ### 11.8 Layout Dimensions
 
@@ -1590,7 +1590,7 @@ The sandbox exposes one port (81) via Caddy:
 16. **Attribute Value Rules** — `AttributeValueRule` model exists but no rule engine UI
 17. **Advanced Inventory Features** — reorder points (`reorderPoint` / `reorderQuantity` fields exist) but no low-stock alerts
 18. **Data Export** — `REPORTS_EXPORT` permission exists but no CSV/Excel export
-19. **`/api/auth/me` performance** — takes 500-1000ms due to 5-6 Prisma round-trips. Potential fixes: raw SQL JOIN, or client-side session caching. (DIAGNOSED, not yet fixed)
+19. ~~**`/api/auth/me` performance**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN. Latency reduced from ~696ms to ~210ms (67% faster). See §11.7.
 
 ---
 
@@ -1672,7 +1672,7 @@ const result = await executeLoggedIntegrationAction({
 ### Performance
 12. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
 13. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
-14. **`/api/auth/me` takes 500-1000ms** — confirmed via profiling: `buildSessionPayload()` fires 5-6 Prisma queries sequentially (Promise.all does NOT parallelize them). Each query is a ~100ms network round-trip. EXPLAIN ANALYZE shows the DB query itself is 0.195ms — the latency is purely network round-trips. Not yet fixed.
+14. ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw query JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. See `src/lib/session-payload.ts`.
 
 ---
 

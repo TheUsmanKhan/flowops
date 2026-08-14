@@ -8825,3 +8825,66 @@ Stage Summary:
 - Added a prominent MAINTENANCE RULE at the top reminding future agents to keep this document updated.
 - All stale references to removed dependencies have been cleaned up.
 - Performance metrics are now accurately reflected (1,070 KB First Load JS, 95 chunks, 0 dead deps).
+
+---
+Task ID: AUTH-ME-LATENCY-FIX-PHASE1
+Agent: main
+Task: Phase 1 — Collapse buildSessionPayload() into one query (raw SQL JOIN)
+
+Work Log:
+
+Step 1 — Attempted single Prisma call with nested includes:
+- Rewrote buildSessionPayload() to use ONE prisma.profile.findUnique() with nested includes for settings.activeCompany + employees → role → rolePermissions + company.
+- Added temporary Prisma query logging (log: ['query'] + $on('query')) to count SQL statements.
+- Result: Prisma generated 3+ SQL queries (splits one-to-many relations like `employees` into separate queries to avoid row-explosion). This is expected Prisma behavior.
+- Per the plan's decision point: 3+ queries → fall back to raw SQL JOIN.
+
+Step 2 — Raw SQL JOIN implementation:
+- Rewrote buildSessionPayload() to use prisma.$queryRaw with a single SQL statement that JOINs 6 tables: Profile + UserSetting + Employee + Company + Role + RolePermission.
+- The query uses LEFT JOINs so it works even if the user has no settings or no employees (returns user with null companies).
+- Filters: active employees only (e.status = 'active'), active companies only (c.isActive = true).
+- Ordered by employee.joinedAt ASC so the first row is the fallback active employee.
+- The flat result rows (one per employee-permission combination) are grouped in JS back into the nested TypeScript shape.
+- Response shape is IDENTICAL to the previous implementation — frontend (useAppStore.setSession) unaffected.
+
+Step 3 — Verification:
+
+BEFORE (5-6 Prisma queries via Promise.all):
+- Call 1: 584ms, Call 2: 466ms, Call 3: 909ms, Call 4: 612ms, Call 5: 909ms
+- Average: ~696ms
+
+AFTER (1 raw SQL query):
+- Call 1: 357ms (cold), Call 2: 211ms, Call 3: 209ms, Call 4: 213ms, Call 5: 210ms, Call 6: 209ms, Call 7: 210ms, Call 8: 208ms, Call 9: 209ms, Call 10: 208ms
+- Average: ~224ms (warm: ~210ms)
+
+IMPROVEMENT:
+- ~472ms saved per call (67% faster)
+- Warm calls consistently ~210ms (down from ~600-900ms)
+- Single SQL round-trip instead of 5-6
+
+Response shape verified unchanged:
+- user.id, user.email, user.isOnboarded ✅
+- activeCompany.name, slug, baseCurrency ✅
+- companies count: 1 ✅
+- employee.roleName (Owner), isElevated (true), permissions ✅
+
+Cleanup:
+- Removed temporary Prisma query logging from db.ts (restored to log: ['error', 'warn']).
+- Added comprehensive JSDoc comment explaining WHY the query is structured as raw SQL (network latency root cause, Prisma's one-to-many split behavior).
+
+Verification:
+- bun run lint: 0 errors ✅
+- tsc --noEmit: 0 errors ✅
+- Dev log: no errors ✅
+- Agent Browser e2e: login → products page loads with 10 products, zero errors ✅
+
+FILES MODIFIED:
+1. src/lib/session-payload.ts — rewrote buildSessionPayload() to use single raw SQL JOIN (prisma.$queryRaw) instead of 3 Prisma queries via Promise.all
+2. src/lib/db.ts — temporarily added query logging for profiling, then removed (restored to original)
+
+Stage Summary:
+- /api/auth/me latency reduced from ~696ms avg (466-909ms range) to ~224ms avg (~210ms warm) — 67% faster.
+- Single SQL round-trip instead of 5-6 (confirmed via Prisma query logging).
+- Response shape completely unchanged — frontend unaffected.
+- Raw SQL follows existing convention (generate_order_number() in supabase/functions-only.sql).
+- Ready for Phase 2 (client-side caching with TanStack Query refetchOnWindowFocus).
