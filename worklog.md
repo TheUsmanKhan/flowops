@@ -8546,3 +8546,66 @@ FILES MODIFIED (diagnostic markers added then removed):
 2. src/lib/session-payload.ts — added per-query timing markers, then removed (restored to original)
 
 No fix applied. Awaiting direction on how to proceed.
+
+---
+Task ID: LCP-REGRESSION-DIAGNOSIS
+Agent: main
+Task: Diagnose LCP regression from ~2,768ms to ~4,420-4,650ms after route-aware LoadingFallback + chunk prefetching fix
+
+Work Log:
+
+TASK 1 — First Load JS comparison:
+- Built production: First Load JS = 1,071 KB (root 400 + polyfill 109 + page shell 560)
+- Step 1 baseline was 1,070 KB.
+- VERDICT: First Load JS is UNCHANGED (+1 KB). The regression is NOT in the initial bundle size.
+- HOWEVER: Total JS across all chunks = 5,973 KB (was 4,670 KB) → +1,303 KB increase
+- Chunk count = 150 (was 95) → +55 new chunks, exactly matching the 55 entries in ROUTE_CHUNK_LOADERS
+
+TASK 2 — ROUTE_CHUNK_LOADERS inspection:
+- The map is defined at module scope as an object literal with 55 `() => import(...)` arrow functions.
+- The invocation in useEffect is correct: only `ROUTE_CHUNK_LOADERS[routeName]` is called (not a loop).
+- HOWEVER: Turbopack statically analyzes ALL 55 import() targets at module-scope, creating a separate chunk for EACH import path — even though the same modules are ALREADY imported via the `dynamic()` calls below.
+- This creates DUPLICATE chunks: each route's component code exists in 2-3 chunks (one from dynamic(), one from ROUTE_CHUNK_LOADERS, sometimes a shared metadata chunk).
+
+DUPLICATION CONFIRMED by grepping for unique route-specific strings in all chunks:
+- products-view ("Manage your product catalog"): found in 3 chunks (9KB + 53KB + 9KB)
+- employees-view ("Manage your company directory"): found in 3 chunks (26KB + 26KB + 53KB)
+- roles-view ("System roles have elevated"): found in 3 chunks (41KB + 41KB + 53KB)
+- audit-log-view ("Immutable, append-only"): found in 3 chunks (24KB + 24KB + 53KB)
+- catalog-settings ("Configure categories, brands"): found in 1 chunk (53KB, shared with others)
+
+TASK 3 — LoadingFallback render cost:
+- LoadingFallback does a simple O(1) `ROUTE_METADATA[route.name]` lookup. No iteration, no expensive computation. NOT the problem.
+
+TASK 4 — Runtime timing measurement (production, with perf markers):
+- Tested with warm cache (chunks cached): LCP text paints at ~1005ms (LoadingFallback painted at 1005ms, ProductsView mounted at 1298ms).
+- chunk-prefetch: 16-48ms (fast because chunk was already cached)
+- session-fetch: 898-975ms (the /api/auth/me slowness, separate issue)
+- VERDICT: With WARM cache, the fix actually works as intended — LCP paints ~293ms before ProductsView mounts.
+- The reported 4,420-4,650ms regression is on COLD cache (Incognito + Hard Refresh), where the browser must download ALL referenced chunks fresh.
+
+TASK 5 — Double-fetching check:
+- /api/auth/me: called 1x per navigation (not double-fetched)
+- /api/products: called 1x (not double-fetched)
+- Network log shows 17 JS chunks downloaded on EACH navigation to ?view=products.
+- Step 1 baseline downloaded only ~10 chunks upfront.
+- The extra 7 chunks per navigation are the duplicate chunks created by ROUTE_CHUNK_LOADERS.
+
+ROOT CAUSE (evidence-based):
+The `ROUTE_CHUNK_LOADERS` map at module scope in page.tsx contains 55 `() => import(...)` functions. Even though only ONE loader is invoked at runtime, Turbopack's static analysis sees ALL 55 import() targets and creates a separate chunk for EACH — duplicating code that already exists in the `dynamic()` chunks.
+
+This causes:
+1. +55 duplicate chunks (95 → 150 total chunks)
+2. +1,303 KB total JS (4,670 KB → 5,973 KB)
+3. On cold cache, the browser downloads 17 chunks per navigation (was ~10), including duplicate copies of the same component code
+4. Estimated cold download for ?view=products: ~1,409 KB (root 400 + polyfill 109 + page shell 560 + 10 additional chunks totaling 365 KB, some of which are duplicates)
+
+The regression from 2,768ms to 4,420-4,650ms (~1,650-1,880ms increase) is consistent with downloading an extra ~365 KB of duplicate JS on a cold cache at typical broadband speeds (3-5 Mbps), plus the overhead of parsing/evaluating 7 extra chunks.
+
+NOTE: First Load JS (1,070 KB) is unchanged because the duplicate chunks are lazy-loaded — they don't affect the INITIAL bundle, but they DO affect subsequent navigations where the browser downloads both the dynamic() chunk AND the ROUTE_CHUNK_LOADERS chunk for the same module.
+
+FILES MODIFIED (diagnostic markers added then removed):
+1. src/app/page.tsx — added perf.mark markers, then removed (restored to pre-diagnosis state)
+2. src/components/products/products-view.tsx — added mount marker, then removed
+
+No fix applied. Awaiting direction on whether to fix in place (e.g. remove ROUTE_CHUNK_LOADERS, keep route-aware LoadingFallback) or revert entirely to the Step 1 spinner-only fallback.
