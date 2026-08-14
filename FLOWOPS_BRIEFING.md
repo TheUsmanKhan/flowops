@@ -2,9 +2,11 @@
 
 > **Purpose**: This document is the single source of truth for the FlowOps ERP system. It covers every module, the API system, dependencies, database schema, frontend, backend, third-party services, what's built, what's in process, and what needs to be built. Use this to train AI assistants so they can generate correct, context-aware prompts.
 >
-> **Last Updated**: August 2026
+> **Last Updated**: August 2026 (updated after performance optimization pass + products table conversion + hydration fixes)
 > **App URL**: Single-page app at `/` (Next.js 16 App Router)
 > **Stack**: Next.js 16 + React 19 + TypeScript + Prisma 6 + Supabase PostgreSQL + Tailwind 4 + shadcn/ui
+>
+> **MAINTENANCE RULE**: This document MUST be updated whenever significant changes are made to the architecture, modules, dependencies, or performance characteristics. Do not let it go stale.
 
 ---
 
@@ -38,7 +40,15 @@
 
 **Core value proposition**: One system to manage products, inventory, orders, customers, and courier bookings — replacing the spreadsheets + WhatsApp + manual courier portal workflow that Pakistani e-commerce sellers currently use.
 
-**Scale**: 58 Prisma models, 148 API routes, ~137 React components, 21 SQL migrations, 30 permission keys, 2 live courier integrations.
+**Scale**: 58 Prisma models, 148 API routes, ~153 React components (101 non-UI + 52 shadcn/ui), 21 SQL migrations, 30 permission keys, 2 live courier integrations.
+
+**Performance posture** (as of latest optimization pass):
+- First Load JS: **1,070 KB** (down from 3,148 KB baseline — 66% reduction via code-splitting)
+- Total JS across all chunks: **4,665 KB** (95 chunks — was 10 chunks pre-split)
+- All 70 data-fetching views use TanStack Query (was 64/70 — 6 migrated from raw `useEffect`+`api.get()`)
+- `React.memo` used on leaf components in 6 largest views
+- 10 dead dependencies removed (node_modules: 1.2 GB, was 1.3 GB)
+- Route-aware `LoadingFallback` renders PageHeader text immediately at Suspense boundary
 
 ---
 
@@ -104,8 +114,7 @@ Every transition has inventory side-effects:
 | Library | Purpose |
 |---|---|
 | Zustand 5 | Client state (session, active company, SPA routing) — single store `useAppStore` |
-| TanStack Query 5 | Server state (data fetching, caching, mutations) |
-| TanStack Table 8 | Data tables (orders, products, inventory) |
+| TanStack Query 5 | Server state (data fetching, caching, mutations) — used by ALL 70 data-fetching views |
 
 ### Forms & Validation
 | Library | Purpose |
@@ -121,7 +130,6 @@ Every transition has inventory side-effects:
 | shadcn/ui (New York style) | 52 component primitives in `src/components/ui/` |
 | Radix UI | 26 `@radix-ui/react-*` packages (shadcn/ui foundation) |
 | Lucide React | Icons |
-| Framer Motion 12 | Animations |
 | Sonner | Toast notifications |
 | next-themes | Dark/light mode |
 | vaul, embla-carousel, cmdk | Drawer, carousel, command palette |
@@ -131,10 +139,20 @@ Every transition has inventory side-effects:
 |---|---|
 | `@react-pdf/renderer` | Scan report PDF generation |
 | `recharts` | Dashboard charts |
-| `react-markdown` + `@mdxeditor/editor` | Rich text (audit logs, notes) |
 | `date-fns` | Date utilities |
 | `bcryptjs` | Password hashing (actually uses Node `crypto.scrypt` in `src/lib/auth.ts`) |
 | `z-ai-web-dev-sdk` | AI skills (image generation, VLM, etc.) — backend only |
+
+### Removed Dependencies (Step 4 cleanup — August 2026)
+The following 10 packages were installed but confirmed unused (0 code imports) and removed to reduce install time + Docker image size:
+- `@mdxeditor/editor` (1.1 MB) — was listed for "rich text" but never imported
+- `@tanstack/react-table` (796 KB) — FlowOps uses shadcn/ui `Table` component instead
+- `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` (2.4 MB total) — no drag-drop features
+- `framer-motion` (5.4 MB) — animations handled by CSS transitions + Tailwind
+- `react-syntax-highlighter` (8.9 MB) — no code display features
+- `react-markdown` (88 KB) — no markdown rendering
+- `next-intl` (1.6 MB) — app is English-only, no i18n
+- `next-auth` (2.7 MB) — app uses custom HMAC sessions (see §6)
 
 ### Full dependency list: see `package.json`
 
@@ -161,7 +179,7 @@ Supabase PostgreSQL (Mumbai)
 
 1. **Single SPA route** — the entire app lives at `/` (`src/app/page.tsx`). Navigation is client-side via Zustand's `navigate(route)` with URL sync. There are no other Next.js pages.
 
-2. **Custom HMAC sessions** — `next-auth` is installed but UNUSED. Sessions are HMAC-signed tokens: `userId.timestamp.hmac` (30-day TTL). Dual-channel: `Authorization: Bearer` header (works in iframes/cross-origin) + HttpOnly cookie fallback.
+2. **Custom HMAC sessions** — Sessions are HMAC-signed tokens: `userId.timestamp.hmac` (30-day TTL). Dual-channel: `Authorization: Bearer` header (works in iframes/cross-origin) + HttpOnly cookie fallback. (`next-auth` was previously installed but unused; it was removed in Step 4 — see §3.)
 
 3. **Multi-tenant isolation in app layer** — `getWorkspace()` in `src/lib/workspace.ts` resolves the caller's active company from `UserSetting.activeCompanyId` via a SINGLE Prisma JOIN query (Profile → settings.activeCompany + employees.role). No database-level RLS — all scoping is enforced in the application layer via `requirePermission()`.
 
@@ -1002,7 +1020,33 @@ Leopard uses 2-character status codes: RC, SP, DP, AR, AC, DV, PN1, PN2, RO, RN1
 
 ### 11.1 Single-Page App Structure
 
-The entire app is a **single Next.js page** at `/` (`src/app/page.tsx`, 375 lines). All "pages" are route cases inside a `switch(route.name)` in `renderRoute()`.
+The entire app is a **single Next.js page** at `/` (`src/app/page.tsx`). All "pages" are route cases inside a `switch(route.name)` in `renderRoute()`.
+
+**Code-splitting strategy** (Step 1 optimization — August 2026):
+All 70+ view components are lazy-loaded via `next/dynamic` with `ssr: false`:
+```typescript
+const ProductsView = dynamic(
+  () => import('@/components/products/products-view').then(m => ({ default: m.ProductsView })),
+  { ssr: false, loading: LoadingFallback }
+)
+```
+This splits the bundle into ~95 chunks: 5 root main (always loaded) + 90 lazy chunks (loaded on-demand when the user navigates to that route). First Load JS dropped from 3,148 KB → 1,070 KB (66% reduction).
+
+**Route-aware LoadingFallback** (renders PageHeader text immediately at Suspense boundary):
+```typescript
+const ROUTE_METADATA: Record<string, { title: string; description?: string }> = {
+  products: { title: 'Products', description: 'Manage your product catalog...' },
+  // ... 55 routes total
+}
+const LoadingFallback = () => {
+  const route = useAppStore((s) => s.route)
+  const meta = ROUTE_METADATA[route.name]
+  // Renders PageHeader + skeleton grid — LCP text paints immediately
+}
+```
+This makes the LCP text element paint as soon as the Suspense boundary renders, NOT after the lazy chunk downloads.
+
+> ⚠️ **IMPORTANT — Do NOT add `ROUTE_CHUNK_LOADERS`**: A previous attempt to "prefetch" route chunks in parallel with session hydration used a module-scope map of 55 `() => import(...)` functions. Turbopack statically analyzed all 55 targets and created DUPLICATE chunks (+55 chunks, +1,303 KB). This was removed. The ONLY place each route's code should be imported is the `dynamic()` call. Do not reintroduce module-scope import maps.
 
 **Pre-switch gating logic:**
 1. **Hydration**: On mount, fires `GET /api/auth/me`. If URL has `?view=...`, restores that route. Listens to `popstate` for browser back/forward.
@@ -1130,8 +1174,8 @@ The entire app is a **single Next.js page** at `/` (`src/app/page.tsx`, 375 line
 #### `products/` (13 files)
 | Component | Description | Key Features |
 |---|---|---|
-| `products-view.tsx` | Searchable product list with type/scope/brand filters | `useMemo`, 2 `useQuery` |
-| `product-create-view.tsx` | 2321-line creation wizard with draft autosave | 7 `useQuery`, `useMemo`, `useCallback`, `useFormGuard` |
+| `products-view.tsx` | **Responsive table (desktop) + stacked card list (mobile)** — switches at `md` breakpoint via `hidden md:block` / `block md:hidden`. Desktop table has 8 columns (Img, Product, Type, Status, Variants, Tags, Price Range, Actions) with progressive column visibility (`lg`/`xl`). Mobile shows full-width compact cards. All sub-components (`ProductsTable`, `ProductTableRow`, `ProductMobileCard`) wrapped in `memo()`. | `useQuery`, `useMemo`, 3 `memo` components |
+| `product-create-view.tsx` | 2321-line creation wizard with draft autosave. **Scroll-to-top on step change** (added to prevent users landing at the bottom of step 3). | 7 `useQuery`, `useMemo`, `useCallback`, `useFormGuard` |
 | `product-detail-view.tsx` | Tabs: variants, pricing, images, inventory | 16 `useQuery`/`useMutation` |
 | `catalog-settings-view.tsx` | 2289-line tabbed CRUD: Categories, Brands, Attributes, Values | 22 `useQuery`/`useMutation`, `useMemo` |
 | `parent-child-variant-table.tsx` | Variant table with override/resync/toggle | 9 `useQuery`, `useMemo` |
@@ -1249,23 +1293,36 @@ Standard shadcn/ui (New York style) + 4 custom FlowOps components:
 
 ### 11.7 Performance Analysis
 
-#### What's optimized ✅
-- **Zustand atomic subscriptions**: `useAppStore((s) => s.field)` — only re-renders when the specific field changes
-- **TanStack Query caching**: Global `staleTime: 30_000`, `refetchOnWindowFocus: false`, `retry: 1`. 100+ per-query overrides (10s for detail pages, 60s for slow-changing data, 0s for force-refetch)
-- **`useMemo`**: Used in 41 component files for expensive computations (filtering, sorting, derived data)
-- **`useCallback`**: Used in 8 files for stable handler references
-- **Debounced search**: 300ms debounce on customer/product/city autocomplete (7 instances)
-- **Optimistic workspace switch**: `setQueryData` flips `is_active_workspace` before server responds
-- **Targeted cache invalidation**: Workspace switcher invalidates exactly 5 keys (not whole cache)
-- **Prefetch**: Dashboard data prefetched after workspace switch
-- **Fire-and-forget audit/metric writes**: Non-blocking DB writes (see §9)
+#### Bundle metrics (latest — August 2026)
 
-#### What needs improvement ⚠️
-- **NO code-splitting**: All 62+ view components are statically imported in `page.tsx`. Every user downloads the entire ~62,000 LOC bundle. **Highest-impact optimization**: replace static imports with `next/dynamic(() => import(...), { ssr: false })` keyed off `route.name`.
-- **NO `React.memo`**: Zero usage anywhere. Combined with large list components, every Zustand state change re-renders the entire active view tree.
-- **Mixed data-fetching**: 64 components use TanStack Query correctly, but ~6 older views (`employees-view`, `roles-view`, `organization-view`, `company-settings-view`, `audit-log-view`, `onboarding-view`) use raw `api.get()` inside `useEffect` — tech debt.
-- **10 files = 34% of bundle**: The 10 largest components total ~21,500 LOC (orders-view: 2599, order-create: 2390, product-create: 2321, catalog-settings: 2289, losses: 2249, cycle-counts: 2249, order-detail: 2040, product-detail: 1949, org-catalog: 1221, returned-stitched: 1349).
-- **Dead dependencies** (installed but unused in `src/components/`): `@mdxeditor/editor`, `@tanstack/react-table`, `@dnd-kit/*` (3 pkgs), `framer-motion`, `react-syntax-highlighter`, `react-markdown`, `next-intl`, `next-auth`.
+| Metric | Value |
+|---|---|
+| First Load JS | **1,070 KB** (was 3,148 KB pre-code-split — 66% reduction) |
+| Root main JS (5 chunks) | 400 KB |
+| Polyfill | 109 KB |
+| Page shell (page.tsx + DashboardShell + LoadingFallback) | 560 KB |
+| Total JS (all 95 chunks) | 4,665 KB |
+| Total CSS | 167 KB |
+| JS chunk count | 95 (was 10 pre-split) |
+| node_modules size | 1.2 GB (was 1.3 GB before dead dep removal) |
+| `dependencies` count | 60 (was 70 before removing 10 dead deps) |
+
+#### What's optimized ✅
+- **Code-splitting**: All 70+ views lazy-loaded via `next/dynamic` with `ssr: false`. 95 chunks total (5 upfront + 90 lazy).
+- **Route-aware LoadingFallback**: Renders PageHeader + skeleton at Suspense boundary — LCP text paints immediately without waiting for chunk download.
+- **`React.memo`**: Used on leaf components in 6 largest views (orders-view, order-create-view, product-create-view, catalog-settings-view, losses-view, cycle-counts-view) + products-view table components.
+- **TanStack Query**: ALL 70 data-fetching views use `useQuery`/`useMutation` (6 migrated from raw `useEffect`+`api.get()` in Step 3). Global `staleTime: 30_000`, `refetchOnWindowFocus: false`, `retry: 1`. 100+ per-query overrides (10s for detail pages, 60s for slow-changing data, 15s for queue views).
+- **Zustand atomic subscriptions**: `useAppStore((s) => s.field)` — only re-renders when the specific field changes.
+- **`useMemo`**: Used in 41+ component files for expensive computations.
+- **`useCallback`**: Used in 8+ files for stable handler references.
+- **Debounced search**: 300ms debounce on customer/product/city autocomplete (7 instances).
+- **Optimistic workspace switch**: `setQueryData` flips `is_active_workspace` before server responds.
+- **Targeted cache invalidation**: Workspace switcher invalidates exactly 5 keys (not whole cache).
+- **Prefetch**: Dashboard data prefetched after workspace switch.
+- **Fire-and-forget audit/metric writes**: Non-blocking DB writes (see §9).
+
+#### Known performance issue ⚠️
+- **`/api/auth/me` takes 500-1000ms**: This runs on every authenticated page load. Root cause confirmed via profiling: `buildSessionPayload()` fires 5-6 separate Prisma SQL queries (1 `profile.findUnique` + 1 `userSetting.findUnique` + 4 for `employee.findMany` with nested includes), each requiring a ~100ms network round-trip to Supabase Mumbai. `Promise.all` does NOT parallelize them (Prisma serializes through a single connection). EXPLAIN ANALYZE shows the DB query itself is 0.195ms — the latency is entirely network round-trips. **Not yet fixed** — potential fixes: raw SQL JOIN query, or client-side session caching with revalidation.
 
 ### 11.8 Layout Dimensions
 
@@ -1279,23 +1336,22 @@ Standard shadcn/ui (New York style) + 4 custom FlowOps components:
 
 ### 11.9 Data Fetching Patterns
 
-**TanStack Query** (primary — 64 components):
+**TanStack Query** (primary — ALL 70 data-fetching views):
 ```typescript
 const { data, isLoading } = useQuery({
   queryKey: ['orders', filters],
   queryFn: () => api.get('/api/orders?' + params),
-  staleTime: 15_000, // 15s for queue views, 60s for slow-changing data
+  staleTime: 15_000, // 15s for queue views, 60s for slow-changing data, 10s for detail pages
 })
 ```
 
-**Raw `api.get()` in `useEffect`** (tech debt — 6 older views):
-```typescript
-useEffect(() => {
-  api.get('/api/employees').then(r => setEmployees(r.employees))
-}, [])
-```
+**staleTime conventions** (established in Step 3 migration):
+- 10s — detail pages (product-detail, order-detail, PO detail)
+- 15s — queue-like views (orders, audit-logs, losses, cycle-counts)
+- 30s — directories (employees, suppliers, products, onboarding invitations)
+- 60s — slow-changing settings (roles, organization, company-settings, workspaces)
 
-**Mutations** (42 components use `useMutation`):
+**Mutations** (42+ components use `useMutation`):
 ```typescript
 const mutation = useMutation({
   mutationFn: (data) => api.post('/api/orders', data),
@@ -1307,6 +1363,8 @@ const mutation = useMutation({
   onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed')
 })
 ```
+
+> ✅ **All 6 tech-debt views migrated** (Step 3 — August 2026): `employees-view`, `roles-view`, `organization-view`, `company-settings-view`, `audit-log-view`, `onboarding-view` now use TanStack Query instead of raw `api.get()` in `useEffect`.
 
 ### 11.10 Form Handling
 
@@ -1323,11 +1381,14 @@ const mutation = useMutation({
 | Total component files | 153 |
 | Total LOC in `src/components/` | ~62,309 |
 | Largest 10 files LOC | ~21,500 (34% of total) |
-| `useQuery`/`useMutation` usage | 64 files |
-| `useMemo` usage | 41 files |
-| `React.memo` usage | 0 files |
-| Dynamic imports | 0 |
-| Dead dependencies | 8+ packages |
+| `useQuery`/`useMutation` usage | **70 files** (all data-fetching views) |
+| `useMemo` usage | 41+ files |
+| `React.memo` usage | **6+ views** (orders, order-create, product-create, catalog-settings, losses, cycle-counts, products-view) |
+| Dynamic imports | **70+** (all views via `next/dynamic`) |
+| First Load JS | **1,070 KB** |
+| Total JS (all chunks) | 4,665 KB |
+| JS chunk count | 95 |
+| Dead dependencies | **0** (10 removed in Step 4) |
 
 ---
 
@@ -1449,8 +1510,8 @@ The sandbox exposes one port (81) via Caddy:
 - **Output mode**: `standalone` (self-contained server bundle)
 
 ### Mini-Services
-- **Directory**: `mini-services/` (currently EMPTY — only `.gitkeep`)
-- **Purpose**: For future detached services (websocket, background workers)
+- **Directory**: `mini-services/`
+- **`postex-poller/`**: Scaffold for a detached PostEx status poller service (for horizontal scaling). Has `package.json`, `README.md`, placeholder `Dockerfile`. NOT yet implemented — the `ENABLE_IN_PROCESS_POLLER` env var (default `true`) controls whether the in-process poller runs. Set to `false` on all but one replica, or use this dedicated worker.
 - **Convention**: Each mini-service is an independent Bun project with its own port + `package.json`
 - **Gateway**: Access via `?XTransformPort=PORT` query parameter
 
@@ -1463,7 +1524,7 @@ The sandbox exposes one port (81) via Caddy:
 1. **Auth System** — login, register, logout, forgot/reset password, dual-channel sessions
 2. **Multi-Tenancy** — org → company → employee, workspace switching, 30 permissions
 3. **Catalog** — org-level categories, brands, attributes, attribute values
-4. **Product Management** — org products, company subscriptions, variant management, pricing overrides, selective access
+4. **Product Management** — org products, company subscriptions, variant management, pricing overrides, selective access. **Products list view**: responsive table (desktop, 8 columns) + stacked card list (mobile), switches at `md` breakpoint.
 5. **Customer Management** — multi-phone, multi-address, external identities, RTO flagging, stats
 6. **Order Management** — create (manual + Shopify stub), confirm, dispatch, deliver, cancel, RTO, payment conversion, queues
 7. **Inventory System** — pools, transactions (16 types), WAC, reservations, dispatch, returns, transfers, adjustments
@@ -1485,6 +1546,7 @@ The sandbox exposes one port (81) via Caddy:
 23. **Form Drafts** — autosave
 24. **Settings** — company, organization, order workflow, integrations
 25. **Inventory-OMS Connection** — reserve on confirm, deduct on dispatch, unreserve on cancel, restock on RTO (recently fixed)
+26. **Docker Deployment** — multi-stage Dockerfile (dev + prod), docker-compose files, local DB for testing, PostEx poller toggle (see DOCKER.md)
 
 ### 🔧 In-Process / Recently Fixed
 
@@ -1495,6 +1557,16 @@ The sandbox exposes one port (81) via Caddy:
 5. **Fire-and-forget audit/metrics** — all 257 call sites converted from blocking `await` to non-blocking (FIXED)
 6. **getWorkspace() optimization** — 4 sequential queries → 1 JOIN query (FIXED)
 7. **createManualOrder() parallelization** — sequential reads → `Promise.all` batches (FIXED)
+8. **Code-splitting** (Step 1) — all 70+ views lazy-loaded via `next/dynamic`; First Load JS 3,148 KB → 1,070 KB (66% reduction) (FIXED)
+9. **React.memo** (Step 2) — leaf components in 6 largest views wrapped in `memo()` to prevent unnecessary re-renders (FIXED)
+10. **TanStack Query migration** (Step 3) — 6 tech-debt views (`employees-view`, `roles-view`, `organization-view`, `company-settings-view`, `audit-log-view`, `onboarding-view`) migrated from raw `useEffect`+`api.get()` to `useQuery`/`useMutation` (FIXED)
+11. **Dead dependencies removed** (Step 4) — 10 unused packages removed (`@mdxeditor/editor`, `@tanstack/react-table`, `@dnd-kit/*`, `framer-motion`, `react-syntax-highlighter`, `react-markdown`, `next-intl`, `next-auth`); node_modules 1.3 GB → 1.2 GB (FIXED)
+12. **LCP optimization** — route-aware `LoadingFallback` added; renders PageHeader text at Suspense boundary immediately (FIXED)
+13. **LCP regression** — `ROUTE_CHUNK_LOADERS` map (which caused +55 duplicate chunks) removed; chunk count 150 → 95 (FIXED)
+14. **Products view conversion** — grid cards → responsive table (desktop, 8 columns) + stacked card list (mobile); switches at `md` breakpoint (FIXED)
+15. **Product create scroll** — added `useEffect` to scroll to top on step change; prevents users landing at the bottom of step 3 (FIXED)
+16. **Hydration mismatch** — added `suppressHydrationWarning` to `<body>` tag in `layout.tsx`; fixes Grammarly browser extension attribute injection (FIXED)
+17. **Docker setup** — multi-stage Dockerfile (dev + prod), docker-compose.yml (dev), docker-compose.prod.yml (prod), docker-compose.local-db.yml (local Postgres for schema testing), DOCKER.md guide, PostEx poller toggle via `ENABLE_IN_PROCESS_POLLER` env var (FIXED)
 
 ### ❌ Not Yet Built / Needed
 
@@ -1508,7 +1580,7 @@ The sandbox exposes one port (81) via Caddy:
 6. **Reports & Analytics** — `REPORTS_VIEW` / `REPORTS_EXPORT` permissions exist but no reporting module is built
 7. **KPI Dashboard** — `KPI_VIEW` / `KPI_MANAGE` permissions exist; basic dashboard exists but no advanced KPI management
 8. **Finance Module** — `FINANCE_VIEW` / `FINANCE_MANAGE` permissions exist but no finance module is built
-9. **Real-time Notifications** — no websocket/notification system (mini-services/ is empty; examples/websocket/ is reference only)
+9. **Real-time Notifications** — no websocket/notification system (mini-services/postex-poller/ is a stub; examples/websocket/ is reference only)
 10. **Mobile App** — no mobile app (web-only, but responsive)
 11. **Multi-currency** — `baseCurrency` field exists but no currency conversion logic
 12. **Tax Management** — `taxAmount` / `taxLabel` fields exist but no tax calculation engine
@@ -1518,6 +1590,7 @@ The sandbox exposes one port (81) via Caddy:
 16. **Attribute Value Rules** — `AttributeValueRule` model exists but no rule engine UI
 17. **Advanced Inventory Features** — reorder points (`reorderPoint` / `reorderQuantity` fields exist) but no low-stock alerts
 18. **Data Export** — `REPORTS_EXPORT` permission exists but no CSV/Excel export
+19. **`/api/auth/me` performance** — takes 500-1000ms due to 5-6 Prisma round-trips. Potential fixes: raw SQL JOIN, or client-side session caching. (DIAGNOSED, not yet fixed)
 
 ---
 
@@ -1578,23 +1651,28 @@ const result = await executeLoggedIntegrationAction({
 ## 18. Known Issues & Gotchas
 
 ### Environment
-1. **`.env` reverts to SQLite** — the `predev` script guards against this, but always verify before starting
-2. **DB latency** — Mumbai region (~100ms per query from sandbox). Performance optimizations (fire-and-forget, parallel queries, single-JOIN getWorkspace) have been applied
-3. **Turbopack instability** — dev server can hang during compilation in the sandbox (memory issue). Clear `.next/` cache and restart
+1. **`.env` reverts to SQLite** — the `predev` script guards against this, but always verify before starting. If it happens, restore from DOCKER.md reference or git history.
+2. **DB latency** — Mumbai region (~100ms per query from sandbox). Performance optimizations (fire-and-forget, parallel queries, single-JOIN getWorkspace) have been applied. The `/api/auth/me` route is still slow (500-1000ms) due to 5-6 Prisma round-trips — see §16 item 19.
+3. **Turbopack instability** — dev server can hang during compilation in the sandbox (memory issue). Clear `.next/` cache and restart.
+4. **Hydration mismatch from browser extensions** — Grammarly injects `data-gr-ext-installed` + `data-new-gr-c-s-check-loaded` attributes into `<body>`. Fixed via `suppressHydrationWarning` on `<body>` in `layout.tsx`. If new hydration errors appear, check for other browser-extension-injected attributes.
+
+### Bundling
+5. **Do NOT add module-scope `import()` maps** — a `ROUTE_CHUNK_LOADERS` map with 55 `() => import(...)` entries caused Turbopack to create 55 duplicate chunks (+1,303 KB). The ONLY place each route's code should be imported is the `dynamic()` call in `page.tsx`. See §11.1 warning.
 
 ### Integrations
-4. **PostEx bulk tracking API** — intermittently returns HTTP 400. Handled with single-track fallback
-5. **Vercel cron doesn't fire** — on long-lived server. In-process poller added for PostEx (30min). Other crons (city sync, scan reports, Leopard safety-net) need manual triggering or external scheduler
-6. **PostEx API lag** — parcels may be physically picked up but PostEx's API still shows "Booked" for hours. This is a PostEx issue, not FlowOps
+6. **PostEx bulk tracking API** — intermittently returns HTTP 400. Handled with single-track fallback
+7. **Vercel cron doesn't fire** — on long-lived server. In-process poller added for PostEx (30min). Other crons (city sync, scan reports, Leopard safety-net) need manual triggering or external scheduler. The `ENABLE_IN_PROCESS_POLLER` env var (default `true`) can disable the poller for multi-replica deployments.
+8. **PostEx API lag** — parcels may be physically picked up but PostEx's API still shows "Booked" for hours. This is a PostEx issue, not FlowOps
 
 ### Schema
-7. **SQL functions must be applied manually** — `generate_order_number()`, `normalize_phone()`, etc. are NOT in the Prisma schema. They must be applied via raw SQL to the DB (they were lost during DB migration)
-8. **No DB-level RLS** — all multi-tenant isolation is in the app layer. A bug in `getWorkspace()` or a missing `companyId` filter could leak data across tenants
-9. **No `available` column** — `available = onHand - reserved` is computed in app code every time
+9. **SQL functions must be applied manually** — `generate_order_number()`, `normalize_phone()`, etc. are NOT in the Prisma schema. They must be applied via raw SQL to the DB (they were lost during DB migration). A consolidated file `supabase/functions-only.sql` contains all 23 functions + 2 sequences + 12 triggers.
+10. **No DB-level RLS** — all multi-tenant isolation is in the app layer. A bug in `getWorkspace()` or a missing `companyId` filter could leak data across tenants
+11. **No `available` column** — `available = onHand - reserved` is computed in app code every time
 
 ### Performance
-10. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
-11. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
+12. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
+13. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
+14. **`/api/auth/me` takes 500-1000ms** — confirmed via profiling: `buildSessionPayload()` fires 5-6 Prisma queries sequentially (Promise.all does NOT parallelize them). Each query is a ~100ms network round-trip. EXPLAIN ANALYZE shows the DB query itself is 0.195ms — the latency is purely network round-trips. Not yet fixed.
 
 ---
 
@@ -1608,13 +1686,15 @@ When generating prompts for AI assistants working on FlowOps, use these patterns
 - Stack: Next.js 16 + React 19 + TypeScript + Prisma 6 + Supabase PostgreSQL + Tailwind 4 + shadcn/ui
 - Multi-tenant: Organization → Company → Employee
 - Auth: custom HMAC sessions (not NextAuth), dual-channel (Bearer + cookie)
-- State: Zustand (client) + TanStack Query (server)
-- Single SPA route at /, ~75 named view states
+- State: Zustand (client) + TanStack Query (server) — ALL 70 data-fetching views use useQuery/useMutation
+- Single SPA route at /, ~62 named view states, all lazy-loaded via next/dynamic (ssr: false)
 - API: 148 routes under src/app/api/, all use getWorkspace() + requirePermission()
 - Actions: 18 files under src/lib/actions/ contain all business logic
 - Inventory: src/lib/inventory.ts is the ONLY way to modify InventoryPool
 - Couriers: PostEx (live) + Leopard (live) + TCS (stub)
 - Fire-and-forget: insertAuditLog/insertMetricEvent return void
+- Performance: First Load JS 1,070 KB (code-split into 95 chunks). React.memo on leaf components.
+- CRITICAL: Do NOT add module-scope import() maps — use dynamic() in page.tsx only (causes duplicate chunks)
 ```
 
 ### Module-Specific Context
@@ -1641,7 +1721,7 @@ Report the root cause without fixing it yet."
 ```
 
 ### What NOT to Suggest
-- Don't suggest NextAuth — the app uses custom HMAC sessions
+- Don't suggest NextAuth — the app uses custom HMAC sessions (next-auth was removed in Step 4)
 - Don't suggest edge runtime — all routes are `runtime = 'nodejs'`
 - Don't suggest Redis — the app uses TanStack Query + in-memory caching
 - Don't suggest DB-level RLS — isolation is in the app layer
@@ -1649,7 +1729,12 @@ Report the root cause without fixing it yet."
 - Don't suggest indigo/blue colors — design rules prohibit them
 - Don't suggest client-side `z-ai-web-dev-sdk` — it's backend-only
 - Don't suggest `next start` — production uses `bun .next/standalone/server.js`
+- Don't suggest `framer-motion`, `@dnd-kit/*`, `@tanstack/react-table`, `react-markdown`, `@mdxeditor/editor`, `react-syntax-highlighter`, `next-intl` — all were removed as dead dependencies in Step 4
+- Don't add module-scope `import()` maps in `page.tsx` — causes Turbopack to create duplicate chunks. Use `dynamic()` only.
+- Don't suggest `React.Table` — FlowOps uses shadcn/ui `Table` component (`src/components/ui/table.tsx`)
 
 ---
 
-*This document is the authoritative reference for the FlowOps ERP system. Update it when significant changes are made to the architecture, modules, or integrations.*
+*This document is the authoritative reference for the FlowOps ERP system. It MUST be updated whenever significant changes are made to the architecture, modules, dependencies, performance characteristics, or integrations. Do not let it go stale — a stale briefing leads to incorrect AI-assisted code generation.*
+
+*Performance reports: see `perf-baseline.md` (Step 0 baseline) and `perf-results.md` (Step 4+5 after dead dep removal) for detailed before/after bundle measurements.*

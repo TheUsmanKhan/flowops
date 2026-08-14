@@ -8781,3 +8781,47 @@ FILES MODIFIED:
 Stage Summary:
 - Scroll fix: Users now see the top of the form immediately when navigating to any step (especially step 3 Scope & Confirm), instead of starting at the bottom.
 - Hydration fix: The Grammarly/browser-extension hydration mismatch error is eliminated by adding suppressHydrationWarning to <body>.
+
+---
+Task ID: BRIEFING-UPDATE
+Agent: main
+Task: Update FLOWOPS_BRIEFING.md with all recent system changes + add maintenance rule
+
+Work Log:
+
+Updated FLOWOPS_BRIEFING.md (1,656 → 1,740 lines) to reflect ALL changes made in this conversation:
+
+1. HEADER — Added "MAINTENANCE RULE" note: "This document MUST be updated whenever significant changes are made to the architecture, modules, dependencies, or performance characteristics. Do not let it go stale."
+
+2. §1 EXECUTIVE SUMMARY — Updated scale numbers (153 components) + added "Performance posture" section with: First Load JS 1,070 KB, 95 chunks, 70/70 TanStack Query views, React.memo usage, 10 dead deps removed, route-aware LoadingFallback.
+
+3. §3 TECHNOLOGY STACK — Removed stale entries: `@tanstack/react-table`, `framer-motion`, `react-markdown` + `@mdxeditor/editor`. Added new "Removed Dependencies" subsection documenting all 10 removed packages with reasons.
+
+4. §4 ARCHITECTURE — Updated item 2 (HMAC sessions) to note next-auth was removed.
+
+5. §11 FRONTEND ARCHITECTURE — Major updates:
+   - §11.1: Added "Code-splitting strategy" (all 70+ views lazy-loaded via next/dynamic, 95 chunks, 66% First Load JS reduction). Added "Route-aware LoadingFallback" with code example. Added CRITICAL warning about ROUTE_CHUNK_LOADERS (do NOT reintroduce module-scope import maps).
+   - §11.7: Complete rewrite of "Performance Analysis" with current bundle metrics table (First Load JS 1,070 KB, 95 chunks, 4,665 KB total). Updated "What's optimized" list (code-splitting, React.memo, all 70 views on TanStack Query). Added "Known performance issue" (/api/auth/me 500-1000ms, diagnosed root cause).
+   - §11.9: Updated "Data Fetching Patterns" — removed "tech debt" section (6 views migrated). Added staleTime conventions (10s/15s/30s/60s).
+   - §11.11: Updated "Bundle Size Summary" table with current metrics (70 useQuery files, 6+ React.memo views, 70+ dynamic imports, 0 dead deps).
+   - Products-view component: Updated description to "Responsive table (desktop) + stacked card list (mobile)" with 8 columns, md breakpoint switch, memo components.
+   - Product-create-view component: Added note about scroll-to-top on step change.
+
+6. §15 MINI-SERVICES — Updated from "empty" to document the postex-poller scaffold + ENABLE_IN_PROCESS_POLLER toggle.
+
+7. §16 WHAT'S BUILT — Added item 26 (Docker Deployment). Added 10 new "Recently Fixed" items (Steps 1-4, LCP optimization + regression fix, products table, scroll fix, hydration fix, Docker setup). Added item 19 to "Not Yet Built" (/api/auth/me performance — diagnosed, not yet fixed).
+
+8. §18 KNOWN ISSUES — Added item 4 (hydration mismatch from browser extensions — fixed). Added item 5 (Do NOT add module-scope import() maps — causes duplicate chunks). Updated item 7 (ENABLE_IN_PROCESS_POLLER env var). Added item 14 (/api/auth/me 500-1000ms root cause).
+
+9. §19 PROMPT GENERATION GUIDE — Updated "Context to Always Include" (performance metrics, code-splitting, CRITICAL warning about import maps). Expanded "What NOT to Suggest" (added: framer-motion, @dnd-kit, @tanstack/react-table, react-markdown, @mdxeditor/editor, react-syntax-highlighter, next-intl — all removed; don't add module-scope import() maps; don't suggest React.Table).
+
+10. CLOSING NOTE — Updated to emphasize MUST update rule + added references to perf-baseline.md and perf-results.md.
+
+FILES MODIFIED:
+1. /home/z/my-project/FLOWOPS_BRIEFING.md — comprehensive update with all recent changes
+
+Stage Summary:
+- FLOWOPS_BRIEFING.md is now current with ALL changes made in this conversation (Steps 1-5, LCP optimization/regression/fix, products table conversion, scroll fix, hydration fix, Docker setup, auth/me diagnosis).
+- Added a prominent MAINTENANCE RULE at the top reminding future agents to keep this document updated.
+- All stale references to removed dependencies have been cleaned up.
+- Performance metrics are now accurately reflected (1,070 KB First Load JS, 95 chunks, 0 dead deps).
