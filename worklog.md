@@ -9200,3 +9200,40 @@ Stage Summary:
 - Failed attempts can be retried with the same key (ticket only locked on success).
 - Concurrent double-requests return the same cached result (one winner, one replay).
 - Ready for Phase 2 (apply to order/product/customer creation endpoints).
+
+---
+Task ID: IDEMPOTENCY-STALENESS-RECOVERY
+Agent: main
+Task: Add staleness recovery check to withIdempotency()
+
+Work Log:
+
+Added STALE_PROCESSING_THRESHOLD_MS constant (60_000ms = 60s) to src/lib/idempotency.ts.
+
+Modified the polling loop in withIdempotency() — when an existing row has status='processing', BEFORE polling, check its createdAt age:
+- If age > STALE_PROCESSING_THRESHOLD_MS (60s): treat as abandoned → delete the stale row → recursively call withIdempotency() to claim the key fresh and run fn(). This is the same recovery path used for 'failed' rows.
+- If age <= threshold: keep existing poll-then-409 behavior (poll every 300ms up to 5 attempts, then throw ApiError 409).
+
+Rationale: a real creation should never legitimately take >60s. If a 'processing' row is this old, the original request likely crashed, timed out, or the server restarted mid-request. Polling or throwing 409 for a row this old would block the user indefinitely — recovery is the correct behavior.
+
+VERIFICATION (real Postgres):
+
+Test 1 — Stale 'processing' row (createdAt = 2 minutes ago):
+- Manually inserted a row with status='processing', createdAt=now-120s
+- Called withIdempotency() with the same key
+- Result: stale row deleted, fn() ran fresh (called 1 time), wasReplay=false, result returned correctly ✅
+- Final row status: 'completed' with the fresh result stored ✅
+
+Test 2 — Fresh 'processing' row (createdAt = now):
+- Manually inserted a row with status='processing', createdAt=now
+- Called withIdempotency() with the same key
+- Result: fn() NOT called (0 times), polled for ~1.5s, then threw 409 "already being processed" ✅
+- Staleness recovery did NOT trigger (row was fresh — correct behavior)
+
+FILES MODIFIED:
+1. src/lib/idempotency.ts — added STALE_PROCESSING_THRESHOLD_MS constant + staleness check in the polling loop
+
+Stage Summary:
+- Stale 'processing' rows (>60s old) are now recovered automatically — deleted + fn() runs fresh.
+- Fresh 'processing' rows (<60s old) still use the existing poll-then-409 behavior.
+- Verified with real Postgres: stale row recovery works, fresh row polling unchanged.

@@ -23,6 +23,19 @@ import { ApiError } from './workspace'
  * window. We rely on the DB unique constraint and catch the violation.
  */
 
+/**
+ * Threshold for considering a 'processing' row stale.
+ *
+ * If an IdempotencyKey row has status='processing' but its createdAt is
+ * older than this threshold, we treat it as abandoned (the original request
+ * likely crashed or timed out) and recover by deleting it + running fn()
+ * fresh — instead of polling or throwing 409.
+ *
+ * A real creation should never legitimately take this long. If fn() genuinely
+ * needs >60s (e.g., a very slow courier API), consider increasing this.
+ */
+const STALE_PROCESSING_THRESHOLD_MS = 60_000
+
 interface WithIdempotencyParams<T> {
   key: string
   companyId: string
@@ -149,7 +162,20 @@ export async function withIdempotency<T>({
       return withIdempotency({ key, companyId, employeeId, actionType, fn })
     }
 
-    // status === 'processing' — wait briefly and poll again
+    // status === 'processing' — check for staleness BEFORE polling.
+    // If the row is older than STALE_PROCESSING_THRESHOLD_MS, treat it as
+    // abandoned (the original request likely crashed or timed out) and
+    // recover by deleting it + running fn() fresh — same as the 'failed'
+    // path above. A real creation should never take this long.
+    const ageMs = Date.now() - existing.createdAt.getTime()
+    if (ageMs > STALE_PROCESSING_THRESHOLD_MS) {
+      await db.idempotencyKey.delete({ where: { key } }).catch(() => {
+        // If another concurrent request already deleted it, that's fine.
+      })
+      return withIdempotency({ key, companyId, employeeId, actionType, fn })
+    }
+
+    // Row is fresh and still processing — wait briefly and poll again
     await sleep(POLL_INTERVAL_MS)
   }
 
