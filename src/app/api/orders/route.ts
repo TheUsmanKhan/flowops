@@ -125,6 +125,31 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await readBody<CreateManualOrderInput>(req)
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
+    // If an idempotency key is provided, wrap the creation in withIdempotency()
+    // to guarantee only ONE order is created per key (prevents duplicate submissions).
+    if (idempotencyKey) {
+      const { getWorkspace } = await import('@/lib/workspace')
+      const ctx = await getWorkspace()
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: ctx.company.id,
+        employeeId: ctx.employee.id,
+        actionType: 'order.create',
+        fn: async () => {
+          const res = await createManualOrder(body)
+          if (!res.success) {
+            throw new ApiError(400, res.error ?? 'Failed to create order')
+          }
+          return res.data
+        },
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
     const result = await createManualOrder(body)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to create order')

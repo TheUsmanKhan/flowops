@@ -220,6 +220,11 @@ export function ProductCreateView({ onBack, draftId: initialDraftId }: { onBack:
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
 
+  // Idempotency key for product creation — prevents duplicate products from
+  // rapid double-clicks. Generated once per form session (useRef), fresh on
+  // component remount.
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID())
+
   // Step 1 state
   const [title, setTitle] = useState('')
   const [shortDescription, setShortDescription] = useState('')
@@ -586,6 +591,7 @@ export function ProductCreateView({ onBack, draftId: initialDraftId }: { onBack:
       const res = await api.post<{ id: string; slug: string; title: string; variantIds: string[] }>(
         '/api/products',
         payload,
+        { 'Idempotency-Key': idempotencyKeyRef.current },
       )
 
       // 2. Identify variants that have opening stock data filled in. We use

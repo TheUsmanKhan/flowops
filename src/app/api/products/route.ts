@@ -148,167 +148,201 @@ export async function GET(req: Request) {
  */
 export async function POST(req: Request) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({
-      where: { userId: user.id },
-    })
-    const companyId = settings?.activeCompanyId
-    const orgId = settings?.activeOrgId
-    if (!companyId || !orgId) throw new ApiError(403, 'No active company')
-
-    // Permission check
-    const caller = await db.employee.findFirst({
-      where: { companyId, userId: user.id, status: 'active' },
-      include: { role: true },
-    })
-    if (!caller) throw new ApiError(403, 'Not a member of this company.')
-    const allowed =
-      caller.role.roleTier === 'elevated' ||
-      (await db.rolePermission.count({
-        where: { roleId: caller.roleId, permissionKey: PERMISSIONS.PRODUCTS_CREATE },
-      })) > 0
-    if (!allowed) throw new ApiError(403, 'You lack permission to create products.')
-
+    const idempotencyKey = req.headers.get('Idempotency-Key')
     const body = await readBody(req)
-    const parsed = productSchema.safeParse(body)
-    if (!parsed.success) {
-      throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
-    }
-    const d = parsed.data
 
-    // Generate unique slug
-    const baseSlug = d.title
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9\s-]/g, '')
-      .replace(/[\s_-]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 80)
-    let slug = baseSlug || 'product'
-    let n = 1
-    while (await db.orgProduct.findUnique({ where: { organizationId_slug: { organizationId: orgId, slug } } })) {
-      n++
-      slug = `${baseSlug}-${n}`
-    }
+    // The core creation logic — wrapped in a function so it can be called
+    // either directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate submissions).
+    const createProduct = async () => {
+      const user = await getCurrentUser()
+      if (!user) throw new ApiError(401, 'Not authenticated')
+      const settings = await db.userSetting.findUnique({
+        where: { userId: user.id },
+      })
+      const companyId = settings?.activeCompanyId
+      const orgId = settings?.activeOrgId
+      if (!companyId || !orgId) throw new ApiError(403, 'No active company')
 
-    // Validate variant attribute_values (max 3 keys — Shopify limit)
-    for (const v of d.variants) {
-      const keys = Object.keys(v.attribute_values)
-      if (keys.length > 3) {
-        throw new ApiError(400, `Variant ${v.sku} has ${keys.length} attributes. Maximum 3 allowed (Shopify limit).`)
+      // Permission check
+      const caller = await db.employee.findFirst({
+        where: { companyId, userId: user.id, status: 'active' },
+        include: { role: true },
+      })
+      if (!caller) throw new ApiError(403, 'Not a member of this company.')
+      const allowed =
+        caller.role.roleTier === 'elevated' ||
+        (await db.rolePermission.count({
+          where: { roleId: caller.roleId, permissionKey: PERMISSIONS.PRODUCTS_CREATE },
+        })) > 0
+      if (!allowed) throw new ApiError(403, 'You lack permission to create products.')
+
+      const parsed = productSchema.safeParse(body)
+      if (!parsed.success) {
+        throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
       }
-    }
+      const d = parsed.data
 
-    // Create product
-    const product = await db.orgProduct.create({
-      data: {
-        organizationId: orgId,
-        sourceCompanyId: companyId,
-        categoryId: d.category_id || null,
-        brandId: d.brand_id || null,
-        title: d.title,
-        slug,
-        baseSku: d.base_sku || null,
-        description: d.description || null,
-        shortDescription: d.short_description || null,
-        productType: d.product_type,
-        productScope: d.product_scope,
-        isStitchable: d.is_stitchable,
-        hasSizeVariants: d.has_size_variants,
-        stitchingBasePrice: d.stitching_base_price,
-        isActive: d.is_active,
-        isFeatured: d.is_featured,
-        createdById: caller.id,
-      },
-    })
-
-    // Create variants + company pricing
-    const variantRecords: Array<{ id: string }> = []
-    for (const v of d.variants) {
-      // Sync fulfillment_type ↔ inventory_policy
-      const inventoryPolicy = syncInventoryPolicy(v.fulfillment_type, v.allow_backorder)
-
-      // Validate stitching_type ↔ fulfillment_type consistency
-      let fulfillmentType = v.fulfillment_type
-      if (v.stitching_type === 'unstitched') {
-        fulfillmentType = 'stock_based'
-      } else if (['stitched_basic', 'stitched_heavy', 'custom_order'].includes(v.stitching_type ?? '')) {
-        fulfillmentType = 'made_to_order'
+      // Generate unique slug
+      const baseSlug = d.title
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/[\s_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 80)
+      let slug = baseSlug || 'product'
+      let n = 1
+      while (await db.orgProduct.findUnique({ where: { organizationId_slug: { organizationId: orgId, slug } } })) {
+        n++
+        slug = `${baseSlug}-${n}`
       }
 
-      const variant = await db.orgProductVariant.create({
+      // Validate variant attribute_values (max 3 keys — Shopify limit)
+      for (const v of d.variants) {
+        const keys = Object.keys(v.attribute_values)
+        if (keys.length > 3) {
+          throw new ApiError(400, `Variant ${v.sku} has ${keys.length} attributes. Maximum 3 allowed (Shopify limit).`)
+        }
+      }
+
+      // Create product
+      const product = await db.orgProduct.create({
         data: {
-          productId: product.id,
           organizationId: orgId,
-          sku: v.sku,
-          barcode: v.barcode || null,
-          attributeValues: JSON.stringify(v.attribute_values),
-          costPrice: v.cost_price,
-          weightGrams: v.weight_grams,
-          weightKg: v.weight_kg ?? null,
-          fulfillmentType,
-          stitchingType: v.stitching_type ?? null,
-          stitchingCharges: v.stitching_charges,
-          productionDays: v.production_days,
-          isTaxable: v.is_taxable,
-          requiresShipping: v.requires_shipping,
-          inventoryPolicy: syncInventoryPolicy(fulfillmentType, v.allow_backorder),
-          isDefault: v.is_default,
-          isActive: v.is_active,
-          fabricSourceVariantId: v.fabric_source_variant_id || null,
+          sourceCompanyId: companyId,
+          categoryId: d.category_id || null,
+          brandId: d.brand_id || null,
+          title: d.title,
+          slug,
+          baseSku: d.base_sku || null,
+          description: d.description || null,
+          shortDescription: d.short_description || null,
+          productType: d.product_type,
+          productScope: d.product_scope,
+          isStitchable: d.is_stitchable,
+          hasSizeVariants: d.has_size_variants,
+          stitchingBasePrice: d.stitching_base_price,
+          isActive: d.is_active,
+          isFeatured: d.is_featured,
           createdById: caller.id,
         },
       })
-      variantRecords.push(variant)
 
-      // Create company pricing for this variant
-      await db.companyVariantPricing.create({
+      // Create variants + company pricing
+      const variantRecords: Array<{ id: string }> = []
+      for (const v of d.variants) {
+        // Sync fulfillment_type ↔ inventory_policy
+        const inventoryPolicy = syncInventoryPolicy(v.fulfillment_type, v.allow_backorder)
+
+        // Validate stitching_type ↔ fulfillment_type consistency
+        let fulfillmentType = v.fulfillment_type
+        if (v.stitching_type === 'unstitched') {
+          fulfillmentType = 'stock_based'
+        } else if (['stitched_basic', 'stitched_heavy', 'custom_order'].includes(v.stitching_type ?? '')) {
+          fulfillmentType = 'made_to_order'
+        }
+
+        const variant = await db.orgProductVariant.create({
+          data: {
+            productId: product.id,
+            organizationId: orgId,
+            sku: v.sku,
+            barcode: v.barcode || null,
+            attributeValues: JSON.stringify(v.attribute_values),
+            costPrice: v.cost_price,
+            weightGrams: v.weight_grams,
+            weightKg: v.weight_kg ?? null,
+            fulfillmentType,
+            stitchingType: v.stitching_type ?? null,
+            stitchingCharges: v.stitching_charges,
+            productionDays: v.production_days,
+            isTaxable: v.is_taxable,
+            requiresShipping: v.requires_shipping,
+            inventoryPolicy: syncInventoryPolicy(fulfillmentType, v.allow_backorder),
+            isDefault: v.is_default,
+            isActive: v.is_active,
+            fabricSourceVariantId: v.fabric_source_variant_id || null,
+            createdById: caller.id,
+          },
+        })
+        variantRecords.push(variant)
+
+        // Create company pricing for this variant
+        await db.companyVariantPricing.create({
+          data: {
+            companyId,
+            orgVariantId: variant.id,
+            organizationId: orgId,
+            salePrice: v.sale_price,
+            comparePrice: v.compare_price ?? null,
+          },
+        })
+      }
+
+      // Create company_product_settings (creator auto-subscribes)
+      await db.companyProductSetting.create({
         data: {
           companyId,
-          orgVariantId: variant.id,
           organizationId: orgId,
-          salePrice: v.sale_price,
-          comparePrice: v.compare_price ?? null,
+          orgProductId: product.id,
+          subscribedById: caller.id,
         },
       })
-    }
 
-    // Create company_product_settings (creator auto-subscribes)
-    await db.companyProductSetting.create({
-      data: {
+      // Audit + metric
+      insertAuditLog({
+        action: 'product.created',
+        entityType: 'product',
+        entityId: product.id,
         companyId,
         organizationId: orgId,
-        orgProductId: product.id,
-        subscribedById: caller.id,
-      },
-    })
+        userId: user.id,
+        employeeId: caller.id,
+        newValues: {
+          title: product.title,
+          productType: product.productType,
+          variantCount: variantRecords.length,
+          isStitchable: product.isStitchable,
+        },
+      })
+      insertMetricEvent({
+        companyId,
+        entityType: 'product',
+        entityId: product.id,
+        metricKey: 'product.created',
+        numericValue: 1,
+      })
 
-    // Audit + metric
-    insertAuditLog({
-      action: 'product.created',
-      entityType: 'product',
-      entityId: product.id,
-      companyId,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: {
-        title: product.title,
-        productType: product.productType,
-        variantCount: variantRecords.length,
-        isStitchable: product.isStitchable,
-      },
-    })
-    insertMetricEvent({
-      companyId,
-      entityType: 'product',
-      entityId: product.id,
-      metricKey: 'product.created',
-      numericValue: 1,
-    })
+      return { id: product.id, slug: product.slug, title: product.title, variantIds: variantRecords.map(v => v.id) }
+    }
 
-    return Response.json({ id: product.id, slug: product.slug, title: product.title, variantIds: variantRecords.map(v => v.id) })
+    // If an idempotency key is provided, wrap the creation in withIdempotency()
+    if (idempotencyKey) {
+      const user = await getCurrentUser()
+      if (!user) throw new ApiError(401, 'Not authenticated')
+      const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
+      const companyId = settings?.activeCompanyId
+      if (!companyId) throw new ApiError(403, 'No active company')
+      const caller = await db.employee.findFirst({
+        where: { companyId, userId: user.id, status: 'active' },
+        select: { id: true },
+      })
+
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId,
+        employeeId: caller?.id,
+        actionType: 'product.create',
+        fn: createProduct,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createProduct()
+    return Response.json(result, { status: 201 })
   } catch (err) {
     return handleError(err)
   }

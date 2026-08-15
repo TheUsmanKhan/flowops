@@ -269,6 +269,15 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   // state on the submit button.
   const [uploadingProof, setUploadingProof] = useState(false)
 
+  // Idempotency key for order creation — generated once per form session.
+  // Prevents duplicate orders from rapid double-clicks. Regenerated on
+  // component remount (new useRef initialization).
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID())
+
+  // Track whether the order creation itself is in-flight (separate from
+  // uploadingProof which tracks the post-creation payment proof upload).
+  const [submittingOrder, setSubmittingOrder] = useState(false)
+
   // ── Phase 5: Booking failure state for inline Retry UI ──
   // When auto-booking fails after order creation, the order is still saved
   // but we stay on the create page to show an inline banner with a Retry
@@ -818,8 +827,11 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
 
     const payload = buildPayload()
 
+    setSubmittingOrder(true)
     try {
-      const data = await api.post<CreateOrderResponse>('/api/orders', payload)
+      const data = await api.post<CreateOrderResponse>('/api/orders', payload, {
+        'Idempotency-Key': idempotencyKeyRef.current,
+      })
 
       // ── Order creation is ALWAYS successful at this point ──
       toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
@@ -858,6 +870,8 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       navigate({ name: 'order-detail', id: data.orderId })
     } catch (err) {
       toast.error(getErrorMessage(err))
+    } finally {
+      setSubmittingOrder(false)
     }
   }
 
@@ -902,7 +916,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     return undefined
   }
 
-  const isSubmitting = uploadingProof
+  const isSubmitting = uploadingProof || submittingOrder
 
   // The AddressSelector manages {usedCustomerAddressId, deliveryAddress,
   // deliveryCity, saveAddressForNextTime} as a single value object.

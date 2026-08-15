@@ -9289,3 +9289,61 @@ Stage Summary:
 - regenerateKey() for "Create & Add Another" patterns.
 - Button cursor fixed globally: pointer on hover, not-allowed on disabled, with reduced opacity.
 - Ready for Phase 3 (apply to order/product/customer creation forms).
+
+---
+Task ID: IDEMPOTENCY-PHASE3-ROLLOUT
+Agent: main
+Task: Phase 3 — Apply idempotency to Order, Product, and Customer creation flows
+
+Work Log:
+
+1. ORDER CREATE:
+   - Backend: POST /api/orders route reads `Idempotency-Key` header, wraps createManualOrder() in withIdempotency({ actionType: 'order.create' }). If no header present, falls through to normal flow (backwards-compatible).
+   - Frontend: order-create-view.tsx — added idempotencyKeyRef (useRef, crypto.randomUUID()) + submittingOrder state. The api.post('/api/orders', payload, { 'Idempotency-Key': key }) call now includes the header. isSubmitting now tracks both uploadingProof AND submittingOrder. Submit button already disabled via isSubmitting.
+   - Response shape unchanged.
+
+2. PRODUCT CREATE:
+   - Backend: POST /api/products route — refactored the inline creation logic into a `createProduct()` closure, then wraps it in withIdempotency({ actionType: 'product.create' }) when an Idempotency-Key header is present. Backwards-compatible fallback.
+   - Frontend: product-create-view.tsx — added idempotencyKeyRef (useRef). The api.post('/api/products', payload, { 'Idempotency-Key': key }) call now includes the header. Submit button already disabled via `submitting` state.
+   - Response shape unchanged.
+
+3. CUSTOMER CREATE:
+   - Backend: POST /api/customers route — wraps createCustomer() in withIdempotency({ actionType: 'customer.create' }) when header present. Backwards-compatible fallback.
+   - Frontend: CreateCustomerForm.tsx — replaced useMutation with useIdempotentMutation({ url: '/api/customers' }). The hook auto-generates the key and sends it as a header. Drop-in replacement — same interface (mutate, isPending, etc.).
+   - Response shape unchanged.
+
+VERIFICATION (actual results, not assumptions):
+
+Verification 2 — Race condition (2 concurrent requests, SAME Idempotency-Key):
+- Fired 2 simultaneous curl requests to POST /api/products with the same key
+- Result A: HTTP 200, product ID = cmsurth6p0004r086b8gmeiqw
+- Result B: HTTP 200, product ID = cmsurth6p0004r086b8gmeiqw (SAME — replay)
+- Products with "Race Test" title: exactly 1 (not 2) ✅
+- Dev log shows "Unique constraint failed" — this is the LOSING request hitting the DB constraint, which withIdempotency() catches and recovers from by returning the cached result ✅
+
+Verification 4 — Failed-then-retry (same key):
+- Attempt 1 (missing title field): HTTP 400 "Invalid input: expected string, received undefined" ✅
+- Attempt 2 (correct payload, SAME Idempotency-Key): HTTP 201, product created successfully ✅
+- "Retry Success Product" count: exactly 1 ✅
+- The failed attempt did NOT permanently block the retry — the 'failed' status was cleaned up and the retry ran fresh ✅
+
+Lint: 0 errors ✅
+TSC: 0 new errors ✅
+Dev log: no unexpected errors (the "Unique constraint failed" messages are expected behavior from the losing race request) ✅
+
+FILES MODIFIED:
+1. src/app/api/orders/route.ts — POST handler reads Idempotency-Key header, wraps in withIdempotency()
+2. src/app/api/products/route.ts — POST handler refactored to createProduct() closure + withIdempotency()
+3. src/app/api/customers/route.ts — POST handler wraps createCustomer() in withIdempotency()
+4. src/components/orders/order-create-view.tsx — added idempotencyKeyRef + submittingOrder state + Idempotency-Key header on api.post
+5. src/components/products/product-create-view.tsx — added idempotencyKeyRef + Idempotency-Key header on api.post
+6. src/components/customers/CreateCustomerForm.tsx — replaced useMutation with useIdempotentMutation
+
+Stage Summary:
+- All 3 creation flows (Order, Product, Customer) now have idempotency protection.
+- Backend: withIdempotency() wraps each creation — DB unique constraint on key enforces atomicity.
+- Frontend: idempotency key generated per form session (useRef), sent as Idempotency-Key header.
+- Submit buttons already disabled during isPending/isSubmitting (prevents rapid double-clicks at the UI layer).
+- Backwards-compatible: if no Idempotency-Key header is sent, routes fall through to normal flow.
+- Race condition verified: 2 concurrent requests → only 1 record created, both return same result.
+- Failed-then-retry verified: failed attempt doesn't block retry with same key.

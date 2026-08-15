@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api } from '@/lib/api-client'
 import { Button } from '@/components/ui/button'
@@ -62,16 +62,17 @@ export function CreateCustomerForm({
     { _key: nextKey(), address: '', city: '', is_default: true, label: '' },
   ])
 
-  const createMutation = useMutation({
-    mutationFn: async (input: CreateCustomerInput) =>
-      api.post<{ customerId: string }>('/api/customers', input),
-    onSuccess: (data) => {
-      toast.success('Customer created.')
-      onCreated(data.customerId)
-    },
-    onError: (err: unknown) => {
-      const msg = err instanceof Error ? err.message : 'Failed to create customer'
-      toast.error(msg)
+  const createMutation = useIdempotentMutation<{ customerId: string }, CreateCustomerInput>({
+    url: '/api/customers',
+    mutationOptions: {
+      onSuccess: (data) => {
+        toast.success('Customer created.')
+        onCreated(data.customerId)
+      },
+      onError: (err: unknown) => {
+        const msg = err instanceof Error ? err.message : 'Failed to create customer'
+        toast.error(msg)
+      },
     },
   })
 

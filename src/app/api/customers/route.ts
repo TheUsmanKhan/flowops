@@ -190,6 +190,30 @@ export async function POST(req: Request) {
     // createCustomerSchema, normalizes phones, checks org-wide uniqueness,
     // and inserts customer + phones + addresses in a single transaction.
     const input = body as unknown as CreateCustomerInput
+
+    // If an idempotency key is provided, wrap the creation in withIdempotency()
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+    if (idempotencyKey) {
+      const { getWorkspace } = await import('@/lib/workspace')
+      const ctx = await getWorkspace()
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: ctx.company.id,
+        employeeId: ctx.employee.id,
+        actionType: 'customer.create',
+        fn: async () => {
+          const res = await createCustomer(input)
+          if (!res.success || !res.data) {
+            throw new ApiError(400, res.error ?? 'Failed to create customer')
+          }
+          return res.data
+        },
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
     const result = await createCustomer(input)
 
     if (!result.success || !result.data) {
