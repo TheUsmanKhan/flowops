@@ -9237,3 +9237,55 @@ Stage Summary:
 - Stale 'processing' rows (>60s old) are now recovered automatically — deleted + fn() runs fresh.
 - Fresh 'processing' rows (<60s old) still use the existing poll-then-409 behavior.
 - Verified with real Postgres: stale row recovery works, fresh row polling unchanged.
+
+---
+Task ID: IDEMPOTENCY-PHASE2-FRONTEND
+Agent: main
+Task: Phase 2 — Frontend: useIdempotentMutation() hook + cursor-pointer fix
+
+Work Log:
+
+Task A — useIdempotentMutation() hook:
+
+1. Extended api-client.ts to support custom headers per-request:
+   - Added optional `headers?: Record<string, string>` parameter to api.post(), api.put(), api.patch().
+   - The request() function already merged custom headers (line 59), but the typed helpers didn't expose them.
+   - This is backwards-compatible — existing calls without headers work unchanged.
+
+2. Created src/hooks/use-idempotent-mutation.ts:
+   - Generates a fresh idempotency key (crypto.randomUUID()) ONCE per component instance via useRef.
+   - The key persists across re-renders (useRef) but is fresh per mount — when the component unmounts and remounts (e.g., navigating to a fresh create form), a new key is generated automatically.
+   - Automatically includes the key as the `Idempotency-Key` header on every POST request.
+   - Exposes the same interface as useMutation (mutate, mutateAsync, isPending, isError, isSuccess, etc.) — drop-in replacement.
+   - Exposes `regenerateKey()` for "Create & Add Another" patterns (explicitly regenerate after success to get a fresh key for the next record).
+   - Exposes `idempotencyKey` (via getter) for debugging/display.
+   - Used useCallback for regenerateKey + getIdempotencyKey to satisfy React Compiler (avoids accessing refs during render).
+
+Task B — Button cursor + disabled state fix:
+
+Modified src/components/ui/button.tsx base classes:
+- Added `cursor-pointer` to the resting state (all buttons now show pointer cursor by default).
+- Changed `disabled:pointer-events-none` to `disabled:cursor-not-allowed` — the old `pointer-events-none` prevented the cursor from changing at all on disabled buttons. Now disabled buttons show the "not-allowed" cursor AND are still visually inert (reduced opacity via `disabled:opacity-50`).
+- The native `disabled` attribute on `<button>` elements already prevents click events, so `pointer-events-none` was redundant for actual click prevention — it was only preventing the cursor change.
+- This fix applies to ALL shadcn Button components across all 62+ views at once (single shared component).
+
+VERIFICATION:
+- Lint: 0 errors ✅
+- TSC: 0 errors ✅
+- Agent Browser (live):
+  - shadcn Button components (data-slot=button): cursor=pointer ✅
+  - "New Product" button: cursor=pointer ✅
+  - Disabled button test: cursor=not-allowed, opacity=0.5 ✅
+  - disabled:pointer-events-none removed (0 occurrences) ✅
+
+FILES MODIFIED:
+1. src/lib/api-client.ts — added optional headers parameter to post/put/patch helpers
+2. src/components/ui/button.tsx — added cursor-pointer, replaced disabled:pointer-events-none with disabled:cursor-not-allowed
+3. src/hooks/use-idempotent-mutation.ts — NEW: useIdempotentMutation() hook
+
+Stage Summary:
+- useIdempotentMutation() hook created — drop-in replacement for useMutation in creation flows.
+- Auto-generates idempotency key per form session, sends as Idempotency-Key header.
+- regenerateKey() for "Create & Add Another" patterns.
+- Button cursor fixed globally: pointer on hover, not-allowed on disabled, with reduced opacity.
+- Ready for Phase 3 (apply to order/product/customer creation forms).
