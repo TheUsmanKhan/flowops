@@ -1,18 +1,19 @@
 /**
  * Courier Booking Cancellation — Server Action.
  *
- * Cancels a courier booking on the courier's side (PostEx) AND in FlowOps
- * atomically. Only available while the shipment hasn't been physically
- * picked up by the courier (courierSubStatus must be 'slip_generated' or
- * 'pickup_requested').
+ * Cancels a courier booking on the courier's side (PostEx or Leopard) AND
+ * in FlowOps atomically. Only available while the shipment hasn't been
+ * physically picked up by the courier (courierSubStatus must be
+ * 'slip_generated' or 'pickup_requested').
  *
- * On success: the courier booking is cancelled on PostEx, the entity's
- * courierBookingStatus is set to 'cancelled', and the entity itself is
- * cancelled via the existing cancelOrder() / cancelExchangeShipment()
- * logic (which handles stock unreservation + status transition + audit).
+ * On success: the courier booking is cancelled on the courier's side, the
+ * entity's courierBookingStatus is set to 'cancelled', and the entity
+ * itself is cancelled via the existing cancelOrder() /
+ * cancelExchangeShipment() logic (which handles stock unreservation +
+ * status transition + audit).
  *
  * On failure: NO state changes are made — the entity stays in its prior
- * state, and the error from PostEx is propagated to the caller.
+ * state, and the error from the courier is propagated to the caller.
  *
  * Tracking number is PRESERVED for historical/audit purposes.
  */
@@ -129,10 +130,9 @@ export async function cancelCourierBooking(
     }
 
     const providerKey = integration.provider.providerKey
-    if (providerKey !== 'postex') {
-      return { success: false, error: `Courier cancellation not yet implemented for provider '${providerKey}'.` }
-    }
-
+    // Both PostEx and Leopard have real, working cancelShipment() implementations.
+    // TCS is a stub and will throw "not implemented" from inside the adapter —
+    // that error propagates naturally through executeLoggedIntegrationAction.
     const credentials = decryptCredentials(integration.credentialsEncrypted)
     const adapter = getCourierAdapter(providerKey, credentials)
 
@@ -176,18 +176,18 @@ export async function cancelCourierBooking(
       const { cancelOrder } = await import('./order.actions')
       const cancelResult = await cancelOrder({
         order_id: entityId,
-        cancellation_reason: 'Courier booking cancelled (pre-pickup cancellation via PostEx API)',
+        cancellation_reason: 'Courier booking cancelled (pre-pickup cancellation via courier API)',
       })
 
       if (!cancelResult.success) {
-        // PostEx cancellation succeeded but FlowOps cancellation failed.
-        // This is an inconsistent state — log it but don't hide the PostEx success.
+        // PostEx/Leopard cancellation succeeded but FlowOps cancellation failed.
+        // This is an inconsistent state — log it but don't hide the courier success.
         console.error(
-          `[cancelCourierBooking] PostEx cancellation succeeded for ${entityId} but FlowOps cancelOrder() failed: ${cancelResult.error}`,
+          `[cancelCourierBooking] Courier cancellation succeeded for ${entityId} but FlowOps cancelOrder() failed: ${cancelResult.error}`,
         )
         return {
           success: false,
-          error: `Courier booking cancelled on PostEx, but FlowOps order cancellation failed: ${cancelResult.error}. The tracking number ${trackingNumber} is cancelled on the courier side. Please manually cancel the order in FlowOps.`,
+          error: `Courier booking cancelled on the courier side, but FlowOps order cancellation failed: ${cancelResult.error}. The tracking number ${trackingNumber} is cancelled on the courier side. Please manually cancel the order in FlowOps.`,
         }
       }
     } else {
@@ -203,19 +203,23 @@ export async function cancelCourierBooking(
       //   - unreserveStockForOrder() if was confirmed
       //   - audit log: exchange_shipment.cancelled
       //   - metric event
+      // Pass skipCourierCall=true because WE already called the courier
+      // adapter above — without this, cancelExchangeShipment() would try
+      // to call cancelCourierBooking() again (circular call).
       const { cancelExchangeShipment } = await import('./exchange-shipment.actions')
       const cancelResult = await cancelExchangeShipment(
         entityId,
-        'Courier booking cancelled (pre-pickup cancellation via PostEx API)',
+        'Courier booking cancelled (pre-pickup cancellation via courier API)',
+        true, // skipCourierCall — we already handled the courier side
       )
 
       if (!cancelResult.success) {
         console.error(
-          `[cancelCourierBooking] PostEx cancellation succeeded for shipment ${entityId} but FlowOps cancelExchangeShipment() failed: ${cancelResult.error}`,
+          `[cancelCourierBooking] Courier cancellation succeeded for shipment ${entityId} but FlowOps cancelExchangeShipment() failed: ${cancelResult.error}`,
         )
         return {
           success: false,
-          error: `Courier booking cancelled on PostEx, but FlowOps shipment cancellation failed: ${cancelResult.error}.`,
+          error: `Courier booking cancelled on the courier side, but FlowOps shipment cancellation failed: ${cancelResult.error}.`,
         }
       }
     }

@@ -8962,3 +8962,114 @@ Stage Summary:
 - Other views: unaffected (global refetchOnWindowFocus: false still holds).
 - Workspace switch: immediately invalidates session query (activeCompanyId changed).
 - Server-side caching deliberately deferred (documented in briefing).
+
+---
+Task ID: COURIER-CANCEL-FIX
+Agent: main
+Task: Fix courier cancellation bugs (Bug A: Leopard blocked, Bug B: exchange shipments internal-only)
+
+Work Log:
+
+STEP 1 — IntegrationActionLog CHECK constraint (dependency check):
+- Searched supabase/migrations/ for the CHECK constraint on relatedEntityType.
+- Found migration 018 (018_integration_log_exchange_shipment_check.sql) which already adds 'exchange_shipment' to the allowed values.
+- Verified against the LIVE database:
+  SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'integration_action_logs_relatedEntityType_check'
+  Result: CHECK (("relatedEntityType" IS NULL) OR ("relatedEntityType" = ANY (ARRAY['order','product','exchange_shipment'])))
+- 'exchange_shipment' IS already allowed.
+- Confirmed by inserting a test IntegrationActionLog row with entityType='exchange_shipment' — succeeded, then deleted.
+- VERDICT: No fix needed. The constraint already includes 'exchange_shipment'.
+
+STEP 2 — Bug A: Remove PostEx-only guard for Leopard:
+- Removed the guard at courier-cancel.actions.ts:132-134 that rejected all non-'postex' providers.
+- Before: `if (providerKey !== 'postex') { return { success: false, error: '...' } }`
+- After: guard deleted entirely. The existing flow (load adapter → call cancelShipment() → check result → update state on success → log) now runs for ALL providers including Leopard.
+- Checked cancel-courier-booking-button.tsx: the error message "not yet implemented for provider" is NOT hardcoded in any UI — it's displayed generically via toast.error(). Safe to remove.
+- Updated JSDoc comments at top of file from "PostEx" to "PostEx or Leopard".
+- Updated internal error messages from "PostEx cancellation succeeded" to "Courier cancellation succeeded" (courier-agnostic).
+- Updated cancellation_reason strings from "via PostEx API" to "via courier API".
+
+STEP 3 — Bug B: Exchange shipment cancellation must contact the courier:
+
+INVESTIGATION of cancelExchangeShipment():
+- Read the full function (exchange-shipment.actions.ts:1049-1127).
+- Found it handles TWO cases:
+  1. Shipments with status='confirmed' (stock was reserved) — unreserves stock, then sets status='cancelled'.
+  2. Shipments with status='pending' or 'backordered' (no stock reserved) — just sets status='cancelled'.
+- It does NOT check trackingNumber at all — it never calls any courier adapter.
+- ExchangeShipment schema has: trackingNumber (String?), courierSubStatus (String?), courierBookingStatus (String, default 'not_booked'), courierCompanyIntegrationId (String?).
+- So a shipment CAN have no trackingNumber (never booked with a courier) — in that case, courier cancellation should be SKIPPED.
+
+IMPLEMENTATION:
+- Added a `skipCourierCall = false` parameter to cancelExchangeShipment().
+- Before any internal state change, if `!skipCourierCall && shipment.trackingNumber`:
+  - Calls cancelCourierBooking('exchange_shipment', exchangeShipmentId) — reusing the existing correct function.
+  - If courier cancellation fails: returns the failure immediately, does NOT change internal state.
+  - If courier cancellation succeeds: cancelCourierBooking() already called cancelExchangeShipment(skipCourierCall=true) internally to handle stock-unreserve + status update. Returns success.
+- If `skipCourierCall=true` OR `!shipment.trackingNumber`: proceeds with the existing internal-only cancellation (stock unreserve + status update + audit + metric).
+- Updated cancelCourierBooking() to pass `skipCourierCall=true` when calling cancelExchangeShipment() — prevents circular call (cancelCourierBooking → cancelExchangeShipment → cancelCourierBooking → infinite loop).
+
+CIRCULAR CALL PREVENTION:
+- cancelCourierBooking() (entityType='exchange_shipment') → calls adapter → on success → calls cancelExchangeShipment(id, reason, skipCourierCall=true)
+- cancelExchangeShipment(skipCourierCall=false) → if trackingNumber → calls cancelCourierBooking() → (success) → calls cancelExchangeShipment(skipCourierCall=true) → internal-only
+- The skipCourierCall flag breaks the cycle at the second call.
+
+SCAN.ACTIONS.TS VERIFICATION:
+- scan.actions.ts:294-295 calls cancelCourierBooking(entityType, entityId) — reuses the same function.
+- It inherits both fixes automatically (Leopard support + exchange shipment courier call).
+- No code change needed in scan.actions.ts. CONFIRMED.
+
+VERIFICATION (6 points):
+
+1. Cancel Leopard-booked ORDER via cancel button:
+   - Code path: cancel-courier-booking-button.tsx → POST /api/courier-cancel → cancelCourierBooking('order', id)
+   - Guard removed → leopard.adapter.ts:448 cancelShipment() called → POST cancelBookedPackets
+   - Result checked at courier-cancel.actions.ts:151 → internal state only updates on success
+   - Logged via executeLoggedIntegrationAction with actionType='cancel_shipment'
+   - Status: ✅ FIXED (code-verified; live API test not possible without Leopard credentials)
+
+2. Cancel PostEx-booked exchange shipment WITH trackingNumber:
+   - Code path: POST /api/exchange-shipments/[id]/cancel → cancelExchangeShipment(id, reason)
+   - exchange-shipment.actions.ts:1093: trackingNumber exists → calls cancelCourierBooking('exchange_shipment', id)
+   - cancelCourierBooking → postex.adapter.ts:391 PUT /v1/cancel-order → checks result → cancelExchangeShipment(skipCourierCall=true)
+   - Status: ✅ FIXED (code-verified)
+
+3. Cancel Leopard-booked exchange shipment WITH trackingNumber:
+   - Same path as #2, but providerKey='leopard' → leopard.adapter.ts:448 POST cancelBookedPackets
+   - Status: ✅ FIXED (code-verified)
+
+4. Cancel exchange shipment WITHOUT trackingNumber (never booked):
+   - exchange-shipment.actions.ts:1093: !trackingNumber → skips courier call
+   - Proceeds directly to internal stock-unreserve + status update
+   - Status: ✅ UNCHANGED (was already correct for this case)
+   - Live API test: called POST /api/exchange-shipments/nonexistent-id/cancel → HTTP 400 "Exchange shipment not found." (graceful, no crash)
+
+5. IntegrationActionLog CHECK constraint:
+   - Confirmed in Step 1: 'exchange_shipment' already allowed.
+   - Test insert succeeded.
+   - Status: ✅ VERIFIED
+
+6. Scan-initiated cancellation:
+   - scan.actions.ts:294-295 calls cancelCourierBooking() — inherits both fixes.
+   - No code change needed.
+   - Status: ✅ CONFIRMED
+
+API TESTS (live):
+- POST /api/exchange-shipments/nonexistent-id/cancel → HTTP 400 "Exchange shipment not found." ✅
+- POST /api/courier-cancel {entityType:'order', entityId:'nonexistent'} → HTTP 400 "Order not found." ✅
+- POST /api/courier-cancel {entityType:'exchange_shipment', entityId:'nonexistent'} → HTTP 400 "Exchange shipment not found." ✅
+- Zero errors in dev log.
+
+LINT: 0 errors. TSC: 0 new errors (3 pre-existing errors in rto/route.ts + exchange-shipment.actions.ts:940 — unrelated to this fix).
+
+FILES MODIFIED:
+1. src/lib/actions/courier-cancel.actions.ts — removed PostEx-only guard (lines 132-134 deleted); updated JSDoc + error messages to be courier-agnostic; pass skipCourierCall=true when calling cancelExchangeShipment()
+2. src/lib/actions/exchange-shipment.actions.ts — added skipCourierCall parameter to cancelExchangeShipment(); added courier-call-first logic when trackingNumber exists
+
+Stage Summary:
+- Bug A FIXED: Leopard orders can now be cancelled via the courier cancel button (guard removed).
+- Bug B FIXED: Exchange shipments WITH a trackingNumber now call the courier's cancel API before updating internal state. Exchange shipments WITHOUT a trackingNumber still cancel internally-only (correct behavior).
+- Circular call prevented via skipCourierCall flag.
+- scan.actions.ts inherits both fixes automatically (no changes needed).
+- IntegrationActionLog CHECK constraint already supports 'exchange_shipment' (migration 018 was already applied).
+- All 6 verification points confirmed (code-verified + API error handling tested live).

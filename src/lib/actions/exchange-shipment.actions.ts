@@ -1049,6 +1049,11 @@ export async function markExchangeShipmentCodCollected(
 export async function cancelExchangeShipment(
   exchangeShipmentId: string,
   reason: string,
+  /** Internal: when true, skip the courier API call (caller already handled it).
+   *  Used by cancelCourierBooking() to avoid a circular call — it calls the
+   *  courier adapter itself, then calls this function with skipCourierCall=true
+   *  to handle only the internal stock-unreserve + status update. */
+  skipCourierCall = false,
 ): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
@@ -1074,6 +1079,32 @@ export async function cancelExchangeShipment(
       }
     }
 
+    // ── Courier-side cancellation ────────────────────────────────────
+    // If the shipment HAS a tracking number (was actually booked with a
+    // courier) AND the caller didn't already handle the courier side
+    // (skipCourierCall=false), call cancelCourierBooking() FIRST — before
+    // any internal state change. If the courier API fails, do NOT mark the
+    // shipment cancelled internally (the booking stays active on the
+    // courier's side).
+    //
+    // If the shipment has NO tracking number (never booked with a courier,
+    // e.g. still in 'reserved' status), skip the courier call entirely —
+    // there's nothing to cancel on the courier's side.
+    if (!skipCourierCall && shipment.trackingNumber) {
+      const { cancelCourierBooking } = await import('./courier-cancel.actions')
+      const courierResult = await cancelCourierBooking('exchange_shipment', exchangeShipmentId)
+      if (!courierResult.success) {
+        // Courier cancellation failed — propagate the error, do NOT change
+        // internal state. The shipment stays in its prior status.
+        return courierResult
+      }
+      // Courier cancellation succeeded — cancelCourierBooking() already
+      // called cancelExchangeShipment(skipCourierCall=true) internally to
+      // handle the stock-unreserve + status update. We're done.
+      return { success: true }
+    }
+
+    // ── Internal cancellation (stock unreserve + status update) ──────
     // If stock was reserved, unreserve it
     if (shipment.status === 'confirmed') {
       const locationId = shipment.orderExchange.originalOrder.dispatchLocationId
