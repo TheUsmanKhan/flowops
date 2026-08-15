@@ -2584,3 +2584,24 @@ model EmployeeAdvance {
   @@index([employeeId, status])
   @@index([createdByEmployeeId])
 }
+
+/// Idempotency key for duplicate-submission protection on creation endpoints.
+/// Client generates a UUID per form-session; server guarantees only ONE
+/// successful creation per key via the unique constraint on `key`.
+/// A ticket is only "claimed" on SUCCESS — failed attempts can be retried.
+model IdempotencyKey {
+  id            String   @id @default(cuid())
+  key           String   @unique
+  companyId     String
+  employeeId    String?
+  actionType    String
+  status        String   @default("processing") // 'processing' | 'completed' | 'failed'
+  resourceType  String?
+  resourceId    String?
+  responseBody  Json?
+  createdAt     DateTime @default(now())
+  completedAt   DateTime?
+
+  @@index([companyId, actionType])
+  @@index([createdAt])
+}

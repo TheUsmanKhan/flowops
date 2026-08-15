@@ -9139,3 +9139,64 @@ Stage Summary:
 - Already-internally-cancelled orders can have their courier booking cancelled retroactively via the CancelCourierBookingButton.
 - Post-dispatch cancellation remains blocked (was already correct).
 - Circular calls prevented via skipCourierCall flags in both cancelOrder() and cancelExchangeShipment().
+
+---
+Task ID: IDEMPOTENCY-PHASE1
+Agent: main
+Task: Phase 1 — IdempotencyKey model + withIdempotency() helper for duplicate-submission protection
+
+Work Log:
+
+Step 1 — Added IdempotencyKey model to prisma/schema.prisma:
+- Fields: id, key (unique), companyId, employeeId, actionType, status ('processing'|'completed'|'failed'), resourceType, resourceId, responseBody (Json), createdAt, completedAt
+- Indexes: @@index([companyId, actionType]), @@index([createdAt]) for future cleanup job
+- Ran `prisma db push` — schema synced to Supabase Postgres (7.25s)
+- Prisma Client regenerated (v6.19.2)
+
+Step 2 — Created src/lib/idempotency.ts with withIdempotency() helper:
+
+The function uses the DB unique constraint on `key` as the atomicity guarantee — NOT a "check then create" pattern (which has a race window).
+
+Behavior:
+1. Attempt to INSERT an IdempotencyKey row with status='processing'.
+   - If insert SUCCEEDS: this request won the race → run fn() → on success, store result + return { result, wasReplay: false }; on failure, mark row as 'failed' + re-throw.
+   - If insert FAILS with P2002 (unique constraint violation): another request already claimed this key → fall through to step 3.
+2. For the LOSING request (unique constraint violation):
+   - Look up the existing row by key.
+   - If status='completed': return the cached responseBody as { result, wasReplay: true } — the frontend can't tell the difference.
+   - If status='processing': poll every 300ms, up to 5 attempts (~1.5s total). If it completes, return cached result. If it times out, throw ApiError(409, "already being processed").
+   - If status='failed': delete the failed row and retry fresh (recursive call) — preserves the "only success locks the ticket" semantic.
+
+Circular call prevention: the 'failed' retry path deletes the failed row first, then re-calls withIdempotency() which can claim the key fresh.
+
+VERIFICATION (real Postgres, not mocked):
+
+Test 1 — Single call:
+- fn() called 1 time, wasReplay=false, result returned correctly ✅
+
+Test 2 — Replay with same key:
+- fn() called 0 times, wasReplay=true, returned the ORIGINAL cached result (not the new fn()'s result) ✅
+
+Test 3 — Concurrent double-call (true race condition via Promise.all):
+- Both calls fired simultaneously with the same key
+- fn() called exactly ONCE (callCount=1)
+- One winner (wasReplay=false), one replay (wasReplay=true)
+- Both returned the SAME result (the winner's) ✅
+
+Test 4 — Failed attempt then retry with same key:
+- First attempt: fn() throws → error propagated, row marked as 'failed'
+- Second attempt (same key): detects 'failed' status → deletes row → retries fresh → fn() succeeds → result returned, wasReplay=false ✅
+
+All 4 tests passed against the real Supabase Postgres database.
+
+FILES CREATED/MODIFIED:
+1. prisma/schema.prisma — added IdempotencyKey model
+2. src/lib/idempotency.ts — NEW: withIdempotency() helper
+
+Stage Summary:
+- IdempotencyKey model added to schema + pushed to DB.
+- withIdempotency() helper created and verified against real Postgres with concurrent requests.
+- Unique constraint on `key` enforces atomicity — no race window.
+- Failed attempts can be retried with the same key (ticket only locked on success).
+- Concurrent double-requests return the same cached result (one winner, one replay).
+- Ready for Phase 2 (apply to order/product/customer creation endpoints).
