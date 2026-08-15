@@ -1049,8 +1049,8 @@ This makes the LCP text element paint as soon as the Suspense boundary renders, 
 > ⚠️ **IMPORTANT — Do NOT add `ROUTE_CHUNK_LOADERS`**: A previous attempt to "prefetch" route chunks in parallel with session hydration used a module-scope map of 55 `() => import(...)` functions. Turbopack statically analyzed all 55 targets and created DUPLICATE chunks (+55 chunks, +1,303 KB). This was removed. The ONLY place each route's code should be imported is the `dynamic()` call. Do not reintroduce module-scope import maps.
 
 **Pre-switch gating logic:**
-1. **Hydration**: On mount, fires `GET /api/auth/me`. If URL has `?view=...`, restores that route. Listens to `popstate` for browser back/forward.
-2. **Loading screen**: `<Loader2 className="animate-spin">` while `!hydrated`.
+1. **Hydration via TanStack Query**: On mount, `useQuery(['session', 'me'])` fires `GET /api/auth/me`. This query has a **deliberate per-query override**: `refetchOnWindowFocus: true` (the global default is `false`). Session validity (active employee status, permissions, platform-level access) is the one place where catching a change quickly after the user returns to a background tab matters — e.g., an employee terminated while their tab sat in the background should see their UI reflect that promptly on refocus. Every other view stays on the global `false` default because they display data, not gate security-sensitive UI. The query result is wired into `useAppStore.setSession()` via a `useEffect` — first fetch shows a loading spinner, background refetches update the store silently (only if data changed). If URL has `?view=...`, restores that route. Listens to `popstate` for browser back/forward.
+2. **Loading screen**: `<Loader2 className="animate-spin">` while `!hydrated` (first session fetch only — background refetches do NOT show a spinner).
 3. **Unauthenticated** (`!user`): login/register/forgot/reset forms, all wrapped in `AuthShell`.
 4. **Authenticated but not onboarded**: `OnboardingView` / `CreateOrganizationView` / `CreateCompanyView`.
 5. **Authenticated + onboarded**: `<DashboardShell>{renderRoute(route)}</DashboardShell>`.
@@ -1317,7 +1317,7 @@ Standard shadcn/ui (New York style) + 4 custom FlowOps components:
 - **`useCallback`**: Used in 8+ files for stable handler references.
 - **Debounced search**: 300ms debounce on customer/product/city autocomplete (7 instances).
 - **Optimistic workspace switch**: `setQueryData` flips `is_active_workspace` before server responds.
-- **Targeted cache invalidation**: Workspace switcher invalidates exactly 5 keys (not whole cache).
+- **Targeted cache invalidation**: Workspace switcher invalidates exactly 6 keys (not whole cache): `['dashboard']`, `['employees']`, `['roles']`, `['audit-logs']`, `['company']`, and `['session', 'me']` (added so the session refetches immediately after activeCompanyId changes, not waiting for next focus event).
 - **Prefetch**: Dashboard data prefetched after workspace switch.
 - **Fire-and-forget audit/metric writes**: Non-blocking DB writes (see §9).
 
@@ -1592,6 +1592,8 @@ The sandbox exposes one port (81) via Caddy:
 18. **Data Export** — `REPORTS_EXPORT` permission exists but no CSV/Excel export
 19. ~~**`/api/auth/me` performance**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN. Latency reduced from ~696ms to ~210ms (67% faster). See §11.7.
 
+    > **Note (deferred, not forgotten)**: Server-side in-memory caching for `/api/auth/me` was considered and deliberately deferred after the raw-SQL JOIN fix brought warm requests to ~210ms. At current traffic levels, the marginal gain (shaving ~210ms to ~1-5ms only on repeat calls within a short window) didn't justify the added invalidation complexity (workspace switch, termination, role change, future isBlocked flag). Revisit this alongside introducing Redis, once either (a) a second server replica is deployed, or (b) concurrent DB read load from this endpoint becomes measurable.
+
 ---
 
 ## 17. Key Conventions & Patterns
@@ -1672,7 +1674,7 @@ const result = await executeLoggedIntegrationAction({
 ### Performance
 12. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
 13. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
-14. ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw query JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. See `src/lib/session-payload.ts`.
+14. ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1 + Phase 2)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw query JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. See `src/lib/session-payload.ts`. Phase 2: client-side stale-while-revalidate caching added via TanStack Query (`refetchOnWindowFocus: true` scoped to session query only — see §11.1). Server-side in-memory cache deliberately deferred (see §16 item 19 note).
 
 ---
 

@@ -109,6 +109,10 @@ export function WorkspaceSwitcher() {
       queryClient.invalidateQueries({ queryKey: ['roles'] })
       queryClient.invalidateQueries({ queryKey: ['audit-logs'] })
       queryClient.invalidateQueries({ queryKey: ['company'] })
+      // Session query must refetch immediately after a workspace switch —
+      // activeCompanyId just changed, so the cached session data is stale.
+      // Without this, the session would only refresh on next tab focus/reconnect.
+      queryClient.invalidateQueries({ queryKey: ['session', 'me'] })
 
       // PREFETCH the dashboard data so it's ready before the user lands
       // on the dashboard page — eliminates the post-switch loading gap.

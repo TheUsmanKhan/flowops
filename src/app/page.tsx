@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import dynamic from 'next/dynamic'
 import { useAppStore } from '@/stores/app-store'
-import { api, FetchError } from '@/lib/api-client'
+import { api } from '@/lib/api-client'
 import { queryToRoute, replaceRouteInURL } from '@/lib/routing/url-sync'
 import type { SessionResponse } from '@/lib/types'
 import { Loader2 } from 'lucide-react'
@@ -187,45 +188,97 @@ const OrderScanView = dynamic(() => import('@/components/orders/order-scan-view'
 const DraftsView = dynamic(() => import('@/components/shared/drafts-view').then(m => ({ default: m.DraftsView })), { ssr: false, loading: LoadingFallback })
 
 export default function Page() {
-  const { hydrated, loading, route, user, activeCompany, employee, setSession, setHydrated, navigate, reset } =
+  const { hydrated, route, user, activeCompany, employee, setSession, setHydrated, navigate } =
     useAppStore()
 
-  // Hydrate session on first load.
+  // Track whether this is the first session fetch (cold start) vs a background
+  // refetch (tab refocus, reconnect, invalidation). On the first fetch we show
+  // a loading spinner; on background refetches we update the store silently.
+  const isFirstFetchRef = useRef(true)
+
+  // ─── Session hydration via TanStack Query ──────────────────────────
+  // This query intentionally overrides the app's global refetchOnWindowFocus:
+  // false default. Session validity (active employee status, permissions,
+  // platform-level access) is the one place where catching a change quickly
+  // after the user returns to a background tab actually matters — e.g., an
+  // employee terminated while their tab sat in the background should have
+  // their UI reflect that promptly on refocus, not only on their next manual
+  // page refresh. Every other view in this app is correctly left on the
+  // global default because those views display data, not gate
+  // security-sensitive UI. Do not "clean up" this override to match the
+  // global default in future refactors.
+  const sessionQuery = useQuery<SessionResponse>({
+    queryKey: ['session', 'me'],
+    queryFn: () => api.get<SessionResponse>('/api/auth/me'),
+    staleTime: 60_000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
+    retry: 1,
+  })
+
+  // Wire session data into the Zustand store.
   useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const session = await api.get<SessionResponse>('/api/auth/me')
-        if (cancelled) return
+    const session = sessionQuery.data
+    if (!session) return
 
-        // URL sync: restore route from URL query string on initial load/refresh
-        const urlRoute = queryToRoute()
-        const currentRoute = useAppStore.getState().route
+    // On the very first successful fetch, restore the URL route + set hydrated.
+    if (isFirstFetchRef.current) {
+      isFirstFetchRef.current = false
+      const urlRoute = queryToRoute()
+      const currentRoute = useAppStore.getState().route
 
+      setSession({
+        user: session.user,
+        activeCompany: session.activeCompany,
+        companies: session.companies,
+        employee: session.employee ?? undefined,
+      })
+
+      // If the URL has a route, restore it (overrides the default 'login')
+      if (urlRoute && urlRoute.name !== currentRoute.name) {
+        if (session.user) {
+          useAppStore.getState().navigate(urlRoute)
+        }
+      }
+    } else {
+      // Background refetch: update the store ONLY if the session data
+      // actually changed, so the UI updates without a visible loading flicker.
+      const currentUser = useAppStore.getState().user
+      const currentActiveCompanyId = useAppStore.getState().activeCompany?.id
+      const newActiveCompanyId = session.activeCompany?.id
+      const newPermissions = session.employee?.permissions ?? []
+      const currentPermissions = useAppStore.getState().employee?.permissions ?? []
+
+      const userChanged = currentUser?.id !== session.user?.id
+      const companyChanged = currentActiveCompanyId !== newActiveCompanyId
+      const permissionsChanged =
+        newPermissions.length !== currentPermissions.length ||
+        newPermissions.some((p, i) => p !== currentPermissions[i])
+
+      if (userChanged || companyChanged || permissionsChanged || !currentUser) {
         setSession({
           user: session.user,
           activeCompany: session.activeCompany,
           companies: session.companies,
           employee: session.employee ?? undefined,
         })
-
-        // If the URL has a route, restore it (overrides the default 'login')
-        if (urlRoute && urlRoute.name !== currentRoute.name) {
-          // Only restore if user is authenticated (urlRoute could be a protected view)
-          if (session.user) {
-            useAppStore.getState().navigate(urlRoute)
-          }
-        }
-      } catch {
-        if (cancelled) return
-        setHydrated(true)
       }
-    })()
-    return () => {
-      cancelled = true
     }
-     
-  }, [])
+  }, [sessionQuery.data, setSession])
+
+  // On query error (401, network failure), mark hydrated so the login screen shows.
+  useEffect(() => {
+    if (sessionQuery.error && !hydrated) {
+      setHydrated(true)
+    }
+  }, [sessionQuery.error, hydrated, setHydrated])
+
+  // Mark hydrated on first successful fetch (if not already set by setSession).
+  useEffect(() => {
+    if (sessionQuery.isSuccess && !hydrated) {
+      setHydrated(true)
+    }
+  }, [sessionQuery.isSuccess, hydrated, setHydrated])
 
   // Browser back/forward: sync URL → Zustand state
   // NOTE: The useFormGuard's use-browser-back-guard also listens to popstate.
@@ -260,14 +313,9 @@ export default function Page() {
      
   }, [hydrated, route.name, 'id' in route ? route.id : '', 'token' in route ? route.token : ''])
 
-  // Loading screen while hydrating.
-  if (!hydrated && loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <Loader2 className="h-6 w-6 animate-spin text-primary" />
-      </div>
-    )
-  }
+  // Loading screen while hydrating (first session fetch only).
+  // On background refetches, sessionQuery.isFetching is true but we DON'T show
+  // a spinner — TanStack Query returns cached data instantly while revalidating.
   if (!hydrated) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
