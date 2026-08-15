@@ -9073,3 +9073,69 @@ Stage Summary:
 - scan.actions.ts inherits both fixes automatically (no changes needed).
 - IntegrationActionLog CHECK constraint already supports 'exchange_shipment' (migration 018 was already applied).
 - All 6 verification points confirmed (code-verified + API error handling tested live).
+
+---
+Task ID: ORDER-CANCEL-COURIER-FIX
+Agent: main
+Task: Fix order cancellation to always cancel on courier side + allow retroactive courier cancel
+
+Work Log:
+
+ISSUES identified:
+1. cancelOrder() in order.actions.ts did NOT call the courier cancel API — it only did internal cancellation (stock unreserve + status change). If an order had a courier booking (trackingNumber + courierSubStatus='slip_generated'/'pickup_requested'), the courier booking stayed active.
+2. cancelCourierBooking() rejected already-cancelled orders (guard at line 80: "Order is already cancelled") — so an order cancelled internally could NOT have its courier booking cancelled retroactively.
+3. Post-dispatch cancellation was already blocked (cancelOrder line 1433: nonCancellableStatuses includes 'dispatched') — no fix needed.
+
+FIX 1 — cancelOrder() now calls courier cancel API first:
+- Added skipCourierCall parameter to cancelOrder() (default false).
+- Before any internal state change, if !skipCourierCall AND order has trackingNumber AND courierSubStatus is 'slip_generated' or 'pickup_requested':
+  - Calls cancelCourierBooking('order', orderId) — reusing the existing correct function.
+  - If courier fails: returns the failure immediately, does NOT change internal state.
+  - If courier succeeds: cancelCourierBooking() already called cancelOrder(skipCourierCall=true) internally — returns success.
+- If no trackingNumber (never booked): skips courier call, proceeds with internal-only cancellation.
+- Circular call prevention: cancelCourierBooking() passes skipCourierCall=true when calling cancelOrder().
+
+FIX 2 — cancelCourierBooking() allows retroactive courier cancellation:
+- Removed the guard that rejected already-cancelled orders (lines 80-82 deleted).
+- Removed the guard that rejected already-cancelled exchange shipments (lines 100-102 deleted).
+- Added entityAlreadyCancelled tracking: if the entity is already 'cancelled' internally, skip the internal cancelOrder()/cancelExchangeShipment() call after the courier API succeeds — just set courierBookingStatus='cancelled' + audit log.
+- The CancelCourierBookingButton visibility is based on courierSubStatus (not order.status), so it already shows for internally-cancelled orders that still have an active courier booking.
+
+FIX 3 — Post-dispatch cancellation already blocked:
+- cancelOrder() line 1447: nonCancellableStatuses = ['dispatched', 'delivered', 'rto', 'cancelled', 'refunded'] — already blocks dispatched orders.
+- No change needed.
+
+VERIFICATION:
+- API tests (live):
+  - POST /api/orders/nonexistent-id/cancel → HTTP 400 "Order not found" ✅
+  - POST /api/courier-cancel {entityType:'order', entityId:'nonexistent'} → HTTP 400 "Order not found." ✅
+  - POST /api/exchange-shipments/nonexistent-id/cancel → HTTP 400 "Exchange shipment not found." ✅
+- Zero errors in dev log ✅
+- Lint: 0 errors ✅
+- TSC: 0 new errors (2 pre-existing errors in performOrderDispatch — unrelated) ✅
+
+CODE PATH SUMMARY (all scenarios):
+
+1. Order with courier booking cancelled via regular cancel flow:
+   cancelOrder() → detects trackingNumber + slip_generated → calls cancelCourierBooking('order', id) → adapter.cancelShipment() → (success) → cancelOrder(skipCourierCall=true) → internal stock-unreserve + status='cancelled'
+
+2. Order without courier booking cancelled via regular cancel flow:
+   cancelOrder() → no trackingNumber → skips courier call → internal stock-unreserve + status='cancelled' (unchanged behavior)
+
+3. Already-internally-cancelled order, retroactive courier cancel via CancelCourierBookingButton:
+   cancelCourierBooking('order', id) → entityAlreadyCancelled=true → adapter.cancelShipment() → (success) → sets courierBookingStatus='cancelled' only (skips cancelOrder since already cancelled) → audit log
+
+4. Exchange shipment with trackingNumber cancelled via /api/exchange-shipments/[id]/cancel:
+   cancelExchangeShipment() → detects trackingNumber → calls cancelCourierBooking('exchange_shipment', id) → adapter.cancelShipment() → (success) → cancelExchangeShipment(skipCourierCall=true) → internal stock-unreserve + status='cancelled'
+
+5. Dispatched order: cancelOrder() → nonCancellableStatuses blocks 'dispatched' → returns error "Cannot cancel an order that is already dispatched" (unchanged)
+
+FILES MODIFIED:
+1. src/lib/actions/order.actions.ts — added skipCourierCall parameter to cancelOrder(); added courier-call-first logic when trackingNumber exists; changed findFirst to use explicit select with courier fields
+2. src/lib/actions/courier-cancel.actions.ts — removed guards that rejected already-cancelled orders/shipments; added entityAlreadyCancelled tracking; skip internal cancel call if entity already cancelled
+
+Stage Summary:
+- Internal cancellation now automatically cancels on courier side too (if booking exists and is pre-pickup).
+- Already-internally-cancelled orders can have their courier booking cancelled retroactively via the CancelCourierBookingButton.
+- Post-dispatch cancellation remains blocked (was already correct).
+- Circular calls prevented via skipCourierCall flags in both cancelOrder() and cancelExchangeShipment().

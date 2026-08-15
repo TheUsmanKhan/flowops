@@ -1414,7 +1414,14 @@ export async function markCodCollected(
 // cancelOrder
 // ──────────────────────────────────────────────────────────────
 
-export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult> {
+export async function cancelOrder(
+  input: CancelOrderInput,
+  /** Internal: when true, skip the courier API call (caller already handled it).
+   *  Used by cancelCourierBooking() to avoid a circular call — it calls the
+   *  courier adapter itself, then calls this function with skipCourierCall=true
+   *  to handle only the internal stock-unreserve + status update. */
+  skipCourierCall = false,
+): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
     await requirePermission(ctx, PERMISSIONS.ORDERS_CANCEL)
@@ -1427,6 +1434,20 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
 
     const order = await db.order.findFirst({
       where: { id: d.order_id, companyId: ctx.company.id },
+      select: {
+        id: true,
+        status: true,
+        trackingNumber: true,
+        courierCompanyIntegrationId: true,
+        courierSubStatus: true,
+        courierBookingStatus: true,
+        dispatchLocationId: true,
+        organizationId: true,
+        customerId: true,
+        totalOrderValue: true,
+        salesEmployeeId: true,
+        packedAt: true,
+      },
     })
     if (!order) return { success: false, error: 'Order not found' }
 
@@ -1436,6 +1457,35 @@ export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult
         success: false,
         error: `Cannot cancel an order that is already ${order.status} (use the returns flow instead)`,
       }
+    }
+
+    // ── Courier-side cancellation ────────────────────────────────────
+    // If this order has a courier booking (trackingNumber + pre-pickup
+    // courierSubStatus) AND the caller didn't already handle the courier
+    // side (skipCourierCall=false), call cancelCourierBooking() FIRST —
+    // before any internal state change. If the courier API fails, do NOT
+    // mark the order cancelled internally (the booking stays active on
+    // the courier's side, and we don't want a mismatch).
+    //
+    // If the order has no trackingNumber (never booked with a courier),
+    // skip the courier call — there's nothing to cancel on that side.
+    if (
+      !skipCourierCall &&
+      order.trackingNumber &&
+      order.courierSubStatus &&
+      ['slip_generated', 'pickup_requested'].includes(order.courierSubStatus)
+    ) {
+      const { cancelCourierBooking } = await import('./courier-cancel.actions')
+      const courierResult = await cancelCourierBooking('order', d.order_id)
+      if (!courierResult.success) {
+        // Courier cancellation failed — propagate the error, do NOT
+        // change internal state. The order stays in its prior status.
+        return courierResult
+      }
+      // Courier cancellation succeeded — cancelCourierBooking() already
+      // called cancelOrder() internally to handle the stock-unreserve +
+      // status update. We're done; don't double-process.
+      return { success: true }
     }
 
     // ── Phase 3: Set physicalUnpackRequired if the order was already

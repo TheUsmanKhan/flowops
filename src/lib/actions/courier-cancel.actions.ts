@@ -58,6 +58,7 @@ export async function cancelCourierBooking(
     let trackingNumber: string | null
     let courierIntegrationId: string | null
     let courierSubStatus: string | null
+    let entityAlreadyCancelled = false
 
     if (entityType === 'order') {
       const order = await db.order.findFirst({
@@ -75,11 +76,12 @@ export async function cancelCourierBooking(
       trackingNumber = order.trackingNumber
       courierIntegrationId = order.courierCompanyIntegrationId
       courierSubStatus = order.courierSubStatus
+      entityAlreadyCancelled = order.status === 'cancelled'
 
-      // Guard: only cancellable if not already cancelled in FlowOps
-      if (order.status === 'cancelled') {
-        return { success: false, error: 'Order is already cancelled.' }
-      }
+      // Allow retroactive courier cancellation even if the order is already
+      // cancelled internally — the courier booking may still be active on
+      // the courier's side. We'll skip the internal cancelOrder() call
+      // below if status is already 'cancelled'.
     } else {
       const shipment = await db.exchangeShipment.findFirst({
         where: { id: entityId, companyId: ctx.company.id },
@@ -96,10 +98,10 @@ export async function cancelCourierBooking(
       trackingNumber = shipment.trackingNumber
       courierIntegrationId = shipment.courierCompanyIntegrationId
       courierSubStatus = shipment.courierSubStatus
+      entityAlreadyCancelled = shipment.status === 'cancelled'
 
-      if (shipment.status === 'cancelled') {
-        return { success: false, error: 'Exchange shipment is already cancelled.' }
-      }
+      // Allow retroactive courier cancellation even if the shipment is
+      // already cancelled internally — same rationale as orders above.
     }
 
     // ── 2. Guard: only cancellable if courierSubStatus is slip_generated or pickup_requested ──
@@ -159,35 +161,48 @@ export async function cancelCourierBooking(
     // Set courierBookingStatus='cancelled' FIRST (before calling the entity's
     // own cancel logic, which may transition the status to 'cancelled' and
     // prevent further updates).
+    //
+    // If the entity is ALREADY cancelled internally (entityAlreadyCancelled=true),
+    // skip the internal cancelOrder()/cancelExchangeShipment() call — the
+    // internal state was already handled; we're only here to cancel the
+    // courier-side booking retroactively.
     if (entityType === 'order') {
       await db.order.update({
         where: { id: entityId },
         data: { courierBookingStatus: 'cancelled' },
       })
 
-      // Reuse the existing cancelOrder() logic — it handles:
-      //   - status → 'cancelled'
-      //   - cancelledAt = now()
-      //   - cancellationReason
-      //   - unreserveStockForOrder() per reserved item
-      //   - audit log: order.cancelled
-      //   - metric event
-      //   - updateCustomerStats()
-      const { cancelOrder } = await import('./order.actions')
-      const cancelResult = await cancelOrder({
-        order_id: entityId,
-        cancellation_reason: 'Courier booking cancelled (pre-pickup cancellation via courier API)',
-      })
-
-      if (!cancelResult.success) {
-        // PostEx/Leopard cancellation succeeded but FlowOps cancellation failed.
-        // This is an inconsistent state — log it but don't hide the courier success.
-        console.error(
-          `[cancelCourierBooking] Courier cancellation succeeded for ${entityId} but FlowOps cancelOrder() failed: ${cancelResult.error}`,
+      if (!entityAlreadyCancelled) {
+        // Reuse the existing cancelOrder() logic — it handles:
+        //   - status → 'cancelled'
+        //   - cancelledAt = now()
+        //   - cancellationReason
+        //   - unreserveStockForOrder() per reserved item
+        //   - audit log: order.cancelled
+        //   - metric event
+        //   - updateCustomerStats()
+        // Pass skipCourierCall=true because WE already called the courier
+        // adapter above — without this, cancelOrder() would try to call
+        // cancelCourierBooking() again (circular call).
+        const { cancelOrder } = await import('./order.actions')
+        const cancelResult = await cancelOrder(
+          {
+            order_id: entityId,
+            cancellation_reason: 'Courier booking cancelled (pre-pickup cancellation via courier API)',
+          },
+          true, // skipCourierCall — we already handled the courier side
         )
-        return {
-          success: false,
-          error: `Courier booking cancelled on the courier side, but FlowOps order cancellation failed: ${cancelResult.error}. The tracking number ${trackingNumber} is cancelled on the courier side. Please manually cancel the order in FlowOps.`,
+
+        if (!cancelResult.success) {
+          // Courier cancellation succeeded but FlowOps cancellation failed.
+          // This is an inconsistent state — log it but don't hide the courier success.
+          console.error(
+            `[cancelCourierBooking] Courier cancellation succeeded for ${entityId} but FlowOps cancelOrder() failed: ${cancelResult.error}`,
+          )
+          return {
+            success: false,
+            error: `Courier booking cancelled on the courier side, but FlowOps order cancellation failed: ${cancelResult.error}. The tracking number ${trackingNumber} is cancelled on the courier side. Please manually cancel the order in FlowOps.`,
+          }
         }
       }
     } else {
@@ -197,29 +212,31 @@ export async function cancelCourierBooking(
         data: { courierBookingStatus: 'cancelled' },
       })
 
-      // Reuse the existing cancelExchangeShipment() logic — it handles:
-      //   - status → 'cancelled'
-      //   - cancelledAt = now()
-      //   - unreserveStockForOrder() if was confirmed
-      //   - audit log: exchange_shipment.cancelled
-      //   - metric event
-      // Pass skipCourierCall=true because WE already called the courier
-      // adapter above — without this, cancelExchangeShipment() would try
-      // to call cancelCourierBooking() again (circular call).
-      const { cancelExchangeShipment } = await import('./exchange-shipment.actions')
-      const cancelResult = await cancelExchangeShipment(
-        entityId,
-        'Courier booking cancelled (pre-pickup cancellation via courier API)',
-        true, // skipCourierCall — we already handled the courier side
-      )
-
-      if (!cancelResult.success) {
-        console.error(
-          `[cancelCourierBooking] Courier cancellation succeeded for shipment ${entityId} but FlowOps cancelExchangeShipment() failed: ${cancelResult.error}`,
+      if (!entityAlreadyCancelled) {
+        // Reuse the existing cancelExchangeShipment() logic — it handles:
+        //   - status → 'cancelled'
+        //   - cancelledAt = now()
+        //   - unreserveStockForOrder() if was confirmed
+        //   - audit log: exchange_shipment.cancelled
+        //   - metric event
+        // Pass skipCourierCall=true because WE already called the courier
+        // adapter above — without this, cancelExchangeShipment() would try
+        // to call cancelCourierBooking() again (circular call).
+        const { cancelExchangeShipment } = await import('./exchange-shipment.actions')
+        const cancelResult = await cancelExchangeShipment(
+          entityId,
+          'Courier booking cancelled (pre-pickup cancellation via courier API)',
+          true, // skipCourierCall — we already handled the courier side
         )
-        return {
-          success: false,
-          error: `Courier booking cancelled on the courier side, but FlowOps shipment cancellation failed: ${cancelResult.error}.`,
+
+        if (!cancelResult.success) {
+          console.error(
+            `[cancelCourierBooking] Courier cancellation succeeded for shipment ${entityId} but FlowOps cancelExchangeShipment() failed: ${cancelResult.error}`,
+          )
+          return {
+            success: false,
+            error: `Courier booking cancelled on the courier side, but FlowOps shipment cancellation failed: ${cancelResult.error}.`,
+          }
         }
       }
     }
