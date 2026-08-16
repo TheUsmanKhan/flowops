@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
@@ -204,17 +205,18 @@ export function ReceiveStockView() {
   }, [locationId, locationsQuery.data])
 
   // ── Mutation ─────────────────────────────────────────────────────────────
-  const receiveMutation = useMutation({
-    mutationFn: async (payload: ReceivePayload) =>
-      api.post('/api/inventory/receive', payload),
-    onSuccess: (_data, vars) => {
-      const unitCount = vars.items.reduce((s, i) => s + i.quantity, 0)
-      toast.success(`Received ${unitCount} unit${unitCount === 1 ? '' : 's'} across ${vars.items.length} item${vars.items.length === 1 ? '' : 's'}.`)
-      void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
-      void queryClient.invalidateQueries({ queryKey: ['locations'] })
-      navigate({ name: 'inventory' })
+  const receiveMutation = useIdempotentMutation<unknown, ReceivePayload>({
+    url: '/api/inventory/receive',
+    mutationOptions: {
+      onSuccess: (_data, vars) => {
+        const unitCount = vars.items.reduce((s, i) => s + i.quantity, 0)
+        toast.success(`Received ${unitCount} unit${unitCount === 1 ? '' : 's'} across ${vars.items.length} item${vars.items.length === 1 ? '' : 's'}.`)
+        void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+        void queryClient.invalidateQueries({ queryKey: ['locations'] })
+        navigate({ name: 'inventory' })
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   // ── Item manipulation ────────────────────────────────────────────────────

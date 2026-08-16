@@ -49,6 +49,8 @@ export async function GET() {
 /** Create a new custom (standard) role. */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -84,41 +86,62 @@ export async function POST(req: Request) {
     })
     if (existing) throw new ApiError(409, 'A role with this name already exists.')
 
-    const role = await db.role.create({
-      data: {
-        companyId: company.id,
-        name,
-        description: description || null,
-        roleTier: 'standard',
-        isSystemRole: false,
-        ordersDataScope,
-        createdById: user.id,
-        rolePermissions: {
-          create: permissions.map((key) => ({
-            companyId: company.id,
-            permissionKey: key,
-          })),
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate role submissions).
+    const createRole = async () => {
+      const role = await db.role.create({
+        data: {
+          companyId: company.id,
+          name,
+          description: description || null,
+          roleTier: 'standard',
+          isSystemRole: false,
+          ordersDataScope,
+          createdById: user!.id,
+          rolePermissions: {
+            create: permissions.map((key) => ({
+              companyId: company.id,
+              permissionKey: key,
+            })),
+          },
         },
-      },
-      include: { rolePermissions: { select: { permissionKey: true } } },
-    })
+        include: { rolePermissions: { select: { permissionKey: true } } },
+      })
 
-    insertAuditLog({
-      action: 'role.created',
-      entityType: 'role',
-      entityId: role.id,
-      companyId: company.id,
-      organizationId: company.organizationId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: { name, description, permissions, ordersDataScope },
-    })
+      insertAuditLog({
+        action: 'role.created',
+        entityType: 'role',
+        entityId: role.id,
+        companyId: company.id,
+        organizationId: company.organizationId,
+        userId: user!.id,
+        employeeId: caller.id,
+        newValues: { name, description, permissions, ordersDataScope },
+      })
 
-    return Response.json({
-      id: role.id,
-      name: role.name,
-      permissions: role.rolePermissions.map((p) => p.permissionKey),
-    })
+      return {
+        id: role.id,
+        name: role.name,
+        permissions: role.rolePermissions.map((p) => p.permissionKey),
+      }
+    }
+
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'role.create',
+        fn: createRole,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createRole()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

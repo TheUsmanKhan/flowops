@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
@@ -627,14 +628,15 @@ function CreateReturnDialog({
   const totalValue = qty * cpu
   const insufficientStock = pool ? qty > pool.onHand : false
 
-  const createMutation = useMutation({
-    mutationFn: async (payload: CreatePayload) =>
-      api.post('/api/supplier-returns', payload),
-    onSuccess: () => {
-      toast.success('Supplier return recorded. Stock reduced immediately.')
-      onSuccess()
+  const createMutation = useIdempotentMutation<unknown, CreatePayload>({
+    url: '/api/supplier-returns',
+    mutationOptions: {
+      onSuccess: () => {
+        toast.success('Supplier return recorded. Stock reduced immediately.')
+        onSuccess()
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   const handleSubmit = () => {

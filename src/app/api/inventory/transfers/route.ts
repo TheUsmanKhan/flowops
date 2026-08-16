@@ -16,6 +16,8 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -72,97 +74,118 @@ export async function POST(req: Request) {
 
     const costPerUnitAtTransfer = Number(sourcePool.avgCost)
 
-    // Create the stock_transfer record
-    const transfer = await db.stockTransfer.create({
-      data: {
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate transfer submissions).
+    const createTransfer = async () => {
+      // Create the stock_transfer record
+      const transfer = await db.stockTransfer.create({
+        data: {
+          organizationId: orgId,
+          orgVariantId: body.org_variant_id!,
+          fromLocationId: body.from_location_id!,
+          toLocationId: body.to_location_id!,
+          quantity: body.quantity!,
+          costPerUnitAtTransfer,
+          logisticsCost: body.logistics_cost || 0,
+          status: 'completed',
+          notes: body.notes || null,
+          initiatedById: caller.id,
+        },
+      })
+
+      // Process transfer_out at source location
+      const outResult = await processInventoryTransaction({
+        orgVariantId: body.org_variant_id!,
+        locationId: body.from_location_id!,
         organizationId: orgId,
-        orgVariantId: body.org_variant_id,
-        fromLocationId: body.from_location_id,
-        toLocationId: body.to_location_id,
-        quantity: body.quantity,
-        costPerUnitAtTransfer,
-        logisticsCost: body.logistics_cost || 0,
+        companyId: company.id,
+        employeeId: caller.id,
+        transactionType: 'transfer_out',
+        quantity: body.quantity!,
+        costPerUnit: costPerUnitAtTransfer,
+        referenceType: 'transfer',
+        referenceId: transfer.id,
+        notes: `Transfer to ${body.to_location_id}`,
+      })
+      if (!outResult.success) {
+        throw new ApiError(500, `Transfer out failed: ${outResult.error}`)
+      }
+
+      // Process transfer_in at destination location
+      // costPerUnit is the sending location's cost — logistics_cost is NOT merged
+      const inResult = await processInventoryTransaction({
+        orgVariantId: body.org_variant_id!,
+        locationId: body.to_location_id!,
+        organizationId: orgId,
+        companyId: company.id,
+        employeeId: caller.id,
+        transactionType: 'transfer_in',
+        quantity: body.quantity!,
+        costPerUnit: costPerUnitAtTransfer,
+        referenceType: 'transfer',
+        referenceId: transfer.id,
+        notes: `Transfer from ${body.from_location_id}`,
+      })
+      if (!inResult.success) {
+        throw new ApiError(500, `Transfer in failed: ${inResult.error}`)
+      }
+
+      insertAuditLog({
+        action: 'stock.transferred',
+        entityType: 'transfer',
+        entityId: transfer.id,
+        companyId: company.id,
+        organizationId: orgId,
+        userId: user.id,
+        employeeId: caller.id,
+        newValues: {
+          quantity: body.quantity,
+          costPerUnitAtTransfer,
+          logisticsCost: body.logistics_cost || 0,
+          fromLocation: body.from_location_id,
+          toLocation: body.to_location_id,
+        },
+      })
+
+      // ── Metric event (CRITICAL — powers stock movement / turnover KPIs) ──
+      insertMetricEvent({
+        companyId: company.id,
+        entityType: 'product',
+        entityId: body.org_variant_id!,
+        metricKey: 'inventory.stock_transferred',
+        numericValue: body.quantity! * costPerUnitAtTransfer,
+        dimensions: {
+          from_location_id: body.from_location_id,
+          to_location_id: body.to_location_id,
+          logistics_cost: body.logistics_cost ?? 0,
+          quantity: body.quantity,
+        },
+      })
+
+      return {
+        id: transfer.id,
         status: 'completed',
-        notes: body.notes || null,
-        initiatedById: caller.id,
-      },
-    })
-
-    // Process transfer_out at source location
-    const outResult = await processInventoryTransaction({
-      orgVariantId: body.org_variant_id,
-      locationId: body.from_location_id,
-      organizationId: orgId,
-      companyId: company.id,
-      employeeId: caller.id,
-      transactionType: 'transfer_out',
-      quantity: body.quantity,
-      costPerUnit: costPerUnitAtTransfer,
-      referenceType: 'transfer',
-      referenceId: transfer.id,
-      notes: `Transfer to ${body.to_location_id}`,
-    })
-    if (!outResult.success) {
-      throw new ApiError(500, `Transfer out failed: ${outResult.error}`)
+        outTxnId: outResult.transactionId,
+        inTxnId: inResult.transactionId,
+      }
     }
 
-    // Process transfer_in at destination location
-    // costPerUnit is the sending location's cost — logistics_cost is NOT merged
-    const inResult = await processInventoryTransaction({
-      orgVariantId: body.org_variant_id,
-      locationId: body.to_location_id,
-      organizationId: orgId,
-      companyId: company.id,
-      employeeId: caller.id,
-      transactionType: 'transfer_in',
-      quantity: body.quantity,
-      costPerUnit: costPerUnitAtTransfer,
-      referenceType: 'transfer',
-      referenceId: transfer.id,
-      notes: `Transfer from ${body.from_location_id}`,
-    })
-    if (!inResult.success) {
-      throw new ApiError(500, `Transfer in failed: ${inResult.error}`)
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'inventory.transfer',
+        fn: createTransfer,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
     }
 
-    insertAuditLog({
-      action: 'stock.transferred',
-      entityType: 'transfer',
-      entityId: transfer.id,
-      companyId: company.id,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: {
-        quantity: body.quantity,
-        costPerUnitAtTransfer,
-        logisticsCost: body.logistics_cost || 0,
-        fromLocation: body.from_location_id,
-        toLocation: body.to_location_id,
-      },
-    })
-
-    // ── Metric event (CRITICAL — powers stock movement / turnover KPIs) ──
-    insertMetricEvent({
-      companyId: company.id,
-      entityType: 'product',
-      entityId: body.org_variant_id,
-      metricKey: 'inventory.stock_transferred',
-      numericValue: body.quantity * costPerUnitAtTransfer,
-      dimensions: {
-        from_location_id: body.from_location_id,
-        to_location_id: body.to_location_id,
-        logistics_cost: body.logistics_cost ?? 0,
-        quantity: body.quantity,
-      },
-    })
-
-    return Response.json({
-      id: transfer.id,
-      status: 'completed',
-      outTxnId: outResult.transactionId,
-      inTxnId: inResult.transactionId,
-    })
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createTransfer()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

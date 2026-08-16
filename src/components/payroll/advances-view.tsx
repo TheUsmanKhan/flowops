@@ -7,8 +7,8 @@
  * Shows amount, remaining balance, repayment plan, status, and a "Record Advance" dialog.
  */
 
-import { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useState, useRef } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, FetchError } from '@/lib/api-client'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -195,6 +195,7 @@ function RecordAdvanceDialog({
   const [repaymentPlan, setRepaymentPlan] = useState<'lump_sum' | 'installments'>('lump_sum')
   const [installmentAmount, setInstallmentAmount] = useState('')
   const [saving, setSaving] = useState(false)
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID())
 
   async function save() {
     if (!employeeId || !amount || !reason) {
@@ -222,6 +223,8 @@ function RecordAdvanceDialog({
         reason,
         repaymentPlan,
         installmentAmount: repaymentPlan === 'installments' ? parseFloat(installmentAmount) : undefined,
+      }, {
+        'Idempotency-Key': idempotencyKeyRef.current,
       })
       toast.success('Advance recorded')
       onSuccess()

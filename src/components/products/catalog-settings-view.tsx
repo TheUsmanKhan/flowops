@@ -1,9 +1,10 @@
 'use client'
 
-import { useEffect, useMemo, useState , memo} from 'react'
+import { useEffect, useMemo, useState , memo, useRef} from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { z } from 'zod'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
@@ -364,24 +365,27 @@ function CategoriesTab() {
     return { roots, childrenByParent }
   }, [categories])
 
-  const createMutation = useMutation({
-    mutationFn: (values: CategoryFormValues) =>
-      api.post('/api/categories', {
-        name: values.name,
-        parentId: values.parentId || undefined,
-        imageUrl: values.imageUrl || undefined,
-        displayOrder: values.displayOrder ?? 0,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['categories'] })
-      toast.success('Category created')
-      setAddOpen(false)
-      setAddSubParentId(null)
-    },
-    onError: (err) => {
-      toast.error(
-        err instanceof FetchError ? err.message : 'Failed to create category.',
-      )
+  const toCategoryPayload = (values: CategoryFormValues) => ({
+    name: values.name,
+    parentId: values.parentId || undefined,
+    imageUrl: values.imageUrl || undefined,
+    displayOrder: values.displayOrder ?? 0,
+  })
+
+  const createMutation = useIdempotentMutation<unknown, ReturnType<typeof toCategoryPayload>>({
+    url: '/api/categories',
+    mutationOptions: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['categories'] })
+        toast.success('Category created')
+        setAddOpen(false)
+        setAddSubParentId(null)
+      },
+      onError: (err) => {
+        toast.error(
+          err instanceof FetchError ? err.message : 'Failed to create category.',
+        )
+      },
     },
   })
 
@@ -453,7 +457,7 @@ function CategoriesTab() {
           mode="create"
           categories={categories}
           isPending={createMutation.isPending}
-          onSubmit={(v) => createMutation.mutate(v)}
+          onSubmit={(v) => createMutation.mutate(toCategoryPayload(v))}
         />
       </>
     )
@@ -521,7 +525,7 @@ function CategoriesTab() {
         mode="create"
         categories={categories}
         isPending={createMutation.isPending}
-        onSubmit={(v) => createMutation.mutate(v)}
+        onSubmit={(v) => createMutation.mutate(toCategoryPayload(v))}
       />
 
       {editTarget && (
@@ -545,7 +549,7 @@ function CategoriesTab() {
         lockedParentId={addSubParentId}
         categories={categories}
         isPending={createMutation.isPending}
-        onSubmit={(v) => createMutation.mutate(v)}
+        onSubmit={(v) => createMutation.mutate(toCategoryPayload(v))}
       />
 
       <DeleteConfirmDialog
@@ -908,18 +912,19 @@ function BrandsTab() {
 
   const brands = data?.brands ?? []
 
-  const createMutation = useMutation({
-    mutationFn: (values: BrandFormValues) =>
-      api.post('/api/brands', { name: values.name }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['brands'] })
-      toast.success('Brand created')
-      setAddOpen(false)
-    },
-    onError: (err) => {
-      toast.error(
-        err instanceof FetchError ? err.message : 'Failed to create brand.',
-      )
+  const createMutation = useIdempotentMutation<unknown, { name: string }>({
+    url: '/api/brands',
+    mutationOptions: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['brands'] })
+        toast.success('Brand created')
+        setAddOpen(false)
+      },
+      onError: (err) => {
+        toast.error(
+          err instanceof FetchError ? err.message : 'Failed to create brand.',
+        )
+      },
     },
   })
 
@@ -980,7 +985,7 @@ function BrandsTab() {
           onOpenChange={setAddOpen}
           mode="create"
           isPending={createMutation.isPending}
-          onSubmit={(v) => createMutation.mutate(v)}
+          onSubmit={(v) => createMutation.mutate({ name: v.name })}
         />
       </>
     )
@@ -1066,7 +1071,7 @@ function BrandsTab() {
         onOpenChange={setAddOpen}
         mode="create"
         isPending={createMutation.isPending}
-        onSubmit={(v) => createMutation.mutate(v)}
+        onSubmit={(v) => createMutation.mutate({ name: v.name })}
       />
 
       {editTarget && (
@@ -1317,28 +1322,31 @@ function AttributesTab() {
     [attributes, selectedId],
   )
 
-  const createAttrMutation = useMutation({
-    mutationFn: (values: AttributeFormValues) =>
-      api.post('/api/catalog/attributes', {
-        name: values.name,
-        displayName: values.displayName,
-        attributeType: values.attributeType,
-        displayOrder: values.displayOrder ?? 0,
-      }),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['attributes'] })
-      queryClient.invalidateQueries({ queryKey: ['available-attributes'] })
-      toast.success('Attribute created')
-      setAddAttrOpen(false)
-      // Pre-select the new attribute once the list refreshes.
-      // We can't know the new id yet, but selecting by name is a good UX hint.
-      // The actual selection will happen on next render via the find-by-name fallback.
-      void variables
-    },
-    onError: (err) => {
-      toast.error(
-        err instanceof FetchError ? err.message : 'Failed to create attribute.',
-      )
+  const toAttributePayload = (values: AttributeFormValues) => ({
+    name: values.name,
+    displayName: values.displayName,
+    attributeType: values.attributeType,
+    displayOrder: values.displayOrder ?? 0,
+  })
+
+  const createAttrMutation = useIdempotentMutation<unknown, ReturnType<typeof toAttributePayload>>({
+    url: '/api/catalog/attributes',
+    mutationOptions: {
+      onSuccess: (_data, variables) => {
+        queryClient.invalidateQueries({ queryKey: ['attributes'] })
+        queryClient.invalidateQueries({ queryKey: ['available-attributes'] })
+        toast.success('Attribute created')
+        setAddAttrOpen(false)
+        // Pre-select the new attribute once the list refreshes.
+        // We can't know the new id yet, but selecting by name is a good UX hint.
+        // The actual selection will happen on next render via the find-by-name fallback.
+        void variables
+      },
+      onError: (err) => {
+        toast.error(
+          err instanceof FetchError ? err.message : 'Failed to create attribute.',
+        )
+      },
     },
   })
 
@@ -1422,7 +1430,7 @@ function AttributesTab() {
           onOpenChange={setAddAttrOpen}
           mode="create"
           isPending={createAttrMutation.isPending}
-          onSubmit={(v) => createAttrMutation.mutate(v)}
+          onSubmit={(v) => createAttrMutation.mutate(toAttributePayload(v))}
         />
       </>
     )
@@ -1566,7 +1574,7 @@ function AttributesTab() {
         onOpenChange={setAddAttrOpen}
         mode="create"
         isPending={createAttrMutation.isPending}
-        onSubmit={(v) => createAttrMutation.mutate(v)}
+        onSubmit={(v) => createAttrMutation.mutate(toAttributePayload(v))}
       />
 
       {editAttrTarget && (
@@ -1802,6 +1810,8 @@ function AttributeValuesPanel({ attribute }: { attribute: Attribute | null }) {
     staleTime: 60_000,
   })
 
+  const createValueKeyRef = useRef<string>(crypto.randomUUID())
+
   const createValueMutation = useMutation({
     mutationFn: ({ attrId, values }: { attrId: string; values: AttributeValueFormValues }) =>
       api.post(`/api/catalog/attributes/${attrId}/values`, {
@@ -1810,6 +1820,8 @@ function AttributeValuesPanel({ attribute }: { attribute: Attribute | null }) {
         colorHex: values.colorHex || undefined,
         skuCode: values.skuCode || undefined,
         displayOrder: values.displayOrder ?? 0,
+      }, {
+        'Idempotency-Key': createValueKeyRef.current,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['attributes'] })

@@ -27,6 +27,7 @@ export async function POST(req: Request) {
   let createdCompanyId: string | null = null
 
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Your session has expired. Please sign in again.')
 
@@ -61,125 +62,151 @@ export async function POST(req: Request) {
     }
     const d = parsed.data
 
-    const orgSlug = await uniqueSlug(d.org_name, 'organization')
-    const companySlug = await uniqueSlug(d.company_name, 'company')
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate organization submissions).
+    // Note: createdOrgId/createdCompanyId are tracked in the outer scope so
+    // the catch block can roll back partial creates on failure.
+    const createOrganization = async () => {
+      const orgSlug = await uniqueSlug(d.org_name, 'organization')
+      const companySlug = await uniqueSlug(d.company_name, 'company')
 
-    // 1. Create the organization.
-    const org = await db.organization.create({
-      data: {
-        name: d.org_name,
-        slug: orgSlug,
-        logoUrl: body.org_logo_url || null,
-        ownerId: user.id,
-        subscriptionPlan: 'free',
-        subscriptionStatus: 'active',
-      },
-    })
-    createdOrgId = org.id
+      // 1. Create the organization.
+      const org = await db.organization.create({
+        data: {
+          name: d.org_name,
+          slug: orgSlug,
+          logoUrl: body.org_logo_url || null,
+          ownerId: user!.id,
+          subscriptionPlan: 'free',
+          subscriptionStatus: 'active',
+        },
+      })
+      createdOrgId = org.id
 
-    // 2. Create the first company.
-    const company = await db.company.create({
-      data: {
+      // 2. Create the first company.
+      const company = await db.company.create({
+        data: {
+          organizationId: org.id,
+          name: d.company_name,
+          legalName: d.company_legal_name || null,
+          slug: companySlug,
+          logoUrl: body.company_logo_url || null,
+          baseCurrency: d.base_currency,
+          countryCode: d.country_code,
+          taxId: d.ntn || null,
+          taxIdType: d.ntn ? 'NTN' : null,
+          addressStreet: d.address || null,
+          addressCity: d.city || null,
+          addressProvince: d.province || null,
+          addressCountry: d.country_code,
+          phone: d.phone || null,
+          email: d.email || null,
+          website: d.website || null,
+          timezone: d.timezone || 'Asia/Karachi',
+          fiscalYearStart: d.fiscal_year_start || 1,
+          createdById: user!.id,
+        },
+      })
+      createdCompanyId = company.id
+
+      // 3. Seed the 4 system roles (batch).
+      await db.role.createMany({
+        data: SYSTEM_ROLES.map((sr) => ({
+          companyId: company.id,
+          name: sr.name,
+          roleTier: 'elevated',
+          isSystemRole: true,
+          systemRoleKey: sr.systemRoleKey,
+          createdById: user!.id,
+        })),
+      })
+
+      // 4. Make the creator the Owner employee.
+      const ownerRole = await db.role.findFirst({
+        where: { companyId: company.id, systemRoleKey: 'owner' },
+        select: { id: true },
+      })
+      if (!ownerRole) throw new Error('Failed to seed the Owner role.')
+
+      const employee = await db.employee.create({
+        data: {
+          companyId: company.id,
+          userId: user!.id,
+          roleId: ownerRole.id,
+          designation: 'Owner',
+          status: 'active',
+          invitedById: user!.id,
+        },
+      })
+
+      // 5. Activate the new workspace + mark onboarded.
+      await db.userSetting.upsert({
+        where: { userId: user!.id },
+        update: { activeCompanyId: company.id, activeOrgId: org.id },
+        create: { userId: user!.id, activeCompanyId: company.id, activeOrgId: org.id },
+      })
+      await db.profile.update({
+        where: { id: user!.id },
+        data: { isOnboarded: true },
+      })
+
+      // 6. Audit logs.
+      insertAuditLog({
+        action: 'organization.created',
+        entityType: 'organization',
+        entityId: org.id,
         organizationId: org.id,
-        name: d.company_name,
-        legalName: d.company_legal_name || null,
-        slug: companySlug,
-        logoUrl: body.company_logo_url || null,
-        baseCurrency: d.base_currency,
-        countryCode: d.country_code,
-        taxId: d.ntn || null,
-        taxIdType: d.ntn ? 'NTN' : null,
-        addressStreet: d.address || null,
-        addressCity: d.city || null,
-        addressProvince: d.province || null,
-        addressCountry: d.country_code,
-        phone: d.phone || null,
-        email: d.email || null,
-        website: d.website || null,
-        timezone: d.timezone || 'Asia/Karachi',
-        fiscalYearStart: d.fiscal_year_start || 1,
-        createdById: user.id,
-      },
-    })
-    createdCompanyId = company.id
-
-    // 3. Seed the 4 system roles (batch).
-    await db.role.createMany({
-      data: SYSTEM_ROLES.map((sr) => ({
+        userId: user!.id,
+        newValues: { name: org.name, slug: org.slug },
+      })
+      insertAuditLog({
+        action: 'company.created',
+        entityType: 'company',
+        entityId: company.id,
         companyId: company.id,
-        name: sr.name,
-        roleTier: 'elevated',
-        isSystemRole: true,
-        systemRoleKey: sr.systemRoleKey,
-        createdById: user.id,
-      })),
-    })
+        organizationId: org.id,
+        userId: user!.id,
+        employeeId: employee.id,
+        newValues: { name: company.name, slug: company.slug, baseCurrency: company.baseCurrency },
+      })
 
-    // 4. Make the creator the Owner employee.
-    const ownerRole = await db.role.findFirst({
-      where: { companyId: company.id, systemRoleKey: 'owner' },
-      select: { id: true },
-    })
-    if (!ownerRole) throw new Error('Failed to seed the Owner role.')
+      // 7. Seed default attributes (Piece Type, Size, Color, Fabric + Unstitched→OneSize rule)
+      try {
+        await seedDefaultAttributes(org.id, employee.id)
+      } catch (e) {
+        console.error('[attribute-seeding] Failed (non-blocking):', e)
+      }
 
-    const employee = await db.employee.create({
-      data: {
-        companyId: company.id,
-        userId: user.id,
-        roleId: ownerRole.id,
-        designation: 'Owner',
-        status: 'active',
-        invitedById: user.id,
-      },
-    })
+      // 8. Auto-create company_order_settings (OMS — both flags default FALSE)
+      try {
+        const { ensureCompanyOrderSettings } = await import('@/lib/actions/order-settings.actions')
+        await ensureCompanyOrderSettings(company.id)
+      } catch (e) {
+        console.error('[order-settings] Failed to auto-create (non-blocking):', e)
+      }
 
-    // 5. Activate the new workspace + mark onboarded.
-    await db.userSetting.upsert({
-      where: { userId: user.id },
-      update: { activeCompanyId: company.id, activeOrgId: org.id },
-      create: { userId: user.id, activeCompanyId: company.id, activeOrgId: org.id },
-    })
-    await db.profile.update({
-      where: { id: user.id },
-      data: { isOnboarded: true },
-    })
-
-    // 6. Audit logs.
-    insertAuditLog({
-      action: 'organization.created',
-      entityType: 'organization',
-      entityId: org.id,
-      organizationId: org.id,
-      userId: user.id,
-      newValues: { name: org.name, slug: org.slug },
-    })
-    insertAuditLog({
-      action: 'company.created',
-      entityType: 'company',
-      entityId: company.id,
-      companyId: company.id,
-      organizationId: org.id,
-      userId: user.id,
-      employeeId: employee.id,
-      newValues: { name: company.name, slug: company.slug, baseCurrency: company.baseCurrency },
-    })
-
-    // 7. Seed default attributes (Piece Type, Size, Color, Fabric + Unstitched→OneSize rule)
-    try {
-      await seedDefaultAttributes(org.id, employee.id)
-    } catch (e) {
-      console.error('[attribute-seeding] Failed (non-blocking):', e)
+      return await buildSessionPayload(user!.id)
     }
 
-    // 8. Auto-create company_order_settings (OMS — both flags default FALSE)
-    try {
-      const { ensureCompanyOrderSettings } = await import('@/lib/actions/order-settings.actions')
-      await ensureCompanyOrderSettings(company.id)
-    } catch (e) {
-      console.error('[order-settings] Failed to auto-create (non-blocking):', e)
+    if (idempotencyKey) {
+      // The user may not have an active company yet (this is their first
+      // organization). Use the user ID as the companyId for idempotency
+      // grouping — the `key` itself is globally unique, so this is just
+      // for indexing/diagnostics.
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: `_user_${user.id}`,
+        actionType: 'organization.create',
+        fn: createOrganization,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
     }
 
-    return Response.json(await buildSessionPayload(user.id))
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createOrganization()
+    return Response.json(result)
   } catch (err) {
     // Roll back partial creates.
     if (createdCompanyId) {

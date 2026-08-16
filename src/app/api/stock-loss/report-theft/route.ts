@@ -17,6 +17,8 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -44,66 +46,87 @@ export async function POST(req: Request) {
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     const d = parsed.data
 
-    // Fetch current avg_cost for cost recording
-    const pool = await db.inventoryPool.findUnique({
-      where: { orgVariantId_locationId: { orgVariantId: d.org_variant_id, locationId: d.location_id } },
-    })
-    if (!pool) throw new ApiError(404, 'No inventory at this location for this variant.')
-    const avgCost = Number(pool.avgCost)
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate theft reports).
+    const createTheftLoss = async () => {
+      // Fetch current avg_cost for cost recording
+      const pool = await db.inventoryPool.findUnique({
+        where: { orgVariantId_locationId: { orgVariantId: d.org_variant_id, locationId: d.location_id } },
+      })
+      if (!pool) throw new ApiError(404, 'No inventory at this location for this variant.')
+      const avgCost = Number(pool.avgCost)
 
-    // Quarantine the stock (increase reserved, no transaction)
-    const quarantineResult = await quarantineStock(d.org_variant_id, d.location_id, d.quantity)
-    if (!quarantineResult.success) {
-      throw new ApiError(400, quarantineResult.error || 'Failed to quarantine stock.')
+      // Quarantine the stock (increase reserved, no transaction)
+      const quarantineResult = await quarantineStock(d.org_variant_id, d.location_id, d.quantity)
+      if (!quarantineResult.success) {
+        throw new ApiError(400, quarantineResult.error || 'Failed to quarantine stock.')
+      }
+
+      const lossRecord = await db.stockLossRecord.create({
+        data: {
+          organizationId: orgId,
+          companyId: company.id,
+          orgVariantId: d.org_variant_id,
+          locationId: d.location_id,
+          lossType: 'theft',
+          subType: d.sub_type,
+          quantity: d.quantity,
+          costPerUnit: avgCost,
+          investigationStatus: 'open',
+          resolution: null,
+          responsibleParty: 'unknown',
+          policeReportRef: d.police_report_ref || null,
+          evidenceUrls: JSON.stringify(d.evidence_urls),
+          notes: d.notes || null,
+          reportedById: caller.id,
+        },
+      })
+
+      insertAuditLog({
+        action: 'stock_loss.theft_reported',
+        entityType: 'stock_loss',
+        entityId: lossRecord.id,
+        companyId: company.id,
+        organizationId: orgId,
+        userId: user.id,
+        employeeId: caller.id,
+        newValues: { quantity: d.quantity, subType: d.sub_type, quarantined: true },
+      })
+
+      insertMetricEvent({
+        companyId: company.id,
+        entityType: 'product',
+        entityId: d.org_variant_id,
+        metricKey: 'inventory.theft_loss',
+        numericValue: d.quantity * avgCost,
+        dimensions: {
+          loss_type: 'theft',
+          sub_type: d.sub_type,
+          location_id: d.location_id,
+          investigation_status: 'open',
+          quantity: d.quantity,
+        },
+      })
+
+      return { success: true, loss_record_id: lossRecord.id }
     }
 
-    const lossRecord = await db.stockLossRecord.create({
-      data: {
-        organizationId: orgId,
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
         companyId: company.id,
-        orgVariantId: d.org_variant_id,
-        locationId: d.location_id,
-        lossType: 'theft',
-        subType: d.sub_type,
-        quantity: d.quantity,
-        costPerUnit: avgCost,
-        investigationStatus: 'open',
-        resolution: null,
-        responsibleParty: 'unknown',
-        policeReportRef: d.police_report_ref || null,
-        evidenceUrls: JSON.stringify(d.evidence_urls),
-        notes: d.notes || null,
-        reportedById: caller.id,
-      },
-    })
+        employeeId: caller.id,
+        actionType: 'stock_loss.theft',
+        fn: createTheftLoss,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
 
-    insertAuditLog({
-      action: 'stock_loss.theft_reported',
-      entityType: 'stock_loss',
-      entityId: lossRecord.id,
-      companyId: company.id,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: { quantity: d.quantity, subType: d.sub_type, quarantined: true },
-    })
-
-    insertMetricEvent({
-      companyId: company.id,
-      entityType: 'product',
-      entityId: d.org_variant_id,
-      metricKey: 'inventory.theft_loss',
-      numericValue: d.quantity * avgCost,
-      dimensions: {
-        loss_type: 'theft',
-        sub_type: d.sub_type,
-        location_id: d.location_id,
-        investigation_status: 'open',
-        quantity: d.quantity,
-      },
-    })
-
-    return Response.json({ success: true, loss_record_id: lossRecord.id })
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createTheftLoss()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

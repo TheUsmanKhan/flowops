@@ -39,6 +39,8 @@ export async function GET() {
 /** Create a category. */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -60,43 +62,64 @@ export async function POST(req: Request) {
       throw new ApiError(400, 'Category name is required')
     }
 
-    const slug = body.name
-      .toLowerCase()
-      .trim()
-      .replace(/[^a-z0-9\s-]/g, '')
-      .replace(/[\s_-]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 60)
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate category submissions).
+    const createCategory = async () => {
+      const slug = body.name!
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9\s-]/g, '')
+        .replace(/[\s_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 60)
 
-    let uniqueSlug = slug
-    let n = 1
-    while (await db.orgCategory.findUnique({ where: { organizationId_slug: { organizationId: orgId, slug: uniqueSlug } } })) {
-      n++
-      uniqueSlug = `${slug}-${n}`
+      let categorySlug = slug
+      let n = 1
+      while (await db.orgCategory.findUnique({ where: { organizationId_slug: { organizationId: orgId, slug: categorySlug } } })) {
+        n++
+        categorySlug = `${slug}-${n}`
+      }
+
+      const category = await db.orgCategory.create({
+        data: {
+          organizationId: orgId,
+          name: body.name!.trim(),
+          slug: categorySlug,
+          parentId: body.parentId || null,
+          createdById: caller.id,
+        },
+      })
+
+      insertAuditLog({
+        action: 'category.created',
+        entityType: 'category',
+        entityId: category.id,
+        companyId: company.id,
+        organizationId: orgId,
+        userId: user!.id,
+        employeeId: caller.id,
+        newValues: { name: category.name },
+      })
+
+      return { id: category.id, name: category.name, slug: category.slug }
     }
 
-    const category = await db.orgCategory.create({
-      data: {
-        organizationId: orgId,
-        name: body.name.trim(),
-        slug: uniqueSlug,
-        parentId: body.parentId || null,
-        createdById: caller.id,
-      },
-    })
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'category.create',
+        fn: createCategory,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
 
-    insertAuditLog({
-      action: 'category.created',
-      entityType: 'category',
-      entityId: category.id,
-      companyId: company.id,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: { name: category.name },
-    })
-
-    return Response.json({ id: category.id, name: category.name, slug: category.slug })
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createCategory()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

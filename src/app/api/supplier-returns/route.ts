@@ -67,6 +67,8 @@ export async function GET() {
 /** Create a supplier return. Processes a supplier_return inventory transaction. */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -94,67 +96,88 @@ export async function POST(req: Request) {
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     const d = parsed.data
 
-    // Process the inventory transaction (reduces on_hand using existing avg_cost)
-    const txnResult = await processInventoryTransaction({
-      orgVariantId: d.org_variant_id,
-      locationId: d.location_id,
-      organizationId: orgId,
-      companyId: company.id,
-      employeeId: caller.id,
-      transactionType: 'supplier_return',
-      quantity: d.quantity,
-      costPerUnit: d.cost_per_unit,
-      referenceType: 'supplier_return',
-      notes: d.notes || `Return to ${d.supplier_id}: ${d.reason}`,
-    })
-    if (!txnResult.success) {
-      throw new ApiError(500, `Inventory transaction failed: ${txnResult.error}`)
-    }
-
-    const record = await db.supplierReturn.create({
-      data: {
-        organizationId: orgId,
-        companyId: company.id,
-        purchaseOrderId: d.purchase_order_id || null,
-        supplierId: d.supplier_id,
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate supplier-return submissions).
+    const createSupplierReturn = async () => {
+      // Process the inventory transaction (reduces on_hand using existing avg_cost)
+      const txnResult = await processInventoryTransaction({
         orgVariantId: d.org_variant_id,
         locationId: d.location_id,
+        organizationId: orgId,
+        companyId: company.id,
+        employeeId: caller.id,
+        transactionType: 'supplier_return',
         quantity: d.quantity,
         costPerUnit: d.cost_per_unit,
-        reason: d.reason,
-        status: 'pending',
-        notes: d.notes || null,
-        inventoryTxnId: txnResult.transactionId ?? null,
-        reportedById: caller.id,
-      },
-    })
+        referenceType: 'supplier_return',
+        notes: d.notes || `Return to ${d.supplier_id}: ${d.reason}`,
+      })
+      if (!txnResult.success) {
+        throw new ApiError(500, `Inventory transaction failed: ${txnResult.error}`)
+      }
 
-    insertAuditLog({
-      action: 'supplier_return.created',
-      entityType: 'supplier_return',
-      entityId: record.id,
-      companyId: company.id,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: { quantity: d.quantity, reason: d.reason, totalValue: d.quantity * d.cost_per_unit },
-    })
+      const record = await db.supplierReturn.create({
+        data: {
+          organizationId: orgId,
+          companyId: company.id,
+          purchaseOrderId: d.purchase_order_id || null,
+          supplierId: d.supplier_id,
+          orgVariantId: d.org_variant_id,
+          locationId: d.location_id,
+          quantity: d.quantity,
+          costPerUnit: d.cost_per_unit,
+          reason: d.reason,
+          status: 'pending',
+          notes: d.notes || null,
+          inventoryTxnId: txnResult.transactionId ?? null,
+          reportedById: caller.id,
+        },
+      })
 
-    insertMetricEvent({
-      companyId: company.id,
-      entityType: 'supplier',
-      entityId: d.supplier_id,
-      metricKey: 'supplier_return.created',
-      numericValue: d.quantity * d.cost_per_unit,
-      dimensions: {
-        reason: d.reason,
-        org_variant_id: d.org_variant_id,
-        purchase_order_id: d.purchase_order_id || null,
-        location_id: d.location_id,
-      },
-    })
+      insertAuditLog({
+        action: 'supplier_return.created',
+        entityType: 'supplier_return',
+        entityId: record.id,
+        companyId: company.id,
+        organizationId: orgId,
+        userId: user.id,
+        employeeId: caller.id,
+        newValues: { quantity: d.quantity, reason: d.reason, totalValue: d.quantity * d.cost_per_unit },
+      })
 
-    return Response.json({ id: record.id, transactionId: txnResult.transactionId })
+      insertMetricEvent({
+        companyId: company.id,
+        entityType: 'supplier',
+        entityId: d.supplier_id,
+        metricKey: 'supplier_return.created',
+        numericValue: d.quantity * d.cost_per_unit,
+        dimensions: {
+          reason: d.reason,
+          org_variant_id: d.org_variant_id,
+          purchase_order_id: d.purchase_order_id || null,
+          location_id: d.location_id,
+        },
+      })
+
+      return { id: record.id, transactionId: txnResult.transactionId }
+    }
+
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'supplier_return.create',
+        fn: createSupplierReturn,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createSupplierReturn()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

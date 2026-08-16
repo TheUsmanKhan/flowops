@@ -2,6 +2,7 @@
 
 import { useState, useMemo } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { Button } from '@/components/ui/button'
@@ -122,21 +123,22 @@ export function RequestExchangeDialog({
   const priceDifference = newItemPrice - orderItemPrice
 
   // Create exchange mutation
-  const createMutation = useMutation({
-    mutationFn: () =>
-      api.post<{ exchangeId: string }>('/api/exchanges', {
-        original_order_item_id: orderItemId,
-        new_org_variant_id: newVariantId,
-        exchange_method: exchangeMethod,
-        reason: reason.trim(),
-      }),
-    onSuccess: (data) => {
-      toast.success('Exchange requested.')
-      setCreatedExchangeId(data.exchangeId)
-      invalidateAll(data.exchangeId)
-    },
-    onError: (err) => {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to create exchange')
+  const createMutation = useIdempotentMutation<{ exchangeId: string }, {
+    original_order_item_id: string
+    new_org_variant_id: string
+    exchange_method: string
+    reason: string
+  }>({
+    url: '/api/exchanges',
+    mutationOptions: {
+      onSuccess: (data) => {
+        toast.success('Exchange requested.')
+        setCreatedExchangeId(data.exchangeId)
+        invalidateAll(data.exchangeId)
+      },
+      onError: (err) => {
+        toast.error(err instanceof FetchError ? err.message : 'Failed to create exchange')
+      },
     },
   })
 
@@ -364,7 +366,12 @@ export function RequestExchangeDialog({
             <Button variant="outline" onClick={handleClose}>Cancel</Button>
             <Button
               disabled={!canSubmit}
-              onClick={() => createMutation.mutate()}
+              onClick={() => createMutation.mutate({
+                original_order_item_id: orderItemId,
+                new_org_variant_id: newVariantId,
+                exchange_method: exchangeMethod,
+                reason: reason.trim(),
+              })}
             >
               {createMutation.isPending ? (
                 <><Loader2 className="h-4 w-4 animate-spin" /> Submitting…</>

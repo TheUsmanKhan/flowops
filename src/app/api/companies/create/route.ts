@@ -24,6 +24,7 @@ export async function POST(req: Request) {
   let createdCompanyId: string | null = null
 
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Your session has expired. Please sign in again.')
 
@@ -63,102 +64,128 @@ export async function POST(req: Request) {
       throw new ApiError(403, 'You do not own this organization, or it no longer exists.')
     }
 
-    const companySlug = await uniqueSlug(d.company_name, 'company')
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate company submissions).
+    // Note: createdCompanyId is tracked in the outer scope so the catch
+    // block can roll back partial creates on failure.
+    const createCompany = async () => {
+      const companySlug = await uniqueSlug(d.company_name, 'company')
 
-    const company = await db.company.create({
-      data: {
+      const company = await db.company.create({
+        data: {
+          organizationId: org.id,
+          name: d.company_name,
+          legalName: d.company_legal_name || null,
+          slug: companySlug,
+          logoUrl: body.company_logo_url || null,
+          baseCurrency: d.base_currency,
+          countryCode: d.country_code,
+          taxId: d.ntn || null,
+          taxIdType: d.ntn ? 'NTN' : null,
+          addressStreet: d.address || null,
+          addressCity: d.city || null,
+          addressProvince: d.province || null,
+          addressCountry: d.country_code,
+          phone: d.phone || null,
+          email: d.email || null,
+          website: d.website || null,
+          timezone: d.timezone || 'Asia/Karachi',
+          fiscalYearStart: d.fiscal_year_start || 1,
+          createdById: user!.id,
+        },
+      })
+      createdCompanyId = company.id
+
+      // Seed the 4 system roles.
+      await db.role.createMany({
+        data: SYSTEM_ROLES.map((sr) => ({
+          companyId: company.id,
+          name: sr.name,
+          roleTier: 'elevated',
+          isSystemRole: true,
+          systemRoleKey: sr.systemRoleKey,
+          createdById: user!.id,
+        })),
+      })
+
+      const ownerRole = await db.role.findFirst({
+        where: { companyId: company.id, systemRoleKey: 'owner' },
+        select: { id: true },
+      })
+      if (!ownerRole) throw new Error('Failed to seed the Owner role.')
+
+      const employee = await db.employee.create({
+        data: {
+          companyId: company.id,
+          userId: user!.id,
+          roleId: ownerRole.id,
+          designation: 'Owner',
+          status: 'active',
+          invitedById: user!.id,
+        },
+      })
+
+      // Switch the caller's active workspace to the new company.
+      await db.userSetting.upsert({
+        where: { userId: user!.id },
+        update: { activeCompanyId: company.id, activeOrgId: org.id },
+        create: { userId: user!.id, activeCompanyId: company.id, activeOrgId: org.id },
+      })
+
+      insertAuditLog({
+        action: 'company.created',
+        entityType: 'company',
+        entityId: company.id,
+        companyId: company.id,
         organizationId: org.id,
-        name: d.company_name,
-        legalName: d.company_legal_name || null,
-        slug: companySlug,
-        logoUrl: body.company_logo_url || null,
-        baseCurrency: d.base_currency,
-        countryCode: d.country_code,
-        taxId: d.ntn || null,
-        taxIdType: d.ntn ? 'NTN' : null,
-        addressStreet: d.address || null,
-        addressCity: d.city || null,
-        addressProvince: d.province || null,
-        addressCountry: d.country_code,
-        phone: d.phone || null,
-        email: d.email || null,
-        website: d.website || null,
-        timezone: d.timezone || 'Asia/Karachi',
-        fiscalYearStart: d.fiscal_year_start || 1,
-        createdById: user.id,
-      },
-    })
-    createdCompanyId = company.id
+        userId: user!.id,
+        employeeId: employee.id,
+        newValues: { name: company.name, slug: company.slug, baseCurrency: company.baseCurrency },
+      })
 
-    // Seed the 4 system roles.
-    await db.role.createMany({
-      data: SYSTEM_ROLES.map((sr) => ({
-        companyId: company.id,
-        name: sr.name,
-        roleTier: 'elevated',
-        isSystemRole: true,
-        systemRoleKey: sr.systemRoleKey,
-        createdById: user.id,
-      })),
-    })
-
-    const ownerRole = await db.role.findFirst({
-      where: { companyId: company.id, systemRoleKey: 'owner' },
-      select: { id: true },
-    })
-    if (!ownerRole) throw new Error('Failed to seed the Owner role.')
-
-    const employee = await db.employee.create({
-      data: {
-        companyId: company.id,
-        userId: user.id,
-        roleId: ownerRole.id,
-        designation: 'Owner',
-        status: 'active',
-        invitedById: user.id,
-      },
-    })
-
-    // Switch the caller's active workspace to the new company.
-    await db.userSetting.upsert({
-      where: { userId: user.id },
-      update: { activeCompanyId: company.id, activeOrgId: org.id },
-      create: { userId: user.id, activeCompanyId: company.id, activeOrgId: org.id },
-    })
-
-    insertAuditLog({
-      action: 'company.created',
-      entityType: 'company',
-      entityId: company.id,
-      companyId: company.id,
-      organizationId: org.id,
-      userId: user.id,
-      employeeId: employee.id,
-      newValues: { name: company.name, slug: company.slug, baseCurrency: company.baseCurrency },
-    })
-
-    // Auto-create company_order_settings (OMS — both flags default FALSE)
-    try {
-      const { ensureCompanyOrderSettings } = await import('@/lib/actions/order-settings.actions')
-      await ensureCompanyOrderSettings(company.id)
-    } catch (e) {
-      console.error('[order-settings] Failed to auto-create (non-blocking):', e)
-    }
-
-    // Seed the 5 default HR roles (Sales, Sales Manager, Inventory Manager,
-    // Warehouse Staff, Manager) so the company is immediately usable for
-    // non-Owner employees. Idempotent — skips if already exist.
-    try {
-      const { seedDefaultRolesForCompany } = await import('@/lib/seed-default-roles')
-      const created = await seedDefaultRolesForCompany(company.id, user.id)
-      if (created > 0) {
-        console.log(`[company-create] Seeded ${created} default roles for company ${company.id}`)
+      // Auto-create company_order_settings (OMS — both flags default FALSE)
+      try {
+        const { ensureCompanyOrderSettings } = await import('@/lib/actions/order-settings.actions')
+        await ensureCompanyOrderSettings(company.id)
+      } catch (e) {
+        console.error('[order-settings] Failed to auto-create (non-blocking):', e)
       }
-    } catch (e) {
-      console.error('[seed-default-roles] Failed to seed (non-blocking):', e)
+
+      // Seed the 5 default HR roles (Sales, Sales Manager, Inventory Manager,
+      // Warehouse Staff, Manager) so the company is immediately usable for
+      // non-Owner employees. Idempotent — skips if already exist.
+      try {
+        const { seedDefaultRolesForCompany } = await import('@/lib/seed-default-roles')
+        const created = await seedDefaultRolesForCompany(company.id, user!.id)
+        if (created > 0) {
+          console.log(`[company-create] Seeded ${created} default roles for company ${company.id}`)
+        }
+      } catch (e) {
+        console.error('[seed-default-roles] Failed to seed (non-blocking):', e)
+      }
+
+      return await buildSessionPayload(user!.id)
     }
 
-    return Response.json(await buildSessionPayload(user.id))
+    if (idempotencyKey) {
+      // The user is creating a new company — they may not yet have an
+      // activeCompany pointing to this new entity. Use the user ID as the
+      // companyId for idempotency grouping — the `key` itself is globally
+      // unique, so this is just for indexing/diagnostics.
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: `_user_${user.id}`,
+        actionType: 'company.create',
+        fn: createCompany,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createCompany()
+    return Response.json(result)
   } catch (err) {
     if (createdCompanyId) {
       try { await db.company.delete({ where: { id: createdCompanyId } }) } catch { /* best-effort */ }

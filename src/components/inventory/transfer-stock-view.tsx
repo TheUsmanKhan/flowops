@@ -1,7 +1,8 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
@@ -225,17 +226,18 @@ export function TransferStockView() {
   const destAfterQty = destinationPool ? destinationPool.onHand + quantity : quantity
 
   // ── Mutation ─────────────────────────────────────────────────────────────
-  const transferMutation = useMutation({
-    mutationFn: async (payload: TransferPayload) =>
-      api.post('/api/inventory/transfers', payload),
-    onSuccess: () => {
-      toast.success(`Transferred ${quantity} unit${quantity === 1 ? '' : 's'} successfully.`)
-      void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
-      void queryClient.invalidateQueries({ queryKey: ['location-detail'] })
-      void queryClient.invalidateQueries({ queryKey: ['locations'] })
-      navigate({ name: 'inventory' })
+  const transferMutation = useIdempotentMutation<unknown, TransferPayload>({
+    url: '/api/inventory/transfers',
+    mutationOptions: {
+      onSuccess: () => {
+        toast.success(`Transferred ${quantity} unit${quantity === 1 ? '' : 's'} successfully.`)
+        void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+        void queryClient.invalidateQueries({ queryKey: ['location-detail'] })
+        void queryClient.invalidateQueries({ queryKey: ['locations'] })
+        navigate({ name: 'inventory' })
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   // ── Submit ───────────────────────────────────────────────────────────────

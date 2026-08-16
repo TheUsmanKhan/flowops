@@ -17,6 +17,8 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -44,76 +46,97 @@ export async function POST(req: Request) {
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     const d = parsed.data
 
-    const transactionIds: string[] = []
-    let preMadeStitchedStockAdded = false
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate receive-stock submissions).
+    const receiveStock = async () => {
+      const transactionIds: string[] = []
+      let preMadeStitchedStockAdded = false
 
-    for (const item of d.items) {
-      // Check if this is the first-ever transaction for this variant+location
-      const existingTxnCount = await db.inventoryTransaction.count({
-        where: { orgVariantId: item.org_variant_id, locationId: d.location_id },
-      })
-      const txnType = existingTxnCount === 0 ? 'opening_stock' : 'purchase_received'
+      for (const item of d.items) {
+        // Check if this is the first-ever transaction for this variant+location
+        const existingTxnCount = await db.inventoryTransaction.count({
+          where: { orgVariantId: item.org_variant_id, locationId: d.location_id },
+        })
+        const txnType = existingTxnCount === 0 ? 'opening_stock' : 'purchase_received'
 
-      // Check if variant is made_to_order with track_inventory = FALSE
-      const variant = await db.orgProductVariant.findUnique({
-        where: { id: item.org_variant_id },
-        select: { fulfillmentType: true, trackInventory: true },
-      })
-      if (variant?.fulfillmentType === 'made_to_order' && !variant.trackInventory) {
-        preMadeStitchedStockAdded = true
+        // Check if variant is made_to_order with track_inventory = FALSE
+        const variant = await db.orgProductVariant.findUnique({
+          where: { id: item.org_variant_id },
+          select: { fulfillmentType: true, trackInventory: true },
+        })
+        if (variant?.fulfillmentType === 'made_to_order' && !variant.trackInventory) {
+          preMadeStitchedStockAdded = true
+        }
+
+        const txnResult = await processInventoryTransaction({
+          orgVariantId: item.org_variant_id,
+          locationId: d.location_id,
+          organizationId: orgId,
+          companyId: company.id,
+          employeeId: caller.id,
+          transactionType: txnType,
+          quantity: item.quantity,
+          costPerUnit: item.cost_per_unit,
+          referenceType: 'manual',
+          notes: d.notes || d.po_reference || undefined,
+        })
+
+        if (!txnResult.success) {
+          throw new ApiError(500, `Failed to receive ${item.org_variant_id}: ${txnResult.error}`)
+        }
+        transactionIds.push(txnResult.transactionId!)
+
+        insertAuditLog({
+          action: txnType === 'opening_stock' ? 'stock.opening' : 'stock.received',
+          entityType: 'variant',
+          entityId: item.org_variant_id,
+          companyId: company.id,
+          organizationId: orgId,
+          userId: user.id,
+          employeeId: caller.id,
+          newValues: { quantity: item.quantity, costPerUnit: item.cost_per_unit, locationId: d.location_id },
+        })
       }
 
-      const txnResult = await processInventoryTransaction({
-        orgVariantId: item.org_variant_id,
-        locationId: d.location_id,
-        organizationId: orgId,
+      // ── Metric event (CRITICAL — powers stock value / procurement KPIs) ──
+      const totalValue = d.items.reduce(
+        (sum, item) => sum + item.quantity * item.cost_per_unit,
+        0,
+      )
+      const totalQuantity = d.items.reduce((sum, item) => sum + item.quantity, 0)
+      const firstVariantId = d.items[0]?.org_variant_id ?? d.location_id
+      insertMetricEvent({
         companyId: company.id,
-        employeeId: caller.id,
-        transactionType: txnType,
-        quantity: item.quantity,
-        costPerUnit: item.cost_per_unit,
-        referenceType: 'manual',
-        notes: d.notes || d.po_reference || undefined,
+        entityType: 'product',
+        entityId: firstVariantId,
+        metricKey: 'inventory.stock_received',
+        numericValue: totalValue,
+        dimensions: {
+          item_count: d.items.length,
+          location_id: d.location_id,
+          total_quantity: totalQuantity,
+        },
       })
 
-      if (!txnResult.success) {
-        throw new ApiError(500, `Failed to receive ${item.org_variant_id}: ${txnResult.error}`)
-      }
-      transactionIds.push(txnResult.transactionId!)
-
-      insertAuditLog({
-        action: txnType === 'opening_stock' ? 'stock.opening' : 'stock.received',
-        entityType: 'variant',
-        entityId: item.org_variant_id,
-        companyId: company.id,
-        organizationId: orgId,
-        userId: user.id,
-        employeeId: caller.id,
-        newValues: { quantity: item.quantity, costPerUnit: item.cost_per_unit, locationId: d.location_id },
-      })
+      return { success: true, transaction_ids: transactionIds, preMadeStitchedStockAdded }
     }
 
-    // ── Metric event (CRITICAL — powers stock value / procurement KPIs) ──
-    const totalValue = d.items.reduce(
-      (sum, item) => sum + item.quantity * item.cost_per_unit,
-      0,
-    )
-    const totalQuantity = d.items.reduce((sum, item) => sum + item.quantity, 0)
-    const firstVariantId = d.items[0]?.org_variant_id ?? d.location_id
-    insertMetricEvent({
-      companyId: company.id,
-      entityType: 'product',
-      entityId: firstVariantId,
-      metricKey: 'inventory.stock_received',
-      numericValue: totalValue,
-      dimensions: {
-        item_count: d.items.length,
-        location_id: d.location_id,
-        total_quantity: totalQuantity,
-      },
-    })
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'inventory.receive',
+        fn: receiveStock,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
 
-    return Response.json({ success: true, transaction_ids: transactionIds, preMadeStitchedStockAdded })
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await receiveStock()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

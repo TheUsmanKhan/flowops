@@ -78,6 +78,8 @@ export async function GET(req: NextRequest) {
  */
 export async function POST(req: NextRequest) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -114,49 +116,70 @@ export async function POST(req: NextRequest) {
     })
     if (!variant) throw new ApiError(404, 'Variant not found.')
 
-    const isDamaged = d.condition === 'damaged'
-    const record = await db.returnedStitchedInventory.create({
-      data: {
-        organizationId: orgId,
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate return-receive submissions).
+    const receiveReturnedStitched = async () => {
+      const isDamaged = d.condition === 'damaged'
+      const record = await db.returnedStitchedInventory.create({
+        data: {
+          organizationId: orgId,
+          companyId,
+          orgVariantId: d.org_variant_id,
+          quantity: d.quantity,
+          condition: d.condition,
+          totalCost: d.total_cost,
+          suggestedResalePrice: d.suggested_resale_price ?? null,
+          originalOrderReference: d.original_order_reference || null,
+          returnReason: d.return_reason,
+          status: isDamaged ? 'written_off' : 'available',
+          photos: JSON.stringify(d.photos),
+          notes: d.notes || null,
+          receivedById: caller.id,
+          ...(isDamaged
+            ? {
+                writtenOffAt: new Date(),
+                writtenOffById: caller.id,
+                writeOffReason: 'Damaged on return',
+              }
+            : {}),
+        },
+      })
+
+      insertAuditLog({
+        action: 'returned_stitched.received',
+        entityType: 'returned_stitched',
+        entityId: record.id,
         companyId,
-        orgVariantId: d.org_variant_id,
-        quantity: d.quantity,
-        condition: d.condition,
-        totalCost: d.total_cost,
-        suggestedResalePrice: d.suggested_resale_price ?? null,
-        originalOrderReference: d.original_order_reference || null,
-        returnReason: d.return_reason,
-        status: isDamaged ? 'written_off' : 'available',
-        photos: JSON.stringify(d.photos),
-        notes: d.notes || null,
-        receivedById: caller.id,
-        ...(isDamaged
-          ? {
-              writtenOffAt: new Date(),
-              writtenOffById: caller.id,
-              writeOffReason: 'Damaged on return',
-            }
-          : {}),
-      },
-    })
+        organizationId: orgId,
+        userId: user!.id,
+        employeeId: caller.id,
+        newValues: {
+          condition: d.condition,
+          totalCost: d.total_cost,
+          variantId: d.org_variant_id,
+          status: record.status,
+        },
+      })
 
-    insertAuditLog({
-      action: 'returned_stitched.received',
-      entityType: 'returned_stitched',
-      entityId: record.id,
-      companyId,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: {
-        condition: d.condition,
-        totalCost: d.total_cost,
-        variantId: d.org_variant_id,
-        status: record.status,
-      },
-    })
+      return { success: true, record_id: record.id, status: record.status }
+    }
 
-    return Response.json({ success: true, record_id: record.id, status: record.status })
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId,
+        employeeId: caller.id,
+        actionType: 'returned_stitched.create',
+        fn: receiveReturnedStitched,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await receiveReturnedStitched()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

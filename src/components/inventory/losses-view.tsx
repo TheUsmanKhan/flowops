@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState , memo} from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
@@ -1191,14 +1192,15 @@ function DamagedForm({ onBack, onSuccess }: { onBack: () => void; onSuccess: () 
   const availableAtPool = pool?.available ?? 0
   const insufficient = pool !== null && qty > availableAtPool
 
-  const mutation = useMutation({
-    mutationFn: async (payload: DamagedPayload) =>
-      api.post('/api/stock-loss/report-damaged', payload),
-    onSuccess: () => {
-      toast.success('Damaged stock written off. Available inventory reduced.')
-      onSuccess()
+  const mutation = useIdempotentMutation<unknown, DamagedPayload>({
+    url: '/api/stock-loss/report-damaged',
+    mutationOptions: {
+      onSuccess: () => {
+        toast.success('Damaged stock written off. Available inventory reduced.')
+        onSuccess()
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   const handleSubmit = () => {
@@ -1414,14 +1416,15 @@ function TheftForm({ onBack, onSuccess }: { onBack: () => void; onSuccess: () =>
   const availableAtPool = pool?.available ?? 0
   const insufficient = pool !== null && qty > availableAtPool
 
-  const mutation = useMutation({
-    mutationFn: async (payload: TheftPayload) =>
-      api.post('/api/stock-loss/report-theft', payload),
-    onSuccess: () => {
-      toast.success('Theft reported. Stock quarantined while you investigate.')
-      onSuccess()
+  const mutation = useIdempotentMutation<unknown, TheftPayload>({
+    url: '/api/stock-loss/report-theft',
+    mutationOptions: {
+      onSuccess: () => {
+        toast.success('Theft reported. Stock quarantined while you investigate.')
+        onSuccess()
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   const handleSubmit = () => {
@@ -1650,14 +1653,15 @@ function TransitForm({ onBack, onSuccess }: { onBack: () => void; onSuccess: () 
 
   const qty = parseInt(quantity, 10) || 0
 
-  const mutation = useMutation({
-    mutationFn: async (payload: TransitPayload) =>
-      api.post('/api/stock-loss/report-transit', payload),
-    onSuccess: () => {
-      toast.success('Transit loss recorded. Courier claim is now being tracked.')
-      onSuccess()
+  const mutation = useIdempotentMutation<unknown, TransitPayload>({
+    url: '/api/stock-loss/report-transit',
+    mutationOptions: {
+      onSuccess: () => {
+        toast.success('Transit loss recorded. Courier claim is now being tracked.')
+        onSuccess()
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   const handleSubmit = () => {

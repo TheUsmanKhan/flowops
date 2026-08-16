@@ -60,6 +60,8 @@ export async function GET() {
 /** Create a cycle count. */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -87,44 +89,65 @@ export async function POST(req: Request) {
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     const d = parsed.data
 
-    const count = await db.cycleCount.create({
-      data: {
-        organizationId: orgId,
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate cycle count submissions).
+    const createCycleCount = async () => {
+      const count = await db.cycleCount.create({
+        data: {
+          organizationId: orgId,
+          companyId: company.id,
+          locationId: d.location_id,
+          countName: d.count_name,
+          countType: d.count_type,
+          status: 'scheduled',
+          scheduledAt: d.scheduled_at ? new Date(d.scheduled_at) : new Date(),
+          notes: d.notes || null,
+          createdById: caller.id,
+        },
+      })
+
+      insertAuditLog({
+        action: 'cycle_count.created',
+        entityType: 'cycle_count',
+        entityId: count.id,
         companyId: company.id,
-        locationId: d.location_id,
-        countName: d.count_name,
-        countType: d.count_type,
-        status: 'scheduled',
-        scheduledAt: d.scheduled_at ? new Date(d.scheduled_at) : new Date(),
-        notes: d.notes || null,
-        createdById: caller.id,
-      },
-    })
+        organizationId: orgId,
+        userId: user.id,
+        employeeId: caller.id,
+        newValues: { countName: count.countName, countType: count.countType },
+      })
 
-    insertAuditLog({
-      action: 'cycle_count.created',
-      entityType: 'cycle_count',
-      entityId: count.id,
-      companyId: company.id,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: { countName: count.countName, countType: count.countType },
-    })
+      insertMetricEvent({
+        companyId: company.id,
+        entityType: 'location',
+        entityId: d.location_id,
+        metricKey: 'inventory.cycle_count_created',
+        numericValue: 1,
+        dimensions: {
+          count_type: d.count_type,
+          count_name: d.count_name,
+        },
+      })
 
-    insertMetricEvent({
-      companyId: company.id,
-      entityType: 'location',
-      entityId: d.location_id,
-      metricKey: 'inventory.cycle_count_created',
-      numericValue: 1,
-      dimensions: {
-        count_type: d.count_type,
-        count_name: d.count_name,
-      },
-    })
+      return { id: count.id }
+    }
 
-    return Response.json({ id: count.id })
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'cycle_count.create',
+        fn: createCycleCount,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createCycleCount()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { useAppStore, useCan } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
 import type { RolePublic } from '@/lib/types'
@@ -229,15 +230,16 @@ function CreateRoleDialog({ onCreated }: { onCreated: () => void }) {
   const [description, setDescription] = useState('')
   const [permissions, setPermissions] = useState<string[]>([])
 
-  const createMutation = useMutation({
-    mutationFn: async (input: { name: string; description: string; permissions: string[] }) =>
-      api.post('/api/roles', input),
-    onSuccess: (_data, input) => {
-      toast.success(`Role "${input.name}" created`)
-      onCreated()
+  const createMutation = useIdempotentMutation<unknown, { name: string; description: string; permissions: string[] }>({
+    url: '/api/roles',
+    mutationOptions: {
+      onSuccess: (_data, input) => {
+        toast.success(`Role "${input.name}" created`)
+        onCreated()
+      },
+      onError: (err) =>
+        toast.error(err instanceof FetchError ? err.message : 'Failed to create role.'),
     },
-    onError: (err) =>
-      toast.error(err instanceof FetchError ? err.message : 'Failed to create role.'),
   })
 
   const saving = createMutation.isPending

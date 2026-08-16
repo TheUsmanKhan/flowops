@@ -17,6 +17,8 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -44,90 +46,111 @@ export async function POST(req: Request) {
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     const d = parsed.data
 
-    // Fetch current avg_cost for this variant+location
-    const pool = await db.inventoryPool.findUnique({
-      where: { orgVariantId_locationId: { orgVariantId: d.org_variant_id, locationId: d.location_id } },
-    })
-    if (!pool) throw new ApiError(404, 'No inventory at this location for this variant.')
-    const available = pool.onHand - pool.reserved
-    if (available < d.quantity) {
-      throw new ApiError(400, `Insufficient available stock. Available: ${available}, required: ${d.quantity}.`)
-    }
-    const avgCost = Number(pool.avgCost)
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate damage reports).
+    const createDamagedLoss = async () => {
+      // Fetch current avg_cost for this variant+location
+      const pool = await db.inventoryPool.findUnique({
+        where: { orgVariantId_locationId: { orgVariantId: d.org_variant_id, locationId: d.location_id } },
+      })
+      if (!pool) throw new ApiError(404, 'No inventory at this location for this variant.')
+      const available = pool.onHand - pool.reserved
+      if (available < d.quantity) {
+        throw new ApiError(400, `Insufficient available stock. Available: ${available}, required: ${d.quantity}.`)
+      }
+      const avgCost = Number(pool.avgCost)
 
-    // 1. Insert stock_loss_records first (with inventory_txn_id = NULL)
-    const lossRecord = await db.stockLossRecord.create({
-      data: {
-        organizationId: orgId,
-        companyId: company.id,
+      // 1. Insert stock_loss_records first (with inventory_txn_id = NULL)
+      const lossRecord = await db.stockLossRecord.create({
+        data: {
+          organizationId: orgId,
+          companyId: company.id,
+          orgVariantId: d.org_variant_id,
+          locationId: d.location_id,
+          lossType: 'damaged',
+          subType: 'confirmed',
+          damageType: d.damage_type,
+          quantity: d.quantity,
+          costPerUnit: avgCost,
+          investigationStatus: 'none',
+          resolution: 'written_off',
+          responsibleParty: d.responsible_party,
+          evidenceUrls: JSON.stringify(d.evidence_urls),
+          notes: d.notes || null,
+          reportedById: caller.id,
+          resolvedById: caller.id,
+          resolvedAt: new Date(),
+        },
+      })
+
+      // 2. Call processInventoryTransaction with reference to the loss record
+      const txnResult = await processInventoryTransaction({
         orgVariantId: d.org_variant_id,
         locationId: d.location_id,
-        lossType: 'damaged',
-        subType: 'confirmed',
-        damageType: d.damage_type,
+        organizationId: orgId,
+        companyId: company.id,
+        employeeId: caller.id,
+        transactionType: 'damage_writeoff',
         quantity: d.quantity,
         costPerUnit: avgCost,
-        investigationStatus: 'none',
-        resolution: 'written_off',
-        responsibleParty: d.responsible_party,
-        evidenceUrls: JSON.stringify(d.evidence_urls),
-        notes: d.notes || null,
-        reportedById: caller.id,
-        resolvedById: caller.id,
-        resolvedAt: new Date(),
-      },
-    })
+        referenceType: 'stock_loss',
+        referenceId: lossRecord.id,
+        notes: `Damaged: ${d.damage_type}. ${d.notes || ''}`,
+      })
+      if (!txnResult.success) {
+        throw new ApiError(500, `Write-off transaction failed: ${txnResult.error}`)
+      }
 
-    // 2. Call processInventoryTransaction with reference to the loss record
-    const txnResult = await processInventoryTransaction({
-      orgVariantId: d.org_variant_id,
-      locationId: d.location_id,
-      organizationId: orgId,
-      companyId: company.id,
-      employeeId: caller.id,
-      transactionType: 'damage_writeoff',
-      quantity: d.quantity,
-      costPerUnit: avgCost,
-      referenceType: 'stock_loss',
-      referenceId: lossRecord.id,
-      notes: `Damaged: ${d.damage_type}. ${d.notes || ''}`,
-    })
-    if (!txnResult.success) {
-      throw new ApiError(500, `Write-off transaction failed: ${txnResult.error}`)
+      // 3. Update loss record with the transaction ID
+      await db.stockLossRecord.update({
+        where: { id: lossRecord.id },
+        data: { inventoryTxnId: txnResult.transactionId },
+      })
+
+      insertAuditLog({
+        action: 'stock_loss.damaged_reported',
+        entityType: 'stock_loss',
+        entityId: lossRecord.id,
+        companyId: company.id,
+        organizationId: orgId,
+        userId: user.id,
+        employeeId: caller.id,
+        newValues: { quantity: d.quantity, damageType: d.damage_type, value: d.quantity * avgCost },
+      })
+
+      insertMetricEvent({
+        companyId: company.id,
+        entityType: 'product',
+        entityId: d.org_variant_id,
+        metricKey: 'inventory.damage_loss',
+        numericValue: d.quantity * avgCost,
+        dimensions: {
+          damage_type: d.damage_type,
+          responsible_party: d.responsible_party,
+          location_id: d.location_id,
+          quantity: d.quantity,
+        },
+      })
+
+      return { success: true, loss_record_id: lossRecord.id, transaction_id: txnResult.transactionId }
     }
 
-    // 3. Update loss record with the transaction ID
-    await db.stockLossRecord.update({
-      where: { id: lossRecord.id },
-      data: { inventoryTxnId: txnResult.transactionId },
-    })
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'stock_loss.damaged',
+        fn: createDamagedLoss,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
 
-    insertAuditLog({
-      action: 'stock_loss.damaged_reported',
-      entityType: 'stock_loss',
-      entityId: lossRecord.id,
-      companyId: company.id,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: { quantity: d.quantity, damageType: d.damage_type, value: d.quantity * avgCost },
-    })
-
-    insertMetricEvent({
-      companyId: company.id,
-      entityType: 'product',
-      entityId: d.org_variant_id,
-      metricKey: 'inventory.damage_loss',
-      numericValue: d.quantity * avgCost,
-      dimensions: {
-        damage_type: d.damage_type,
-        responsible_party: d.responsible_party,
-        location_id: d.location_id,
-        quantity: d.quantity,
-      },
-    })
-
-    return Response.json({ success: true, loss_record_id: lossRecord.id, transaction_id: txnResult.transactionId })
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createDamagedLoss()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

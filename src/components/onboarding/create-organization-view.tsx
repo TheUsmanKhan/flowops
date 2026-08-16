@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { Loader2, ArrowLeft, ArrowRight, Check, Building2, MapPin, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAppStore } from '@/stores/app-store'
@@ -51,6 +51,7 @@ export function CreateOrganizationView({ onBack }: { onBack: () => void }) {
   const [step, setStep] = useState(0)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID())
   const [form, setForm] = useState<OrgFormState>({
     org_name: '',
     org_logo_url: null,
@@ -112,6 +113,9 @@ export function CreateOrganizationView({ onBack }: { onBack: () => void }) {
       const session = await api.post<SessionResponse>(
         '/api/organizations/create',
         form,
+        {
+          'Idempotency-Key': idempotencyKeyRef.current,
+        },
       )
       setSession({
         user: session.user,

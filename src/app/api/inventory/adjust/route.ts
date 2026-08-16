@@ -17,6 +17,8 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -63,93 +65,114 @@ export async function POST(req: Request) {
     })
     const avgCostForMetric = pool ? Number(pool.avgCost) : 0
 
-    if (isPositive) {
-      // Adding stock — use cycle_count_adjust (sets on_hand)
-      const txnResult = await processInventoryTransaction({
-        orgVariantId: d.org_variant_id,
-        locationId: d.location_id,
-        organizationId: orgId,
-        companyId: company.id,
-        employeeId: caller.id,
-        transactionType: 'cycle_count_adjust',
-        quantity: absQty,
-        referenceType: 'manual',
-        notes: `Manual adjustment: ${d.reason}. ${d.notes || ''}`,
-      })
-      if (!txnResult.success) {
-        throw new ApiError(500, `Adjustment failed: ${txnResult.error}`)
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate adjustment submissions).
+    const adjustStock = async () => {
+      if (isPositive) {
+        // Adding stock — use cycle_count_adjust (sets on_hand)
+        const txnResult = await processInventoryTransaction({
+          orgVariantId: d.org_variant_id,
+          locationId: d.location_id,
+          organizationId: orgId,
+          companyId: company.id,
+          employeeId: caller.id,
+          transactionType: 'cycle_count_adjust',
+          quantity: absQty,
+          referenceType: 'manual',
+          notes: `Manual adjustment: ${d.reason}. ${d.notes || ''}`,
+        })
+        if (!txnResult.success) {
+          throw new ApiError(500, `Adjustment failed: ${txnResult.error}`)
+        }
+
+        insertAuditLog({
+          action: 'stock.adjusted',
+          entityType: 'variant',
+          entityId: d.org_variant_id,
+          companyId: company.id,
+          organizationId: orgId,
+          userId: user.id,
+          employeeId: caller.id,
+          newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id },
+        })
+
+        // Metric event (CRITICAL — powers stock adjustment KPI)
+        insertMetricEvent({
+          companyId: company.id,
+          entityType: 'product',
+          entityId: d.org_variant_id,
+          metricKey: 'inventory.stock_adjusted',
+          numericValue: absQty * avgCostForMetric,
+          dimensions: {
+            location_id: d.location_id,
+            direction: 'increase',
+            reason: d.reason,
+          },
+        })
+
+        return { success: true, transaction_id: txnResult.transactionId }
+      } else {
+        // Removing stock — use damage_writeoff as a generic removal type
+        const txnResult = await processInventoryTransaction({
+          orgVariantId: d.org_variant_id,
+          locationId: d.location_id,
+          organizationId: orgId,
+          companyId: company.id,
+          employeeId: caller.id,
+          transactionType: 'damage_writeoff',
+          quantity: absQty,
+          referenceType: 'manual',
+          notes: `Manual adjustment: ${d.reason}. ${d.notes || ''}`,
+        })
+        if (!txnResult.success) {
+          throw new ApiError(500, `Adjustment failed: ${txnResult.error}`)
+        }
+
+        insertAuditLog({
+          action: 'stock.adjusted',
+          entityType: 'variant',
+          entityId: d.org_variant_id,
+          companyId: company.id,
+          organizationId: orgId,
+          userId: user.id,
+          employeeId: caller.id,
+          newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id },
+        })
+
+        // Metric event (CRITICAL — powers stock adjustment KPI)
+        insertMetricEvent({
+          companyId: company.id,
+          entityType: 'product',
+          entityId: d.org_variant_id,
+          metricKey: 'inventory.stock_adjusted',
+          numericValue: absQty * avgCostForMetric,
+          dimensions: {
+            location_id: d.location_id,
+            direction: 'decrease',
+            reason: d.reason,
+          },
+        })
+
+        return { success: true, transaction_id: txnResult.transactionId }
       }
-
-      insertAuditLog({
-        action: 'stock.adjusted',
-        entityType: 'variant',
-        entityId: d.org_variant_id,
-        companyId: company.id,
-        organizationId: orgId,
-        userId: user.id,
-        employeeId: caller.id,
-        newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id },
-      })
-
-      // Metric event (CRITICAL — powers stock adjustment KPI)
-      insertMetricEvent({
-        companyId: company.id,
-        entityType: 'product',
-        entityId: d.org_variant_id,
-        metricKey: 'inventory.stock_adjusted',
-        numericValue: absQty * avgCostForMetric,
-        dimensions: {
-          location_id: d.location_id,
-          direction: 'increase',
-          reason: d.reason,
-        },
-      })
-
-      return Response.json({ success: true, transaction_id: txnResult.transactionId })
-    } else {
-      // Removing stock — use damage_writeoff as a generic removal type
-      const txnResult = await processInventoryTransaction({
-        orgVariantId: d.org_variant_id,
-        locationId: d.location_id,
-        organizationId: orgId,
-        companyId: company.id,
-        employeeId: caller.id,
-        transactionType: 'damage_writeoff',
-        quantity: absQty,
-        referenceType: 'manual',
-        notes: `Manual adjustment: ${d.reason}. ${d.notes || ''}`,
-      })
-      if (!txnResult.success) {
-        throw new ApiError(500, `Adjustment failed: ${txnResult.error}`)
-      }
-
-      insertAuditLog({
-        action: 'stock.adjusted',
-        entityType: 'variant',
-        entityId: d.org_variant_id,
-        companyId: company.id,
-        organizationId: orgId,
-        userId: user.id,
-        employeeId: caller.id,
-        newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id },
-      })
-
-      // Metric event (CRITICAL — powers stock adjustment KPI)
-      insertMetricEvent({
-        companyId: company.id,
-        entityType: 'product',
-        entityId: d.org_variant_id,
-        metricKey: 'inventory.stock_adjusted',
-        numericValue: absQty * avgCostForMetric,
-        dimensions: {
-          location_id: d.location_id,
-          direction: 'decrease',
-          reason: d.reason,
-        },
-      })
-
-      return Response.json({ success: true, transaction_id: txnResult.transactionId })
     }
+
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'inventory.adjust',
+        fn: adjustStock,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await adjustStock()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

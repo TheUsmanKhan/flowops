@@ -1,7 +1,8 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
@@ -215,17 +216,18 @@ export function AdjustStockView() {
   const projectedOnHand = currentPool ? currentPool.onHand + effectiveDelta : null
 
   // ── Mutation ─────────────────────────────────────────────────────────────
-  const adjustMutation = useMutation({
-    mutationFn: async (payload: AdjustPayload) =>
-      api.post('/api/inventory/adjust', payload),
-    onSuccess: (_data, vars) => {
-      const verb = vars.quantity > 0 ? 'added' : 'removed'
-      toast.success(`Stock ${verb}: ${Math.abs(vars.quantity)} unit${Math.abs(vars.quantity) === 1 ? '' : 's'}.`)
-      void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
-      void queryClient.invalidateQueries({ queryKey: ['location-detail'] })
-      navigate({ name: 'inventory' })
+  const adjustMutation = useIdempotentMutation<unknown, AdjustPayload>({
+    url: '/api/inventory/adjust',
+    mutationOptions: {
+      onSuccess: (_data, vars) => {
+        const verb = vars.quantity > 0 ? 'added' : 'removed'
+        toast.success(`Stock ${verb}: ${Math.abs(vars.quantity)} unit${Math.abs(vars.quantity) === 1 ? '' : 's'}.`)
+        void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+        void queryClient.invalidateQueries({ queryKey: ['location-detail'] })
+        navigate({ name: 'inventory' })
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   // ── Submit ───────────────────────────────────────────────────────────────

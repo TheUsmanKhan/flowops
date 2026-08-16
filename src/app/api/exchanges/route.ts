@@ -1,4 +1,4 @@
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, handleError, readBody, getWorkspace } from '@/lib/workspace'
 import {
   createExchangeRequest,
   listExchanges,
@@ -31,15 +31,46 @@ export async function GET(req: Request) {
 /** POST /api/exchanges — create a new exchange request. */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
     const body = await readBody<Record<string, unknown>>(req)
-    const result = await createExchangeRequest({
+
+    // Build the action input up-front so both paths use identical data.
+    const input = {
       original_order_item_id: String(body.original_order_item_id ?? ''),
       new_org_variant_id: String(body.new_org_variant_id ?? ''),
       exchange_method: body.exchange_method as 'courier_replacement' | 'customer_self_return',
       reason: String(body.reason ?? ''),
-    })
-    if (!result.success) throw new ApiError(400, result.error ?? 'Failed to create exchange')
-    return Response.json(result.data, { status: 201 })
+    }
+
+    // Core creation logic — calls the action function and throws on failure
+    // so withIdempotency marks the ticket as 'failed' (allowing genuine retry).
+    const runCreate = async () => {
+      const result = await createExchangeRequest(input)
+      if (!result.success) {
+        throw new ApiError(400, result.error ?? 'Failed to create exchange')
+      }
+      return result.data
+    }
+
+    if (idempotencyKey) {
+      // Resolve workspace at the route layer so we have companyId/employeeId
+      // to scope the idempotency key. The action function re-resolves the
+      // same workspace internally — that's a single extra JOIN, acceptable.
+      const ctx = await getWorkspace()
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: ctx.company.id,
+        employeeId: ctx.employee.id,
+        actionType: 'exchange.create',
+        fn: runCreate,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const data = await runCreate()
+    return Response.json(data, { status: 201 })
   } catch (err) {
     return handleError(err)
   }

@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
@@ -249,20 +250,21 @@ export function PoCreateView() {
   }, [deliveryLocationId, locationsQuery.data])
 
   // ── Mutation ─────────────────────────────────────────────────────────────
-  const createMutation = useMutation({
-    mutationFn: async (payload: CreatePayload) =>
-      api.post<CreateResponse>('/api/purchase-orders', payload),
-    onSuccess: (data, vars) => {
-      toast.success(
-        vars.status === 'ordered'
-          ? `PO ${data.poNumber} confirmed and sent.`
-          : `Draft PO ${data.poNumber} saved.`,
-      )
-      void queryClient.invalidateQueries({ queryKey: ['purchase-orders'] })
-      void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
-      navigate({ name: 'inventory-po-detail', id: data.id })
+  const createMutation = useIdempotentMutation<CreateResponse, CreatePayload>({
+    url: '/api/purchase-orders',
+    mutationOptions: {
+      onSuccess: (data, vars) => {
+        toast.success(
+          vars.status === 'ordered'
+            ? `PO ${data.poNumber} confirmed and sent.`
+            : `Draft PO ${data.poNumber} saved.`,
+        )
+        void queryClient.invalidateQueries({ queryKey: ['purchase-orders'] })
+        void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+        navigate({ name: 'inventory-po-detail', id: data.id })
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   // ── Item manipulation ────────────────────────────────────────────────────
@@ -827,23 +829,24 @@ function QuickCreateSupplierDialog({
   const [contactPerson, setContactPerson] = useState('')
   const [phone, setPhone] = useState('')
 
-  const createMutation = useMutation({
-    mutationFn: async () =>
-      api.post<{ id: string; name: string }>('/api/suppliers', {
-        name: name.trim(),
-        contactPerson: contactPerson.trim() || undefined,
-        phone: phone.trim() || undefined,
-        isOrgLevel: false,
-      }),
-    onSuccess: (data) => {
-      toast.success(`Supplier "${data.name}" created.`)
-      onCreated(data.id)
-      setName('')
-      setContactPerson('')
-      setPhone('')
-      onOpenChange(false)
+  const createMutation = useIdempotentMutation<{ id: string; name: string }, {
+    name: string
+    contactPerson?: string
+    phone?: string
+    isOrgLevel: boolean
+  }>({
+    url: '/api/suppliers',
+    mutationOptions: {
+      onSuccess: (data) => {
+        toast.success(`Supplier "${data.name}" created.`)
+        onCreated(data.id)
+        setName('')
+        setContactPerson('')
+        setPhone('')
+        onOpenChange(false)
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   return (
@@ -863,7 +866,12 @@ function QuickCreateSupplierDialog({
               toast.error('Name must be at least 2 characters.')
               return
             }
-            createMutation.mutate()
+            createMutation.mutate({
+              name: name.trim(),
+              contactPerson: contactPerson.trim() || undefined,
+              phone: phone.trim() || undefined,
+              isOrgLevel: false,
+            })
           }}
           className="space-y-3"
         >

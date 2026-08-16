@@ -44,6 +44,8 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
 
@@ -114,75 +116,96 @@ export async function POST(req: Request) {
       )
     }
 
-    // THE single write path — processInventoryTransaction handles:
-    //   - find/create inventory_pools row
-    //   - increment on_hand
-    //   - recalculate WAC avg_cost
-    //   - insert inventory_transactions ledger row
-    //   - insert avg_cost_history
-    //   - flip track_inventory FALSE → TRUE for made_to_order variants
-    const txnResult = await processInventoryTransaction({
-      orgVariantId: d.org_variant_id,
-      locationId: d.location_id,
-      organizationId: orgId,
-      companyId: company.id,
-      employeeId: caller.id,
-      transactionType: 'opening_stock',
-      quantity: +d.quantity,
-      costPerUnit: d.cost_per_unit,
-      referenceType: 'opening',
-      referenceId: null,
-      notes: d.notes || 'Opening stock recorded at product creation',
-    })
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate opening-stock submissions).
+    const recordOpeningStock = async () => {
+      // THE single write path — processInventoryTransaction handles:
+      //   - find/create inventory_pools row
+      //   - increment on_hand
+      //   - recalculate WAC avg_cost
+      //   - insert inventory_transactions ledger row
+      //   - insert avg_cost_history
+      //   - flip track_inventory FALSE → TRUE for made_to_order variants
+      const txnResult = await processInventoryTransaction({
+        orgVariantId: d.org_variant_id,
+        locationId: d.location_id,
+        organizationId: orgId,
+        companyId: company.id,
+        employeeId: caller.id,
+        transactionType: 'opening_stock',
+        quantity: +d.quantity,
+        costPerUnit: d.cost_per_unit,
+        referenceType: 'opening',
+        referenceId: null,
+        notes: d.notes || 'Opening stock recorded at product creation',
+      })
 
-    if (!txnResult.success) {
-      // Surface the real error — do NOT swallow
-      throw new ApiError(500, txnResult.error ?? 'Failed to record opening stock.')
+      if (!txnResult.success) {
+        // Surface the real error — do NOT swallow
+        throw new ApiError(500, txnResult.error ?? 'Failed to record opening stock.')
+      }
+
+      // Audit log
+      insertAuditLog({
+        action: 'inventory.opening_stock_added',
+        entityType: 'variant',
+        entityId: d.org_variant_id,
+        companyId: company.id,
+        organizationId: orgId,
+        userId: user.id,
+        employeeId: caller.id,
+        newValues: {
+          quantity: d.quantity,
+          costPerUnit: d.cost_per_unit,
+          locationId: d.location_id,
+          locationName: location.name,
+          sku: variant.sku,
+          productTitle: variant.product.title,
+        },
+      })
+
+      // ── Metric event (CRITICAL—powers stock value KPI; same key as
+      //     /api/inventory/receive so opening stock doesn't double-count) ──
+      insertMetricEvent({
+        companyId: company.id,
+        entityType: 'product',
+        entityId: d.org_variant_id,
+        metricKey: 'inventory.stock_received',
+        numericValue: d.quantity * d.cost_per_unit,
+        dimensions: {
+          location_id: d.location_id,
+          quantity: d.quantity,
+          cost_per_unit: d.cost_per_unit,
+          source: 'opening_stock',
+        },
+      })
+
+      return {
+        success: true,
+        transaction_id: txnResult.transactionId,
+        pool_state: txnResult.poolState,
+        variant_id: d.org_variant_id,
+        product_id: variant.product.id,
+        location_id: d.location_id,
+      }
     }
 
-    // Audit log
-    insertAuditLog({
-      action: 'inventory.opening_stock_added',
-      entityType: 'variant',
-      entityId: d.org_variant_id,
-      companyId: company.id,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: {
-        quantity: d.quantity,
-        costPerUnit: d.cost_per_unit,
-        locationId: d.location_id,
-        locationName: location.name,
-        sku: variant.sku,
-        productTitle: variant.product.title,
-      },
-    })
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'inventory.opening_stock',
+        fn: recordOpeningStock,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
 
-    // ── Metric event (CRITICAL — powers stock value KPI; same key as
-    //     /api/inventory/receive so opening stock doesn't double-count) ──
-    insertMetricEvent({
-      companyId: company.id,
-      entityType: 'product',
-      entityId: d.org_variant_id,
-      metricKey: 'inventory.stock_received',
-      numericValue: d.quantity * d.cost_per_unit,
-      dimensions: {
-        location_id: d.location_id,
-        quantity: d.quantity,
-        cost_per_unit: d.cost_per_unit,
-        source: 'opening_stock',
-      },
-    })
-
-    return Response.json({
-      success: true,
-      transaction_id: txnResult.transactionId,
-      pool_state: txnResult.poolState,
-      variant_id: d.org_variant_id,
-      product_id: variant.product.id,
-      location_id: d.location_id,
-    })
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await recordOpeningStock()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

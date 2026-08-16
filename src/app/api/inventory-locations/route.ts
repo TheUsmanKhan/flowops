@@ -51,6 +51,8 @@ export async function GET() {
 /** Create a location. */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -87,46 +89,67 @@ export async function POST(req: Request) {
       throw new ApiError(400, 'Location name is required')
     }
 
-    // If is_default = true, unset any existing default for this company scope
-    const scopeCompanyId = body.isOrgLevel ? null : company.id
-    if (body.isDefault) {
-      await db.inventoryLocation.updateMany({
-        where: {
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate location submissions).
+    const createLocation = async () => {
+      // If is_default = true, unset any existing default for this company scope
+      const scopeCompanyId = body.isOrgLevel ? null : company.id
+      if (body.isDefault) {
+        await db.inventoryLocation.updateMany({
+          where: {
+            organizationId: orgId,
+            companyId: scopeCompanyId,
+            isDefault: true,
+          },
+          data: { isDefault: false },
+        })
+      }
+
+      const location = await db.inventoryLocation.create({
+        data: {
           organizationId: orgId,
-          companyId: scopeCompanyId,
-          isDefault: true,
+          companyId: body.isOrgLevel ? null : company.id,
+          name: body.name!.trim(),
+          locationType: body.locationType || 'warehouse',
+          city: body.city || 'Lahore',
+          province: body.province || 'Punjab',
+          contactPerson: body.contactPerson || null,
+          contactPhone: body.contactPhone || null,
+          isDefault: body.isDefault ?? false,
+          createdById: caller.id,
         },
-        data: { isDefault: false },
       })
+
+      insertAuditLog({
+        action: 'location.created',
+        entityType: 'location',
+        entityId: location.id,
+        companyId: company.id,
+        organizationId: orgId,
+        userId: user!.id,
+        employeeId: caller.id,
+        newValues: { name: location.name, isOrgLevel: body.isOrgLevel },
+      })
+
+      return { id: location.id, name: location.name }
     }
 
-    const location = await db.inventoryLocation.create({
-      data: {
-        organizationId: orgId,
-        companyId: body.isOrgLevel ? null : company.id,
-        name: body.name.trim(),
-        locationType: body.locationType || 'warehouse',
-        city: body.city || 'Lahore',
-        province: body.province || 'Punjab',
-        contactPerson: body.contactPerson || null,
-        contactPhone: body.contactPhone || null,
-        isDefault: body.isDefault ?? false,
-        createdById: caller.id,
-      },
-    })
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'inventory_location.create',
+        fn: createLocation,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
 
-    insertAuditLog({
-      action: 'location.created',
-      entityType: 'location',
-      entityId: location.id,
-      companyId: company.id,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: { name: location.name, isOrgLevel: body.isOrgLevel },
-    })
-
-    return Response.json({ id: location.id, name: location.name })
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createLocation()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }

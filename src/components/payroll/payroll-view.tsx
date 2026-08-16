@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useState, useRef } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAppStore } from '@/stores/app-store'
 import { api, FetchError } from '@/lib/api-client'
 import { PageHeader } from '@/components/layout/dashboard-shell'
@@ -184,6 +184,7 @@ function GenerateRunDialog({ onClose, onSuccess }: { onClose: () => void; onSucc
   const [month, setMonth] = useState((now.getMonth() + 1).toString())
   const [year, setYear] = useState(now.getFullYear().toString())
   const [saving, setSaving] = useState(false)
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID())
 
   async function generate() {
     setSaving(true)
@@ -191,6 +192,8 @@ function GenerateRunDialog({ onClose, onSuccess }: { onClose: () => void; onSucc
       const result = await api.post<{ runId: string; payslipCount: number }>('/api/payroll', {
         periodMonth: parseInt(month),
         periodYear: parseInt(year),
+      }, {
+        'Idempotency-Key': idempotencyKeyRef.current,
       })
       toast.success(`Payroll run generated: ${result.payslipCount} payslips`)
       onSuccess()

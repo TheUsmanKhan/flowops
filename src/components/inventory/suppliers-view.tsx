@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { z } from 'zod'
 import { toast } from 'sonner'
 import { api, FetchError, initials } from '@/lib/api-client'
@@ -182,21 +183,24 @@ export function SuppliersView() {
   }, [suppliers, search])
 
   // ── Mutations ────────────────────────────────────────────────────────────
-  const createMutation = useMutation({
-    mutationFn: async (payload: SupplierFormValues) =>
-      api.post('/api/suppliers', {
-        ...payload,
-        // Normalize empty strings → undefined so the backend uses its defaults.
-        contactPerson: payload.contactPerson || undefined,
-        phone: payload.phone || undefined,
-        email: payload.email || undefined,
-      }),
-    onSuccess: () => {
-      toast.success('Supplier created.')
-      void queryClient.invalidateQueries({ queryKey: ['suppliers'] })
-      setCreateOpen(false)
+  const createMutation = useIdempotentMutation<unknown, SupplierFormValues>({
+    url: '/api/suppliers',
+    mutationOptions: {
+      onSuccess: () => {
+        toast.success('Supplier created.')
+        void queryClient.invalidateQueries({ queryKey: ['suppliers'] })
+        setCreateOpen(false)
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
+  })
+
+  // Normalize empty strings → undefined so the backend uses its defaults.
+  const normalizeSupplierValues = (payload: SupplierFormValues) => ({
+    ...payload,
+    contactPerson: payload.contactPerson || undefined,
+    phone: payload.phone || undefined,
+    email: payload.email || undefined,
   })
 
   const editMutation = useMutation({
@@ -404,7 +408,7 @@ export function SuppliersView() {
         description="Vendors you purchase stock from. Org-level suppliers are shared across all companies."
         submitLabel="Create supplier"
         loading={createMutation.isPending}
-        onSubmit={(values) => createMutation.mutate(values)}
+        onSubmit={(values) => createMutation.mutate(normalizeSupplierValues(values))}
       />
 
       {/* ── Edit dialog ────────────────────────────────────────────────────── */}

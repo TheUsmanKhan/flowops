@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { z } from 'zod'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
@@ -299,27 +300,29 @@ export function ReturnedStitchedView() {
   }
 
   // ---- Mutations ----
-  const receiveMutation = useMutation({
-    mutationFn: async (payload: {
-      org_variant_id: string
-      quantity: number
-      condition: ReturnedCondition
-      total_cost: number
-      return_reason: string
-      original_order_reference?: string
-      photos: string[]
-      notes?: string
-    }) => api.post('/api/returned-stitched', payload),
-    onSuccess: (_data, vars) => {
-      const msg =
-        vars.condition === 'damaged'
-          ? 'Damaged item recorded and written off.'
-          : 'Return recorded — item is now available stock.'
-      toast.success(msg)
-      invalidateAll()
-      setRecordOpen(false)
+  const receiveMutation = useIdempotentMutation<unknown, {
+    org_variant_id: string
+    quantity: number
+    condition: ReturnedCondition
+    total_cost: number
+    return_reason: string
+    original_order_reference?: string
+    photos: string[]
+    notes?: string
+  }>({
+    url: '/api/returned-stitched',
+    mutationOptions: {
+      onSuccess: (_data, vars) => {
+        const msg =
+          vars.condition === 'damaged'
+            ? 'Damaged item recorded and written off.'
+            : 'Return recorded — item is now available stock.'
+        toast.success(msg)
+        invalidateAll()
+        setRecordOpen(false)
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   const markSoldMutation = useMutation({

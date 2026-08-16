@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState , memo} from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { useAppStore, useCan } from '@/stores/app-store'
@@ -1212,13 +1213,15 @@ function CreateCountDialog({
     }
   }, [locationId, locationsQuery.data])
 
-  const createMutation = useMutation({
-    mutationFn: async (payload: CreatePayload) => api.post('/api/cycle-counts', payload),
-    onSuccess: () => {
-      toast.success('Cycle count scheduled.')
-      onSuccess()
+  const createMutation = useIdempotentMutation<unknown, CreatePayload>({
+    url: '/api/cycle-counts',
+    mutationOptions: {
+      onSuccess: () => {
+        toast.success('Cycle count scheduled.')
+        onSuccess()
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   const handleSubmit = () => {

@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { Loader2, ArrowLeft, ArrowRight, Check, AlertCircle, Building2, Plus } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAppStore } from '@/stores/app-store'
@@ -56,6 +56,7 @@ export function CreateCompanyView({ orgId, onBack }: { orgId?: string; onBack: (
   const [loadingOrgs, setLoadingOrgs] = useState(true)
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID())
   const [form, setForm] = useState<CompanyFormState>({
     organization_id: orgId ?? '',
     company_name: '',
@@ -113,7 +114,9 @@ export function CreateCompanyView({ orgId, onBack }: { orgId?: string; onBack: (
     if (err0 || err1) { setSubmitError(err0 || err1); setStep(err0 ? 0 : 1); return }
     setSubmitting(true)
     try {
-      const session = await api.post<SessionResponse>('/api/companies/create', form)
+      const session = await api.post<SessionResponse>('/api/companies/create', form, {
+        'Idempotency-Key': idempotencyKeyRef.current,
+      })
       setSession({
         user: session.user,
         activeCompany: session.activeCompany,

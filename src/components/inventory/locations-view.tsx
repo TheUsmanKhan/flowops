@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { z } from 'zod'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
@@ -191,16 +192,17 @@ export function LocationsView() {
   const locations = locationsQuery.data?.locations ?? []
 
   // ── Mutations ────────────────────────────────────────────────────────────
-  const createMutation = useMutation({
-    mutationFn: async (payload: LocationFormValues) =>
-      api.post('/api/inventory-locations', payload),
-    onSuccess: () => {
-      toast.success('Location created.')
-      void queryClient.invalidateQueries({ queryKey: ['locations'] })
-      void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
-      setCreateOpen(false)
+  const createMutation = useIdempotentMutation<unknown, LocationFormValues>({
+    url: '/api/inventory-locations',
+    mutationOptions: {
+      onSuccess: () => {
+        toast.success('Location created.')
+        void queryClient.invalidateQueries({ queryKey: ['locations'] })
+        void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+        setCreateOpen(false)
+      },
+      onError: (err) => toast.error(getErrorMessage(err)),
     },
-    onError: (err) => toast.error(getErrorMessage(err)),
   })
 
   const editMutation = useMutation({

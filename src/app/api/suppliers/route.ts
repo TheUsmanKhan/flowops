@@ -48,6 +48,8 @@ export async function GET() {
 /** Create a supplier. */
 export async function POST(req: Request) {
   try {
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({
@@ -82,31 +84,52 @@ export async function POST(req: Request) {
       throw new ApiError(400, 'Supplier name is required')
     }
 
-    const supplier = await db.supplier.create({
-      data: {
+    // Core creation logic — wrapped in a closure so it can be run either
+    // directly (no idempotency key, backwards-compatible) or via
+    // withIdempotency() (prevents duplicate supplier submissions).
+    const createSupplier = async () => {
+      const supplier = await db.supplier.create({
+        data: {
+          organizationId: orgId,
+          companyId: body.isOrgLevel ? null : company.id,
+          name: body.name!.trim(),
+          contactPerson: body.contactPerson || null,
+          phone: body.phone || null,
+          email: body.email || null,
+          paymentTerms: body.paymentTerms || 'immediate',
+          createdById: caller.id,
+        },
+      })
+
+      insertAuditLog({
+        action: 'supplier.created',
+        entityType: 'supplier',
+        entityId: supplier.id,
+        companyId: company.id,
         organizationId: orgId,
-        companyId: body.isOrgLevel ? null : company.id,
-        name: body.name.trim(),
-        contactPerson: body.contactPerson || null,
-        phone: body.phone || null,
-        email: body.email || null,
-        paymentTerms: body.paymentTerms || 'immediate',
-        createdById: caller.id,
-      },
-    })
+        userId: user.id,
+        employeeId: caller.id,
+        newValues: { name: supplier.name },
+      })
 
-    insertAuditLog({
-      action: 'supplier.created',
-      entityType: 'supplier',
-      entityId: supplier.id,
-      companyId: company.id,
-      organizationId: orgId,
-      userId: user.id,
-      employeeId: caller.id,
-      newValues: { name: supplier.name },
-    })
+      return { id: supplier.id, name: supplier.name }
+    }
 
-    return Response.json({ id: supplier.id, name: supplier.name })
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: caller.id,
+        actionType: 'supplier.create',
+        fn: createSupplier,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createSupplier()
+    return Response.json(result)
   } catch (err) {
     return handleError(err)
   }
