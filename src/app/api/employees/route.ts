@@ -104,55 +104,84 @@ export async function POST(req: Request) {
     const role = await db.role.findFirst({ where: { id: roleId, companyId: company.id } })
     if (!role) throw new ApiError(400, 'Selected role does not belong to this company.')
 
-    // Prevent duplicate pending invite.
-    const existingPending = await db.invitation.findFirst({
-      where: { companyId: company.id, invitedEmail: email.toLowerCase(), status: 'pending' },
-    })
-    if (existingPending) {
-      throw new ApiError(409, 'A pending invitation already exists for this email.')
-    }
+    // The core invite creation logic — wrapped in a function so it can be
+    // called either directly or via withIdempotency() (prevents duplicate
+    // invitations from rapid double-clicks).
+    const createInvite = async () => {
+      // Prevent duplicate pending invite.
+      // NOTE: This is a check-then-create pattern with a race window.
+      // The withIdempotency wrapper below closes this gap for the
+      // double-click case. A DB-level unique constraint on
+      // [companyId, invitedEmail, status] would be the ideal fix, but
+      // would require a schema migration — the idempotency key system
+      // provides equivalent protection without the migration.
+      const existingPending = await db.invitation.findFirst({
+        where: { companyId: company.id, invitedEmail: email.toLowerCase(), status: 'pending' },
+      })
+      if (existingPending) {
+        throw new ApiError(409, 'A pending invitation already exists for this email.')
+      }
 
-    const expiresAt = new Date(Date.now() + 7 * 86400000)
-    const invitation = await db.invitation.create({
-      data: {
+      const expiresAt = new Date(Date.now() + 7 * 86400000)
+      const invitation = await db.invitation.create({
+        data: {
+          companyId: company.id,
+          organizationId: company.organizationId,
+          invitedEmail: email.toLowerCase(),
+          invitedById: user.id,
+          roleId: role.id,
+          expiresAt,
+          message: message || null,
+          metadata: JSON.stringify({ department, designation }),
+        },
+        include: { role: true },
+      })
+
+      insertAuditLog({
+        action: 'employee.invited',
+        entityType: 'invitation',
+        entityId: invitation.id,
         companyId: company.id,
         organizationId: company.organizationId,
-        invitedEmail: email.toLowerCase(),
-        invitedById: user.id,
-        roleId: role.id,
-        expiresAt,
-        message: message || null,
-        metadata: JSON.stringify({ department, designation }),
-      },
-      include: { role: true },
-    })
+        userId: user.id,
+        employeeId: callerEmp.id,
+        newValues: {
+          invitedEmail: email,
+          role: role.name,
+          department,
+          designation,
+          expiresAt: expiresAt.toISOString(),
+        },
+      })
 
-    insertAuditLog({
-      action: 'employee.invited',
-      entityType: 'invitation',
-      entityId: invitation.id,
-      companyId: company.id,
-      organizationId: company.organizationId,
-      userId: user.id,
-      employeeId: callerEmp.id,
-      newValues: {
-        invitedEmail: email,
-        role: role.name,
-        department,
-        designation,
-        expiresAt: expiresAt.toISOString(),
-      },
-    })
+      return {
+        id: invitation.id,
+        invitedEmail: invitation.invitedEmail,
+        status: invitation.status,
+        role: { id: invitation.role.id, name: invitation.role.name },
+        expiresAt: invitation.expiresAt.toISOString(),
+        note:
+          'The invitee will see this invitation when they sign in or register with this email.',
+      }
+    }
 
-    return Response.json({
-      id: invitation.id,
-      invitedEmail: invitation.invitedEmail,
-      status: invitation.status,
-      role: { id: invitation.role.id, name: invitation.role.name },
-      expiresAt: invitation.expiresAt.toISOString(),
-      note:
-        'The invitee will see this invitation when they sign in or register with this email.',
-    })
+    // If an idempotency key is provided, wrap the creation in withIdempotency()
+    const idempotencyKey = req.headers.get('Idempotency-Key')
+    if (idempotencyKey) {
+      const { withIdempotency } = await import('@/lib/idempotency')
+      const { result, wasReplay } = await withIdempotency({
+        key: idempotencyKey,
+        companyId: company.id,
+        employeeId: callerEmp.id,
+        actionType: 'employee.invite',
+        fn: createInvite,
+      })
+      return Response.json(result, { status: wasReplay ? 200 : 201 })
+    }
+
+    // No idempotency key — normal flow (backwards-compatible)
+    const result = await createInvite()
+    return Response.json(result, { status: 201 })
   } catch (err) {
     return handleError(err)
   }

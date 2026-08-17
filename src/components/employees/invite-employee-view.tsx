@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { Loader2, ArrowLeft, Send, Mail } from 'lucide-react'
@@ -56,6 +56,7 @@ export function InviteEmployeeView() {
   const navigate = useAppStore((s) => s.navigate)
   const [roles, setRoles] = useState<RolePublic[]>([])
   const [submitting, setSubmitting] = useState(false)
+  const idempotencyKeyRef = useRef<string>(crypto.randomUUID())
   const [sentTo, setSentTo] = useState<string | null>(null)
   const [customDesignation, setCustomDesignation] = useState('')
 
@@ -97,7 +98,9 @@ export function InviteEmployeeView() {
   async function onSubmit(values: InviteEmployeeInput) {
     setSubmitting(true)
     try {
-      await api.post('/api/employees', values)
+      await api.post('/api/employees', values, {
+        'Idempotency-Key': idempotencyKeyRef.current,
+      })
       toast.success(`Invitation sent to ${values.email}`)
       setSentTo(values.email)
       form.reset()

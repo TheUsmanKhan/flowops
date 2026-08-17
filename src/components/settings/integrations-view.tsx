@@ -579,6 +579,8 @@ function ConnectDialog({
         provider_id: provider.id,
         connection_name: connectionName.trim() || `${provider.providerName} Connection`,
         credentials,
+      }, {
+        'Idempotency-Key': `${provider.id}-${connectionName.trim()}`,
       }),
     onSuccess: (data) => {
       toast.success('Integration connected.')
