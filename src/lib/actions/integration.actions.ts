@@ -272,36 +272,97 @@ export async function connectIntegration(input: {
         webhookSecret = generateWebhookSecret()
       }
 
-      integration = await db.companyIntegration.create({
-        data: {
+      try {
+        integration = await db.companyIntegration.create({
+          data: {
+            companyId: ctx.company.id,
+            organizationId: ctx.company.organizationId,
+            providerId: input.providerId,
+            connectionName: input.connectionName,
+            credentialsEncrypted,
+            webhookEndpointId,
+            webhookSecret,
+            connectionStatus: 'pending',
+            createdBy: ctx.employee.id,
+          },
+          select: { id: true },
+        })
+        isNewConnection = true
+
+        insertAuditLog({
+          action: 'integration.connected',
+          entityType: 'company_integration',
+          entityId: integration.id,
           companyId: ctx.company.id,
           organizationId: ctx.company.organizationId,
-          providerId: input.providerId,
-          connectionName: input.connectionName,
-          credentialsEncrypted,
-          webhookEndpointId,
-          webhookSecret,
-          connectionStatus: 'pending',
-          createdBy: ctx.employee.id,
-        },
-        select: { id: true },
-      })
-      isNewConnection = true
-
-      insertAuditLog({
-        action: 'integration.connected',
-        entityType: 'company_integration',
-        entityId: integration.id,
-        companyId: ctx.company.id,
-        organizationId: ctx.company.organizationId,
-        userId: ctx.user.id,
-        employeeId: ctx.employee.id,
-        newValues: {
-          provider: provider.providerKey,
-          connectionName: input.connectionName,
-          supportsWebhook: provider.supportsWebhook,
-        },
-      })
+          userId: ctx.user.id,
+          employeeId: ctx.employee.id,
+          newValues: {
+            provider: provider.providerKey,
+            connectionName: input.connectionName,
+            supportsWebhook: provider.supportsWebhook,
+          },
+        })
+      } catch (createErr: unknown) {
+        // Catch the @@unique([companyId, providerId]) constraint violation.
+        // This means another concurrent request just created this integration
+        // (genuine race between two different sessions — the idempotency key
+        // system only protects same-session double-clicks). Re-fetch the
+        // now-existing row and run the same reactivation logic as the
+        // findFirst-then-update path above.
+        if (
+          createErr &&
+          typeof createErr === 'object' &&
+          'code' in createErr &&
+          (createErr as { code: string }).code === 'P2002'
+        ) {
+          // Re-fetch the row the winner created
+          const raceExisting = await db.companyIntegration.findFirst({
+            where: { companyId: ctx.company.id, providerId: input.providerId },
+            select: { id: true, isActive: true },
+          })
+          if (!raceExisting) {
+            // Extremely unlikely: the row was deleted between the constraint
+            // violation and this re-fetch. Let the error propagate.
+            throw createErr
+          }
+          // Reactivate the row (same logic as the existing-update path above)
+          let raceWebhookSecret: string | null = null
+          if (provider.supportsWebhook) {
+            webhookEndpointId = generateWebhookEndpointId()
+            raceWebhookSecret = generateWebhookSecret()
+          }
+          integration = await db.companyIntegration.update({
+            where: { id: raceExisting.id },
+            data: {
+              connectionName: input.connectionName,
+              credentialsEncrypted,
+              isActive: true,
+              connectionStatus: 'pending',
+              lastError: null,
+              webhookEndpointId,
+              webhookSecret: raceWebhookSecret,
+            },
+            select: { id: true },
+          })
+          insertAuditLog({
+            action: raceExisting.isActive ? 'integration.credentials_updated' : 'integration.reconnected',
+            entityType: 'company_integration',
+            entityId: integration.id,
+            companyId: ctx.company.id,
+            organizationId: ctx.company.organizationId,
+            userId: ctx.user.id,
+            employeeId: ctx.employee.id,
+            newValues: {
+              provider: provider.providerKey,
+              connectionName: input.connectionName,
+              supportsWebhook: provider.supportsWebhook,
+            },
+          })
+        } else {
+          throw createErr
+        }
+      }
     }
 
     const appUrl = process.env.APP_URL || 'http://localhost:3000'

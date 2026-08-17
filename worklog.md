@@ -9523,3 +9523,73 @@ Stage Summary:
 - Employee invite: ❌ Was unsafe (findFirst-then-create, no DB unique constraint) → ✅ Fixed with withIdempotency().
 - Integrations: ❌ Was unsafe (findFirst-then-create, no DB unique constraint) → ✅ Fixed with withIdempotency().
 - ALL creation endpoints in the app are now protected by the idempotency system — no remaining gaps.
+
+---
+Task ID: IDEMPOTENCY-DB-LEVEL-UNIQUENESS
+Agent: main
+Task: Add DB-level uniqueness constraints for employee invites + company integrations
+
+Work Log:
+
+TASK 1 — Employee Invitation partial unique index:
+
+1. Applied partial unique index via raw SQL (Prisma doesn't support partial unique indexes in schema.prisma):
+   CREATE UNIQUE INDEX IF NOT EXISTS invitation_pending_email_unique
+     ON "Invitation" ("companyId", "invitedEmail") WHERE status = 'pending';
+   - Applied directly to live Supabase Postgres via prisma.$executeRaw.
+   - Documented in supabase/functions-only.sql (tracked SQL file, same convention as generate_order_number() etc.).
+   - Verified: index exists on live DB.
+
+2. Updated POST /api/employees route:
+   - Kept the findFirst check as a fast-path (clean error for the common case).
+   - Wrapped db.invitation.create() in try/catch for P2002 (Prisma's unique constraint violation code).
+   - On violation: throws ApiError(409, "A pending invitation already exists for this email.") — same message as the fast-path.
+   - This means the API response is identical from the consumer's perspective, but now race-proof at the DB level.
+
+TASK 2 — CompanyIntegration @@unique([companyId, providerId]):
+
+1. Added @@unique([companyId, providerId]) to the CompanyIntegration model in prisma/schema.prisma.
+   - Verified no existing duplicate rows (0 duplicates found).
+   - Ran `prisma db push --accept-data-loss` — constraint applied successfully.
+   - Prisma Client regenerated.
+
+2. Updated connectIntegration() in integration.actions.ts:
+   - Kept the existing findFirst-then-reactivate as the fast path.
+   - Wrapped db.companyIntegration.create() in try/catch for P2002.
+   - On violation: re-fetches the now-existing row (the winner created it) and runs the same reactivation logic (update credentials, generate new webhook secrets, set isActive=true).
+   - This means a genuine race between two "connect" attempts correctly results in one integration being reactivated, not a crash or duplicate.
+
+VERIFICATION (real Postgres):
+
+Verification 1 — 2 concurrent requests, DIFFERENT idempotency keys, SAME email:
+- Email: race-test-1786969452@example.com
+- Key A: diff-session-A-... (different session)
+- Key B: diff-session-B-... (different session)
+- Result A: HTTP 409 "A pending invitation already exists for this email." (loser — caught the unique constraint violation)
+- Result B: HTTP 201, invitation created (winner)
+- Pending invitations: exactly 1 ✅
+- The losing request got a clean 409 error, NOT a raw 500/constraint crash ✅
+
+Verification 3 — Same-session double-click (SAME key):
+- Key: same-session-test-... (both requests use the same key)
+- Result A: HTTP 201, invitation created (winner — fresh create)
+- Result B: HTTP 200, same invitation ID (loser — replay from idempotency cache)
+- Invitations: exactly 1 ✅
+- Same-session idempotency still works unchanged ✅
+
+(Note: Verification 2 for integrations was not run because the test company doesn't have integration provider credentials set up, but the code pattern is identical and was verified via code review + the same DB constraint mechanism.)
+
+Lint: 0 errors ✅
+TSC: 0 new errors ✅
+
+FILES MODIFIED:
+1. prisma/schema.prisma — added @@unique([companyId, providerId]) to CompanyIntegration model
+2. src/app/api/employees/route.ts — wrapped invitation.create() in try/catch for P2002 → clean 409
+3. src/lib/actions/integration.actions.ts — wrapped companyIntegration.create() in try/catch for P2002 → re-fetch + reactivate
+4. supabase/functions-only.sql — documented the partial unique index (invitation_pending_email_unique)
+
+Stage Summary:
+- Employee invites: now race-proof at the DB level via partial unique index (only applies to status='pending'). Two different sessions can't create duplicate pending invites for the same email.
+- Company integrations: now race-proof via @@unique([companyId, providerId]). Two different sessions can't create duplicate integrations for the same provider — the loser re-fetches and reactivates.
+- Same-session double-click protection (via withIdempotency) still works unchanged — it's additive to the DB-level constraints, not a replacement.
+- Both layers now protect against duplicates: DB-level constraints for cross-session races + idempotency keys for same-session double-clicks.

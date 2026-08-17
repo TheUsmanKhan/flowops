@@ -522,3 +522,13 @@ DROP TRIGGER IF EXISTS trg_exchange_shipments_updatedAt ON exchange_shipments;
 CREATE TRIGGER trg_exchange_shipments_updatedAt
   BEFORE UPDATE ON exchange_shipments
   FOR EACH ROW EXECUTE FUNCTION update_exchange_shipments_updatedAt();
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Partial unique index: only one pending invitation per email per company.
+-- Allows re-inviting after a prior invite expires or is cancelled/accepted.
+-- Applied manually (Prisma doesn't support partial unique indexes in schema.prisma).
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE UNIQUE INDEX IF NOT EXISTS invitation_pending_email_unique
+  ON "Invitation" ("companyId", "invitedEmail")
+  WHERE status = 'pending';

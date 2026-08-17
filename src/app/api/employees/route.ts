@@ -108,13 +108,9 @@ export async function POST(req: Request) {
     // called either directly or via withIdempotency() (prevents duplicate
     // invitations from rapid double-clicks).
     const createInvite = async () => {
-      // Prevent duplicate pending invite.
-      // NOTE: This is a check-then-create pattern with a race window.
-      // The withIdempotency wrapper below closes this gap for the
-      // double-click case. A DB-level unique constraint on
-      // [companyId, invitedEmail, status] would be the ideal fix, but
-      // would require a schema migration — the idempotency key system
-      // provides equivalent protection without the migration.
+      // Fast-path check: if a pending invite already exists, return a clean
+      // error immediately (avoids the overhead of attempting an insert that
+      // would fail on the unique constraint below).
       const existingPending = await db.invitation.findFirst({
         where: { companyId: company.id, invitedEmail: email.toLowerCase(), status: 'pending' },
       })
@@ -123,19 +119,36 @@ export async function POST(req: Request) {
       }
 
       const expiresAt = new Date(Date.now() + 7 * 86400000)
-      const invitation = await db.invitation.create({
-        data: {
-          companyId: company.id,
-          organizationId: company.organizationId,
-          invitedEmail: email.toLowerCase(),
-          invitedById: user.id,
-          roleId: role.id,
-          expiresAt,
-          message: message || null,
-          metadata: JSON.stringify({ department, designation }),
-        },
-        include: { role: true },
-      })
+      let invitation
+      try {
+        invitation = await db.invitation.create({
+          data: {
+            companyId: company.id,
+            organizationId: company.organizationId,
+            invitedEmail: email.toLowerCase(),
+            invitedById: user.id,
+            roleId: role.id,
+            expiresAt,
+            message: message || null,
+            metadata: JSON.stringify({ department, designation }),
+          },
+          include: { role: true },
+        })
+      } catch (createErr: unknown) {
+        // Catch the partial unique index violation (invitation_pending_email_unique)
+        // that prevents two 'pending' invitations for the same email+company.
+        // Prisma surfaces raw SQL constraint violations as P2002 — same code
+        // as Prisma-managed @unique constraints.
+        if (
+          createErr &&
+          typeof createErr === 'object' &&
+          'code' in createErr &&
+          (createErr as { code: string }).code === 'P2002'
+        ) {
+          throw new ApiError(409, 'A pending invitation already exists for this email.')
+        }
+        throw createErr
+      }
 
       insertAuditLog({
         action: 'employee.invited',
