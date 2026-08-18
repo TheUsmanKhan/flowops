@@ -407,6 +407,8 @@ export async function pollLeopardOrderStatuses(): Promise<ActionResult<{
               relatedEntityType: entry.type,
               relatedEntityId: entry.id,
               fn: async () => adapter.trackShipment(entry.trackingNumber),
+              // Log the tracking number being tracked
+              requestPayload: { trackingNumber: entry.trackingNumber, providerKey: 'leopard' },
             })
 
             if (!trackResult.success) {

@@ -132,6 +132,8 @@ export async function addPickupAddress(
         actionType: 'create_pickup_address',
         direction: 'outbound',
         fn: async () => adapter.createPickupAddress!(input),
+        // Log the pickup address data being sent (no credentials — just business data)
+        requestPayload: input,
       })
 
       if (!createResult.success) {

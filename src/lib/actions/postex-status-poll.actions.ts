@@ -89,6 +89,8 @@ export async function generatePostExLoadSheet(
       actionType: 'generate_load_sheet',
       direction: 'outbound',
       fn: async () => adapter.generateLoadSheet!(trackingNumbers, pickupAddress),
+      // Log the tracking numbers + pickup address used for the load sheet request
+      requestPayload: { trackingNumbers, pickupAddress },
     })
 
     insertAuditLog({
@@ -210,6 +212,8 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
       relatedEntityType: 'order',
       relatedEntityId: order.id,
       fn: async () => adapter.trackShipment(order.trackingNumber!),
+      // Log the tracking number being tracked
+      requestPayload: { trackingNumber: order.trackingNumber, providerKey },
     })
 
     // Extract mapped subStatus from raw response
@@ -428,6 +432,8 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
           actionType: 'track_shipment_bulk',
           direction: 'outbound',
           fn: async () => adapter.trackBulkShipments!(allTrackingNumbers.map((t) => t.trackingNumber)),
+          // Log the tracking numbers being bulk-tracked
+          requestPayload: { trackingNumbers: allTrackingNumbers.map((t) => t.trackingNumber), count: allTrackingNumbers.length },
         })
 
         // Map results back to records by tracking number

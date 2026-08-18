@@ -9842,3 +9842,78 @@ STEP 3 — Report:
 3. The fix going forward (adding deliveryCity/deliveryAddress to the order.update in bookOrderWithCourier) is the correct fix — it ensures future bookings persist the corrected city. But historical orders cannot be backfilled because the data was never logged.
 4. No evidence of drift in existing data: all 4 booked orders have reasonable city values. No NULLs, no obviously wrong values. But this cannot be confirmed definitively without the request payload.
 5. Recommendation: Optionally, modify executeLoggedIntegrationAction() to also log the requestPayload for book_shipment actions going forward — this would make future backfills possible if needed. This is a separate improvement, not part of the current task.
+
+---
+Task ID: REQUEST-PAYLOAD-LOGGING
+Agent: main
+Task: Log request payload for outbound integration actions (book_shipment, cancel_shipment, track_shipment, etc.)
+
+Work Log:
+
+1. Modified src/lib/integrations/logged-call.ts:
+   - Added optional `requestPayload?: unknown` field to ExecuteLoggedParams interface.
+   - Changed the log insertion from `requestPayload: null` to `requestPayload: params.requestPayload ? JSON.stringify(params.requestPayload) : null`.
+   - Backwards-compatible: callers that don't pass requestPayload still get null (same as before).
+
+2. Added requestPayload to all outbound integration action call sites:
+
+   a. booking.actions.ts — book_shipment (line ~346):
+      requestPayload: bookInput
+      Contains: orderNumber, recipientName, recipientPhone, deliveryAddress, deliveryCity, codAmount, weightGrams, itemDescription, etc.
+      No credentials (those are in the adapter instance, not in bookInput).
+
+   b. courier-cancel.actions.ts — cancel_shipment (line ~142):
+      requestPayload: { trackingNumber, providerKey }
+      Contains: the tracking number being cancelled and which courier provider.
+
+   c. postex-status-poll.actions.ts — track_shipment (line ~207):
+      requestPayload: { trackingNumber: order.trackingNumber, providerKey }
+
+   d. postex-status-poll.actions.ts — track_shipment_bulk (line ~429):
+      requestPayload: { trackingNumbers: [...], count: N }
+
+   e. postex-status-poll.actions.ts — generate_load_sheet (line ~86):
+      requestPayload: { trackingNumbers, pickupAddress }
+
+   f. leopard-webhook.actions.ts — track_shipment (line ~402):
+      requestPayload: { trackingNumber: entry.trackingNumber, providerKey: 'leopard' }
+
+   g. courier-address-book.actions.ts — create_pickup_address (line ~129):
+      requestPayload: input (the pickup address data being sent)
+
+3. Credentials safety:
+   - None of the requestPayload objects contain API keys, tokens, or encrypted credentials.
+   - The credentials are passed to the adapter constructor (new PostExAdapter(credentials)), not included in the request payload (bookInput, trackingNumber, etc.).
+   - The adapter uses credentials internally to set HTTP headers — they never appear in the business data being logged.
+
+VERIFICATION (real Postgres):
+
+Simulated a book_shipment call with a test payload containing deliveryCity: "TestCityForLogging":
+- Called executeLoggedIntegrationAction with requestPayload containing the full BookShipmentInput
+- Verified the resulting IntegrationActionLog row:
+  - requestPayload: {"orderNumber":"ORD-TEST-001","recipientName":"Test Customer","recipientPhone":"03001234567","deliveryAddress":"House 123, Test Street","deliveryCity":"TestCityForLogging","codAmount":500,"weightGrams":250,"itemDescription":"Test Product x1"}
+  - responsePayload: {"success":true,"trackingNumber":"TEST-TRACKING-001","providerStatus":"UnBooked"}
+  - ✅ requestPayload contains deliveryCity = "TestCityForLogging"
+- Cleaned up the test log row.
+
+Existing logs: all 22 pre-existing book_shipment logs have requestPayload=NULL (predate the fix, as expected). Only NEW bookings will have the requestPayload populated.
+
+Lint: 0 errors ✅
+TSC: 0 new errors (all 4 pre-existing errors in booking.actions.ts + leopard-webhook.actions.ts are unrelated) ✅
+
+FILES MODIFIED:
+1. src/lib/integrations/logged-call.ts — added requestPayload field to ExecuteLoggedParams + changed log insertion to use it
+2. src/lib/actions/booking.actions.ts — added requestPayload: bookInput to book_shipment call
+3. src/lib/actions/courier-cancel.actions.ts — added requestPayload: { trackingNumber, providerKey } to cancel_shipment call
+4. src/lib/actions/postex-status-poll.actions.ts — added requestPayload to 3 call sites (track_shipment, track_shipment_bulk, generate_load_sheet)
+5. src/lib/actions/leopard-webhook.actions.ts — added requestPayload to track_shipment call
+6. src/lib/actions/courier-address-book.actions.ts — added requestPayload: input to create_pickup_address call
+
+Stage Summary:
+- All outbound integration actions now log their request payload to IntegrationActionLog.requestPayload.
+- book_shipment logs will now contain the delivery city, address, COD amount, weight, etc. — enabling future backfill/audit scenarios.
+- cancel_shipment logs will contain the tracking number being cancelled.
+- track_shipment logs will contain the tracking number being tracked.
+- No credentials are logged — only business data.
+- Backwards-compatible: existing call sites without requestPayload still get null.
+- Verified against real Postgres: requestPayload is correctly stored and contains the delivery city.

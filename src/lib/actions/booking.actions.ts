@@ -351,6 +351,11 @@ export async function bookOrderWithCourier(
       relatedEntityType: 'order',
       relatedEntityId: orderId,
       fn: async () => adapterResult,
+      // Log the actual request payload sent to the courier (for audit/debugging
+      // and future backfill scenarios). bookInput contains the delivery city,
+      // address, COD amount, weight, etc. — no credentials (those are in the
+      // adapter instance, not in bookInput).
+      requestPayload: bookInput,
     })
     mark('loggedActionWriteEnd')
     measure('loggedActionWriteStart', 'loggedActionWriteEnd', '8_action_log_write')

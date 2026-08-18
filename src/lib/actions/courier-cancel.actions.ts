@@ -147,6 +147,9 @@ export async function cancelCourierBooking(
       relatedEntityType: entityType,
       relatedEntityId: entityId,
       fn: async () => adapter.cancelShipment(trackingNumber!),
+      // Log the tracking number being cancelled (for audit/debugging).
+      // No credentials here — just the business data.
+      requestPayload: { trackingNumber, providerKey },
     })
 
     // ── 5. On failure: do NOT change any state — propagate error ──

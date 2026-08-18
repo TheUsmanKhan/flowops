@@ -28,6 +28,13 @@ interface ExecuteLoggedParams {
   relatedEntityId?: string
   /** The function to execute (the actual adapter call) */
   fn: () => Promise<unknown>
+  /**
+   * Optional: the request payload being sent to the external API (e.g., the
+   * BookShipmentInput for book_shipment, the tracking number for track_shipment).
+   * Stored in integration_action_logs.requestPayload for audit/debugging.
+   * Do NOT include raw credentials (API keys/tokens) — only the business data.
+   */
+  requestPayload?: unknown
 }
 
 /**
@@ -65,7 +72,7 @@ export async function executeLoggedIntegrationAction<T>(
           organizationId: params.organizationId,
           actionType: params.actionType,
           direction: params.direction,
-          requestPayload: null, // caller can pre-log request if needed
+          requestPayload: params.requestPayload ? JSON.stringify(params.requestPayload) : null,
           responsePayload: responsePayload ? JSON.stringify(responsePayload) : null,
           status: success ? 'success' : 'failed',
           errorMessage: errorMessage ?? null,
