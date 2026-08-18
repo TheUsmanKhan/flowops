@@ -2,7 +2,7 @@
 
 > **Purpose**: This document is the single source of truth for the FlowOps ERP system. It covers every module, the API system, dependencies, database schema, frontend, backend, third-party services, what's built, what's in process, and what needs to be built. Use this to train AI assistants so they can generate correct, context-aware prompts.
 >
-> **Last Updated**: August 2026 (updated after performance optimization pass + products table conversion + hydration fixes)
+> **Last Updated**: August 2026 (updated after idempotency system, courier cancel fix, city propagation, phone validation, request payload logging, LCP/perf optimization, products table, hydration fixes)
 > **App URL**: Single-page app at `/` (Next.js 16 App Router)
 > **Stack**: Next.js 16 + React 19 + TypeScript + Prisma 6 + Supabase PostgreSQL + Tailwind 4 + shadcn/ui
 >
@@ -40,7 +40,7 @@
 
 **Core value proposition**: One system to manage products, inventory, orders, customers, and courier bookings — replacing the spreadsheets + WhatsApp + manual courier portal workflow that Pakistani e-commerce sellers currently use.
 
-**Scale**: 58 Prisma models, 148 API routes, ~153 React components (101 non-UI + 52 shadcn/ui), 21 SQL migrations, 30 permission keys, 2 live courier integrations.
+**Scale**: 60 Prisma models, 148 API routes, ~153 React components (101 non-UI + 52 shadcn/ui), 21 SQL migrations, 30 permission keys, 2 live courier integrations.
 
 **Performance posture** (as of latest optimization pass):
 - First Load JS: **1,070 KB** (down from 3,148 KB baseline — 66% reduction via code-splitting)
@@ -49,6 +49,11 @@
 - `React.memo` used on leaf components in 6 largest views
 - 10 dead dependencies removed (node_modules: 1.2 GB, was 1.3 GB)
 - Route-aware `LoadingFallback` renders PageHeader text immediately at Suspense boundary
+- Idempotency system: `withIdempotency()` + `useIdempotentMutation()` on ALL 24+ creation endpoints
+- Phone validation: libphonenumber-js for international phone format validation
+- Courier cancel: Leopard cancellation now works (guard removed); order cancellation auto-cancels courier booking
+- City propagation: corrected cities propagate back to CustomerAddress
+- IntegrationActionLog now logs request payloads (not just responses)
 
 ---
 
@@ -142,6 +147,7 @@ Every transition has inventory side-effects:
 | `date-fns` | Date utilities |
 | `bcryptjs` | Password hashing (actually uses Node `crypto.scrypt` in `src/lib/auth.ts`) |
 | `z-ai-web-dev-sdk` | AI skills (image generation, VLM, etc.) — backend only |
+| `libphonenumber-js` | International phone number validation + E.164 normalization (client + server) |
 
 ### Removed Dependencies (Step 4 cleanup — August 2026)
 The following 10 packages were installed but confirmed unused (0 code imports) and removed to reduce install time + Docker image size:
@@ -211,7 +217,7 @@ APP_URL="http://localhost:3000"
 
 > ⚠️ **KNOWN ISSUE**: The `.env` file keeps reverting to SQLite (`file:./db/custom.db`). The `predev` script guards against this — it refuses to start if `DATABASE_URL` doesn't start with `postgresql://`. Always verify `.env` before starting the server.
 
-### Schema: 58 Prisma Models
+### Schema: 60 Prisma Models
 
 #### Auth / Org / Tenancy (10 models)
 | Model | Purpose |
@@ -268,7 +274,7 @@ APP_URL="http://localhost:3000"
 | Model | Purpose |
 |---|---|
 | `Customer` | Customer master (org-level, shared across companies) |
-| `CustomerPhone` | Multi-phone (normalized + raw) |
+| `CustomerPhone` | Multi-phone (normalized + raw). Has `isValidFormat Boolean @default(true)` field — false = phone came from external platform with unvalidated format (e.g. from external platform). Order creation shows amber warning banner for `isValidFormat=false`. |
 | `CustomerAddress` | Multi-address |
 | `CustomerExternalIdentity` | External ID mapping (Shopify/Daraz customer ID) |
 
@@ -293,7 +299,7 @@ APP_URL="http://localhost:3000"
 | Model | Purpose |
 |---|---|
 | `IntegrationProvider` | Registered provider master (postex, leopard, tcs, shopify, daraz) |
-| `CompanyIntegration` | Company's connection to a provider (encrypted credentials) |
+| `CompanyIntegration` | Company's connection to a provider (encrypted credentials). `@@unique([companyId, providerId])` — prevents duplicate integrations per provider per company. |
 | `IntegrationActionLog` | Every API call to a provider (logged with duration) |
 | `CourierOperationalCity` | Cached list of cities each courier serves |
 | `CourierCityAlias` | Local city ↔ courier city fuzzy-match mapping |
@@ -315,6 +321,11 @@ APP_URL="http://localhost:3000"
 |---|---|
 | `FormDraft` | Autosaved form drafts (product create, order create) |
 
+#### Idempotency (1 model)
+| Model | Purpose |
+|---|---|
+| `IdempotencyKey` | Duplicate-submission protection — DB unique constraint on `key` enforces atomicity. Status: `processing` → `completed` / `failed`. Stores cached response for replay. Stale `processing` rows (>60s) auto-recover. |
+
 ### SQL Functions (applied manually, not in Prisma schema)
 | Function | Purpose |
 |---|---|
@@ -325,6 +336,7 @@ APP_URL="http://localhost:3000"
 | `recompute_order_status(orderId)` | Recomputes order status from items |
 | RLS helpers | `get_active_company_id()`, `get_active_org_id()`, `has_permission()`, `is_elevated_employee()` |
 | Triggers | `backfill_order_timestamps()`, `update_*_updatedAt()` |
+| `invitation_pending_email_unique` (partial index) | UNIQUE INDEX on `Invitation(companyId, invitedEmail) WHERE status='pending'` — prevents duplicate pending invites. Applied manually (not in Prisma schema). Documented in `supabase/functions-only.sql`. |
 
 ### Migrations
 21 SQL migration files in `supabase/migrations/` (numbered 001–021, with 015 and 017 missing). These are reference SQL — the live schema is managed via `prisma db push`.
@@ -371,6 +383,9 @@ Permissions use dot-notation `module.action`:
 - Throws `ApiError(401)` if not signed in, `ApiError(403)` if no active company or not a member
 - Returns `WorkspaceContext` = `{ user, employee, company }`
 - Called by nearly every authenticated API route
+
+### Session Payload (`src/lib/session-payload.ts`)
+`buildSessionPayload()` uses a SINGLE raw SQL JOIN (`prisma.$queryRaw`) that joins Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. Replaces the previous 5-6 sequential Prisma queries. Latency: ~696ms → ~210ms warm (67% faster). The raw query result (flat rows) is grouped in JS back into the nested SessionResponse shape. The old SQL `normalize_phone()` function remains for DB-level triggers/matching; the app-layer path now uses `libphonenumber-js` for phone normalization.
 
 ---
 
@@ -471,6 +486,9 @@ Permissions use dot-notation `module.action`:
   - Cached stats: `totalOrdersCount`, `totalOrderValue`, `totalRtoCount` — recomputed via `updateCustomerStats()` on every order mutation
   - Auto-flag at 3+ RTO (`isFlagged = true`, `flagReason = 'High RTO rate'`)
   - `matchOrCreateExternalCustomer()` — layered matching: exact_identity → phone_match → email_match → create new
+  - **Phone validation**: `isValidPhoneFormat()` + `validateAndNormalizePhone()` from `src/lib/phone-validation.ts` (libphonenumber-js). Client-side: blocks submission on invalid. Server-side: defense in depth (400 error). External platform phones: saved with `isValidFormat=false` instead of blocked.
+  - **`CustomerPhone.isValidFormat` field**: false = phone came from external platform with unvalidated format. Order creation shows amber warning banner.
+  - **City propagation**: when a city is corrected during order creation or booking, the corrected city propagates back to the customer's saved `CustomerAddress` row (only when the order used a saved address, not a one-off).
 
 ### 7.14 Order Management System (OMS)
 - **Status**: ✅ Built (recently fixed — inventory connection was broken, now fixed)
@@ -481,7 +499,7 @@ Permissions use dot-notation `module.action`:
   - **Confirm**: reserves stock (`reserveStockForOrder`) — may backorder if insufficient
   - **Payment convert**: confirms pending order + reserves stock
   - **Dispatch** (`performOrderDispatch`): deducts stock (`dispatchOrder` → `sale_dispatched`), sets tracking number, blocks if backordered items exist
-  - **Cancel**: unreserves stock
+  - **Cancel**: unreserves stock. If the order has a courier booking (trackingNumber + pre-pickup courierSubStatus), calls `cancelCourierBooking()` FIRST — if the courier API fails, the order is NOT cancelled internally. Post-dispatch cancellation is blocked.
   - **RTO** (manual `processOrderReturn`): restocks via `return_resellable` / `return_stitched_received`
   - **RTO** (auto via courier poll): `restockOrderForRto()` — session-free version for cron/webhook context
   - **Payment types**: `full_cod`, `partial_advance`, `fully_prepaid`
@@ -497,7 +515,7 @@ Permissions use dot-notation `module.action`:
 - **Status**: ✅ Built
 - **Routes**: `/api/exchange-shipments/[id]/reserve`, `/dispatch`, `/cod-collected`, `/rto`, `/cancel`
 - **Components**: `shipment-tracking-card`
-- **Logic**: Replacement shipments have their own lifecycle (reserve → dispatch → deliver/RTO/cancel), separate from orders but reusing the same inventory functions.
+- **Logic**: Replacement shipments have their own lifecycle (reserve → dispatch → deliver/RTO/cancel), separate from orders but reusing the same inventory functions. `cancelExchangeShipment()` now calls `cancelCourierBooking()` first when a trackingNumber exists (before unreserving stock). If courier cancel fails, internal state is NOT changed. Uses `skipCourierCall` flag to prevent circular calls.
 
 ### 7.17 Courier Integration Framework
 - **Status**: ✅ Built (PostEx + Leopard live; TCS stub)
@@ -546,7 +564,7 @@ Permissions use dot-notation `module.action`:
 - **Status**: ✅ Built
 - **Routes**: `/api/courier-cancel`, `/api/couriers/postex/poll`
 - **Components**: `cancel-courier-booking-button`
-- **Logic**: Cancels a courier booking — calls adapter `cancelShipment()` + updates order status
+- **Logic**: Cancels a courier booking — calls adapter `cancelShipment()` + updates order status. Now supports BOTH PostEx AND Leopard (previously PostEx-only guard was removed). Allows retroactive cancellation of already-internally-cancelled orders. `cancelCourierBooking()` skips internal `cancelOrder()`/`cancelExchangeShipment()` if the entity is already cancelled internally.
 
 ### 7.22 Webhook Receiver Module
 - **Status**: ✅ Built
@@ -925,6 +943,8 @@ All server-side business logic lives in `src/lib/actions/*.ts` (18 files). API r
 | `scan-report.actions.ts` | `generateDailyScanReport` | Daily scan report PDF |
 | `drafts/save-draft.ts` | `saveDraft`, `getDrafts`, `deleteDraft` | Form draft autosave |
 | `order-settings.actions.ts` | `getOrderSettings`, `updateOrderSettings` | Order workflow settings |
+| `src/lib/idempotency.ts` | `withIdempotency()` | Duplicate-submission protection: DB unique constraint on key enforces atomicity. Failed attempts can be retried. Stale processing rows (>60s) auto-recover. |
+| `src/lib/phone-validation.ts` | `isValidPhoneFormat()`, `normalizePhoneInternational()`, `validateAndNormalizePhone()` | International phone validation using libphonenumber-js. Defaults to Pakistan ('PK') for local numbers, accepts any international format with '+'. |
 
 ### Inventory Module (`src/lib/inventory.ts`)
 
@@ -959,6 +979,19 @@ PostExAdapter | LeopardAdapter | TcsAdapter (stub)
   ↓
 External Courier API
 ```
+
+### `executeLoggedIntegrationAction()` — request payload logging
+Now accepts optional `requestPayload` parameter — stores the actual request data sent to the courier (e.g., delivery city, address, COD amount) in `IntegrationActionLog.requestPayload`. Previously this was always null.
+
+All outbound calls now log their request payload:
+- `book_shipment` (full BookShipmentInput)
+- `cancel_shipment` (trackingNumber + providerKey)
+- `track_shipment` (trackingNumber)
+- `track_shipment_bulk` (trackingNumbers array)
+- `generate_load_sheet` (trackingNumbers + pickupAddress)
+- `create_pickup_address` (address data)
+
+No credentials are logged — only business data.
 
 ### `CourierAdapter` Interface (`src/lib/integrations/types.ts`)
 
@@ -1109,6 +1142,7 @@ This makes the LCP text element paint as soon as the Suspense boundary renders, 
 - **Dual-channel auth**: Bearer header (works in iframes/cross-origin) + cookie fallback
 - **Error handling**: Throws `FetchError(status, message)` on non-2xx, reads `body.error` for server message
 - **Exports**: `api.get/post/put/patch/delete` typed helpers
+- **Custom headers**: `api.post/put/patch` now accept optional `headers?: Record<string, string>` as third argument. Used by `useIdempotentMutation()` to send the `Idempotency-Key` header.
 - **No retry, no timeout, no abort, no multipart/form-data helper**
 
 ### 11.5 Component Inventory — 153 files (101 non-UI + 52 shadcn/ui)
@@ -1150,7 +1184,7 @@ This makes the LCP text element paint as soon as the Suspense boundary renders, 
 | Component | Description | Key Features |
 |---|---|---|
 | `employees-view.tsx` | Table with search + 4 filters (status/role/designation/department) | `useMemo`, manual `api.get` (tech debt) |
-| `invite-employee-view.tsx` | Invite form with designation dropdown auto-defaulting role | |
+| `invite-employee-view.tsx` | Invite form with designation dropdown auto-defaulting role. Now has idempotency key (via `useIdempotentMutation()`) to prevent duplicate invites from rapid double-clicks. | |
 | `employee-detail-view.tsx` | 5-tab profile: Overview, Access, Performance, Salary, My Payslips | Tabs only for `isSelf` |
 | `employee-status-badge.tsx` | Colored badge for active/suspended/terminated/on_leave | |
 | `salary-tab.tsx` | Salary profile + commission rules + live monthly preview | 5 `useQuery`, `useMemo` |
@@ -1213,7 +1247,7 @@ This makes the LCP text element paint as soon as the Suspense boundary renders, 
 |---|---|---|
 | `_shared.ts` | Helpers: `formatPKR`, `formatDate`, `badgeForStatus`, `ORDER_STATUS_BADGE` | — |
 | `orders-view.tsx` | Master orders list (2599 lines) with recharts Bar+Line charts, customer/product autocomplete | 8 `useQuery`, `useMemo`, `useCallback`, 300ms debounce |
-| `order-create-view.tsx` | 2390-line creation wizard with draft autosave, customer search, address selection | 7 `useQuery`, `useMemo`, `useCallback`, `useFormGuard` |
+| `order-create-view.tsx` | 2390-line creation wizard with draft autosave, customer search, address selection. Now has idempotency key (via `useIdempotentMutation()`) + phone format warning banner for flagged customers (`CustomerPhone.isValidFormat=false`). | 7 `useQuery`, `useMemo`, `useCallback`, `useFormGuard` |
 | `order-detail-view.tsx` | 2040-line detail with 9 mutations (confirm/dispatch/deliver/cancel/rto/etc.) | 13 `useQuery`/`useMutation`, `useMemo` |
 | `orders-pending-confirmation-view.tsx` | Confirm/cancel/convert-payment queue | 7 `useQuery`, `useMemo` |
 | `orders-backordered-view.tsx` | Backordered item queue (collapsible) | 2 `useQuery`, `useMemo` |
@@ -1247,7 +1281,7 @@ This makes the LCP text element paint as soon as the Suspense boundary renders, 
 | Component | Description | Key Features |
 |---|---|---|
 | `CustomerSearchAutocomplete.tsx` | Debounced phone/name search dropdown | 2 `useQuery`, `useCallback`, `useMemo`, `useRef`, 300ms debounce |
-| `CreateCustomerForm.tsx` | Multi-phone / multi-address creation form | 2 `useQuery` |
+| `CreateCustomerForm.tsx` | Multi-phone / multi-address creation form. Now has phone validation (libphonenumber-js) + CityAutocomplete for city field (permissive — suggestions but no blocking). | 2 `useQuery` |
 | `AddressSelector.tsx` | Saved-address radio group + inline new-address with CityAutocomplete | — |
 | `types.ts` | Shared DTOs + helpers (`formatLastUsed`, `PLATFORM_LABELS`) | — |
 | `index.ts` | Barrel re-exports | — |
@@ -1366,10 +1400,17 @@ const mutation = useMutation({
 
 > ✅ **All 6 tech-debt views migrated** (Step 3 — August 2026): `employees-view`, `roles-view`, `organization-view`, `company-settings-view`, `audit-log-view`, `onboarding-view` now use TanStack Query instead of raw `api.get()` in `useEffect`.
 
+**Idempotent Mutations** (24+ creation endpoints):
+All creation flows use `useIdempotentMutation()` from `src/hooks/use-idempotent-mutation.ts` — a drop-in replacement for `useMutation` that auto-generates a UUID idempotency key per form session and sends it as the `Idempotency-Key` header. Prevents duplicate records from rapid double-clicks. `regenerateKey()` for "Create & Add Another" patterns.
+
+**Phone Validation** (client + server):
+`isValidPhoneFormat()` from `src/lib/phone-validation.ts` validates phone numbers using libphonenumber-js. Blocks submission on invalid format. Applied to ALL phone entries (not just primary).
+
 ### 11.10 Form Handling
 
 - **React Hook Form** + **Zod** validation (shared schemas between client + server)
 - **`useFormGuard`** hook (in `src/hooks/form-guard/`): intercepts navigation when forms are dirty. Coordinates with `page.tsx`'s `popstate` handler via `window.__formGuardIntercepting` flag. Used by `product-create-view` and `order-create-view`.
+- **`useIdempotentMutation`** hook (`src/hooks/use-idempotent-mutation.ts`) — NEW: shared hook for idempotent creation mutations. Drop-in replacement for `useMutation` that auto-generates a UUID idempotency key per form session and sends it as the `Idempotency-Key` header. Used by ALL 24+ creation endpoints. `regenerateKey()` for "Create & Add Another" patterns.
 - **Draft autosave**: Form drafts saved to `FormDraft` table via `/api/drafts` — survives page refresh.
 
 ### 11.11 Bundle Size Summary
@@ -1567,6 +1608,16 @@ The sandbox exposes one port (81) via Caddy:
 15. **Product create scroll** — added `useEffect` to scroll to top on step change; prevents users landing at the bottom of step 3 (FIXED)
 16. **Hydration mismatch** — added `suppressHydrationWarning` to `<body>` tag in `layout.tsx`; fixes Grammarly browser extension attribute injection (FIXED)
 17. **Docker setup** — multi-stage Dockerfile (dev + prod), docker-compose.yml (dev), docker-compose.prod.yml (prod), docker-compose.local-db.yml (local Postgres for schema testing), DOCKER.md guide, PostEx poller toggle via `ENABLE_IN_PROCESS_POLLER` env var (FIXED)
+18. **Courier cancel — Leopard support** (FIXED) — removed PostEx-only guard; Leopard's `cancelShipment()` now works for both orders + exchange shipments
+19. **Courier cancel — retroactive** (FIXED) — already-internally-cancelled orders can now have their courier booking cancelled retroactively
+20. **Order cancel → courier cancel** (FIXED) — `cancelOrder()` now calls `cancelCourierBooking()` first when a courier booking exists (pre-dispatch only)
+21. **Exchange shipment cancel → courier cancel** (FIXED) — `cancelExchangeShipment()` now calls courier cancel when trackingNumber exists
+22. **City propagation** (FIXED) — corrected cities propagate from order creation + booking-time resolution back to CustomerAddress (only when using saved address)
+23. **Phone validation** (FIXED) — international phone validation using libphonenumber-js; client + server defense in depth; external platform phones flagged with `isValidFormat=false`
+24. **Idempotency system** (FIXED) — `withIdempotency()` backend helper + `useIdempotentMutation()` frontend hook; applied to ALL 24+ creation endpoints; DB-level unique constraints on employee invites + company integrations
+25. **Request payload logging** (FIXED) — `IntegrationActionLog.requestPayload` now populated for all outbound courier calls (book_shipment, cancel_shipment, track_shipment, etc.)
+26. **DB-level uniqueness** (FIXED) — partial unique index on `Invitation(companyId, invitedEmail) WHERE status='pending'`; `@@unique([companyId, providerId])` on `CompanyIntegration`
+27. **Button cursor fix** (FIXED) — `cursor-pointer` on all buttons; `disabled:cursor-not-allowed` replaces `disabled:pointer-events-none`
 
 ### ❌ Not Yet Built / Needed
 
@@ -1648,13 +1699,36 @@ const result = await executeLoggedIntegrationAction({
 - `restockOrderForRto` skips items already `'returned'`
 - `processInventoryTransaction` validates stock before mutating
 
+### Creation Idempotency (withIdempotency pattern)
+```typescript
+// ALL creation endpoints wrap their action in withIdempotency():
+const { result, wasReplay } = await withIdempotency({
+  key: idempotencyKey,          // from Idempotency-Key header
+  companyId: ctx.company.id,
+  employeeId: ctx.employee.id,
+  actionType: 'order.create',   // or 'product.create', 'customer.create', etc.
+  fn: async () => { /* actual creation logic */ },
+})
+// DB unique constraint on key enforces atomicity — no race window
+// Failed attempts can be retried with the same key
+// Stale 'processing' rows (>60s) auto-recover
+```
+
+### Phone Validation (libphonenumber-js)
+```typescript
+// Client-side: isValidPhoneFormat(phone) blocks submission
+// Server-side: validateAndNormalizePhone(phone) returns { isValid, normalized }
+// External platform: isValidFormat=false on CustomerPhone row (not blocked)
+import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-validation'
+```
+
 ---
 
 ## 18. Known Issues & Gotchas
 
 ### Environment
 1. **`.env` reverts to SQLite** — the `predev` script guards against this, but always verify before starting. If it happens, restore from DOCKER.md reference or git history.
-2. **DB latency** — Mumbai region (~100ms per query from sandbox). Performance optimizations (fire-and-forget, parallel queries, single-JOIN getWorkspace) have been applied. The `/api/auth/me` route is still slow (500-1000ms) due to 5-6 Prisma round-trips — see §16 item 19.
+2. **DB latency** — Mumbai region (~100ms per query from sandbox). Performance optimizations (fire-and-forget, parallel queries, single-JOIN getWorkspace) have been applied. `/api/auth/me` is now ~210ms (was 500-1000ms) — FIXED (see item 14 for details).
 3. **Turbopack instability** — dev server can hang during compilation in the sandbox (memory issue). Clear `.next/` cache and restart.
 4. **Hydration mismatch from browser extensions** — Grammarly injects `data-gr-ext-installed` + `data-new-gr-c-s-check-loaded` attributes into `<body>`. Fixed via `suppressHydrationWarning` on `<body>` in `layout.tsx`. If new hydration errors appear, check for other browser-extension-injected attributes.
 
@@ -1675,6 +1749,9 @@ const result = await executeLoggedIntegrationAction({
 12. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
 13. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
 14. ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1 + Phase 2)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw query JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. See `src/lib/session-payload.ts`. Phase 2: client-side stale-while-revalidate caching added via TanStack Query (`refetchOnWindowFocus: true` scoped to session query only — see §11.1). Server-side in-memory cache deliberately deferred (see §16 item 19 note).
+15. **Booking-time city corrections were not persisted** (FIXED) — `order.update` in `bookOrderWithCourier()` now includes `deliveryCity` + `deliveryAddress`. Pre-fix, corrected cities were sent to the courier API but not saved on the Order row. Historical data cannot be backfilled (requestPayload was null for pre-fix logs). Going forward, requestPayload is logged for all outbound calls.
+16. **Employee invite had race window** (FIXED) — was check-then-create (findFirst then create). Now has partial unique index `invitation_pending_email_unique` on `(companyId, invitedEmail) WHERE status='pending'` + catches P2002 constraint violation.
+17. **Company integration had race window** (FIXED) — was find-then-create. Now has `@@unique([companyId, providerId])` + catches P2002 → re-fetches + reactivates.
 
 ---
 
@@ -1697,6 +1774,10 @@ When generating prompts for AI assistants working on FlowOps, use these patterns
 - Fire-and-forget: insertAuditLog/insertMetricEvent return void
 - Performance: First Load JS 1,070 KB (code-split into 95 chunks). React.memo on leaf components.
 - CRITICAL: Do NOT add module-scope import() maps — use dynamic() in page.tsx only (causes duplicate chunks)
+- Idempotency: withIdempotency() wraps ALL creation endpoints; useIdempotentMutation() on frontend
+- Phone validation: libphonenumber-js (isValidPhoneFormat) — client + server defense in depth
+- City propagation: corrected cities propagate to CustomerAddress at order creation + booking time
+- IntegrationActionLog: now logs requestPayload (not just responsePayload) for all outbound calls
 ```
 
 ### Module-Specific Context
@@ -1734,9 +1815,11 @@ Report the root cause without fixing it yet."
 - Don't suggest `framer-motion`, `@dnd-kit/*`, `@tanstack/react-table`, `react-markdown`, `@mdxeditor/editor`, `react-syntax-highlighter`, `next-intl` — all were removed as dead dependencies in Step 4
 - Don't add module-scope `import()` maps in `page.tsx` — causes Turbopack to create duplicate chunks. Use `dynamic()` only.
 - Don't suggest `React.Table` — FlowOps uses shadcn/ui `Table` component (`src/components/ui/table.tsx`)
+- Don't use check-then-create patterns for dedup — use DB-level unique constraints + catch P2002
+- Don't leave requestPayload null in executeLoggedIntegrationAction — always pass the business data
 
 ---
 
 *This document is the authoritative reference for the FlowOps ERP system. It MUST be updated whenever significant changes are made to the architecture, modules, dependencies, performance characteristics, or integrations. Do not let it go stale — a stale briefing leads to incorrect AI-assisted code generation.*
 
-*Performance reports: see `perf-baseline.md` (Step 0 baseline) and `perf-results.md` (Step 4+5 after dead dep removal) for detailed before/after bundle measurements.*
+*Performance reports: see `perf-baseline.md` (Step 0 baseline) and `perf-results.md` (Step 4+5 after dead dep removal) for detailed before/after bundle measurements. See `supabase/functions-only.sql` for all manually-applied SQL functions + indexes.*

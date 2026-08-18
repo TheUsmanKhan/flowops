@@ -9989,3 +9989,70 @@ Stage Summary:
 - External platform phones that fail validation are still saved but flagged with isValidFormat=false.
 - Order creation shows an amber warning banner when a selected customer's phone is flagged.
 - No existing display formatting was changed — phone numbers still display as phoneRaw everywhere.
+
+---
+Task ID: BRIEFING-COMPREHENSIVE-UPDATE
+Agent: main
+Task: Update FLOWOPS_BRIEFING.md with all latest changes + DB-level detail
+
+Work Log:
+
+Updated FLOWOPS_BRIEFING.md from 1,743 → 1,825 lines (+82 lines) to reflect ALL recent work:
+
+§1 Executive Summary:
+- Updated "Last Updated" line to mention idempotency, courier cancel, city propagation, phone validation, request payload logging
+- Updated scale: 58 → 60 Prisma models (IdempotencyKey + CustomerPhone.isValidFormat)
+- Added 5 new bullets to Performance posture: idempotency system, phone validation, courier cancel fix, city propagation, request payload logging
+
+§3 Technology Stack:
+- Added libphonenumber-js to Other Key Libraries table
+
+§5 Database Layer:
+- Added IdempotencyKey model (new "Idempotency (1 model)" section)
+- Updated CustomerPhone to mention isValidFormat Boolean @default(true)
+- Added @@unique([companyId, providerId]) note on CompanyIntegration
+- Added invitation_pending_email_unique partial index to SQL Functions
+- Updated schema count 58 → 60
+
+§6 Authentication:
+- Added "Session Payload (src/lib/session-payload.ts)" subsection describing the raw SQL JOIN optimization (696ms → 210ms)
+
+§7 Modules:
+- §7.13 Customer Management: added phone validation + isValidFormat + city propagation
+- §7.14 Order Management: updated cancel to mention cancelCourierBooking() first
+- §7.16 Exchange Shipment: updated cancel with skipCourierCall flag
+- §7.21 Courier Cancel: updated to support both PostEx + Leopard, retroactive cancellation
+
+§9 Backend Server Actions:
+- Added src/lib/idempotency.ts (withIdempotency)
+- Added src/lib/phone-validation.ts (isValidPhoneFormat, validateAndNormalizePhone)
+
+§10 Integration Framework:
+- Added requestPayload logging subsection (book_shipment, cancel_shipment, track_shipment, etc.)
+
+§11 Frontend Architecture:
+- §11.4: Updated API client to mention optional headers parameter
+- §11.5: Updated CreateCustomerForm, order-create-view, invite-employee-view descriptions
+- §11.9: Added Idempotent Mutations + Phone Validation subsections
+- §11.10: Added useIdempotentMutation hook reference
+
+§16 What's Built:
+- Added 10 new "Recently Fixed" items (18-27): courier cancel Leopard, retroactive cancel, order cancel → courier, exchange cancel → courier, city propagation, phone validation, idempotency system, request payload logging, DB-level uniqueness, button cursor fix
+
+§17 Key Conventions:
+- Added "Creation Idempotency (withIdempotency pattern)" with code example
+- Added "Phone Validation (libphonenumber-js)" with code example
+
+§18 Known Issues:
+- Updated item 2: /api/auth/me now ~210ms (was 500-1000ms) — FIXED
+- Added item 15: booking-time city corrections were not persisted — FIXED
+- Added item 16: employee invite race window — FIXED
+- Added item 17: company integration race window — FIXED
+
+§19 Prompt Generation Guide:
+- Added idempotency, phone validation, city propagation, requestPayload logging to context
+- Added "Don't use check-then-create patterns" and "Don't leave requestPayload null" to NOT suggestions
+
+Final line: Updated to reference supabase/functions-only.sql for SQL functions + indexes.
+
+41 mentions of new features found in the updated briefing ✅
