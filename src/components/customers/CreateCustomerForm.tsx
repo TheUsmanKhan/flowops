@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
 import { toast } from 'sonner'
 import { api } from '@/lib/api-client'
+import { isValidPhoneFormat } from '@/lib/phone-validation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -106,6 +107,17 @@ export function CreateCustomerForm({
   const handleSubmit = () => {
     if (!name.trim()) { toast.error('Name is required'); return }
     if (phones.length === 0 || !phones[0].phone.trim()) { toast.error('At least one phone is required'); return }
+
+    // Validate ALL phone numbers using libphonenumber-js
+    for (let i = 0; i < phones.length; i++) {
+      const phone = phones[i].phone.trim()
+      if (!phone) { toast.error(`Phone ${i + 1} is empty`); return }
+      if (!isValidPhoneFormat(phone)) {
+        toast.error(`Phone ${i + 1} "${phone}" is not a valid phone number. Use format like 03001234567 or +923001234567.`)
+        return
+      }
+    }
+
     if (addresses.length === 0 || !addresses[0].address.trim()) { toast.error('At least one address is required'); return }
 
     const payload: CreateCustomerInput = {
@@ -163,8 +175,11 @@ export function CreateCustomerForm({
                 placeholder="0300-1234567"
                 value={entry.phone}
                 onChange={(e) => updatePhone(entry._key, 'phone', e.target.value)}
-                className="text-sm"
+                className={cn('text-sm', entry.phone.trim() && !isValidPhoneFormat(entry.phone) && 'border-destructive')}
               />
+              {entry.phone.trim() && !isValidPhoneFormat(entry.phone) && (
+                <p className="text-[10px] text-destructive">Invalid phone format. Use 03001234567 or +923001234567.</p>
+              )}
             </div>
             <div className="w-32 space-y-1">
               {idx === 0 && <Label className="text-[10px]">Label</Label>}

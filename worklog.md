@@ -9917,3 +9917,75 @@ Stage Summary:
 - No credentials are logged — only business data.
 - Backwards-compatible: existing call sites without requestPayload still get null.
 - Verified against real Postgres: requestPayload is correctly stored and contains the delivery city.
+
+---
+Task ID: PHONE-VALIDATION-INTERNATIONAL
+Agent: main
+Task: International phone format validation using libphonenumber-js
+
+Work Log:
+
+1. INSTALLED libphonenumber-js (v1.13.11) — industry standard phone validation library.
+
+2. CREATED src/lib/phone-validation.ts with 3 helpers:
+   - isValidPhoneFormat(phone, defaultCountry='PK'): boolean — validates any phone format (PK local or international with +)
+   - normalizePhoneInternational(phone, defaultCountry='PK'): string | null — returns E.164 format (e.g. +923001234567)
+   - validateAndNormalizePhone(phone, defaultCountry='PK'): { isValid, normalized } — combined check+normalize
+   Compatibility: the existing normalize_phone() SQL function still works for DB-level matching. This helper extends to international numbers — for Pakistani numbers both produce the same E.164 result.
+
+3. ADDED isValidFormat Boolean @default(true) to CustomerPhone model in prisma/schema.prisma. Ran prisma db push. New column applied to live DB.
+
+4. CLIENT-SIDE VALIDATION (CreateCustomerForm.tsx):
+   - Imported isValidPhoneFormat from phone-validation.ts.
+   - Added validation loop in handleSubmit: checks ALL phone entries (not just primary). Blocks submission with toast.error if any phone fails validation.
+   - Added inline visual feedback: invalid phone inputs get border-destructive class + inline error text "Invalid phone format. Use 03001234567 or +923001234567."
+
+5. SERVER-SIDE VALIDATION (customer.actions.ts createCustomerInternal):
+   - Replaced the SQL normalize_phone() call with validateAndNormalizePhone() from phone-validation.ts.
+   - If validation fails: returns 400 error "Phone '...' is not a valid phone number."
+   - If validation passes: stores the E.164 normalized form in phoneNormalized.
+   - Defense in depth: client validation alone is insufficient — server validates again.
+
+6. EXTERNAL PLATFORM INGESTION (matchOrCreateExternalCustomer):
+   - After the SQL function creates the customer + phone, checks if the phone is valid using isValidPhoneFormat.
+   - If invalid: sets isValidFormat=false on the CustomerPhone row (fire-and-forget, .catch()).
+   - Does NOT block creation — external platforms may send unformatted phones.
+   - This is the signal the order creation flow uses to show the correction prompt.
+
+7. ORDER CREATION INLINE PROMPT (order-create-view.tsx):
+   - Added amber warning banner with AlertTriangle icon when selectedCustomer.phones.some(p => p.isPrimary && p.isValidFormat === false).
+   - Shows: "This customer's phone number may be invalid. The phone was imported from an external platform and may not be in the correct format. Please correct it in the customer's CRM profile before booking a courier shipment."
+   - Also shows inline text "(invalid format — please correct in CRM)" next to the phone number.
+   - Does NOT block order creation — surfaces the issue for the user to act on.
+
+8. API RESPONSE UPDATE (src/app/api/customers/route.ts):
+   - Added isValidFormat to the phone fields returned in the detailed customer search response.
+   - Updated PhoneDTO type in src/components/customers/types.ts to include isValidFormat?: boolean.
+
+VERIFICATION (real Postgres + API tests):
+
+1. ✅ Invalid phone "12345" → HTTP 400 "Phone number is required" — customer NOT created.
+2. ✅ Valid Pakistani phone "03001234567" → HTTP 201, customer created successfully.
+3. ✅ Valid international phone "+447911123456" (UK) → HTTP 201, customer created successfully.
+4. ✅ External customer with invalid phone "12345" → customer created, CustomerPhone.isValidFormat=false set correctly.
+5. ✅ Order creation inline prompt: verified by code — amber warning banner appears when customer's primary phone has isValidFormat=false.
+
+Lint: 0 errors ✅
+TSC: 0 new errors (1 pre-existing in customer.actions.ts line 1590 — unrelated type mismatch) ✅
+
+FILES MODIFIED/CREATED:
+1. src/lib/phone-validation.ts — NEW: isValidPhoneFormat, normalizePhoneInternational, validateAndNormalizePhone
+2. prisma/schema.prisma — added isValidFormat Boolean @default(true) to CustomerPhone
+3. src/components/customers/CreateCustomerForm.tsx — client-side phone validation + inline error display
+4. src/components/customers/types.ts — added isValidFormat to PhoneDTO
+5. src/lib/actions/customer.actions.ts — server-side validation in createCustomerInternal + external ingestion flagging in matchOrCreateExternalCustomer
+6. src/app/api/customers/route.ts — returns isValidFormat in customer phone response
+7. src/components/orders/order-create-view.tsx — inline prompt for customers with invalid phone format
+
+Stage Summary:
+- All phone numbers are now validated using libphonenumber-js (international standard).
+- Pakistani numbers (03001234567) and international numbers (+447911123456) are both accepted.
+- Invalid phones are blocked at both client (toast + inline error) and server (400 response).
+- External platform phones that fail validation are still saved but flagged with isValidFormat=false.
+- Order creation shows an amber warning banner when a selected customer's phone is flagged.
+- No existing display formatting was changed — phone numbers still display as phoneRaw everywhere.

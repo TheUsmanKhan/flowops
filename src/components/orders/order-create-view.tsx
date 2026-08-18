@@ -47,6 +47,7 @@ import {
   FileImage,
   RotateCcw,
   Save,
+  AlertTriangle,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { createManualOrderSchema } from '@/lib/validations/order.schemas'
@@ -1332,6 +1333,11 @@ function CustomerSection({
                     {selectedCustomer.phones[0] && (
                       <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
                         <Phone className="h-2.5 w-2.5" /> {selectedCustomer.phones[0].phoneRaw}
+                        {selectedCustomer.phones[0].isValidFormat === false && (
+                          <span className="text-amber-600 font-sans font-medium ml-1">
+                            (invalid format — please correct in CRM)
+                          </span>
+                        )}
                       </p>
                     )}
                   </div>
@@ -1340,6 +1346,25 @@ function CustomerSection({
                   <RotateCcw className="h-3.5 w-3.5" /> Change
                 </Button>
               </div>
+
+              {/* Phone format warning — shown when the customer's primary phone
+                  has isValidFormat=false (e.g., from an external platform with
+                  an unformatted phone). Does NOT block order creation, but
+                  surfaces the issue so the user can correct it in CRM. */}
+              {selectedCustomer.phones.some((p) => p.isPrimary && p.isValidFormat === false) && (
+                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2.5">
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <p className="text-xs font-medium text-amber-900">
+                      This customer's phone number may be invalid.
+                    </p>
+                    <p className="text-[11px] text-amber-700 mt-0.5">
+                      The phone was imported from an external platform and may not be in the correct format.
+                      Please correct it in the customer's CRM profile before booking a courier shipment.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* Compact CRM stats (informational only) */}
               <CrmStatsWidget customer={selectedCustomer} />

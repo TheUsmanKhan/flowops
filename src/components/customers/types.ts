@@ -11,6 +11,7 @@ export interface PhoneDTO {
   phoneNormalized: string
   label: string | null
   isPrimary: boolean
+  isValidFormat?: boolean
   createdAt: string
 }
 

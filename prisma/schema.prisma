@@ -1507,6 +1507,7 @@ model CustomerPhone {
   phoneNormalized   String
   label             String?
   isPrimary         Boolean  @default(false)
+  isValidFormat     Boolean  @default(true)  // false = phone failed format validation (e.g., from external platform)
 
   createdAt         DateTime @default(now())
 

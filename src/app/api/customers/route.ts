@@ -88,6 +88,7 @@ export async function GET(req: Request) {
                 phoneNormalized: p.phoneNormalized,
                 label: p.label,
                 isPrimary: p.isPrimary,
+                isValidFormat: p.isValidFormat,
                 createdAt: p.createdAt.toISOString(),
               })),
               addresses: full.addresses.map((a) => ({

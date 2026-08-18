@@ -28,6 +28,7 @@ import { getWorkspace, requirePermission, ApiError, getOrdersDataScope } from '@
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
+import { validateAndNormalizePhone, isValidPhoneFormat } from '@/lib/phone-validation'
 import {
   createCustomerSchema,
   updateCustomerSchema,
@@ -365,7 +366,9 @@ export async function createCustomerInternal(
     }
     const d = parsed.data
 
-    // 1. Normalize every phone via the SQL function (single source of truth).
+    // 1. Validate + normalize every phone using libphonenumber-js (international).
+    // This replaces the SQL normalize_phone() for the application-layer path.
+    // The SQL function remains for DB-level triggers/matching.
     const phonesWithNormalized: Array<{
       phoneRaw: string
       phoneNormalized: string
@@ -373,11 +376,11 @@ export async function createCustomerInternal(
       isPrimary: boolean
     }> = []
     for (const p of d.phones) {
-      const normalized = await normalizePhone(p.phone.trim())
-      if (!normalized) {
+      const { isValid, normalized } = validateAndNormalizePhone(p.phone.trim())
+      if (!isValid || !normalized) {
         return {
           success: false,
-          error: `Could not normalize phone "${p.phone}" — please enter a valid phone number`,
+          error: `Phone "${p.phone}" is not a valid phone number. Use format like 03001234567 or +923001234567.`,
         }
       }
       phonesWithNormalized.push({
@@ -1068,6 +1071,30 @@ export async function matchOrCreateExternalCustomer(
 
     const wasNewlyCreated = !existingMapping
     const matchedVia = existingMapping?.matchedVia ?? 'exact_identity'
+
+    // If this customer was newly created AND a phone was provided, check if
+    // the phone is valid. If not, flag the CustomerPhone row with
+    // isValidFormat=false so it can be surfaced for correction later.
+    // We do NOT block creation — external platforms may send unformatted
+    // or invalid phones, and the customer still needs to be importable.
+    if (wasNewlyCreated && d.phone) {
+      const phoneValid = isValidPhoneFormat(d.phone)
+      if (!phoneValid) {
+        // Find the phone row that was just created by the SQL function and
+        // flag it. This is fire-and-forget — the customer is already created.
+        db.customerPhone.updateMany({
+          where: {
+            customerId,
+            phoneRaw: d.phone,
+          },
+          data: { isValidFormat: false },
+        }).catch(() => {
+          // Non-fatal: if the update fails, the customer is still created.
+          // The phone will default to isValidFormat=true, which is the
+          // less-restrictive option (won't block future orders).
+        })
+      }
+    }
 
     return {
       success: true,
