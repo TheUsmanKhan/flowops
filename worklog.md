@@ -9786,3 +9786,59 @@ Stage Summary:
 - Point 1: ✅ FIXED — city propagation in createManualOrder is now genuinely fire-and-forget (not awaited, .catch with console.error).
 - Point 2: ✅ VERIFIED — booking-time propagation tested against real Postgres, CustomerAddress correctly updated when order has a saved address.
 - Point 3: ✅ CONFIRMED — deliveryCity/deliveryAddress were NOT persisted on the Order during booking before this fix. This was a real pre-existing bug. The fix (adding these fields to the order.update) closes the gap. Existing data impact is limited (display-only, courier has correct city, alias saved), but noted for potential future cleanup.
+
+---
+Task ID: CITY-BACKFILL-INVESTIGATION
+Agent: main
+Task: Check manifest usage of deliveryCity + write one-time backfill script + report findings
+
+Work Log:
+
+STEP 1 — Does generateLoadSheet() or other manifest/label generation read Order.deliveryCity/deliveryAddress?
+
+FINDING: NO — manifests do NOT read deliveryCity/deliveryAddress from the database.
+
+Evidence:
+- generateLoadSheet() in load-sheet.actions.ts (lines 125-136, 390-407):
+  The Order query in both generateLoadSheet() and listLoadSheetReady() selects ONLY:
+  - id, flowopsOrderNumber, trackingNumber, courierBookingStatus, courierSubStatus, loadSheetId, courierCompanyIntegrationId, dispatchedAt, customer.name
+  It does NOT select deliveryCity or deliveryAddress.
+  
+- The LoadSheet model stores items as a JSONB array of { entityType, entityId, trackingNumber } — no address/city data.
+- The load sheet PDF (when downloaded from PostEx) is the courier's own manifest — it contains whatever the courier generated, not FlowOps's stored city.
+- scan-report.actions.ts does not reference deliveryCity or deliveryAddress at all.
+- The Order detail API route (GET /api/orders/[id]) DOES return deliveryCity/deliveryAddress for display (lines 108-109), but this is for the order detail page UI, not for manifest generation.
+
+VERDICT: ✅ Manifests do NOT rely on Order.deliveryCity. This is a DISPLAY-ONLY data consistency issue, not an operational risk. The priority remains LOW (not higher than previously assessed).
+
+STEP 2 — One-time backfill script investigation:
+
+ATTEMPTED: Searched for the city that was actually sent to the courier in the IntegrationActionLog entries for 'book_shipment' actions.
+
+CRITICAL FINDING: The requestPayload field is NULL for ALL 22 book_shipment IntegrationActionLog entries.
+
+The executeLoggedIntegrationAction() wrapper in logged-call.ts:
+- Stores `responsePayload` (the adapter's return value: { success, trackingNumber, providerStatus, rawResponse })
+- Stores `requestPayload: null` (line 68: "caller can pre-log request if needed" — but no caller does this for book_shipment)
+
+This means: the city that was actually sent to the courier is NOT logged anywhere in the IntegrationActionLog. The responsePayload only contains the courier's API RESPONSE, and PostEx's response does NOT echo back the delivery city (it returns: trackingNumber, orderStatus, orderDate — no city/address fields).
+
+WITHOUT the logged request payload, we CANNOT determine what city was actually sent to the courier at booking time. The IntegrationActionLog does not have the data needed for the backfill.
+
+ALTERNATIVE APPROACH: Since we can't recover the booked city from logs, we checked whether any of the 4 booked orders (with trackingNumber !== null AND courierBookingStatus='booked') show signs of drift:
+
+Booked orders:
+1. ORD-2026-00032 | city=Faisalabad | tracking=20150830016004
+2. ORD-2026-00005 | city=TANDO ALLAHYAR | tracking=23150830016068
+3. ORD-2026-00001 | city=Lahore | tracking=27150830016066
+4. ORD-2026-00004 | city=lahore | tracking=20150830016067
+
+These cities look reasonable (they match known Pakistani cities). Without the logged request payload, we can't compare against what was actually sent. But there's no evidence of drift (no NULL deliveryCity, no obviously wrong values).
+
+STEP 3 — Report:
+
+1. Manifests do NOT read deliveryCity → LOW priority, display-only issue. ✅
+2. Backfill NOT POSSIBLE from existing data: requestPayload is NULL for all book_shipment logs, and PostEx's API response does NOT echo back the delivery city. ❌ Cannot determine the city that was actually sent to the courier.
+3. The fix going forward (adding deliveryCity/deliveryAddress to the order.update in bookOrderWithCourier) is the correct fix — it ensures future bookings persist the corrected city. But historical orders cannot be backfilled because the data was never logged.
+4. No evidence of drift in existing data: all 4 booked orders have reasonable city values. No NULLs, no obviously wrong values. But this cannot be confirmed definitively without the request payload.
+5. Recommendation: Optionally, modify executeLoggedIntegrationAction() to also log the requestPayload for book_shipment actions going forward — this would make future backfills possible if needed. This is a separate improvement, not part of the current task.
