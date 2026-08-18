@@ -684,9 +684,22 @@ export async function createManualOrder(
     if (selectedSavedAddressId) {
       // Bump lastUsedAt on the saved address + recompute customer stats
       // in parallel (independent writes to different tables).
+      // Also propagate city correction: if the user modified the city for
+      // this order (e.g., corrected "lahore" → "Lahore"), update the saved
+      // CustomerAddress row so future orders see the corrected city.
+      const cityUpdatePromise = d.delivery_city?.trim()
+        ? db.customerAddress.update({
+            where: { id: selectedSavedAddressId },
+            data: { city: d.delivery_city.trim() },
+          }).catch(() => {
+            // Non-fatal: if the update fails, the order is still created.
+          })
+        : Promise.resolve()
+
       await Promise.all([
         markAddressAsUsed(selectedSavedAddressId),
         updateCustomerStats(customerId),
+        cityUpdatePromise,
       ])
     } else if (saveAddressForNextTime && d.delivery_address && d.delivery_city) {
       // One-off address typed + user opted to save it for next time.

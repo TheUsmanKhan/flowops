@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent } from '@/components/ui/card'
+import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 import { Badge } from '@/components/ui/badge'
 import { Plus, Trash2, Star, Phone, MapPin, Loader2, User, Mail } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -262,10 +263,11 @@ export function CreateCustomerForm({
               </div>
               <div className="space-y-1">
                 {idx === 0 && <Label className="text-[10px]">City *</Label>}
-                <Input
-                  placeholder="e.g. Lahore"
+                <CityAutocomplete
+                  providerKey="all"
                   value={entry.city}
-                  onChange={(e) => updateAddress(entry._key, 'city', e.target.value)}
+                  onChange={(city) => updateAddress(entry._key, 'city', city)}
+                  placeholder="e.g. Lahore"
                   className="text-sm"
                 />
               </div>

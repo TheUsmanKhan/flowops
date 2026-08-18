@@ -419,10 +419,30 @@ export async function bookOrderWithCourier(
         courierBookingFailureReason: null,
         // Store our own copy of the courier slip PDF (if downloaded)
         ...(courierSlipStoragePath ? { courierSlipStoragePath } : {}),
+        // Persist the (possibly corrected) delivery city + address on the order
+        deliveryCity: resolvedDeliveryCity || deliveryCity,
+        ...(deliveryAddress ? { deliveryAddress } : {}),
       },
     })
     mark('orderUpdateEnd')
     measure('orderUpdateStart', 'orderUpdateEnd', '9_order_update')
+
+    // ── Propagate city correction back to the customer's saved address ──
+    // If the city was corrected during booking (e.g., via the mismatch
+    // resolver or manual override), and the order used a SAVED customer
+    // address (usedCustomerAddressId is non-null), update that
+    // CustomerAddress row so the corrected city shows up on future orders
+    // for this customer — the same correction won't need to be repeated.
+    // If the order used a one-off address (usedCustomerAddressId is null),
+    // skip propagation — we only fix the order's own address (above).
+    if (order.usedCustomerAddressId && resolvedDeliveryCity) {
+      db.customerAddress.update({
+        where: { id: order.usedCustomerAddressId },
+        data: { city: resolvedDeliveryCity },
+      }).catch(() => {
+        // Non-fatal: if this fails, the order is still booked successfully.
+      })
+    }
 
     // Audit log (fire-and-forget — see src/lib/audit.ts)
     mark('auditMetricStart')

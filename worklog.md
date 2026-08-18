@@ -9593,3 +9593,79 @@ Stage Summary:
 - Company integrations: now race-proof via @@unique([companyId, providerId]). Two different sessions can't create duplicate integrations for the same provider — the loser re-fetches and reactivates.
 - Same-session double-click protection (via withIdempotency) still works unchanged — it's additive to the DB-level constraints, not a replacement.
 - Both layers now protect against duplicates: DB-level constraints for cross-session races + idempotency keys for same-session double-clicks.
+
+---
+Task ID: CITY-PERMISSIVE-PROPAGATION
+Agent: main
+Task: Permissive city field + propagate corrections back to CustomerAddress
+
+Work Log:
+
+TASK 1 — Investigate Order/CustomerAddress relationship:
+
+Findings:
+- Order has a HYBRID approach:
+  1. `usedCustomerAddressId` (String?, FK to CustomerAddress) — tracks WHICH saved address was used (null = one-off address)
+  2. `deliveryAddress` (String?, JSONB) — denormalized/snapshotted address text stored on the Order itself
+  3. `deliveryCity` (String?) — also denormalized on the Order
+- The `usedCustomerAddressId` field is the key: non-null = used a saved address (propagation applies), null = one-off address (skip propagation).
+- `onDelete: SetNull` means if the CustomerAddress is deleted, the FK becomes null (order survives).
+
+TASK 2 — Make City field permissive:
+- CreateCustomerForm.tsx: replaced plain `<Input>` for city with `<CityAutocomplete providerKey="all">` — shows courier-matched suggestions but does NOT block submission if the city doesn't match. The CityAutocomplete component is inherently permissive (it's a text input with a dropdown, not a select — the user can type anything).
+- City remains a required field (Zod validation `z.string().min(2)` on `delivery_city` in the order schema, and city.trim() check in CreateCustomerForm's validation).
+- Confirmed: CityAutocomplete never blocks/rejects input — it just shows suggestions. If no match, the text is accepted as-is.
+
+TASK 3a — CRM direct edit:
+- Confirmed: `PATCH /api/customers/[id]/addresses/[addressId]` → `updateCustomerAddress()` updates the CustomerAddress row directly. This IS the source record — "propagation" happens by definition.
+
+TASK 3b — Order creation address selector propagation:
+- Modified `createManualOrder()` in `order.actions.ts` (line ~684):
+  - In the `if (selectedSavedAddressId)` branch (where the order used a saved CustomerAddress), added a parallel `db.customerAddress.update()` that writes the order's `delivery_city` back to the CustomerAddress row.
+  - This runs in `Promise.all` alongside `markAddressAsUsed` and `updateCustomerStats` — non-blocking, fire-and-forget if it fails.
+  - Only fires when `selectedSavedAddressId` is non-null (saved address) AND `d.delivery_city` is non-empty.
+  - When `selectedSavedAddressId` is null (one-off address), this branch is skipped entirely — the customer's saved address is NOT touched.
+
+TASK 3c — Booking-time mismatch resolver propagation:
+- Modified `bookOrderWithCourier()` in `booking.actions.ts` (line ~430):
+  - After the order.update that persists the resolved city on the order, added a check: if `order.usedCustomerAddressId` is non-null AND `resolvedDeliveryCity` is non-empty, update the CustomerAddress row with the resolved city.
+  - This is fire-and-forget (`.catch(() => {})`) — non-fatal if it fails.
+  - When `usedCustomerAddressId` is null (one-off address), propagation is skipped — only the order's own address is corrected.
+  - Also persists `deliveryCity` and `deliveryAddress` on the Order itself (previously the order.update didn't include these fields).
+
+VERIFICATION (real Postgres):
+
+1. ✅ Create customer with non-matching city:
+   - Created "City Test Customer" with city "NonExistentCity123"
+   - HTTP 201 — not blocked ✅
+   - CustomerAddress row created with the non-matching city ✅
+
+2. ✅ Order with saved address + corrected city → propagation:
+   - Created order for "City Test Customer" with `used_customer_address_id` set (saved address)
+   - `delivery_city: "CorrectedCity456"` (corrected from original "NonExistentCity123")
+   - HTTP 201 — order created ✅
+   - CustomerAddress.city changed from "NonExistentCity123" → "CorrectedCity456" ✅
+   - Propagation confirmed: the saved address was updated with the corrected city
+
+3. (Booking-time propagation was not tested via API due to no live courier credentials, but the code path is verified: `bookOrderWithCourier` checks `order.usedCustomerAddressId` and updates the CustomerAddress if non-null)
+
+4. ✅ Order with one-off address (NO saved address) → CustomerAddress NOT touched:
+   - Created order for same customer with `used_customer_address_id: null` (one-off)
+   - `delivery_city: "OneOffCity789"`
+   - HTTP 201 — order created ✅
+   - CustomerAddress.city still "CorrectedCity456" (from test 2) — NOT overwritten with "OneOffCity789" ✅
+   - Propagation correctly skipped for one-off address
+
+Lint: 0 errors ✅
+TSC: 0 new errors (5 pre-existing errors in booking.actions.ts + order.actions.ts, all unrelated to this task) ✅
+
+FILES MODIFIED:
+1. src/components/customers/CreateCustomerForm.tsx — replaced plain Input for city with CityAutocomplete (permissive, shows suggestions but doesn't block)
+2. src/lib/actions/order.actions.ts — added city propagation in createManualOrder() when using a saved address
+3. src/lib/actions/booking.actions.ts — added city propagation in bookOrderWithCourier() when order has a saved address; also persists deliveryCity/deliveryAddress on the order itself
+
+Stage Summary:
+- City field is now permissive: CityAutocomplete shows courier-matched suggestions but does NOT block submission for unmatched cities.
+- City corrections propagate to the customer's saved CustomerAddress in two places: order creation (when using a saved address) and booking-time mismatch resolution (when the order has a saved address).
+- One-off addresses correctly skip propagation — only the order's own address is corrected.
+- The CourierCityAlias learning mechanism is unchanged — it solves a different problem (future fuzzy-matching for ANY customer).
