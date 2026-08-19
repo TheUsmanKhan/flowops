@@ -10056,3 +10056,29 @@ Updated FLOWOPS_BRIEFING.md from 1,743 → 1,825 lines (+82 lines) to reflect AL
 Final line: Updated to reference supabase/functions-only.sql for SQL functions + indexes.
 
 41 mentions of new features found in the updated briefing ✅
+
+---
+Task ID: COUNTRY-PHASE1
+Agent: main
+Task: FlowOps Country System (Shopify-style) — Phase 1 Investigation (no code changes, report only)
+
+Work Log:
+- Read /home/z/my-project/worklog.md for prior context (FlowOps Sprint 1 complete, multi-tenant ERP live on Supabase).
+- Inspected src/components/ui/country-selector.tsx + src/lib/data/countries.ts: searchable combobox, ~88 countries, Pakistan first in list, returns ISO alpha-2 code. Pure controlled component (value/onChange), no validation logic.
+- Traced CountrySelector usage across src/: used in create-organization-view, create-company-view, company-settings-view only. NOT used in any customer/order address form.
+- Read prisma/schema.prisma CustomerAddress model (lines 1529-1564): NO country column. Fields: label, address, city, isDefault, lastUsedAt, cityMatchedCouriers, cityValidatedAt. Province was removed; country was NEVER added — genuinely new field.
+- Read Order model deliveryAddress (line 1930): `deliveryAddress String? // JSONB` — comment claims JSONB but column is plain String?.
+- Traced both write paths: manual order creation (order.actions.ts line 614: `deliveryAddress: d.delivery_address` where order.schemas.ts line 77 is `z.string().min(2)`) and Shopify ingestion (order.actions.ts line 1033: `shopifyAddress1 || ...`). Both assign a FLAT STREET STRING, not a JSON object. So the briefing's `{street, city, province, postal_code, country}` claim is structurally false for the current implementation — country key cannot exist there.
+- Read matchExternalCustomerSchema (customer.schemas.ts lines 139-145): accepts platform, external_customer_id, phone, email, name ONLY. No country. SQL function match_or_create_customer() takes only those 6 params (order.actions.ts lines 1057-1066). Country from external platforms is discarded at the match layer.
+- Traced Shopify address handling (order.actions.ts lines 913-933): only default_address.address1 and default_address.city are read. default_address.country / country_code / province / zip / address2 all ignored.
+- Confirmed Daraz/Instagram ingestion: matchExternalCustomerSchema enum includes them, but no live ingestion code path exists — only Shopify is active (createOrderFromShopify + webhook route).
+- Cross-referenced country-field precedents in schema: Company has `countryCode String @default("PK")` + `addressCountry String?`; InventoryLocation has `countryCode String @default("PK")` + separate province/city/postalCode columns. Clear pattern to mirror.
+- Appended this investigation record to worklog.md for Phase 2 continuity.
+
+Stage Summary:
+- FINDINGS (reported to user, no code changed):
+  1. CountrySelector is reusable as-is for customer/order forms — no adjustment needed.
+  2. CustomerAddress has NO country column — genuinely new field (province was removed, country never existed).
+  3. Order.deliveryAddress is a plain street STRING (not JSONB despite the comment) — country key cannot exist; deliveryCity is a separate column. Migrating to real JSONB would be disruptive; recommend a new `deliveryCountry String?` column mirroring the `deliveryCity` pattern instead.
+  4. matchOrCreateExternalCustomer + match_or_create_customer() SQL take no country param; Shopify ingestion reads only address1 + city from default_address — country/country_code/province/zip/address2 all discarded. Daraz/Instagram ingestion doesn't exist yet.
+- RECOMMENDED Phase 2 approach (pending user approval): add `country String @default("PK")` to CustomerAddress + `deliveryCountry String?` to Order; extend matchExternalCustomer input + SQL fn to accept country; wire Shopify default_address.country_code through; default Order.deliveryCountry from Company.countryCode; drop CountrySelector into the order + customer address forms unchanged.

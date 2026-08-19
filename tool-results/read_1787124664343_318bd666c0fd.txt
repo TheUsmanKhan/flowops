@@ -1,0 +1,2002 @@
+     1→// FlowOps — Multi-tenant SaaS ERP schema (Sprint 1)
+     2→// Adapted from the Supabase/PostgreSQL spec to Prisma + SQLite.
+     3→// Multi-tenant isolation is enforced in the application layer
+     4→// (company-scoping + permission checks) mirroring the RLS design.
+     5→
+     6→generator client {
+     7→  provider = "prisma-client-js"
+     8→}
+     9→
+    10→datasource db {
+    11→  provider  = "postgresql"
+    12→  url       = env("DATABASE_URL")
+    13→  directUrl = env("DIRECT_URL")
+    14→}
+    15→
+    16→/// Extends the auth identity. One row per registered user.
+    17→model Profile {
+    18→  id           String   @id @default(cuid())
+    19→  email        String   @unique
+    20→  fullName     String
+    21→  passwordHash String
+    22→  avatarUrl    String?
+    23→  phone        String?
+    24→  isOnboarded  Boolean  @default(false)
+    25→  createdAt    DateTime @default(now())
+    26→  updatedAt    DateTime @updatedAt
+    27→
+    28→  ownedOrgs         Organization[]  @relation("OrgOwner")
+    29→  createdCompanies  Company[]       @relation("CompanyCreator")
+    30→  employees         Employee[]
+    31→  settings          UserSetting?
+    32→  invitationsSent   Invitation[]    @relation("InvitedBy")
+    33→  invitationsAccepted Invitation[]  @relation("AcceptedBy")
+    34→  terminationsDone  Employee[]      @relation("TerminatedBy")
+    35→  employeeInvitedBy Employee[]      @relation("EmployeeInvitedBy")
+    36→  auditLogs         AuditLog[]
+    37→  rolesCreated      Role[]          @relation("RoleCreator")
+    38→}
+    39→
+    40→/// Top-level tenant. A holding umbrella for one or more companies.
+    41→model Organization {
+    42→  id                 String   @id @default(cuid())
+    43→  name               String
+    44→  slug               String   @unique
+    45→  logoUrl            String?
+    46→  ownerId            String
+    47→  owner              Profile  @relation("OrgOwner", fields: [ownerId], references: [id])
+    48→  subscriptionPlan   String   @default("free") // free | starter | growth | enterprise
+    49→  subscriptionStatus String   @default("active") // active | past_due | cancelled | trialing
+    50→  isActive           Boolean  @default(true)
+    51→  metadata           String   @default("{}")
+    52→  createdAt          DateTime @default(now())
+    53→  updatedAt          DateTime @updatedAt
+    54→
+    55→  companies   Company[]
+    56→  invitations Invitation[]
+    57→  auditLogs   AuditLog[]
+    58→
+    59→  // Sprint 3 back-relations
+    60→  orgCategories        OrgCategory[]
+    61→  orgBrands            OrgBrand[]
+    62→  orgAttributes        OrgAttribute[]
+    63→  orgAttributeValues   OrgAttributeValue[]
+    64→  orgProducts          OrgProduct[]
+    65→  orgProductVariants   OrgProductVariant[]
+    66→  orgProductImages     OrgProductImage[]
+    67→  orgProductBundles    OrgProductBundle[]
+    68→  selectiveAccess      SelectiveProductAccess[]
+    69→  companyProductSettings CompanyProductSetting[]
+    70→  companyVariantPricing  CompanyVariantPricing[]
+    71→  returnedStitchedInventory ReturnedStitchedInventory[]
+    72→  productFulfillmentCosts  ProductFulfillmentCost[]
+    73→
+    74→  // Sprint 6 back-relations
+    75→  inventoryLocations   InventoryLocation[]
+    76→  suppliers            Supplier[]
+    77→  inventoryPools       InventoryPool[]
+    78→  inventoryTransactions InventoryTransaction[]
+    79→  avgCostHistory       AvgCostHistory[]
+    80→  stockTransfers       StockTransfer[]
+    81→  purchaseOrders       PurchaseOrder[]
+    82→  purchaseOrderItems   PurchaseOrderItem[]
+    83→  purchaseOrderReceipts PurchaseOrderReceipt[]
+    84→  supplierReturns      SupplierReturn[]
+    85→  stockLossRecords     StockLossRecord[]
+    86→  cycleCounts          CycleCount[]
+    87→  cycleCountItems      CycleCountItem[]
+    88→  productionOrders     ProductionOrder[]
+    89→
+    90→  // OMS back-relations
+    91→  customers            Customer[]
+    92→  orders               Order[]
+    93→  orderItems           OrderItem[]
+    94→  attributeValueRules  AttributeValueRule[]
+    95→
+    96→  // Customer Management System back-relations (migration 002)
+    97→  customerPhones          CustomerPhone[]
+    98→  customerAddresses       CustomerAddress[]
+    99→  customerExternalIdentities CustomerExternalIdentity[]
+   100→
+   101→  // Item Exchange System back-relations (migration 003)
+   102→  orderExchanges          OrderExchange[]
+   103→
+   104→  // Universal Integration Framework back-relations (migration 004)
+   105→  companyIntegrations     CompanyIntegration[]
+   106→  integrationActionLogs   IntegrationActionLog[]
+   107→
+   108→  // Form Drafts back-relation (migration 005)
+   109→  formDrafts              FormDraft[]
+   110→
+   111→  // Exchange Shipments System back-relation (migration 008)
+   112→  exchangeShipments       ExchangeShipment[]
+   113→
+   114→  // Order Scan Module back-relations (migration 017)
+   115→  scanEvents              ScanEvent[]
+   116→  scanDailyReports        ScanDailyReport[]
+   117→  // Load Sheets back-relation (migration 020)
+   118→  loadSheets              LoadSheet[]
+   119→}
+   120→
+   121→/// Legal operating entity under an Organization. All business data lives here.
+   122→model Company {
+   123→  id                String   @id @default(cuid())
+   124→  organizationId    String
+   125→  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+   126→  name              String
+   127→  legalName         String?
+   128→  slug              String   @unique
+   129→  logoUrl           String?
+   130→  baseCurrency      String   @default("PKR")
+   131→  countryCode       String   @default("PK")
+   132→  taxId             String?
+   133→  taxIdType         String? // NTN | STRN
+   134→  addressStreet     String?
+   135→  addressCity       String?
+   136→  addressProvince   String?
+   137→  addressPostalCode String?
+   138→  addressCountry    String?
+   139→  phone             String?
+   140→  email             String?
+   141→  website           String?
+   142→  timezone          String   @default("Asia/Karachi")
+   143→  fiscalYearStart   Int      @default(1)
+   144→  isActive          Boolean  @default(true)
+   145→  metadata          String   @default("{}")
+   146→  createdById       String
+   147→  createdBy         Profile  @relation("CompanyCreator", fields: [createdById], references: [id])
+   148→  createdAt         DateTime @default(now())
+   149→  updatedAt         DateTime @updatedAt
+   150→
+   151→  roles            Role[]
+   152→  employees        Employee[]
+   153→  invitations      Invitation[]
+   154→  rolePermissions  RolePermission[]
+   155→  auditLogs        AuditLog[]
+   156→  metricEvents     MetricEvent[]
+   157→  activeForSettings UserSetting[]
+   158→
+   159→  // Sprint 3 back-relations
+   160→  sourceProducts          OrgProduct[]
+   161→  selectiveProductAccess  SelectiveProductAccess[]
+   162→  companyProductSettings  CompanyProductSetting[]
+   163→  companyVariantPricing   CompanyVariantPricing[]
+   164→  returnedStitchedInventory ReturnedStitchedInventory[]
+   165→  productFulfillmentCosts  ProductFulfillmentCost[]
+   166→
+   167→  // Sprint 6 back-relations
+   168→  inventoryLocations      InventoryLocation[]
+   169→  suppliers               Supplier[]
+   170→  inventoryTxnsCompany    InventoryTransaction[]
+   171→  purchaseOrders          PurchaseOrder[]
+   172→  supplierReturns         SupplierReturn[]
+   173→  stockLossRecords        StockLossRecord[]
+   174→  cycleCounts             CycleCount[]
+   175→  productionOrders        ProductionOrder[]
+   176→
+   177→  // OMS back-relations
+   178→  orderSettings           CompanyOrderSetting?
+   179→  orders                  Order[]
+   180→
+   181→  // Item Exchange System back-relations (migration 003)
+   182→  orderExchanges          OrderExchange[]
+   183→
+   184→  // Universal Integration Framework back-relations (migration 004)
+   185→  companyIntegrations    CompanyIntegration[]
+   186→
+   187→  // Form Drafts back-relation (migration 005)
+   188→  formDrafts             FormDraft[]
+   189→
+   190→  // City & Address Book System back-relation (migration 007)
+   191→  cityAliases            CourierCityAlias[]
+   192→
+   193→  // Exchange Shipments System back-relation (migration 008)
+   194→  exchangeShipments      ExchangeShipment[]
+   195→
+   196→  // Order Scan Module back-relations (migration 017)
+   197→  scanEvents             ScanEvent[]
+   198→  scanDailyReports       ScanDailyReport[]
+   199→
+   200→  // Load Sheets back-relation (migration 020)
+   201→  loadSheets             LoadSheet[]
+   202→
+   203→  // HR / Payroll back-relation
+   204→  payrollRuns            PayrollRun[]
+   205→}
+   206→
+   207→/// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
+   208→/// elevated and bypass all permission checks. Custom roles use role_permissions.
+   209→model Role {
+   210→  id            String   @id @default(cuid())
+   211→  companyId     String
+   212→  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   213→  name          String
+   214→  description   String?
+   215→  roleTier      String   @default("standard") // elevated | standard
+   216→  isSystemRole  Boolean  @default(false)
+   217→  systemRoleKey String?  // owner | founder | co_founder | investor | null
+   218→  // NOTE: systemRoleKey is unique PER COMPANY (not globally), so every
+   219→  // company can seed its own owner/founder/co_founder/investor roles.
+   220→  // ─── Data scope for the Orders module ───────────────────────────────
+   221→  // "all"  → role sees ALL orders in the company (default, preserves
+   222→  //          existing behavior for every row after migration)
+   223→  // "own"  → role sees only orders where salesEmployeeId === the caller's
+   224→  //          own Employee.id (enforced at the query layer, not in SQL)
+   225→  ordersDataScope String  @default("all") // "own" | "all"
+   226→  isActive      Boolean  @default(true)
+   227→  createdById   String?
+   228→  createdBy     Profile? @relation("RoleCreator", fields: [createdById], references: [id])
+   229→  createdAt     DateTime @default(now())
+   230→  updatedAt     DateTime @updatedAt
+   231→
+   232→  employees       Employee[]
+   233→  rolePermissions RolePermission[]
+   234→  invitations     Invitation[]
+   235→
+   236→  @@unique([companyId, name])
+   237→  @@unique([companyId, systemRoleKey])
+   238→}
+   239→
+   240→/// Permission keys attached to standard roles. Elevated roles bypass this.
+   241→model RolePermission {
+   242→  id            String   @id @default(cuid())
+   243→  roleId        String
+   244→  role          Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+   245→  companyId     String
+   246→  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   247→  permissionKey String
+   248→  createdAt     DateTime @default(now())
+   249→
+   250→  @@unique([roleId, permissionKey])
+   251→}
+   252→
+   253→/// Core of the Employment System. Merges HR + system access.
+   254→/// One user can have multiple employee records (one per company).
+   255→model Employee {
+   256→  id                String    @id @default(cuid())
+   257→  companyId         String
+   258→  company           Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   259→  userId            String
+   260→  user              Profile   @relation(fields: [userId], references: [id], onDelete: Cascade)
+   261→  roleId            String
+   262→  role              Role      @relation(fields: [roleId], references: [id])
+   263→  employeeCode      String?
+   264→  department        String?
+   265→  designation       String?
+   266→  directManagerId   String?
+   267→  directManager     Employee? @relation("EmployeeManager", fields: [directManagerId], references: [id])
+   268→  subordinates      Employee[] @relation("EmployeeManager")
+   269→  status            String    @default("active") // active | suspended | terminated | on_leave
+   270→  joinedAt          DateTime  @default(now())
+   271→  terminatedAt      DateTime?
+   272→  terminatedById    String?
+   273→  terminatedBy      Profile?  @relation("TerminatedBy", fields: [terminatedById], references: [id])
+   274→  terminationReason String?
+   275→  invitedById       String?
+   276→  invitedBy         Profile?  @relation("EmployeeInvitedBy", fields: [invitedById], references: [id])
+   277→  metadata          String    @default("{}")
+   278→  createdAt         DateTime  @default(now())
+   279→  updatedAt         DateTime  @updatedAt
+   280→
+   281→  auditLogs AuditLog[]
+   282→
+   283→  // Sprint 3 back-relations (named to avoid ambiguity)
+   284→  createdCategories      OrgCategory[]      @relation("CategoryCreator")
+   285→  createdBrands          OrgBrand[]         @relation("BrandCreator")
+   286→  createdAttributes      OrgAttribute[]     @relation("AttributeCreator")
+   287→  createdProducts        OrgProduct[]      @relation("ProductCreator")
+   288→  promotedProducts       OrgProduct[]      @relation("ProductPromoter")
+   289→  demotedProducts        OrgProduct[]      @relation("ProductDemoter")
+   290→  createdVariants        OrgProductVariant[] @relation("VariantCreator")
+   291→  uploadedProductImages  OrgProductImage[] @relation("ImageUploader")
+   292→  grantedSelectiveAccess SelectiveProductAccess[] @relation("SelectiveAccessGranter")
+   293→  subscribedProducts     CompanyProductSetting[] @relation("SubscriptionCreator")
+   294→  revokedSubscriptions   CompanyProductSetting[] @relation("SubscriptionRevoker")
+   295→  receivedReturnedItems  ReturnedStitchedInventory[] @relation("ReturnedItemReceiver")
+   296→  writtenOffReturnedItems ReturnedStitchedInventory[] @relation("ReturnedItemWriteOff")
+   297→  loggedFulfillmentCosts ProductFulfillmentCost[] @relation("FulfillmentCostLogger")
+   298→
+   299→  // Sprint 6 back-relations
+   300→  createdLocations       InventoryLocation[] @relation("LocationCreator")
+   301→  createdSuppliers       Supplier[] @relation("SupplierCreator")
+   302→  inventoryTxnEmployee   InventoryTransaction[] @relation("InventoryTxnEmployee")
+   303→  transferInitiator      StockTransfer[] @relation("TransferInitiator")
+   304→  poCreator              PurchaseOrder[] @relation("POCreator")
+   305→  poCanceller            PurchaseOrder[] @relation("POCanceller")
+   306→  poReceiver             PurchaseOrderReceipt[] @relation("POReceiver")
+   307→  supplierReturnReporter SupplierReturn[] @relation("SupplierReturnReporter")
+   308→  supplierReturnResolver SupplierReturn[] @relation("SupplierReturnResolver")
+   309→  stockLossReporter      StockLossRecord[] @relation("StockLossReporter")
+   310→  stockLossApprover      StockLossRecord[] @relation("StockLossApprover")
+   311→  stockLossResolver      StockLossRecord[] @relation("StockLossResolver")
+   312→  cycleCountAssignee     CycleCount[] @relation("CycleCountAssignee")
+   313→  cycleCountCreator      CycleCount[] @relation("CycleCountCreator")
+   314→  cycleCountApprover     CycleCount[] @relation("CycleCountApprover")
+   315→  cycleCountCounter      CycleCountItem[] @relation("CycleCountCounter")
+   316→  productionOrderCreator ProductionOrder[] @relation("ProductionOrderCreator")
+   317→
+   318→  // OMS back-relations
+   319→  orderSettingsUpdater   CompanyOrderSetting[] @relation("CompanyOrderSettingsUpdater")
+   320→  orderCreator           Order[] @relation("OrderCreator")
+   321→  orderConverter         Order[] @relation("OrderConverter")
+   322→
+   323→  // Customer Management System back-relations (migration 002)
+   324→  flaggedCustomers       Customer[] @relation("CustomerFlagger")
+   325→  createdCustomers       Customer[] @relation("CustomerCreator")
+   326→
+   327→  // Item Exchange System back-relations (migration 003)
+   328→  exchangeRequestsRequested       OrderExchange[] @relation("ExchangeRequester")
+   329→  exchangesOldItemVerified        OrderExchange[] @relation("ExchangeOldItemVerifier")
+   330→  exchangesCustomerShippedConfirmed OrderExchange[] @relation("ExchangeCustomerShippedConfirmer")
+   331→  exchangePriceDiffSettled        OrderExchange[] @relation("ExchangePriceDiffSettler")
+   332→  exchangeRefundsProcessed        OrderExchange[] @relation("ExchangeRefundProcessor")
+   333→
+   334→  // Universal Integration Framework back-relations (migration 004)
+   335→  integrationsCreated             CompanyIntegration[] @relation("IntegrationCreator")
+   336→
+   337→  // Form Drafts back-relation (migration 005)
+   338→  formDraftsCreated               FormDraft[] @relation("FormDraftCreator")
+   339→
+   340→  // Exchange Shipments System back-relation (migration 008)
+   341→  exchangeShipmentsCreated        ExchangeShipment[] @relation("ExchangeShipmentCreator")
+   342→
+   343→  // Order Scan Module back-relation (migration 017)
+   344→  scanEvents                      ScanEvent[] @relation("ScanEventScannedBy")
+   345→  loadSheetsGenerated             LoadSheet[] @relation("LoadSheetGenerator")
+   346→
+   347→  // ─── HR / Payroll back-relations ────────────────────────────────────
+   348→  // Orders where this employee is the attributed salesperson (Order.salesEmployeeId).
+   349→  salesOrders                     Order[] @relation("OrderSalesEmployee")
+   350→  // Cached rollup of this employee's sales performance (1:1).
+   351→  employeeStats                   EmployeeStats?
+   352→  // Active salary profile (1:1, the current effective base salary).
+   353→  salaryProfile                   EmployeeSalaryProfile?
+   354→  // Append-only salary revision history (1:N — as the employee whose salary changed).
+   355→  salaryRevisions                 SalaryRevision[] @relation("SalaryRevisionEmployee")
+   356→  // Salary revisions this employee made for others (1:N — as the changer).
+   357→  salaryRevisionsMade             SalaryRevision[] @relation("SalaryRevisionChangedBy")
+   358→  // Commission rules configured for this employee (1:N).
+   359→  commissionRules                 CommissionRule[]
+   360→  // Payslips generated for this employee (1:N).
+   361→  payslips                        Payslip[]
+   362→  // Salary advances given to this employee (1:N).
+   363→  advancesReceived                EmployeeAdvance[]
+   364→  // Salary advances created BY this employee (1:N — the staff member who recorded it).
+   365→  advancesCreatedBy               EmployeeAdvance[] @relation("AdvanceCreatedBy")
+   366→  // Payroll runs this employee finalized (1:N).
+   367→  payrollRunsFinalized            PayrollRun[] @relation("PayrollFinalizer")
+   368→
+   369→  @@unique([companyId, userId])
+   370→  @@index([companyId, designation])
+   371→}
+   372→
+   373→/// Token-based email invitations. Works whether user exists or not.
+   374→model Invitation {
+   375→  id             String    @id @default(cuid())
+   376→  companyId      String
+   377→  company        Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   378→  organizationId String
+   379→  organization   Organization @relation(fields: [organizationId], references: [id])
+   380→  invitedEmail   String
+   381→  invitedById    String
+   382→  invitedBy      Profile   @relation("InvitedBy", fields: [invitedById], references: [id])
+   383→  roleId         String
+   384→  role           Role      @relation(fields: [roleId], references: [id])
+   385→  token          String    @unique @default(cuid())
+   386→  status         String    @default("pending") // pending | accepted | expired | revoked
+   387→  acceptedById   String?
+   388→  acceptedBy     Profile?  @relation("AcceptedBy", fields: [acceptedById], references: [id])
+   389→  acceptedAt     DateTime?
+   390→  expiresAt      DateTime  @default(now())
+   391→  message        String?
+   392→  metadata       String    @default("{}")
+   393→  createdAt      DateTime  @default(now())
+   394→}
+   395→
+   396→/// Stores active workspace context per user.
+   397→model UserSetting {
+   398→  id                String   @id @default(cuid())
+   399→  userId            String   @unique
+   400→  user              Profile  @relation(fields: [userId], references: [id], onDelete: Cascade)
+   401→  activeCompanyId   String?
+   402→  activeCompany     Company? @relation(fields: [activeCompanyId], references: [id], onDelete: SetNull)
+   403→  activeOrgId       String?
+   404→  theme             String   @default("system") // light | dark | system
+   405→  language          String   @default("en")
+   406→  notificationPrefs String   @default("{}")
+   407→  createdAt         DateTime @default(now())
+   408→  updatedAt         DateTime @updatedAt
+   409→}
+   410→
+   411→/// Immutable append-only event log. Foundation for the KPI system.
+   412→model AuditLog {
+   413→  id             String   @id @default(cuid())
+   414→  companyId      String?
+   415→  company        Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+   416→  organizationId String?
+   417→  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+   418→  userId         String?
+   419→  user           Profile? @relation(fields: [userId], references: [id], onDelete: SetNull)
+   420→  employeeId     String?
+   421→  employee       Employee? @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+   422→  action         String
+   423→  entityType     String
+   424→  entityId       String?
+   425→  ipAddress      String?
+   426→  userAgent      String?
+   427→  oldValues      String?
+   428→  newValues      String?
+   429→  metadata       String   @default("{}")
+   430→  createdAt      DateTime @default(now())
+   431→
+   432→  @@index([companyId, entityType, createdAt])
+   433→  @@index([companyId, createdAt])
+   434→}
+   435→
+   436→/// Raw numeric events. Future KPI dashboards aggregate from this table.
+   437→model MetricEvent {
+   438→  id           String   @id @default(cuid())
+   439→  companyId    String
+   440→  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   441→  entityType   String
+   442→  entityId     String
+   443→  metricKey    String
+   444→  numericValue Float
+   445→  currency     String?
+   446→  dimensions   String   @default("{}")
+   447→  recordedAt   DateTime @default(now())
+   448→  createdAt    DateTime @default(now())
+   449→
+   450→  @@index([companyId, entityType, metricKey, recordedAt])
+   451→}
+   452→
+   453→// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   454→// SPRINT 3 — PRODUCT CATALOG SYSTEM
+   455→// 12 models: categories, brands, attributes, products, variants,
+   456→// images, bundles, selective access, company pricing, returned inventory.
+   457→// Multi-tenant isolation: org-level catalog + company-level pricing.
+   458→// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   459→
+   460→/// Hierarchical categories at organization level (shared by all companies).
+   461→model OrgCategory {
+   462→  id             String   @id @default(cuid())
+   463→  organizationId String
+   464→  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+   465→  parentId       String?
+   466→  parent         OrgCategory? @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+   467→  children       OrgCategory[] @relation("CategoryTree")
+   468→  name           String
+   469→  slug           String
+   470→  imageUrl       String?
+   471→  displayOrder   Int      @default(0)
+   472→  isActive       Boolean  @default(true)
+   473→  createdById    String?
+   474→  createdBy      Employee? @relation("CategoryCreator", fields: [createdById], references: [id])
+   475→  createdAt      DateTime @default(now())
+   476→  updatedAt      DateTime @updatedAt
+   477→
+   478→  products       OrgProduct[]
+   479→
+   480→  @@unique([organizationId, slug])
+   481→  @@index([organizationId])
+   482→}
+   483→
+   484→/// Brands at organization level. e.g. LAMHA, Muzammil Collection.
+   485→model OrgBrand {
+   486→  id             String   @id @default(cuid())
+   487→  organizationId String
+   488→  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+   489→  name           String
+   490→  slug           String
+   491→  logoUrl        String?
+   492→  isActive       Boolean  @default(true)
+   493→  createdById    String?
+   494→  createdBy      Employee? @relation("BrandCreator", fields: [createdById], references: [id])
+   495→  createdAt      DateTime @default(now())
+   496→  updatedAt      DateTime @updatedAt
+   497→
+   498→  products       OrgProduct[]
+   499→
+   500→  @@unique([organizationId, slug])
+   501→  @@index([organizationId])
+   502→}
+   503→
+   504→/// Attribute definitions used to build variants. e.g. Size, Color, Piece Type.
+   505→model OrgAttribute {
+   506→  id             String   @id @default(cuid())
+   507→  organizationId String
+   508→  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+   509→  name           String   // "Size"
+   510→  displayName    String   // "Select Size"
+   511→  attributeType  String   @default("select") // select | color
+   512→  displayOrder   Int      @default(0)
+   513→  isActive       Boolean  @default(true)
+   514→  createdById    String?
+   515→  createdBy      Employee? @relation("AttributeCreator", fields: [createdById], references: [id])
+   516→  createdAt      DateTime @default(now())
+   517→
+   518→  values         OrgAttributeValue[]
+   519→
+   520→  // Sprint 9 — Generic attribute rules (e.g. "Unstitched" forces "One Size")
+   521→  rulesAsForcedAttr   AttributeValueRule[] @relation("ForcedAttribute")
+   522→
+   523→  @@unique([organizationId, name])
+   524→  @@index([organizationId])
+   525→}
+   526→
+   527→/// Values for each attribute. e.g. S, M, L / Red, Navy / Unstitched, Stitched.
+   528→model OrgAttributeValue {
+   529→  id             String   @id @default(cuid())
+   530→  attributeId    String
+   531→  attribute      OrgAttribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+   532→  organizationId String
+   533→  organization   Organization @relation(fields: [organizationId], references: [id])
+   534→  value          String   // "Medium"
+   535→  displayValue   String   // "M"
+   536→  colorHex       String?  // only for color type
+   537→  skuCode        String?  // e.g. "M", "XXL", "RED" — used to build variant SKUs
+   538→  displayOrder   Int      @default(0)
+   539→  isActive       Boolean  @default(true)
+   540→  createdAt      DateTime @default(now())
+   541→
+   542→  // Sprint 9 — back-relations for attribute value rules
+   543→  rulesAsTrigger AttributeValueRule[] @relation("TriggerValue")
+   544→  rulesAsForced  AttributeValueRule[] @relation("ForcedValue")
+   545→
+   546→  @@unique([attributeId, value])
+   547→  @@index([organizationId])
+   548→}
+   549→
+   550→/// Generic conditional rules: "when trigger value is selected, force another attribute to a specific value."
+   551→/// e.g. Piece Type = "Unstitched" forces Size = "One Size"
+   552→model AttributeValueRule {
+   553→  id                      String   @id @default(cuid())
+   554→  organizationId          String
+   555→  organization            Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+   556→
+   557→  triggerAttributeValueId String
+   558→  triggerAttributeValue   OrgAttributeValue @relation("TriggerValue", fields: [triggerAttributeValueId], references: [id], onDelete: Cascade)
+   559→
+   560→  forcesAttributeId       String
+   561→  forcesAttribute         OrgAttribute @relation("ForcedAttribute", fields: [forcesAttributeId], references: [id], onDelete: Cascade)
+   562→
+   563→  forcesValueId           String
+   564→  forcesValue             OrgAttributeValue @relation("ForcedValue", fields: [forcesValueId], references: [id], onDelete: Cascade)
+   565→
+   566→  createdAt               DateTime @default(now())
+   567→
+   568→  @@unique([triggerAttributeValueId, forcesAttributeId])
+   569→  @@index([organizationId])
+   570→}
+   571→
+   572→/// Master product record. Lives at org level. Created by one company,
+   573→/// can be promoted to org-wide or selective sharing.
+   574→model OrgProduct {
+   575→  id             String   @id @default(cuid())
+   576→  organizationId String
+   577→  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+   578→  sourceCompanyId String
+   579→  sourceCompany   Company @relation(fields: [sourceCompanyId], references: [id])
+   580→
+   581→  categoryId     String?
+   582→  category       OrgCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+   583→  brandId        String?
+   584→  brand          OrgBrand? @relation(fields: [brandId], references: [id], onDelete: SetNull)
+   585→
+   586→  title          String
+   587→  slug           String
+   588→  baseSku        String?  // manually entered by user, e.g. "FSES-10A". Nullable — falls back to slug.
+   589→  description    String?
+   590→  shortDescription String? @db.VarChar(500)
+   591→
+   592→  productType    String   @default("variable") // simple | variable | bundle | service
+   593→  productScope   String   @default("private") // private | organization | selective | archived
+   594→
+   595→  isStitchable   Boolean  @default(false)
+   596→  hasSizeVariants Boolean @default(false)
+   597→  stitchingBasePrice Decimal @default(0) @db.Decimal(12, 2)
+   598→
+   599→  isActive       Boolean  @default(true)
+   600→  isFeatured     Boolean  @default(false)
+   601→
+   602→  promotedAt     DateTime?
+   603→  promotedById   String?
+   604→  promotedBy     Employee? @relation("ProductPromoter", fields: [promotedById], references: [id])
+   605→  demotedAt      DateTime?
+   606→  demotedById    String?
+   607→  demotedBy      Employee? @relation("ProductDemoter", fields: [demotedById], references: [id])
+   608→  demotionReason String?
+   609→
+   610→  createdById    String
+   611→  createdBy      Employee @relation("ProductCreator", fields: [createdById], references: [id])
+   612→  createdAt      DateTime @default(now())
+   613→  updatedAt      DateTime @updatedAt
+   614→
+   615→  variants       OrgProductVariant[]
+   616→  images         OrgProductImage[]
+   617→  bundles        OrgProductBundle[] @relation("BundleProduct")
+   618→  selectiveAccess SelectiveProductAccess[]
+   619→  companySettings CompanyProductSetting[]
+   620→
+   621→  @@unique([organizationId, slug])
+   622→  @@index([organizationId, productScope])
+   623→  @@index([sourceCompanyId])
+   624→}
+   625→
+   626→/// Every unique sellable combination of a product. Shopify-compatible fields.
+   627→/// NOTE: attribute_values JSONB must never exceed 3 keys (Shopify limit).
+   628→model OrgProductVariant {
+   629→  id             String   @id @default(cuid())
+   630→  productId      String
+   631→  product        OrgProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+   632→  organizationId String
+   633→  organization   Organization @relation(fields: [organizationId], references: [id])
+   634→
+   635→  sku            String   @unique
+   636→  barcode        String?  @unique
+   637→  // JSONB: { "Piece Type": "Stitched", "Size": "M" } — max 3 keys
+   638→  attributeValues String  @default("{}")
+   639→
+   640→  costPrice      Decimal  @default(0) @db.Decimal(12, 2)
+   641→  weightGrams    Int      @default(0)
+   642→
+   643→  fulfillmentType String  @default("stock_based") // stock_based | made_to_order
+   644→  stitchingType  String?  // unstitched | stitched_basic | stitched_heavy | custom_order
+   645→  stitchingCharges Decimal @default(0) @db.Decimal(12, 2)
+   646→  productionDays Int      @default(0)
+   647→
+   648→  isTaxable      Boolean  @default(true)
+   649→  requiresShipping Boolean @default(true)
+   650→  inventoryPolicy String  @default("deny") // deny | continue
+   651→
+   652→  isDefault      Boolean  @default(false)
+   653→  isActive       Boolean  @default(true)
+   654→
+   655→  // Shopify sync fields
+   656→  shopifyVariantId      String? @unique
+   657→  shopifyInventoryItemId String?
+   658→
+   659→  // Dimensions for courier/international
+   660→  dimensions      String  @default("{}") // { length_cm, width_cm, height_cm }
+   661→
+   662→  // Sprint 6 — Inventory system columns
+   663→  trackInventory      Boolean @default(true) // FALSE for made_to_order until first return; one-way TRUE→never back to FALSE
+   664→  fabricSourceVariantId String? // self-reference: the stock_based variant fabric is drawn from for made_to_order production
+   665→  fabricSourceVariant  OrgProductVariant? @relation("FabricSource", fields: [fabricSourceVariantId], references: [id])
+   666→  fabricSourceFor      OrgProductVariant[] @relation("FabricSource")
+   667→
+   668→  // Sprint 10 — Parent-child pricing sync flag
+   669→  costPriceSyncedWithParent Boolean @default(true) // TRUE = follows parent group cost; FALSE = manually overridden
+   670→
+   671→  // Weight tracking (KG, 3 decimal precision). Nullable so existing variants
+   672→  // remain NULL until manually set. Mirrors costPriceSyncedWithParent for the
+   673→  // parent-child cascade/override/re-sync pattern. Consumed by future courier
+   674→  // booking logic (Overland vs Normal order type).
+   675→  weightKg                  Decimal? @db.Decimal(6,3)
+   676→  weightSyncedWithParent    Boolean  @default(true)
+   677→
+   678→  createdById     String?
+   679→  createdBy       Employee? @relation("VariantCreator", fields: [createdById], references: [id])
+   680→  createdAt       DateTime @default(now())
+   681→  updatedAt       DateTime @updatedAt
+   682→
+   683→  images          OrgProductImage[]
+   684→  bundleComponents OrgProductBundle[] @relation("BundleComponent")
+   685→  companyPricing  CompanyVariantPricing[]
+   686→  returnedInventory ReturnedStitchedInventory[]
+   687→  fulfillmentCosts ProductFulfillmentCost[]
+   688→  inventoryPools  InventoryPool[]
+   689→  inventoryTransactions InventoryTransaction[]
+   690→  avgCostHistory  AvgCostHistory[]
+   691→  stockTransfers  StockTransfer[]
+   692→  stockLossRecords StockLossRecord[]
+   693→  cycleCountItems CycleCountItem[]
+   694→  productionOrdersStitched ProductionOrder[] @relation("StitchedVariantProduction")
+   695→  productionOrdersFabric ProductionOrder[] @relation("FabricVariantProduction")
+   696→  supplierReturns SupplierReturn[]
+   697→  purchaseOrderItems PurchaseOrderItem[]
+   698→  purchaseOrderReceiptItems PurchaseOrderReceiptItem[]
+   699→
+   700→  // OMS back-relations
+   701→  orderItems       OrderItem[]
+   702→
+   703→  // Item Exchange System back-relations (migration 003)
+   704→  exchangesAsNewVariant OrderExchange[] @relation("ExchangeNewVariant")
+   705→
+   706→  // Exchange Shipments System back-relation (migration 008)
+   707→  exchangeShipmentsAsNewVariant ExchangeShipment[] @relation("ExchangeShipmentNewVariant")
+   708→
+   709→  @@index([productId])
+   710→  @@index([organizationId, fulfillmentType])
+   711→}
+   712→
+   713→/// Images stored in Supabase Storage, shared across all subscribing companies.
+   714→model OrgProductImage {
+   715→  id             String   @id @default(cuid())
+   716→  productId      String
+   717→  product        OrgProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+   718→  organizationId String
+   719→  organization   Organization @relation(fields: [organizationId], references: [id])
+   720→  variantId      String?
+   721→  variant        OrgProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+   722→
+   723→  storagePath    String
+   724→  publicUrl      String
+   725→  displayOrder   Int      @default(0)
+   726→  isPrimary      Boolean  @default(false)
+   727→
+   728→  uploadedById   String?
+   729→  uploadedBy     Employee? @relation("ImageUploader", fields: [uploadedById], references: [id])
+   730→  createdAt      DateTime @default(now())
+   731→
+   732→  @@index([productId])
+   733→}
+   734→
+   735→/// For bundle-type products. Defines component variants and quantities.
+   736→model OrgProductBundle {
+   737→  id             String   @id @default(cuid())
+   738→  bundleProductId String
+   739→  bundleProduct   OrgProduct @relation("BundleProduct", fields: [bundleProductId], references: [id], onDelete: Cascade)
+   740→  componentVariantId String
+   741→  componentVariant  OrgProductVariant @relation("BundleComponent", fields: [componentVariantId], references: [id])
+   742→  quantity       Int      @default(1)
+   743→  organizationId String
+   744→  organization   Organization @relation(fields: [organizationId], references: [id])
+   745→  createdAt      DateTime @default(now())
+   746→
+   747→  @@unique([bundleProductId, componentVariantId])
+   748→}
+   749→
+   750→/// When product_scope = 'selective', controls which companies can access it.
+   751→model SelectiveProductAccess {
+   752→  id             String   @id @default(cuid())
+   753→  orgProductId   String
+   754→  orgProduct     OrgProduct @relation(fields: [orgProductId], references: [id], onDelete: Cascade)
+   755→  companyId      String
+   756→  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   757→  organizationId String
+   758→  organization   Organization @relation(fields: [organizationId], references: [id])
+   759→  grantedById    String?
+   760→  grantedBy      Employee? @relation("SelectiveAccessGranter", fields: [grantedById], references: [id])
+   761→  grantedAt      DateTime @default(now())
+   762→
+   763→  @@unique([orgProductId, companyId])
+   764→}
+   765→
+   766→/// Per-company pricing and activation for a shared org product.
+   767→model CompanyProductSetting {
+   768→  id             String   @id @default(cuid())
+   769→  companyId      String
+   770→  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   771→  organizationId String
+   772→  organization   Organization @relation(fields: [organizationId], references: [id])
+   773→  orgProductId   String
+   774→  orgProduct     OrgProduct @relation(fields: [orgProductId], references: [id], onDelete: Cascade)
+   775→
+   776→  isActive       Boolean  @default(true)
+   777→  subscriptionStatus String @default("active") // active | paused | revoked
+   778→
+   779→  subscribedAt   DateTime @default(now())
+   780→  subscribedById String?
+   781→  subscribedBy   Employee? @relation("SubscriptionCreator", fields: [subscribedById], references: [id])
+   782→  revokedAt      DateTime?
+   783→  revokedById    String?
+   784→  revokedBy      Employee? @relation("SubscriptionRevoker", fields: [revokedById], references: [id])
+   785→  revokeReason   String?
+   786→
+   787→  createdAt      DateTime @default(now())
+   788→  updatedAt      DateTime @updatedAt
+   789→
+   790→  @@unique([companyId, orgProductId])
+   791→  @@index([companyId])
+   792→}
+   793→
+   794→/// Per-variant selling price set independently by each company.
+   795→model CompanyVariantPricing {
+   796→  id             String   @id @default(cuid())
+   797→  companyId      String
+   798→  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   799→  orgVariantId   String
+   800→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+   801→  organizationId String
+   802→  organization   Organization @relation(fields: [organizationId], references: [id])
+   803→
+   804→  salePrice      Decimal  @db.Decimal(12, 2)
+   805→  comparePrice   Decimal? @db.Decimal(12, 2)
+   806→
+   807→  // Sprint 10 — Parent-child pricing sync flags (independent per field)
+   808→  salePriceSyncedWithParent    Boolean @default(true)
+   809→  comparePriceSyncedWithParent Boolean @default(true)
+   810→
+   811→  isActive       Boolean  @default(true)
+   812→  createdAt      DateTime @default(now())
+   813→  updatedAt      DateTime @updatedAt
+   814→
+   815→  @@unique([companyId, orgVariantId])
+   816→  @@index([companyId])
+   817→}
+   818→
+   819→/// Special pool for made-to-order items returned in sellable condition.
+   820→/// This is the ONLY stock a made_to_order variant ever holds.
+   821→model ReturnedStitchedInventory {
+   822→  id             String   @id @default(cuid())
+   823→  organizationId String
+   824→  organization   Organization @relation(fields: [organizationId], references: [id])
+   825→  companyId      String
+   826→  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   827→  orgVariantId   String
+   828→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+   829→
+   830→  quantity       Int      @default(1)
+   831→  condition      String   // perfect | good | open_box | damaged
+   832→  totalCost      Decimal  @db.Decimal(12, 2)
+   833→  suggestedResalePrice Decimal? @db.Decimal(12, 2)
+   834→
+   835→  originalOrderReference String?
+   836→  returnReason   String?
+   837→  status         String   @default("available") // available | sold | written_off
+   838→
+   839→  photos         String   @default("[]") // JSON array of URLs
+   840→  notes          String?
+   841→
+   842→  receivedById   String?
+   843→  receivedBy     Employee? @relation("ReturnedItemReceiver", fields: [receivedById], references: [id])
+   844→  receivedAt     DateTime @default(now())
+   845→
+   846→  soldAt         DateTime?
+   847→  soldOrderReference String?
+   848→
+   849→  writtenOffAt   DateTime?
+   850→  writtenOffById String?
+   851→  writtenOffBy   Employee? @relation("ReturnedItemWriteOff", fields: [writtenOffById], references: [id])
+   852→  writeOffReason String?
+   853→
+   854→  createdAt      DateTime @default(now())
+   855→  updatedAt      DateTime @updatedAt
+   856→
+   857→  @@index([organizationId, orgVariantId, status])
+   858→  @@index([companyId, status])
+   859→}
+   860→
+   861→/// Tracks cost components for made_to_order variants in production.
+   862→model ProductFulfillmentCost {
+   863→  id             String   @id @default(cuid())
+   864→  orgVariantId   String
+   865→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+   866→  companyId      String
+   867→  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   868→  organizationId String
+   869→  organization   Organization @relation(fields: [organizationId], references: [id])
+   870→  employeeId     String?
+   871→  employee       Employee? @relation("FulfillmentCostLogger", fields: [employeeId], references: [id])
+   872→
+   873→  orderReference String?
+   874→  fabricCost     Decimal  @default(0) @db.Decimal(12, 2)
+   875→  stitchingCost  Decimal  @default(0) @db.Decimal(12, 2)
+   876→  embroideryCost Decimal  @default(0) @db.Decimal(12, 2)
+   877→  otherCost      Decimal  @default(0) @db.Decimal(12, 2)
+   878→  totalProductionCost Decimal @default(0) @db.Decimal(12, 2)
+   879→  salePrice      Decimal? @db.Decimal(12, 2)
+   880→
+   881→  status         String   @default("in_production") // in_production | dispatched | delivered | returned | written_off
+   882→  tailorName     String?
+   883→  notes          String?
+   884→  metadata       String   @default("{}")
+   885→
+   886→  dispatchedAt   DateTime?
+   887→  deliveredAt    DateTime?
+   888→  returnedAt     DateTime?
+   889→
+   890→  createdAt      DateTime @default(now())
+   891→  updatedAt      DateTime @updatedAt
+   892→
+   893→  @@index([companyId, orgVariantId, status])
+   894→  @@index([orderReference])
+   895→}
+   896→
+   897→// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   898→// SPRINT 6 — INVENTORY, WAREHOUSE, PURCHASE ORDER, SUPPLIER SYSTEM
+   899→// 11 models: locations, suppliers, pools, transactions, avg_cost_history,
+   900→// transfers, purchase_orders (+items+receipts), supplier_returns,
+   901→// stock_loss, cycle_counts, production_orders.
+   902→// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   903→
+   904→/// Warehouse/dispatch/retail locations. company_id NULL = org-level shared.
+   905→model InventoryLocation {
+   906→  id             String   @id @default(cuid())
+   907→  organizationId String
+   908→  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+   909→  companyId      String?  // NULL = org-level shared location
+   910→  company        Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   911→
+   912→  name           String
+   913→  locationType   String   @default("warehouse") // warehouse | dispatch_hub | retail_store | transit | damaged_hold
+   914→  address        String?  // JSONB: { street, city, province, postal_code, country }
+   915→  city           String   @default("Lahore")
+   916→  province       String   @default("Punjab")
+   917→  countryCode    String   @default("PK")
+   918→  postalCode     String?
+   919→  contactPerson  String?
+   920→  contactPhone   String?
+   921→  isDefault      Boolean  @default(false)
+   922→  isActive       Boolean  @default(true)
+   923→
+   924→  createdById    String?
+   925→  createdBy      Employee? @relation("LocationCreator", fields: [createdById], references: [id])
+   926→  createdAt      DateTime @default(now())
+   927→  updatedAt      DateTime @updatedAt
+   928→
+   929→  inventoryPools       InventoryPool[]
+   930→  inventoryTransactions InventoryTransaction[]
+   931→  avgCostHistory       AvgCostHistory[]
+   932→  stockTransfersFrom   StockTransfer[] @relation("TransferFromLocation")
+   933→  stockTransfersTo     StockTransfer[] @relation("TransferToLocation")
+   934→  purchaseOrders       PurchaseOrder[]
+   935→  supplierReturns      SupplierReturn[]
+   936→  stockLossRecords     StockLossRecord[]
+   937→  cycleCounts          CycleCount[]
+   938→  productionOrders     ProductionOrder[]
+   939→
+   940→  // OMS back-relations
+   941→  companyOrderSettingsDefault CompanyOrderSetting[] @relation("CompanyOrderSettingsDefaultLocation")
+   942→  orderDispatchLocations      Order[] @relation("OrderDispatchLocation")
+   943→  orderItemReservedLocations  OrderItem[] @relation("OrderItemReservedLocation")
+   944→
+   945→  @@index([organizationId])
+   946→  @@index([companyId])
+   947→}
+   948→
+   949→/// Suppliers. company_id NULL = org-level shared supplier.
+   950→model Supplier {
+   951→  id             String   @id @default(cuid())
+   952→  organizationId String
+   953→  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+   954→  companyId      String?  // NULL = shared across org
+   955→  company        Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+   956→
+   957→  name           String
+   958→  contactPerson  String?
+   959→  phone          String?
+   960→  email          String?
+   961→  address        String?  // JSONB
+   962→
+   963→  paymentTerms   String   @default("immediate") // immediate | net_15 | net_30 | net_45 | net_60
+   964→  creditBalance  Decimal  @default(0) @db.Decimal(12, 2) // running credit owed BY supplier TO us
+   965→  isActive       Boolean  @default(true)
+   966→
+   967→  createdById    String?
+   968→  createdBy      Employee? @relation("SupplierCreator", fields: [createdById], references: [id])
+   969→  createdAt      DateTime @default(now())
+   970→  updatedAt      DateTime @updatedAt
+   971→
+   972→  purchaseOrders  PurchaseOrder[]
+   973→  supplierReturns SupplierReturn[]
+   974→
+   975→  @@index([organizationId])
+   976→  @@index([companyId])
+   977→}
+   978→
+   979→/// THE single source of truth for stock levels. One row per variant per location.
+   980→model InventoryPool {
+   981→  id             String   @id @default(cuid())
+   982→  orgVariantId   String
+   983→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+   984→  locationId     String
+   985→  location       InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+   986→  organizationId String
+   987→  organization   Organization @relation(fields: [organizationId], references: [id])
+   988→
+   989→  onHand         Int      @default(0)
+   990→  reserved       Int      @default(0)
+   991→  // available = onHand - reserved (computed in application layer)
+   992→  incoming       Int      @default(0) // sum of undelivered PO quantities
+   993→
+   994→  avgCost        Decimal  @default(0) @db.Decimal(12, 4)
+   995→  // totalStockValue = onHand * avgCost (computed in application layer)
+   996→
+   997→  reorderPoint   Int      @default(0)
+   998→  reorderQuantity Int     @default(0)
+   999→
+  1000→  lastReceivedAt DateTime?
+  1001→  lastSoldAt     DateTime?
+  1002→  lastCountedAt  DateTime?
+  1003→
+  1004→  updatedAt      DateTime @updatedAt
+  1005→
+  1006→  @@unique([orgVariantId, locationId])
+  1007→  @@index([organizationId, orgVariantId])
+  1008→  @@index([locationId])
+  1009→}
+  1010→
+  1011→/// Append-only ledger. Never update or delete rows.
+  1012→model InventoryTransaction {
+  1013→  id             String   @id @default(cuid())
+  1014→  orgVariantId   String
+  1015→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  1016→  locationId     String
+  1017→  location       InventoryLocation @relation(fields: [locationId], references: [id])
+  1018→  organizationId String
+  1019→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1020→
+  1021→  companyId      String?  // NULL for org-level events
+  1022→  company        Company?  @relation(fields: [companyId], references: [id])
+  1023→  employeeId     String?
+  1024→  employee       Employee? @relation("InventoryTxnEmployee", fields: [employeeId], references: [id])
+  1025→
+  1026→  transactionType String  // opening_stock | purchase_received | sale_dispatched | order_reserved | order_unreserved | return_resellable | return_damaged | return_stitched_received | transfer_out | transfer_in | cycle_count_adjust | damage_writeoff | theft_writeoff | missing_writeoff | transit_loss | supplier_return | fabric_consumed_for_stitching
+  1027→
+  1028→  quantity       Int      // positive = in, negative = out
+  1029→  costPerUnit    Decimal  @default(0) @db.Decimal(12, 4)
+  1030→  // totalCostValue = ABS(quantity) * costPerUnit (computed in app)
+  1031→
+  1032→  avgCostBefore  Decimal? @db.Decimal(12, 4)
+  1033→  avgCostAfter   Decimal? @db.Decimal(12, 4)
+  1034→
+  1035→  referenceType  String?  // order | purchase_order | transfer | cycle_count | stock_loss | manual | opening | production_order | supplier_return
+  1036→  referenceId    String?
+  1037→
+  1038→  // OMS: links to the originating order (for dispatchOrder/reserveStockForOrder calls)
+  1039→  orderId        String?
+  1040→  order          Order?   @relation(fields: [orderId], references: [id])
+  1041→
+  1042→  notes          String?
+  1043→  metadata       String   @default("{}")
+  1044→
+  1045→  recordedAt     DateTime @default(now())
+  1046→  createdAt      DateTime @default(now())
+  1047→
+  1048→  avgCostHistory AvgCostHistory[]
+  1049→  purchaseOrderReceiptItems PurchaseOrderReceiptItem[]
+  1050→  supplierReturns SupplierReturn[]
+  1051→  stockLossRecords StockLossRecord[]
+  1052→  cycleCountItems CycleCountItem[]
+  1053→  productionOrdersFabric ProductionOrder[]
+  1054→
+  1055→  // Item Exchange System back-relations (migration 003)
+  1056→  exchangeOldItemTxns OrderExchange[] @relation("ExchangeOldItemTxn")
+  1057→
+  1058→  @@index([orgVariantId, recordedAt])
+  1059→  @@index([companyId, transactionType, recordedAt])
+  1060→  @@index([organizationId, transactionType, recordedAt])
+  1061→  @@index([referenceType, referenceId])
+  1062→}
+  1063→
+  1064→/// Audit trail of every average-cost change.
+  1065→model AvgCostHistory {
+  1066→  id             String   @id @default(cuid())
+  1067→  orgVariantId   String
+  1068→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  1069→  locationId     String
+  1070→  location       InventoryLocation @relation(fields: [locationId], references: [id])
+  1071→  organizationId String
+  1072→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1073→
+  1074→  avgCostBefore  Decimal  @db.Decimal(12, 4)
+  1075→  avgCostAfter   Decimal  @db.Decimal(12, 4)
+  1076→  triggeredByTxnId String
+  1077→  triggeredByTxn InventoryTransaction @relation(fields: [triggeredByTxnId], references: [id])
+  1078→  triggerReason  String?
+  1079→  createdAt      DateTime @default(now())
+  1080→
+  1081→  @@index([orgVariantId])
+  1082→}
+  1083→
+  1084→/// Stock transfer between locations. Logistics cost tracked separately from WAC.
+  1085→model StockTransfer {
+  1086→  id             String   @id @default(cuid())
+  1087→  organizationId String
+  1088→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1089→  orgVariantId   String
+  1090→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  1091→
+  1092→  fromLocationId String
+  1093→  fromLocation   InventoryLocation @relation("TransferFromLocation", fields: [fromLocationId], references: [id])
+  1094→  toLocationId   String
+  1095→  toLocation     InventoryLocation @relation("TransferToLocation", fields: [toLocationId], references: [id])
+  1096→
+  1097→  quantity       Int      // CHECK > 0 enforced in app
+  1098→  costPerUnitAtTransfer Decimal @db.Decimal(12, 4) // sending location's avg_cost at transfer time
+  1099→  logisticsCost  Decimal  @default(0) @db.Decimal(12, 2) // separate expense, NEVER merged into WAC
+  1100→
+  1101→  status         String   @default("completed") // completed | in_transit | cancelled
+  1102→  notes          String?
+  1103→  initiatedById  String?
+  1104→  initiatedBy    Employee? @relation("TransferInitiator", fields: [initiatedById], references: [id])
+  1105→  createdAt      DateTime @default(now())
+  1106→
+  1107→  @@index([organizationId])
+  1108→  @@index([orgVariantId])
+  1109→}
+  1110→
+  1111→/// Purchase order header.
+  1112→model PurchaseOrder {
+  1113→  id             String   @id @default(cuid())
+  1114→  organizationId String
+  1115→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1116→  companyId      String
+  1117→  company        Company  @relation(fields: [companyId], references: [id])
+  1118→  supplierId     String
+  1119→  supplier       Supplier @relation(fields: [supplierId], references: [id])
+  1120→
+  1121→  poNumber       String   @unique // PO-{year}-{sequence}
+  1122→  status         String   @default("draft") // draft | ordered | partially_received | received | cancelled
+  1123→
+  1124→  orderDate      DateTime @default(now())
+  1125→  expectedDeliveryDate DateTime?
+  1126→  deliveryLocationId String
+  1127→  deliveryLocation InventoryLocation @relation(fields: [deliveryLocationId], references: [id])
+  1128→
+  1129→  advancePayment Decimal  @default(0) @db.Decimal(12, 2)
+  1130→  paymentMethod  String?
+  1131→  notes          String?
+  1132→
+  1133→  createdById    String
+  1134→  createdBy      Employee @relation("POCreator", fields: [createdById], references: [id])
+  1135→  createdAt      DateTime @default(now())
+  1136→  updatedAt      DateTime @updatedAt
+  1137→  cancelledAt    DateTime?
+  1138→  cancelledById  String?
+  1139→  cancelledBy    Employee? @relation("POCanceller", fields: [cancelledById], references: [id])
+  1140→  cancellationReason String?
+  1141→
+  1142→  items          PurchaseOrderItem[]
+  1143→  receipts       PurchaseOrderReceipt[]
+  1144→  supplierReturns SupplierReturn[]
+  1145→
+  1146→  @@index([companyId, status])
+  1147→  @@index([organizationId])
+  1148→}
+  1149→
+  1150→/// Line items on a purchase order.
+  1151→model PurchaseOrderItem {
+  1152→  id             String   @id @default(cuid())
+  1153→  purchaseOrderId String
+  1154→  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  1155→  orgVariantId   String
+  1156→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  1157→  organizationId String
+  1158→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1159→
+  1160→  orderedQuantity Int     // CHECK > 0
+  1161→  receivedQuantity Int    @default(0)
+  1162→  costPerUnit     Decimal @db.Decimal(12, 4)
+  1163→
+  1164→  createdAt      DateTime @default(now())
+  1165→  updatedAt      DateTime @updatedAt
+  1166→
+  1167→  receiptItems   PurchaseOrderReceiptItem[]
+  1168→
+  1169→  @@index([purchaseOrderId])
+  1170→}
+  1171→
+  1172→/// Each individual receiving event against a PO (supports partial deliveries).
+  1173→model PurchaseOrderReceipt {
+  1174→  id             String   @id @default(cuid())
+  1175→  purchaseOrderId String
+  1176→  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  1177→  organizationId String
+  1178→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1179→  receivedAt     DateTime @default(now())
+  1180→  receivedById   String
+  1181→  receivedBy     Employee @relation("POReceiver", fields: [receivedById], references: [id])
+  1182→  notes          String?
+  1183→  createdAt      DateTime @default(now())
+  1184→
+  1185→  items          PurchaseOrderReceiptItem[]
+  1186→
+  1187→  @@index([purchaseOrderId])
+  1188→}
+  1189→
+  1190→/// Line items within one receiving event — actual quantity and cost that arrived.
+  1191→model PurchaseOrderReceiptItem {
+  1192→  id             String   @id @default(cuid())
+  1193→  purchaseOrderReceiptId String
+  1194→  purchaseOrderReceipt PurchaseOrderReceipt @relation(fields: [purchaseOrderReceiptId], references: [id], onDelete: Cascade)
+  1195→  purchaseOrderItemId String
+  1196→  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id])
+  1197→  orgVariantId   String
+  1198→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  1199→
+  1200→  receivedQuantity Int    // CHECK >= 0
+  1201→  actualCostPerUnit Decimal @db.Decimal(12, 4)
+  1202→  shortageQuantity Int    @default(0)
+  1203→  shortageReason  String?
+  1204→
+  1205→  inventoryTxnId String?
+  1206→  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+  1207→
+  1208→  createdAt      DateTime @default(now())
+  1209→}
+  1210→
+  1211→/// Supplier returns — stock sent back to supplier.
+  1212→model SupplierReturn {
+  1213→  id             String   @id @default(cuid())
+  1214→  organizationId String
+  1215→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1216→  companyId      String
+  1217→  company        Company  @relation(fields: [companyId], references: [id])
+  1218→  purchaseOrderId String?
+  1219→  purchaseOrder  PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  1220→  supplierId     String
+  1221→  supplier       Supplier @relation(fields: [supplierId], references: [id])
+  1222→  orgVariantId   String
+  1223→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  1224→  locationId     String
+  1225→  location       InventoryLocation @relation(fields: [locationId], references: [id])
+  1226→
+  1227→  quantity       Int      // CHECK > 0
+  1228→  costPerUnit    Decimal  @db.Decimal(12, 4)
+  1229→  // totalValue = quantity * costPerUnit (computed in app)
+  1230→
+  1231→  reason         String   // defective | wrong_item | quality_issue | excess_quantity | other
+  1232→  status         String   @default("pending") // pending | sent_to_supplier | refunded | replaced | credit_note | disputed | rejected
+  1233→  resolutionType String?  // refund | replacement | credit_note
+  1234→  resolutionAmount Decimal? @db.Decimal(12, 2)
+  1235→  replacementPoId String?
+  1236→
+  1237→  photos         String   @default("[]") // JSON array
+  1238→  notes          String?
+  1239→
+  1240→  inventoryTxnId String?
+  1241→  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+  1242→
+  1243→  // Populated when status transitions to 'rejected' — back-relation to auto-created stock_loss_records entry
+  1244→  linkedLossRecord StockLossRecord? @relation("SupplierReturnLossLink")
+  1245→
+  1246→  reportedById   String
+  1247→  reportedBy     Employee @relation("SupplierReturnReporter", fields: [reportedById], references: [id])
+  1248→  resolvedById   String?
+  1249→  resolvedBy     Employee? @relation("SupplierReturnResolver", fields: [resolvedById], references: [id])
+  1250→  createdAt      DateTime @default(now())
+  1251→  resolvedAt     DateTime?
+  1252→
+  1253→  @@index([companyId, status])
+  1254→  @@index([supplierId])
+  1255→}
+  1256→
+  1257→/// Stock loss records — 5 types: damaged, theft, missing, transit_loss, supplier_dispute.
+  1258→model StockLossRecord {
+  1259→  id             String   @id @default(cuid())
+  1260→  organizationId String
+  1261→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1262→  companyId      String
+  1263→  company        Company  @relation(fields: [companyId], references: [id])
+  1264→  orgVariantId   String
+  1265→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  1266→  locationId     String
+  1267→  location       InventoryLocation @relation(fields: [locationId], references: [id])
+  1268→
+  1269→  lossType       String   // damaged | theft | missing | transit_loss | supplier_dispute
+  1270→  subType        String?  // confirmed | suspected | admin_error | manufacturing
+  1271→  damageType     String?  // water_moisture | physical_impact | manufacturing_defect | transit_damage | storage_damage | other
+  1272→
+  1273→  quantity       Int
+  1274→  costPerUnit    Decimal  @db.Decimal(12, 4)
+  1275→  // totalLossValue = quantity * costPerUnit (computed in app)
+  1276→
+  1277→  investigationStatus String @default("none") // none | open | closed
+  1278→  resolution     String?  // written_off | recovered | error_corrected | claim_accepted | claim_rejected
+  1279→  responsibleParty String? // warehouse | courier | customer | employee | unknown | supplier
+  1280→  policeReportRef String?
+  1281→  insuranceClaimRef String?
+  1282→  insuranceRecovered Decimal @default(0) @db.Decimal(12, 2)
+  1283→  courierClaimRef String?
+  1284→  courierClaimStatus String? // not_filed | filed | accepted | rejected
+  1285→  courierRecovered Decimal @default(0) @db.Decimal(12, 2)
+  1286→
+  1287→  evidenceUrls   String   @default("[]") // JSON array
+  1288→  notes          String?
+  1289→
+  1290→  reportedById   String
+  1291→  reportedBy     Employee @relation("StockLossReporter", fields: [reportedById], references: [id])
+  1292→  approvedById   String?
+  1293→  approvedBy     Employee? @relation("StockLossApprover", fields: [approvedById], references: [id])
+  1294→  resolvedById   String?
+  1295→  resolvedBy     Employee? @relation("StockLossResolver", fields: [resolvedById], references: [id])
+  1296→
+  1297→  inventoryTxnId String?
+  1298→  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+  1299→  orderReferenceId String? // for transit_loss: references the dispatched order (future)
+  1300→
+  1301→  // OMS: proper FK to order_items (replaces the generic orderReferenceId above;
+  1302→  // keep the old field for backward compatibility)
+  1303→  orderItemId    String?
+  1304→  orderItem      OrderItem? @relation(fields: [orderItemId], references: [id])
+  1305→
+  1306→  // ONLY set when loss_type = 'supplier_dispute' — links to originating rejected return
+  1307→  supplierReturnId String? @unique
+  1308→  supplierReturn   SupplierReturn? @relation("SupplierReturnLossLink", fields: [supplierReturnId], references: [id])
+  1309→
+  1310→  createdAt      DateTime @default(now())
+  1311→  updatedAt      DateTime @updatedAt
+  1312→  resolvedAt     DateTime?
+  1313→
+  1314→  // Item Exchange System back-relations (migration 003)
+  1315→  exchangeOldItemLosses OrderExchange[] @relation("ExchangeOldItemLoss")
+  1316→
+  1317→  @@index([companyId, lossType, investigationStatus])
+  1318→  @@index([companyId, createdAt])
+  1319→  @@index([orgVariantId])
+  1320→}
+  1321→
+  1322→/// Cycle count header.
+  1323→model CycleCount {
+  1324→  id             String   @id @default(cuid())
+  1325→  organizationId String
+  1326→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1327→  companyId      String
+  1328→  company        Company  @relation(fields: [companyId], references: [id])
+  1329→  locationId     String
+  1330→  location       InventoryLocation @relation(fields: [locationId], references: [id])
+  1331→
+  1332→  countName      String
+  1333→  countType      String   @default("full") // full | partial | spot
+  1334→  status         String   @default("scheduled") // scheduled | in_progress | pending_review | approved | cancelled
+  1335→
+  1336→  scheduledAt    DateTime
+  1337→  startedAt      DateTime?
+  1338→  completedAt    DateTime?
+  1339→  approvedAt     DateTime?
+  1340→
+  1341→  assignedToId   String?
+  1342→  assignedTo     Employee? @relation("CycleCountAssignee", fields: [assignedToId], references: [id])
+  1343→  createdById    String
+  1344→  createdBy      Employee @relation("CycleCountCreator", fields: [createdById], references: [id])
+  1345→  approvedById   String?
+  1346→  approvedBy     Employee? @relation("CycleCountApprover", fields: [approvedById], references: [id])
+  1347→
+  1348→  notes          String?
+  1349→  totalDiscrepancies Int  @default(0)
+  1350→  totalVarianceValue Decimal @default(0) @db.Decimal(16, 2)
+  1351→
+  1352→  createdAt      DateTime @default(now())
+  1353→  updatedAt      DateTime @updatedAt
+  1354→
+  1355→  items          CycleCountItem[]
+  1356→
+  1357→  @@index([companyId, status])
+  1358→}
+  1359→
+  1360→/// Individual items in a cycle count.
+  1361→model CycleCountItem {
+  1362→  id             String   @id @default(cuid())
+  1363→  cycleCountId   String
+  1364→  cycleCount     CycleCount @relation(fields: [cycleCountId], references: [id], onDelete: Cascade)
+  1365→  orgVariantId   String
+  1366→  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  1367→  organizationId String
+  1368→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1369→
+  1370→  systemQuantity Int
+  1371→  countedQuantity Int?
+  1372→  // discrepancy = countedQuantity - systemQuantity (computed in app)
+  1373→  discrepancyValue Decimal? @db.Decimal(16, 2)
+  1374→
+  1375→  discrepancyReason String? // recording_error | theft_suspected | damage_not_recorded | transfer_not_recorded | unknown | no_discrepancy
+  1376→
+  1377→  adjustmentApproved Boolean @default(false)
+  1378→  inventoryTxnId String?
+  1379→  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+  1380→
+  1381→  countedById    String?
+  1382→  countedBy      Employee? @relation("CycleCountCounter", fields: [countedById], references: [id])
+  1383→  countedAt      DateTime?
+  1384→  notes          String?
+  1385→  createdAt      DateTime @default(now())
+  1386→
+  1387→  @@index([cycleCountId])
+  1388→}
+  1389→
+  1390→/// Production order for made-to-order fabric tracking.
+  1391→model ProductionOrder {
+  1392→  id             String   @id @default(cuid())
+  1393→  organizationId String
+  1394→  organization   Organization @relation(fields: [organizationId], references: [id])
+  1395→  companyId      String
+  1396→  company        Company  @relation(fields: [companyId], references: [id])
+  1397→
+  1398→  stitchedVariantId String
+  1399→  stitchedVariant OrgProductVariant @relation("StitchedVariantProduction", fields: [stitchedVariantId], references: [id])
+  1400→  fabricVariantId String
+  1401→  fabricVariant   OrgProductVariant @relation("FabricVariantProduction", fields: [fabricVariantId], references: [id])
+  1402→  fabricLocationId String
+  1403→  fabricLocation  InventoryLocation @relation(fields: [fabricLocationId], references: [id])
+  1404→
+  1405→  quantity       Int      @default(1)
+  1406→
+  1407→  status         String   @default("pending") // pending | fabric_reserved | in_production | completed | dispatched | cancelled
+  1408→
+  1409→  stitchingCost  Decimal  @default(0) @db.Decimal(12, 2)
+  1410→  fabricCost     Decimal  @default(0) @db.Decimal(12, 2)
+  1411→  // totalCost = stitchingCost + fabricCost (computed in app)
+  1412→
+  1413→  assignedTailor String?
+  1414→  estimatedCompletionDate DateTime?
+  1415→  actualCompletionDate    DateTime?
+  1416→
+  1417→  referenceType  String   @default("order")
+  1418→  referenceId    String?  // will link to orders table in future sprint
+  1419→
+  1420→  // OMS: proper FK to order_items (keep the old generic referenceType/referenceId
+  1421→  // fields for backward compatibility)
+  1422→  orderItemId    String? @unique
+  1423→  orderItem      OrderItem? @relation("OrderItemProduction", fields: [orderItemId], references: [id])
+  1424→
+  1425→  fabricTxnId    String?
+  1426→  fabricTxn      InventoryTransaction? @relation(fields: [fabricTxnId], references: [id])
+  1427→
+  1428→  createdById    String
+  1429→  createdBy      Employee @relation("ProductionOrderCreator", fields: [createdById], references: [id])
+  1430→  createdAt      DateTime @default(now())
+  1431→  updatedAt      DateTime @updatedAt
+  1432→  cancelledAt    DateTime?
+  1433→  cancellationReason String?
+  1434→
+  1435→  @@index([companyId, status])
+  1436→  @@index([stitchedVariantId])
+  1437→}
+  1438→
+  1439→// ============================================================================
+  1440→// OMS — Order Management System (Step 1: Schema)
+  1441→// ============================================================================
+  1442→
+  1443→/// Customer record — the heart of the standalone Customer Management System.
+  1444→/// Phones and addresses live in separate child tables (CustomerPhone,
+  1445→/// CustomerAddress) so a customer can have multiple of each. Cross-platform
+  1446→/// identity mappings (Shopify/Daraz/Instagram) live in CustomerExternalIdentity.
+  1447→///
+  1448→/// NOTE: This model is managed jointly by Prisma (for ORM access) and raw SQL
+  1449→/// (migration 002). The DB-side defaults on `id` and `updatedAt` are set via
+  1450→/// SQL so the `match_or_create_customer()` SQL function can insert without
+  1451→/// Prisma. Prisma overrides both on its own writes. Do NOT run
+  1452→/// `prisma db push` against this model — it would try to drop the partial
+  1453→/// unique indexes, CHECK constraints, and RLS policies that Prisma can't
+  1454→/// represent. Use `prisma generate` only; schema changes go through
+  1455→/// /supabase/migrations/*.sql.
+  1456→model Customer {
+  1457→  id                String   @id @default(cuid())
+  1458→  organizationId    String
+  1459→  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  1460→
+  1461→  name              String
+  1462→  email             String?
+  1463→
+  1464→  // Cached order history stats (denormalized for fast list views — kept in
+  1465→  // sync by Step 2's recomputeCustomerStats server action, not live joins).
+  1466→  totalOrdersCount  Int      @default(0)
+  1467→  totalOrderValue   Decimal  @default(0) @db.Decimal(14, 2)
+  1468→  totalRtoCount     Int      @default(0)
+  1469→
+  1470→  // RTO flagging for return-fraud detection
+  1471→  isFlagged         Boolean  @default(false)
+  1472→  flaggedReason     String?
+  1473→  flaggedAt         DateTime?
+  1474→  flaggedBy         String?
+  1475→  flaggedByEmployee Employee? @relation("CustomerFlagger", fields: [flaggedBy], references: [id], onDelete: SetNull)
+  1476→
+  1477→  createdBy         String?
+  1478→  createdByEmployee Employee? @relation("CustomerCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  1479→
+  1480→  createdAt         DateTime @default(now())
+  1481→  updatedAt         DateTime @updatedAt
+  1482→
+  1483→  orders            Order[]
+  1484→  phones            CustomerPhone[]
+  1485→  addresses         CustomerAddress[]
+  1486→  externalIdentities CustomerExternalIdentity[]
+  1487→
+  1488→  // Exchange Shipments System back-relation (migration 008)
+  1489→  exchangeShipments  ExchangeShipment[] @relation("ExchangeShipmentCustomer")
+  1490→
+  1491→  @@index([organizationId, isFlagged])
+  1492→}
+  1493→
+  1494→/// A customer can have multiple phone numbers (own, spouse's, family shared
+  1495→/// line). phoneRaw is for display; phoneNormalized (E.164) is for matching.
+  1496→/// UNIQUE(organizationId, phoneNormalized) prevents duplicate customer
+  1497→/// creation. The partial unique index "one primary per customer" is enforced
+  1498→/// in SQL (customer_phones_one_primary_idx) — Prisma can't represent it.
+  1499→model CustomerPhone {
+  1500→  id                String   @id @default(cuid())
+  1501→  customerId        String
+  1502→  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  1503→  organizationId    String
+  1504→  organization      Organization @relation(fields: [organizationId], references: [id])
+  1505→
+  1506→  phoneRaw          String
+  1507→  phoneNormalized   String
+  1508→  label             String?
+  1509→  isPrimary         Boolean  @default(false)
+  1510→  isValidFormat     Boolean  @default(true)  // false = phone failed format validation (e.g., from external platform)
+  1511→
+  1512→  createdAt         DateTime @default(now())
+  1513→
+  1514→  ordersUsedIn      Order[] @relation("OrderUsedPhone")
+  1515→
+  1516→  // Exchange Shipments System back-relation (migration 008)
+  1517→  exchangeShipments ExchangeShipment[] @relation("ExchangeShipmentShippingPhone")
+  1518→
+  1519→  @@unique([organizationId, phoneNormalized])
+  1520→  @@index([organizationId, phoneNormalized])
+  1521→  @@index([customerId])
+  1522→  @@map("customer_phones")
+  1523→}
+  1524→
+  1525→/// A customer can have multiple delivery addresses (home, office, relative's).
+  1526→/// NO province field — per product decision, addresses are just { address, city }.
+  1527→/// The partial unique index "one default per customer" is enforced in SQL
+  1528→/// (customer_addresses_one_default_idx).
+  1529→model CustomerAddress {
+  1530→  id                String   @id @default(cuid())
+  1531→  customerId        String
+  1532→  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  1533→  organizationId    String
+  1534→  organization      Organization @relation(fields: [organizationId], references: [id])
+  1535→
+  1536→  label             String?
+  1537→  address           String
+  1538→  city              String
+  1539→  isDefault         Boolean  @default(false)
+  1540→  lastUsedAt        DateTime?
+  1541→
+  1542→  // ─── City validation (Phase 7 — early warning, not blocking) ──────────
+  1543→  // cityMatchedCouriers stores the providerKey list (e.g. ['postex', 'tcs'])
+  1544→  // of couriers whose cached operational cities include this address's city.
+  1545→  // Populated by validateCustomerAddressCity() after create/update. This is
+  1546→  // INFORMATIONAL only — the authoritative check is always
+  1547→  // revalidateCityAtBookingTime() at booking time (with its live fallback).
+  1548→  // An empty array means "no connected courier recognizes this city yet" —
+  1549→  // a soft warning, NOT a block.
+  1550→  cityMatchedCouriers String[] @default([])
+  1551→  cityValidatedAt    DateTime?
+  1552→
+  1553→  createdAt         DateTime @default(now())
+  1554→  updatedAt         DateTime @updatedAt
+  1555→
+  1556→  ordersUsedIn      Order[] @relation("OrderUsedAddress")
+  1557→
+  1558→  // Exchange Shipments System back-relation (migration 008)
+  1559→  exchangeShipments ExchangeShipment[] @relation("ExchangeShipmentShippingAddress")
+  1560→
+  1561→  @@index([customerId])
+  1562→  @@index([organizationId])
+  1563→  @@map("customer_addresses")
+  1564→}
+  1565→
+  1566→/// Maps platform-specific customer IDs (Shopify, Daraz, Instagram) to internal
+  1567→/// FlowOps customer IDs. This is the fast path of the layered matching strategy
+  1568→/// in match_or_create_customer(). matchedVia records HOW each mapping was
+  1569→/// established. CHECK constraints on platform and matchedVia are enforced in SQL.
+  1570→model CustomerExternalIdentity {
+  1571→  id                String   @id @default(cuid())
+  1572→  customerId        String
+  1573→  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  1574→  organizationId    String
+  1575→  organization      Organization @relation(fields: [organizationId], references: [id])
+  1576→
+  1577→  platform          String   // 'shopify' | 'daraz' | 'instagram' (CHECK in SQL)
+  1578→  externalCustomerId String
+  1579→  matchedVia        String   @default("manual") // 'exact_identity' | 'phone_match' | 'email_match' | 'manual' (CHECK in SQL)
+  1580→
+  1581→  createdAt         DateTime @default(now())
+  1582→
+  1583→  @@unique([organizationId, platform, externalCustomerId])
+  1584→  @@index([customerId])
+  1585→  @@index([organizationId, platform, externalCustomerId])
+  1586→  @@map("customer_external_identities")
+  1587→}
+  1588→
+  1589→/// Item Exchange System — tracks a single item exchange request.
+  1590→/// An exchange can only be created against an order_item belonging to a
+  1591→/// DELIVERED order. Two exchange methods with distinct sequencing:
+  1592→///   - courier_replacement: new item dispatched first, courier collects old
+  1593→///   - customer_self_return: customer ships old item back FIRST, it's
+  1594→///     manually verified, THEN the new item is dispatched
+  1595→///
+  1596→/// newOrderId/newOrderItemId are nullable — populated only once the linked
+  1597→/// exchange order (order_source='exchange') is created, which for
+  1598→/// customer_self_return happens LATE (after old item verification).
+  1599→///
+  1600→/// priceDifference is GENERATED as newItemPrice - oldItemPrice. If positive,
+  1601→/// customer owes; if negative, refund due.
+  1602→///
+  1603→/// "Customer did not return" is a supported terminal outcome — the value of
+  1604→/// the never-returned old item becomes a recoverable amount, and Step 2's
+  1605→/// server actions will call the existing flagCustomer() with reason
+  1606→/// "Exchange item not returned".
+  1607→///
+  1608→/// NOTE: Managed jointly by Prisma (ORM access) + raw SQL (migration 003).
+  1609→/// Do NOT run `prisma db push` — it would drop the GENERATED column, CHECK
+  1610→/// constraints, and RLS policies Prisma can't represent. Use `prisma
+  1611→/// generate` only; schema changes go through /supabase/migrations/*.sql.
+  1612→model OrderExchange {
+  1613→  id                            String   @id @default(cuid())
+  1614→  organizationId                String
+  1615→  organization                  Organization @relation(fields: [organizationId], references: [id])
+  1616→  companyId                     String
+  1617→  company                       Company  @relation(fields: [companyId], references: [id])
+  1618→
+  1619→  // The OLD item being exchanged away
+  1620→  originalOrderId               String
+  1621→  originalOrder                 Order    @relation("ExchangeOriginalOrder", fields: [originalOrderId], references: [id])
+  1622→  originalOrderItemId           String
+  1623→  originalOrderItem             OrderItem @relation("ExchangeOriginalOrderItem", fields: [originalOrderItemId], references: [id])
+  1624→
+  1625→  // The NEW variant + (late-populated) new order/item
+  1626→  newOrgVariantId               String
+  1627→  newOrgVariant                 OrgProductVariant @relation("ExchangeNewVariant", fields: [newOrgVariantId], references: [id])
+  1628→  newOrderId                    String?
+  1629→  newOrder                      Order?   @relation("ExchangeNewOrder", fields: [newOrderId], references: [id])
+  1630→  newOrderItemId                String?
+  1631→  newOrderItem                  OrderItem? @relation("ExchangeNewOrderItem", fields: [newOrderItemId], references: [id])
+  1632→
+  1633→  // NEW (migration 008): link to the new exchange_shipments system. An exchange
+  1634→  // can have multiple shipments over its lifecycle (e.g. if the first is
+  1635→  // cancelled and a new one is created), so this is a 1-N relation.
+  1636→  // The legacy newOrderId/newOrderItemId above remain populated only on old,
+  1637→  // pre-migration historical exchange records.
+  1638→  exchangeShipments             ExchangeShipment[] @relation("ExchangeNewShipment")
+  1639→
+  1640→  exchangeMethod                String   // 'courier_replacement' | 'customer_self_return' (CHECK in SQL)
+  1641→  status                        String   @default("requested") // 10 states (CHECK in SQL) — migration 019 added 'exchange_item_returned'
+  1642→
+  1643→  // Old item verification (manual — no courier API confirms arrival)
+  1644→  oldItemCondition              String?  // 'perfect' | 'good' | 'open_box' | 'damaged' (CHECK in SQL)
+  1645→  oldItemVerifiedAt             DateTime?
+  1646→  oldItemVerifiedBy             String?
+  1647→  oldItemVerifiedByEmployee     Employee? @relation("ExchangeOldItemVerifier", fields: [oldItemVerifiedBy], references: [id], onDelete: SetNull)
+  1648→  oldItemEvidenceUrls           String   @default("[]") // JSONB array
+  1649→  oldItemNotes                  String?
+  1650→
+  1651→  // Links to inventory txn + optional stock_loss (if damaged)
+  1652→  oldItemInventoryTxnId         String?
+  1653→  oldItemInventoryTransaction   InventoryTransaction? @relation("ExchangeOldItemTxn", fields: [oldItemInventoryTxnId], references: [id], onDelete: SetNull)
+  1654→  oldItemStockLossId            String?
+  1655→  oldItemStockLossRecord        StockLossRecord? @relation("ExchangeOldItemLoss", fields: [oldItemStockLossId], references: [id], onDelete: SetNull)
+  1656→
+  1657→  // Customer self-return specific
+  1658→  customerReturnTrackingNumber  String?
+  1659→  customerReturnCourier         String?
+  1660→  customerConfirmedShippedAt    DateTime?
+  1661→  customerConfirmedShippedBy    String?
+  1662→  customerConfirmedShippedByEmployee Employee? @relation("ExchangeCustomerShippedConfirmer", fields: [customerConfirmedShippedBy], references: [id], onDelete: SetNull)
+  1663→
+  1664→  // Price difference (GENERATED in DB as new-old)
+  1665→  oldItemPrice                  Decimal  @db.Decimal(12, 2)
+  1666→  newItemPrice                  Decimal  @db.Decimal(12, 2)
+  1667→  priceDifference              Decimal  @db.Decimal(12, 2) // GENERATED ALWAYS AS (new-old) STORED in DB — managed via raw SQL, not Prisma
+  1668→  priceDifferenceStatus        String   @default("unsettled") // 'unsettled' | 'customer_owes' | 'refund_due' | 'settled' (CHECK in SQL)
+  1669→  priceDifferenceSettledAmount  Decimal? @db.Decimal(12, 2)
+  1670→  priceDifferenceSettledAt      DateTime?
+  1671→  priceDifferenceSettledBy      String?
+  1672→  priceDifferenceSettledByEmployee Employee? @relation("ExchangePriceDiffSettler", fields: [priceDifferenceSettledBy], references: [id], onDelete: SetNull)
+  1673→
+  1674→  // Refund tracking (migration 014) — for refund_due settlements
+  1675→  refundMethod                  String?  // 'cash' | 'bank_transfer' | 'store_credit' | 'other' (CHECK in SQL)
+  1676→  refundReference               String?  // transaction ID / cheque number / free-text
+  1677→  refundProcessedAt             DateTime?
+  1678→  refundProcessedBy             String?
+  1679→  refundProcessedByEmployee     Employee? @relation("ExchangeRefundProcessor", fields: [refundProcessedBy], references: [id], onDelete: SetNull)
+  1680→  refundAmount                  Decimal? @db.Decimal(14, 2)
+  1681→
+  1682→  // "Did not return" outcome
+  1683→  markedAsNotReturned           Boolean  @default(false)
+  1684→  notReturnedReason             String?
+  1685→  notReturnedRecoveryStatus     String?  // 'pending' | 'recovered' | 'written_off' (CHECK in SQL)
+  1686→  notReturnedRecoveryAmount     Decimal? @db.Decimal(12, 2)
+  1687→
+  1688→  reason                        String
+  1689→  requestedBy                   String
+  1690→  requestedByEmployee           Employee @relation("ExchangeRequester", fields: [requestedBy], references: [id])
+  1691→  requestedAt                   DateTime @default(now())
+  1692→  completedAt                   DateTime?
+  1693→  cancelledAt                   DateTime?
+  1694→  cancellationReason            String?
+  1695→
+  1696→  updatedAt                     DateTime @updatedAt
+  1697→
+  1698→  @@index([companyId, status])
+  1699→  @@index([originalOrderId])
+  1700→  @@index([originalOrderItemId])
+  1701→  @@index([exchangeMethod, status])
+  1702→  @@index([requestedBy])
+  1703→  @@map("order_exchanges")
+  1704→}
+  1705→
+  1706→// ============================================================================
+  1707→// Universal Integration Framework (migration 004)
+  1708→// ============================================================================
+  1709→
+  1710→/// Master catalog of integration providers (TCS, Leopard, PostEx, Shopify,
+  1711→/// Daraz). Platform-level, seeded/maintained — not company-specific. Each
+  1712→/// row defines the provider's category, auth type, webhook support, and a
+  1713→/// config_schema describing the required credential fields for dynamic UI
+  1714→/// rendering.
+  1715→///
+  1716→/// NOTE: Managed jointly by Prisma (ORM access) + raw SQL (migration 004).
+  1717→/// Do NOT run `prisma db push` — it would drop the CHECK constraints, seed
+  1718→/// data, and RLS policies. Use `prisma generate` only.
+  1719→model IntegrationProvider {
+  1720→  id              String   @id @default(cuid())
+  1721→  providerKey     String   @unique
+  1722→  providerName    String
+  1723→  category        String   // 'courier' | 'ecommerce' | 'ads' | 'payment' (CHECK in SQL)
+  1724→  logoUrl         String?
+  1725→  authType        String   // 'api_key' | 'oauth2' | 'basic_auth' (CHECK in SQL)
+  1726→  supportsWebhook Boolean  @default(false)
+  1727→  configSchema    String   @default("[]") // JSONB array of credential field defs
+  1728→  capabilities    String   @default("[]") // JSONB array of supported actions
+  1729→  isActive        Boolean  @default(true)
+  1730→  createdAt       DateTime @default(now())
+  1731→  updatedAt       DateTime @updatedAt
+  1732→
+  1733→  companyIntegrations CompanyIntegration[]
+  1734→
+  1735→  @@map("integration_providers")
+  1736→}
+  1737→
+  1738→/// A company's actual connection to a provider — encrypted credentials,
+  1739→/// connection status, webhook routing. A company can connect multiple
+  1740→/// providers in the same category (e.g. TCS + Leopard). One is_default per
+  1741→/// category (enforced via app logic).
+  1742→///
+  1743→/// credentialsEncrypted is a TEXT column holding an encrypted string —
+  1744→/// actual encrypt/decrypt happens in Step 2's application code, NOT in SQL.
+  1745→model CompanyIntegration {
+  1746→  id                        String   @id @default(cuid())
+  1747→  companyId                 String
+  1748→  company                   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  1749→  organizationId            String
+  1750→  organization              Organization @relation(fields: [organizationId], references: [id])
+  1751→  providerId                String
+  1752→  provider                  IntegrationProvider @relation(fields: [providerId], references: [id])
+  1753→
+  1754→  connectionName            String
+  1755→  credentialsEncrypted      String?
+  1756→  webhookEndpointId         String?  @unique
+  1757→  webhookSecret             String?
+  1758→  isActive                  Boolean  @default(true)
+  1759→  isDefault                 Boolean  @default(false)
+  1760→  connectionStatus          String   @default("pending") // 'pending' | 'connected' | 'error' | 'expired' (CHECK in SQL)
+  1761→  lastSyncAt                DateTime?
+  1762→  lastError                 String?
+  1763→
+  1764→  createdBy                 String?
+  1765→  createdByEmployee         Employee? @relation("IntegrationCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  1766→  createdAt                 DateTime @default(now())
+  1767→  updatedAt                 DateTime @updatedAt
+  1768→
+  1769→  actionLogs                IntegrationActionLog[]
+  1770→  ordersBooked              Order[]  @relation("OrderCourierIntegration")
+  1771→  ordersRecommended         Order[]  @relation("OrderRecommendedCourier")
+  1772→  companyOrderSettingsDefault CompanyOrderSetting[] @relation("CompanyOrderSettingsDefaultCourier")
+  1773→  pickupAddresses           CourierPickupAddress[]
+  1774→  exchangeShipmentsBooked   ExchangeShipment[] @relation("ExchangeShipmentCourierIntegration")
+  1775→  exchangeShipmentsRecommended ExchangeShipment[] @relation("ExchangeShipmentRecommendedCourier")
+  1776→  loadSheets                LoadSheet[]
+  1777→
+  1778→  @@unique([companyId, providerId])
+  1779→  @@index([companyId, isActive])
+  1780→  @@map("company_integrations")
+  1781→}
+  1782→
+  1783→/// Universal logging for every integration call — the single source of truth
+  1784→/// for debugging "why did this courier booking fail" or "did this Shopify
+  1785→/// webhook get processed." Immutable: no UPDATE or DELETE.
+  1786→model IntegrationActionLog {
+  1787→  id                    String   @id @default(cuid())
+  1788→  companyIntegrationId  String
+  1789→  companyIntegration    CompanyIntegration @relation(fields: [companyIntegrationId], references: [id], onDelete: Cascade)
+  1790→  organizationId        String
+  1791→  organization          Organization @relation(fields: [organizationId], references: [id])
+  1792→
+  1793→  actionType            String   // 'book_shipment', 'track_shipment', 'receive_order', etc.
+  1794→  direction             String   // 'outbound' | 'inbound' (CHECK in SQL)
+  1795→  requestPayload        String?  // JSONB
+  1796→  responsePayload       String?  // JSONB
+  1797→  status                String   // 'success' | 'failed' (CHECK in SQL)
+  1798→  errorMessage          String?
+  1799→  relatedEntityType     String?  // 'order' | 'product' | null (CHECK in SQL)
+  1800→  relatedEntityId       String?
+  1801→  durationMs            Int?
+  1802→  createdAt             DateTime @default(now())
+  1803→
+  1804→  @@index([companyIntegrationId, createdAt])
+  1805→  @@index([relatedEntityType, relatedEntityId])
+  1806→  @@index([status, createdAt])
+  1807→  @@map("integration_action_logs")
+  1808→}
+  1809→
+  1810→/// Generic form draft storage (Unsaved Changes Guard system). Stores
+  1811→/// in-progress product/order form data as JSON so users can save their work
+  1812→/// before completing a full creation flow.
+  1813→model FormDraft {
+  1814→  id              String   @id @default(cuid())
+  1815→  organizationId  String
+  1816→  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  1817→  companyId       String
+  1818→  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  1819→  createdBy       String?
+  1820→  createdByEmployee Employee? @relation("FormDraftCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  1821→
+  1822→  draftType       String   // 'product' | 'order' (CHECK in SQL)
+  1823→  draftData       String   @default("{}") // JSONB
+  1824→  draftTitle      String?
+  1825→  draftNumber     String?  // DRAFT-00001 format — only for order drafts, null for product drafts
+  1826→
+  1827→  createdAt       DateTime @default(now())
+  1828→  updatedAt       DateTime @updatedAt
+  1829→
+  1830→  @@index([companyId, draftType, updatedAt])
+  1831→  @@index([createdBy])
+  1832→  @@map("form_drafts")
+  1833→}
+  1834→
+  1835→/// Per-company configurable order workflow strictness. When
+  1836→/// requireOrderConfirmation or requirePackingStep are FALSE, orders can
+  1837→/// jump straight to 'dispatched' and the DB trigger auto-backfills the
+  1838→/// skipped timestamps. A default row should be auto-created on company creation.
+  1839→model CompanyOrderSetting {
+  1840→  id                          String   @id @default(cuid())
+  1841→  companyId                   String   @unique
+  1842→  company                     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  1843→
+  1844→  requireOrderConfirmation    Boolean  @default(false)
+  1845→  requirePackingStep          Boolean  @default(false)
+  1846→  defaultCourier              String?
+  1847→  defaultDispatchLocationId   String?
+  1848→  defaultDispatchLocation     InventoryLocation? @relation("CompanyOrderSettingsDefaultLocation", fields: [defaultDispatchLocationId], references: [id])
+  1849→
+  1850→  // Universal Integration Framework (migration 004)
+  1851→  courierBookingMode          String   @default("semi_manual") // 'automatic' | 'semi_manual' (CHECK in SQL)
+  1852→  defaultCourierCompanyIntegrationId String?
+  1853→  defaultCourierCompanyIntegration CompanyIntegration? @relation("CompanyOrderSettingsDefaultCourier", fields: [defaultCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  1854→  // Exchange refund setting (migration 014)
+  1855→  deductDeliveryChargeFromRefund Boolean @default(false) // if true, delivery charge is deducted from customer refund
+  1856→
+  1857→  updatedBy                   String?
+  1858→  updatedByEmployee           Employee? @relation("CompanyOrderSettingsUpdater", fields: [updatedBy], references: [id])
+  1859→  updatedAt                   DateTime @updatedAt
+  1860→
+  1861→  @@index([companyId])
+  1862→}
+  1863→
+  1864→/// The central order record. flowopsOrderNumber is unique per company
+  1865→/// (ORD-{year}-{seq}). externalOrderReference/externalOrderId track the
+  1866→/// source platform's identifiers (nullable for manual orders).
+  1867→model Order {
+  1868→  id                          String   @id @default(cuid())
+  1869→  organizationId              String
+  1870→  organization                Organization @relation(fields: [organizationId], references: [id])
+  1871→  companyId                   String
+  1872→  company                     Company  @relation(fields: [companyId], references: [id])
+  1873→
+  1874→  flowopsOrderNumber          String
+  1875→
+  1876→  orderSource                 String   @default("manual") // shopify | manual | daraz | instagram
+  1877→  externalOrderReference      String?
+  1878→  externalOrderId             String?
+  1879→
+  1880→  customerId                  String
+  1881→  customer                    Customer @relation(fields: [customerId], references: [id])
+  1882→
+  1883→  // Customer Management System integration (migration 002).
+  1884→  // recipientName may differ from customer.name (e.g. son orders, mother receives).
+  1885→  // usedCustomerAddressId/usedCustomerPhoneId track which saved child row was
+  1886→  // used for this order (for lastUsedAt tracking); nullable because a one-off
+  1887→  // address/phone might be typed without saving it permanently.
+  1888→  recipientName               String?
+  1889→  usedCustomerAddressId       String?
+  1890→  usedCustomerAddress         CustomerAddress? @relation("OrderUsedAddress", fields: [usedCustomerAddressId], references: [id], onDelete: SetNull)
+  1891→  usedCustomerPhoneId         String?
+  1892→  usedCustomerPhone           CustomerPhone? @relation("OrderUsedPhone", fields: [usedCustomerPhoneId], references: [id], onDelete: SetNull)
+  1893→
+  1894→  status                      String   @default("pending") // pending | confirmed | partially_backordered | processing | dispatched | delivered | rto | cancelled | refunded
+  1895→
+  1896→  // Payment system: supports partial advance + COD remaining
+  1897→  paymentType                 String   @default("full_cod") // full_cod | partial_advance | fully_prepaid
+  1898→  paymentStatus               String   @default("cod_pending") // cod_pending | advance_paid | fully_prepaid | cod_collected
+  1899→  paymentSource               String   @default("cod_native") // shopify_gateway | manual_conversion | cod_native
+  1900→
+  1901→  subtotal                    Decimal  @default(0) @db.Decimal(14, 2)
+  1902→  discountAmount              Decimal? @db.Decimal(14, 2)
+  1903→  discountReason              String?
+  1904→  courierCharges              Decimal? @db.Decimal(14, 2)
+  1905→  totalOrderValue             Decimal  @default(0) @db.Decimal(14, 2)
+  1906→
+  1907→  // Delivery charge + tax tracking (migration 012)
+  1908→  estimatedDeliveryCharge     Decimal? @db.Decimal(14, 2) // staff-entered or courier-default at booking
+  1909→  actualDeliveryCharge        Decimal? @db.Decimal(14, 2) // populated from courier Payment Status API
+  1910→  taxAmount                   Decimal? @db.Decimal(14, 2) // staff-entered (e.g. GST)
+  1911→  taxLabel                    String?  // free text (e.g. "GST 17%")
+  1912→
+  1913→  advanceAmount               Decimal? @db.Decimal(14, 2)
+  1914→  advancePaymentMethod        String?
+  1915→  advancePaymentReference     String?
+  1916→  advancePaymentScreenshotUrl String?
+  1917→  advancePaidAt               DateTime?
+  1918→
+  1919→  // remainingCodAmount is a GENERATED column (totalOrderValue - advanceAmount)
+  1920→  // — represented here as a regular field; the DB generates it.
+  1921→  remainingCodAmount          Decimal? @db.Decimal(14, 2)
+  1922→  codCollected                Boolean  @default(false)
+  1923→  codCollectedAmount          Decimal? @db.Decimal(14, 2)
+  1924→  codCollectedAt              DateTime?
+  1925→
+  1926→  convertedBy                 String?
+  1927→  convertedByEmployee         Employee? @relation("OrderConverter", fields: [convertedBy], references: [id])
+  1928→  convertedAt                 DateTime?
+  1929→
+  1930→  deliveryAddress             String?  // JSONB
+  1931→  deliveryCity                String?
+  1932→  courierName                 String?
+  1933→  trackingNumber              String?
+  1934→  // Universal Integration Framework (migration 004): links to the specific
+  1935→  // courier integration used to book this order's shipment. Distinct from
+  1936→  // courierName (display text) — this is the authoritative FK for tracing
+  1937→  // back to the actual integration/credentials used.
+  1938→  courierCompanyIntegrationId String?
+  1939→  courierCompanyIntegration   CompanyIntegration? @relation("OrderCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  1940→  // Booking Workbench fields (migration 013)
+  1941→  courierBookingStatus        String   @default("not_booked") // 'not_booked' | 'booked' | 'failed' | 'cancelled' (CHECK in SQL)
+  1942→  // Persisted booking failure reason (Phase 3/5). When courierBookingStatus='failed',
+  1943→  // this holds the specific error message from the courier adapter or city-validation
+  1944→  // step. Survives navigation so the user can see WHY booking failed from the
+  1945→  // order detail page or the Booking Workbench without re-attempting.
+  1946→  courierBookingFailureReason String?
+  1947→  // Per-order pickup address override (nullable). When set, booking uses
+  1948→  // this address instead of the integration's default. Falls back to the
+  1949→  // default when null.
+  1950→  pickupAddressId              String?
+  1951→  pickupAddress                CourierPickupAddress? @relation("OrderPickupAddress", fields: [pickupAddressId], references: [id], onDelete: SetNull)
+  1952→  recommendedCourierCompanyIntegrationId String?
+  1953→  recommendedCourierIntegration CompanyIntegration? @relation("OrderRecommendedCourier", fields: [recommendedCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  1954→  // City validation state for courier booking. 'not_applicable' until the
+  1955→  // order goes through courier city validation (Prompt 4/5). Left unused in
+  1956→  // this foundational prompt — no business logic touches Order here.
+  1957→  courierCityStatus           String   @default("not_applicable") // 'matched' | 'unresolved' | 'not_applicable' (CHECK in SQL)
+  1958→  lastPolledAt                DateTime? // last time this order was polled for courier status
+  1959→  courierSubStatus            String? // PostEx sub-status (e.g. 'picked_up', 'out_for_delivery')
+  1960→  needsShipperAdvice          Boolean  @default(false) // true if status requires shipper advice (Attempted, Delivery Under Review)
+  1961→  unrecognizedCourierStatus   Boolean  @default(false) // true if courier returned an unrecognized status
+  1962→  dispatchLocationId          String?
+  1963→  dispatchLocation            InventoryLocation? @relation("OrderDispatchLocation", fields: [dispatchLocationId], references: [id])
+  1964→  notesForCourier             String?
+  1965→
+  1966→  // ─── Universal courier reference fields (migration 015) ───────────────
+  1967→  // orderRefNumber is the universal "reference" passed to ANY courier at
+  1968→  // booking time. Defaults to flowopsOrderNumber at creation but is editable
+  1969→  // — staff can type a custom PO/channel reference that the courier should
+  1970→  // print on the airway bill. Almost every courier (PostEx, TCS, Leopard…)
+  1971→  // has a "reference" / "order ref" field, so this is a core OMS field, not
+  1972→  // a PostEx-specific one. The booking adapter maps it to the courier's own
+  1973→  // ref field (PostEx → orderRefNumber, TCS → consigneeRef, etc.).
+  1974→  orderRefNumber              String?
+  1975→  // orderDetail is the human-readable item description string passed to the
+  1976→  // courier (e.g. "Silk Kurta (SKU-001, Size: L, Color: Blue) ×2, …").
+  1977→  // Auto-generated from the cart at creation but editable so staff can
+  1978→  // replace it with a more courier-friendly summary when needed.
+  1979→  orderDetail                 String?
+  1980→
+  1981→  skippedConfirmation         Boolean  @default(false)
+  1982→  skippedPacking              Boolean  @default(false)
+  1983→
+  1984→  confirmedAt                 DateTime?
+  1985→  packedAt                    DateTime?
+  1986→  dispatchedAt                DateTime?
+  1987→  deliveredAt                 DateTime?
+  1988→  cancelledAt                 DateTime?
+  1989→  cancellationReason          String?
+  1990→  returnedAt                  DateTime?
+  1991→
+  1992→  createdBy                   String?
+  1993→  createdByEmployee           Employee? @relation("OrderCreator", fields: [createdBy], references: [id])
+  1994→  // ─── Sales attribution (HR/KPI module) ─────────────────────────────
+  1995→  // The employee attributed as the salesperson for this order. Distinct from
+  1996→  // createdBy (who typed the order) — a manager may create an order on behalf
+  1997→  // of a sales agent, in which case salesEmployeeId = the agent and
+  1998→  // createdBy = the manager. Nullable for legacy/Shopify-imported orders.
+  1999→  // Queried on every order-list + KPI request → MUST be indexed.
+  2000→  salesEmployeeId             String?
+
+[showing lines 1-2000 of 2610; use offset=2001 with limit to continue reading]
