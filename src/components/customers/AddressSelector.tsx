@@ -9,6 +9,8 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { MapPin, Star, Plus } from 'lucide-react'
 import { formatLastUsed, type AddressDTO } from './types'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
+import { CountrySelector } from '@/components/ui/country-selector'
+import { countryCodeToName, countryNameToCode } from '@/lib/data/countries'
 
 export interface AddressSelectorValue {
   /** The selected saved address ID, or null if "new address" mode. */
@@ -17,6 +19,11 @@ export interface AddressSelectorValue {
   deliveryAddress: string
   /** The editable delivery city text. */
   deliveryCity: string
+  /** The editable delivery country NAME (e.g. "Pakistan") — the order's own
+   *  snapshot, same editable-per-order semantics as deliveryAddress/deliveryCity.
+   *  Defaults to "Pakistan" (current majority use case). Stored as a NAME
+   *  (not an alpha-2 code) to match CustomerAddress.country + Shopify. */
+  deliveryCountry: string
   /** Whether to persist a new one-off address as a permanent customer_addresses row. */
   saveAddressForNextTime: boolean
 }
@@ -61,7 +68,7 @@ export function AddressSelector({
   cityError,
   courierProviderKey,
 }: AddressSelectorProps) {
-  const { usedCustomerAddressId, deliveryAddress, deliveryCity, saveAddressForNextTime } = value
+  const { usedCustomerAddressId, deliveryAddress, deliveryCity, deliveryCountry, saveAddressForNextTime } = value
   const isNewMode = usedCustomerAddressId === null
 
   // When a saved address is selected, pre-fill the editable text from it
@@ -80,6 +87,9 @@ export function AddressSelector({
             ...value,
             deliveryAddress: selected.address,
             deliveryCity: selected.city,
+            // Fall back to "Pakistan" if the saved address has no country yet
+            // (rows created before the country-system phase have null).
+            deliveryCountry: selected.country ?? 'Pakistan',
           })
         }
       }
@@ -93,6 +103,7 @@ export function AddressSelector({
       usedCustomerAddressId: addr.id,
       deliveryAddress: addr.address,
       deliveryCity: addr.city,
+      deliveryCountry: addr.country ?? 'Pakistan',
       saveAddressForNextTime: false,
     })
   }
@@ -103,6 +114,7 @@ export function AddressSelector({
       usedCustomerAddressId: null,
       deliveryAddress: '',
       deliveryCity: '',
+      deliveryCountry: 'Pakistan',
       saveAddressForNextTime: false,
     })
   }
@@ -145,7 +157,9 @@ export function AddressSelector({
                       )}
                     </div>
                     <p className="text-sm font-medium truncate mt-0.5">{addr.address}</p>
-                    <p className="text-xs text-muted-foreground">{addr.city}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {addr.city}{addr.country ? `, ${addr.country}` : ''}
+                    </p>
                     <p className="text-[10px] text-muted-foreground mt-0.5">
                       Last used: {formatLastUsed(addr.lastUsedAt)}
                     </p>
@@ -209,6 +223,23 @@ export function AddressSelector({
             />
           )}
           {cityError && <p className="text-xs text-destructive">{cityError}</p>}
+        </div>
+        {/* Country — required, visible. Defaults to Pakistan (current
+            majority use case) but the user can change it. The selector
+            works on alpha-2 codes; we translate to/from the NAME stored
+            on the order/customer address. */}
+        <div className="space-y-1">
+          <Label className="text-xs">Country *</Label>
+          <CountrySelector
+            value={countryNameToCode(deliveryCountry) ?? 'PK'}
+            onChange={(code) =>
+              onChange({
+                ...value,
+                deliveryCountry: countryCodeToName(code) ?? 'Pakistan',
+              })
+            }
+            placeholder="Select country"
+          />
         </div>
       </div>
 

@@ -242,6 +242,10 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   // here for buildPayload + validation).
   const [deliveryAddress, setDeliveryAddress] = useState('')
   const [deliveryCity, setDeliveryCity] = useState('')
+  // Country (Phase: Country System). Defaults to "Pakistan" (current
+  // majority use case). Stored as a NAME (not alpha-2 code) — consistent
+  // with CustomerAddress.country + Shopify's default_address.country.
+  const [deliveryCountry, setDeliveryCountry] = useState('Pakistan')
   const [courierName, setCourierName] = useState('')
   const [courierIntegrationId, setCourierIntegrationId] = useState('')
   const [dispatchLocationId, setDispatchLocationId] = useState('')
@@ -308,6 +312,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
         if (typeof data.recipientName === 'string') setRecipientName(data.recipientName)
         if (typeof data.deliveryAddress === 'string') setDeliveryAddress(data.deliveryAddress)
         if (typeof data.deliveryCity === 'string') setDeliveryCity(data.deliveryCity)
+        if (typeof data.deliveryCountry === 'string') setDeliveryCountry(data.deliveryCountry)
         if (typeof data.courierName === 'string') setCourierName(data.courierName)
         if (typeof data.dispatchLocationId === 'string') setDispatchLocationId(data.dispatchLocationId)
         if (typeof data.notesForCourier === 'string') setNotesForCourier(data.notesForCourier)
@@ -364,6 +369,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
           advancePaymentReference,
           deliveryAddress,
           deliveryCity,
+          deliveryCountry,
           courierName,
           dispatchLocationId,
           notesForCourier,
@@ -379,7 +385,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     }
   }, [draftId, selectedCustomer, usedCustomerAddressId, usedCustomerPhoneId,
       recipientName, cart, paymentType, advanceAmount, advancePaymentMethod,
-      advancePaymentReference, deliveryAddress, deliveryCity, courierName,
+      advancePaymentReference, deliveryAddress, deliveryCity, deliveryCountry, courierName,
       dispatchLocationId, notesForCourier, discountAmount, discountReason])
 
   const { ConfirmModal: formGuardModal, attemptNavigation: guardedNavigate } = useFormGuard({
@@ -624,6 +630,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     setUsedCustomerAddressId(defaultAddr?.id ?? null)
     setDeliveryAddress(defaultAddr?.address ?? '')
     setDeliveryCity(defaultAddr?.city ?? '')
+    setDeliveryCountry(defaultAddr?.country ?? 'Pakistan')
 
     setRecipientName(c.name)
     setSaveAddressForNextTime(false)
@@ -639,6 +646,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     setSaveAddressForNextTime(false)
     setDeliveryAddress('')
     setDeliveryCity('')
+    setDeliveryCountry('Pakistan')
   }
 
   // When the user clicks "+ Create New Customer" in the autocomplete dropdown,
@@ -679,6 +687,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       payment_type: paymentType,
       delivery_address: deliveryAddress.trim(),
       delivery_city: deliveryCity.trim(),
+      delivery_country: deliveryCountry,
       courier_name: courierName.trim() || undefined,
       courier_company_integration_id: courierIntegrationId || undefined,
       dispatch_location_id: dispatchLocationId,
@@ -925,12 +934,14 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     usedCustomerAddressId,
     deliveryAddress,
     deliveryCity,
+    deliveryCountry,
     saveAddressForNextTime,
   }
   const handleAddressSelectorChange = (v: AddressSelectorValue) => {
     setUsedCustomerAddressId(v.usedCustomerAddressId)
     setDeliveryAddress(v.deliveryAddress)
     setDeliveryCity(v.deliveryCity)
+    setDeliveryCountry(v.deliveryCountry)
     setSaveAddressForNextTime(v.saveAddressForNextTime)
   }
 

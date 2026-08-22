@@ -10,6 +10,8 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Card, CardContent } from '@/components/ui/card'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
+import { CountrySelector } from '@/components/ui/country-selector'
+import { countryCodeToName, countryNameToCode } from '@/lib/data/countries'
 import { Badge } from '@/components/ui/badge'
 import { Plus, Trash2, Star, Phone, MapPin, Loader2, User, Mail } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -61,7 +63,7 @@ export function CreateCustomerForm({
     { _key: nextKey(), phone: defaultPhone, is_primary: true, label: '' },
   ])
   const [addresses, setAddresses] = useState<AddressEntry[]>([
-    { _key: nextKey(), address: '', city: '', is_default: true, label: '' },
+    { _key: nextKey(), address: '', city: '', country: 'Pakistan', is_default: true, label: '' },
   ])
 
   const createMutation = useIdempotentMutation<{ customerId: string }, CreateCustomerInput>({
@@ -92,7 +94,7 @@ export function CreateCustomerForm({
   }
 
   const addAddress = () => {
-    setAddresses((p) => [...p, { _key: nextKey(), address: '', city: '', is_default: false, label: '' }])
+    setAddresses((p) => [...p, { _key: nextKey(), address: '', city: '', country: 'Pakistan', is_default: false, label: '' }])
   }
   const removeAddress = (key: string) => {
     setAddresses((p) => p.filter((e) => e._key !== key))
@@ -132,6 +134,7 @@ export function CreateCustomerForm({
         label: a.label?.trim() || undefined,
         address: a.address.trim(),
         city: a.city.trim(),
+        country: a.country?.trim() || 'Pakistan',
         is_default: a.is_default,
       })),
     }
@@ -284,6 +287,18 @@ export function CreateCustomerForm({
                   onChange={(city) => updateAddress(entry._key, 'city', city)}
                   placeholder="e.g. Lahore"
                   className="text-sm"
+                />
+              </div>
+              {/* Country — required, visible, defaults to Pakistan. The
+                  selector returns alpha-2 codes; we store the NAME on the
+                  address (matches CustomerAddress.country + Shopify). */}
+              <div className="space-y-1">
+                {idx === 0 && <Label className="text-[10px]">Country *</Label>}
+                <CountrySelector
+                  value={countryNameToCode(entry.country) ?? 'PK'}
+                  onChange={(code) =>
+                    updateAddress(entry._key, 'country', countryCodeToName(code) ?? 'Pakistan')
+                  }
                 />
               </div>
               <div className="space-y-1">

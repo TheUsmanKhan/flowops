@@ -76,6 +76,12 @@ export const createManualOrderSchema = z
     // Delivery (always required — the order's editable snapshot)
     delivery_address: z.string().min(2, 'Delivery address is required'),
     delivery_city: z.string().min(2, 'Delivery city is required'),
+    // Country (Phase: Country System). Optional — defaults to "Pakistan"
+    // server-side when absent (so existing callers that don't send it don't
+    // break). Stores the country NAME (e.g. "Pakistan"), NOT an alpha-2
+    // code — consistent with CustomerAddress.country. The frontend
+    // AddressSelector always sends this; the default is a safety net.
+    delivery_country: z.string().max(100).optional(),
     // Logistics
     courier_name: z.string().max(100).optional().or(z.literal('')),
     courier_company_integration_id: z.string().optional().or(z.literal('')),

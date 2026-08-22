@@ -49,6 +49,13 @@ export type PhoneInput = z.infer<typeof phoneInputSchema>
 /**
  * A single delivery address for a customer.
  * - NO province field (per product decision).
+ * - `country` stores the country NAME (e.g. "Pakistan", "United Arab
+ *   Emirates") — NOT an alpha-2 code. This matches Shopify's
+ *   default_address.country field directly (no translation at ingestion)
+ *   and is human-readable in the DB. Optional with default "Pakistan"
+ *   (current majority use case) — callers that don't send it get the
+ *   sensible default, so this is additive and non-breaking for existing
+ *   flows that don't yet ask for country.
  * - `is_default` marks this as the customer's default delivery address. At
  *   most one address per customer may be default (enforced at the DB layer
  *   via a partial unique index, and at the action layer by unsetting others).
@@ -57,6 +64,7 @@ export const addressInputSchema = z.object({
   label: z.string().max(50).optional().or(z.literal('')),
   address: z.string().min(2, 'Address is required').max(500),
   city: z.string().min(2, 'City is required').max(100),
+  country: z.string().max(100).optional().default('Pakistan'),
   is_default: z.boolean().default(false),
 })
 export type AddressInput = z.infer<typeof addressInputSchema>

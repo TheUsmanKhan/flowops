@@ -613,6 +613,10 @@ export async function createManualOrder(
         remainingCodAmount,
         deliveryAddress: d.delivery_address,
         deliveryCity: d.delivery_city,
+        // Country (Phase: Country System). Defaults to "Pakistan" when the
+        // caller didn't send one (additive — existing callers that don't
+        // send delivery_country still work). Stored as a NAME, not a code.
+        deliveryCountry: d.delivery_country?.trim() || 'Pakistan',
         courierName: d.courier_name || null,
         courierCompanyIntegrationId: d.courier_company_integration_id || null,
         recommendedCourierCompanyIntegrationId: d.courier_company_integration_id || null,
@@ -706,6 +710,21 @@ export async function createManualOrder(
           )
         })
       }
+      // Propagate country correction the same fire-and-forget way (mirrors
+      // the city correction above). Only writes if a non-empty country was
+      // provided on the order — the default "Pakistan" still overwrites a
+      // saved different country, which is the intended correction behavior.
+      if (d.delivery_country?.trim()) {
+        db.customerAddress.update({
+          where: { id: selectedSavedAddressId },
+          data: { country: d.delivery_country.trim() },
+        }).catch((err) => {
+          console.error(
+            `[createManualOrder] Failed to propagate country correction to CustomerAddress ${selectedSavedAddressId}:`,
+            err instanceof Error ? err.message : err,
+          )
+        })
+      }
     } else if (saveAddressForNextTime && d.delivery_address && d.delivery_city) {
       // One-off address typed + user opted to save it for next time.
       // Persist as a non-default customer_addresses row, then link the
@@ -717,6 +736,9 @@ export async function createManualOrder(
           label: null,
           address: d.delivery_address,
           city: d.delivery_city,
+          // Country (Phase: Country System). Defaults to "Pakistan" when
+          // absent — mirrors the order's own deliveryCountry default.
+          country: d.delivery_country?.trim() || 'Pakistan',
           isDefault: false,
           lastUsedAt: new Date(),
         },
@@ -912,6 +934,12 @@ export async function createOrderFromShopifyWebhook(
     let usedCustomerPhoneId: string | null = customer.phones[0]?.id ?? null
     const shopifyAddress1 = d.customer.default_address?.address1 || null
     const shopifyCity = d.customer.default_address?.city || null
+    // Country (Phase: Country System). Shopify's default_address.country is a
+    // NAME (e.g. "Pakistan") — maps directly onto CustomerAddress.country /
+    // Order.deliveryCountry with no translation. Default to "Pakistan" when
+    // absent (current assumption for orders without explicit country data,
+    // per the country-system spec — non-blocking either way).
+    const shopifyCountry = d.customer.default_address?.country || null
 
     if (shopifyAddress1 && shopifyCity && customer.addresses.length === 0) {
       const newAddr = await db.customerAddress.create({
@@ -921,6 +949,10 @@ export async function createOrderFromShopifyWebhook(
           label: 'Shopify Default',
           address: shopifyAddress1,
           city: shopifyCity,
+          // Capture the country Shopify sent instead of discarding it
+          // (Phase 1 finding #4 fix). Falls back to "Pakistan" if Shopify
+          // didn't include one — non-blocking, the address is still saved.
+          country: shopifyCountry || 'Pakistan',
           isDefault: true,
           lastUsedAt: new Date(),
         },
@@ -1032,6 +1064,10 @@ export async function createOrderFromShopifyWebhook(
         // default address's text (if any).
         deliveryAddress: shopifyAddress1 || customer.addresses[0]?.address || null,
         deliveryCity: shopifyCity || customer.addresses[0]?.city || null,
+        // Country (Phase: Country System). Snapshot the Shopify-sent country
+        // onto the order; fall back to the saved address's country, then to
+        // "Pakistan" (current default for orders without explicit data).
+        deliveryCountry: shopifyCountry || customer.addresses[0]?.country || 'Pakistan',
         // Universal courier reference fields (migration 015):
         // orderRefNumber defaults to the Shopify order name (e.g. "#1001")
         // — staff can override post-creation if needed. orderDetail is the
@@ -1615,6 +1651,7 @@ export async function listOrders(
     customerId: string
     deliveryAddress: string | null
     deliveryCity: string | null
+    deliveryCountry: string | null
     confirmedAt: Date | null
     dispatchedAt: Date | null
     deliveredAt: Date | null
@@ -1795,6 +1832,7 @@ export async function listOrders(
           customerId: o.customerId,
           deliveryAddress: o.deliveryAddress,
           deliveryCity: o.deliveryCity,
+          deliveryCountry: o.deliveryCountry,
           // Universal courier reference fields (migration 015)
           orderRefNumber: o.orderRefNumber,
           orderDetail: o.orderDetail,
@@ -1856,6 +1894,7 @@ export async function getOrderDetail(
     convertedAt: Date | null
     deliveryAddress: string | null
     deliveryCity: string | null
+    deliveryCountry: string | null
     courierName: string | null
     trackingNumber: string | null
     dispatchLocationId: string | null
@@ -1946,6 +1985,7 @@ export async function getOrderDetail(
           remainingCodAmount: order.remainingCodAmount ? Number(order.remainingCodAmount) : null,
           codCollectedAmount: order.codCollectedAmount ? Number(order.codCollectedAmount) : null,
           deliveryAddress: order.deliveryAddress,
+          deliveryCountry: order.deliveryCountry,
         },
         customer: {
           id: order.customer.id,

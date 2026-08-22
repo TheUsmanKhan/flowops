@@ -83,7 +83,7 @@ interface CustomerSummaryDTO {
   name: string
   email: string | null
   primaryPhone: string | null
-  defaultAddress: { address: string; city: string } | null
+  defaultAddress: { address: string; city: string; country: string | null } | null
   totalOrdersCount: number
   totalOrderValue: number
   totalRtoCount: number
@@ -182,6 +182,7 @@ function toAddressDTO(a: {
   label: string | null
   address: string
   city: string
+  country?: string | null
   isDefault: boolean
   lastUsedAt: Date | null
   createdAt: Date
@@ -194,6 +195,7 @@ function toAddressDTO(a: {
     label: a.label,
     address: a.address,
     city: a.city,
+    country: a.country ?? null,
     isDefault: a.isDefault,
     lastUsedAt: a.lastUsedAt,
     createdAt: a.createdAt,
@@ -416,11 +418,14 @@ export async function createCustomerInternal(
       }
     }
 
-    // 3. Normalize addresses (no province — only address + city).
+    // 3. Normalize addresses (no province — only address + city + country).
     const addressesData = d.addresses.map((a) => ({
       label: a.label?.trim() || null,
       address: a.address.trim(),
       city: a.city.trim(),
+      // Country (Phase: Country System). Defaults to "Pakistan" when the
+      // caller didn't send one (addressInputSchema default).
+      country: a.country?.trim() || 'Pakistan',
       isDefault: a.is_default,
       lastUsedAt: null,
     }))
@@ -459,6 +464,7 @@ export async function createCustomerInternal(
           label: a.label,
           address: a.address,
           city: a.city,
+          country: a.country,
           isDefault: a.isDefault,
           lastUsedAt: a.lastUsedAt,
         })),
@@ -804,6 +810,9 @@ export async function addCustomerAddress(
           label: d.label?.trim() || null,
           address: d.address.trim(),
           city: d.city.trim(),
+          // Country (Phase: Country System). Defaults to "Pakistan" when
+          // absent — mirrors the addressInputSchema default.
+          country: d.country?.trim() || 'Pakistan',
           isDefault: d.is_default,
         },
       })
@@ -878,6 +887,9 @@ export async function updateCustomerAddress(
           label: d.label?.trim() || null,
           address: d.address.trim(),
           city: d.city.trim(),
+          // Country (Phase: Country System). Defaults to "Pakistan" when
+          // absent — same pattern as addCustomerAddress.
+          country: d.country?.trim() || 'Pakistan',
           isDefault: d.is_default,
         },
       })
@@ -895,12 +907,14 @@ export async function updateCustomerAddress(
         label: address.label,
         address: address.address,
         city: address.city,
+        country: address.country,
         isDefault: address.isDefault,
       },
       newValues: {
         label: updated.label,
         address: updated.address,
         city: updated.city,
+        country: updated.country,
         isDefault: updated.isDefault,
       },
     })
@@ -1458,7 +1472,7 @@ export async function listCustomers(filters: {
       email: c.email,
       primaryPhone: c.phones[0]?.phoneRaw ?? null,
       defaultAddress: c.addresses[0]
-        ? { address: c.addresses[0].address, city: c.addresses[0].city }
+        ? { address: c.addresses[0].address, city: c.addresses[0].city, country: c.addresses[0].country }
         : null,
       totalOrdersCount: c.totalOrdersCount,
       totalOrderValue: Number(c.totalOrderValue),
@@ -1600,6 +1614,7 @@ export async function getCustomerDetail(
               recipientName: o.recipientName,
               deliveryAddress: o.deliveryAddress,
               deliveryCity: o.deliveryCity,
+              deliveryCountry: o.deliveryCountry,
               usedCustomerAddressId: o.usedCustomerAddressId,
               usedCustomerPhoneId: o.usedCustomerPhoneId,
               salesEmployeeId: o.salesEmployeeId,

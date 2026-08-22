@@ -1536,6 +1536,14 @@ model CustomerAddress {
   label             String?
   address           String
   city              String
+  // Country (Phase: Country System). Stores the country NAME (e.g.
+  // "Pakistan", "United Arab Emirates") — matches Shopify's
+  // default_address.country field directly (no translation at ingestion).
+  // Defaults to "Pakistan" (current majority use case) so existing rows
+  // backfill cleanly. Set via CountrySelector (alpha-2 code → name
+  // translation at the form boundary). NOT a code ("PK") — the name form
+  // is deliberately chosen for human-readability + Shopify compatibility.
+  country           String  @default("Pakistan")
   isDefault         Boolean  @default(false)
   lastUsedAt        DateTime?
 
@@ -1929,6 +1937,16 @@ model Order {
 
   deliveryAddress             String?  // JSONB
   deliveryCity                String?
+  // Country (Phase: Country System). Denormalized snapshot of the delivery
+  // country at order creation time — mirrors the existing deliveryCity
+  // pattern (populated from the selected CustomerAddress.country OR a
+  // typed one-off address's country; propagated the same fire-and-forget
+  // way on correction). Stores the country NAME (e.g. "Pakistan"), NOT an
+  // alpha-2 code — consistent with CustomerAddress.country + Shopify's
+  // default_address.country. Nullable so historical orders (pre-country-
+  // system) don't break; new orders always populate it (defaulting to
+  // "Pakistan" when no explicit country is provided).
+  deliveryCountry              String?
   courierName                 String?
   trackingNumber              String?
   // Universal Integration Framework (migration 004): links to the specific

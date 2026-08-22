@@ -20,6 +20,10 @@ export interface AddressDTO {
   label: string | null
   address: string
   city: string
+  /** Country NAME (e.g. "Pakistan"), NOT an alpha-2 code. Nullable for
+   *  rows created before the country-system phase (default applied at DB
+   *  layer going forward). */
+  country: string | null
   isDefault: boolean
   lastUsedAt: string | null
   createdAt: string
@@ -50,6 +54,9 @@ export interface RecentOrderDTO {
   recipientName: string | null
   deliveryAddress: string | null
   deliveryCity: string | null
+  /** Country NAME snapshot at order creation (nullable for historical
+   *  orders pre-dating the country-system phase). */
+  deliveryCountry: string | null
   usedCustomerAddressId: string | null
   usedCustomerPhoneId: string | null
   /** Phase 4: sales attribution — present on full-detail rows, OMITTED on limited rows. */
@@ -125,6 +132,9 @@ export interface AddressInput {
   label?: string
   address: string
   city: string
+  /** Country NAME (e.g. "Pakistan"). Optional — server defaults to
+   *  "Pakistan" when absent. NOT an alpha-2 code. */
+  country?: string
   is_default: boolean
 }
 

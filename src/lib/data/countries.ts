@@ -102,8 +102,36 @@ export const COUNTRIES: Country[] = [
 
 const COUNTRY_MAP = new Map(COUNTRIES.map((c) => [c.code, c]))
 
+// Reverse lookup: country name (case-insensitive) → alpha-2 code.
+// Used to load a stored country NAME back into the CountrySelector (which
+// works on alpha-2 codes). Returns undefined if the name isn't a known
+// canonical country (e.g. Shopify sent "Islamic Republic of Pakistan").
+const COUNTRY_NAME_TO_CODE = new Map(
+  COUNTRIES.map((c) => [c.name.toLowerCase(), c.code]),
+)
+
 export function getCountryByCode(code: string): Country | undefined {
   return COUNTRY_MAP.get(code.toUpperCase())
+}
+
+/** Translate an alpha-2 code (e.g. "PK") to the canonical country name
+ *  ("Pakistan"). Returns the raw input if the code is unknown (so unknown
+ *  codes are preserved rather than blanked). Used at the form boundary
+ *  when saving: the CountrySelector yields a code; we store the NAME on
+ *  CustomerAddress.country / Order.deliveryCountry. */
+export function countryCodeToName(code: string | null | undefined): string | null {
+  if (!code) return null
+  const c = COUNTRY_MAP.get(code.toUpperCase())
+  return c ? c.name : code
+}
+
+/** Translate a country name ("Pakistan") back to its alpha-2 code ("PK"),
+ *  case-insensitive. Returns null if the name isn't a known canonical
+ *  country (the selector will fall back to its default in that case).
+ *  Used at the form boundary when loading: stored NAME → selector code. */
+export function countryNameToCode(name: string | null | undefined): string | null {
+  if (!name) return null
+  return COUNTRY_NAME_TO_CODE.get(name.toLowerCase()) ?? null
 }
 
 export function formatCountryLabel(code: string): string {
