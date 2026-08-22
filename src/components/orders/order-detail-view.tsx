@@ -129,6 +129,7 @@ interface OrderDetail {
 
     deliveryAddress: string | null
     deliveryCity: string | null
+    deliveryCountry: string | null
     courierName: string | null
     trackingNumber: string | null
     courierCompanyIntegrationId?: string | null
@@ -1104,7 +1105,8 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                 value={order.deliveryAddress ?? '—'}
               />
               <InfoRow label="City" value={order.deliveryCity ?? '—'} />
-              {order.courierCityStatus === 'unresolved' && order.deliveryCity && (
+              <InfoRow label="Country" value={order.deliveryCountry ?? '—'} />
+              {order.courierCityStatus === 'unresolved' && order.deliveryCity && !(order.deliveryCountry && order.deliveryCountry !== 'Pakistan') && (
                 <div className="rounded-lg border border-amber-300 bg-amber-50 p-2 mt-1">
                   <div className="flex items-center gap-1.5 mb-1">
                     <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />

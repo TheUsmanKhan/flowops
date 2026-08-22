@@ -10115,3 +10115,48 @@ Stage Summary:
 - Convention decision: CustomerAddress.country + Order.deliveryCountry store country NAMES (e.g. "Pakistan"), NOT alpha-2 codes — per the user's explicit `@default("Pakistan")`. Rationale: matches Shopify's default_address.country directly (no translation at ingestion), human-readable in DB. The CountrySelector (which returns alpha-2 codes) has a thin translation layer at the form boundary (countryCodeToName on save, countryNameToCode on load). The schema comment documents this clearly.
 - matchOrCreateExternalCustomer note: the SQL function match_or_create_customer() only creates Customer + Phone + ExternalIdentity (NOT CustomerAddress), so country belongs at the address-creation step in the Shopify ingestion caller (where Phase 1 #4 showed the discard), not in the match function. Country is captured there (shopifyCountry → CustomerAddress.country + Order.deliveryCountry).
 - Files changed: prisma/schema.prisma, src/lib/data/countries.ts, src/lib/validations/customer.schemas.ts, src/lib/validations/order.schemas.ts, src/components/customers/types.ts, src/components/customers/AddressSelector.tsx, src/components/customers/CreateCustomerForm.tsx, src/components/orders/order-create-view.tsx, src/lib/actions/order.actions.ts, src/lib/actions/customer.actions.ts.
+
+---
+Task ID: COUNTRY-PHASE3
+Agent: main
+Task: FlowOps Country System Phase 3 — use country to drive city-matching, phone validation, fulfillment channel
+
+Work Log:
+- Read worklog for Phase 2 context (country field now real on CustomerAddress + Order). Investigated the 3 systems in parallel.
+- City matching: found CityAutocomplete has providerKey="" escape hatch (plain text); matchCity + revalidateCityAtBookingTime in city-matcher.ts query Pakistan-sourced courier_operational_cities; validateCustomerAddressCity in customer.actions.ts is fire-and-forget after address create/update.
+- Phone validation: validateAndNormalizePhone(phone, defaultCountry='PK') ALREADY accepts a defaultCountry param + uses libphonenumber-js which only applies it to no-+-prefix numbers (so "+ prefix always validates internationally" is built-in — I just made the hint dynamic from the address country).
+- Fulfillment channel: NO existing "self-fulfilled"/"fulfillmentChannel" logic found anywhere (grep returned nothing). The order-create flow's courier dropdown has a "__none__"/"No courier" option = self-fulfilled. The "auto-default to Self-Fulfilled" was part of the unimplemented self-fulfilled-orders plan (referenced in the conversation summary); I implemented it fresh, reading the now-real country field.
+
+IMPLEMENTATION:
+1. City matching (skip for non-Pakistan):
+   - city-matcher.ts matchCity: added optional `country?: string` param; early-returns {status:'unresolved', suggestions:[]} when country != "Pakistan" (courier_operational_cities is 100% Pakistan-sourced — foreign-city matching is noise).
+   - city-matcher.ts revalidateCityAtBookingTime: added optional `country?: string` param; early-returns true when country != "Pakistan" (don't block international booking on Pakistan-courier-cache data).
+   - booking.actions.ts:200 + booking-workbench/book/route.ts:178: pass order.deliveryCountry / shipment.shippingAddress?.country to revalidateCityAtBookingTime. Added `country: true` to the shipment query's shippingAddress select.
+   - customer.actions.ts validateCustomerAddressCity: added optional `country?: string` param; early-returns (skips the check) for non-Pakistan (no point setting empty cityMatchedCouriers + misleading cityValidatedAt for a foreign city). Updated both callers (addCustomerAddress, updateCustomerAddress) to pass d.country.
+   - AddressSelector.tsx: city field now conditionally renders CityAutocomplete (Pakistan: courier suggestions) vs plain Input (non-Pakistan: free text, "Enter city" placeholder).
+   - CreateCustomerForm.tsx: same conditional — CityAutocomplete (Pakistan) vs Input (non-Pakistan).
+2. Phone validation (country hint, hint-only not hard rule):
+   - customer.actions.ts createCustomerInternal: derives phoneCountryCode from the default/first address's country via countryNameToCode (Pakistan→PK, United Kingdom→GB, etc.); passes to validateAndNormalizePhone for each phone. Falls back to 'PK' when no address/country.
+   - CreateCustomerForm.tsx: computes phoneCountryCode from the default address's country; passes to all 3 isValidPhoneFormat calls (handleSubmit + 2 inline render checks). The hint only affects no-+-prefix numbers — + prefix always validates internationally (libphonenumber built-in behavior), so a Pakistani +92 on a UK order still validates.
+3. Fulfillment channel (Self-Fulfilled default for non-Pakistan):
+   - order-create-view.tsx: added userPickedCourier state; modified the company-default-courier effect to only auto-apply when deliveryCountry === 'Pakistan' (Pakistan unchanged); added a new effect that clears courierIntegrationId/courierName/pickupAddressId when deliveryCountry != 'Pakistan' && !userPickedCourier (auto-default to self-fulfilled); courier dropdown onValueChange sets userPickedCourier=true (overridable — stops the auto-default); handleDeselectCustomer resets it; added a "Self-Fulfilled (international delivery — Pakistani couriers don't deliver abroad)" hint with PackageCheck icon when courierIntegrationId==='' && deliveryCountry!=='Pakistan'.
+
+AUDIT (other parts assuming all-Pakistani):
+- FIXED (low-risk): customer-detail-view CityMatchInfo — added `country` prop; for non-Pakistan shows "International address — courier city matching N/A" (Globe icon) instead of misleading "City check pending…"/"Not recognized". Address line now shows "{city}, {country}".
+- FIXED (low-risk): order-detail-view — added "Country" InfoRow next to "City"; gated the city-mismatch warning + CityMismatchResolver to Pakistan-only (non-Pakistan won't have unresolved status since revalidate short-circuits to true).
+- NOTED (not fixed — separate decision): booking-workbench "bookable" endpoint doesn't explicitly exclude no-courier (self-fulfilled) orders. Low-priority edge case: a no-courier order has courierBookingStatus='not_booked' + no courierCompanyIntegrationId, so the booking flow can't act on it (no integration to book against) — it's effectively inert but would still appear in the bookable list. Flag for a separate decision on whether to filter it out.
+
+LINT: 0 errors, 12 warnings (all pre-existing React Hook Form / React Compiler warnings unrelated to changes).
+
+VERIFICATION:
+- Point 1 (UK customer, no city mismatch, plain text city): ✅ Browser-verified. Created customer with country="🇬🇧 United Kingdom"; city field was plain "Enter city" Input (NOT CityAutocomplete with "e.g. Lahore" + suggestions). No courier-city-matching UI for international.
+- Point 2 (UK phone no + validates against UK rules): ✅ Script-verified. isValidPhoneFormat("02079461234", "GB")→true; normalized→"+44 20 7946 1234".
+- Point 3 (Pakistani +92 validates on UK order): ✅ Script-verified. isValidPhoneFormat("+923001234567", "GB")→true; normalized→"+92 300 1234567". + prefix = international validation regardless of hint (libphonenumber built-in).
+- Point 4 (Self-Fulfilled auto-default for UK order): ⚠️ Code-verified (browser E2E blocked by sandbox server-reaping). Effect + hint implemented + lint-clean; the auto-clear fires when deliveryCountry changes to non-Pakistan and user hasn't manually picked a courier.
+- Point 5 (Pakistan unchanged): ✅ Script-verified. isValidPhoneFormat("03001234567","PK")→true; isValidPhoneFormat("+923001234567","PK")→true; normalized→"+92 300 1234567". All Pakistan phone/city/courier behavior identical to before (every guard early-returns ONLY when country != "Pakistan" or omitted — Pakistan is the unchanged default path).
+
+Stage Summary:
+- Phase 3 COMPLETE. Country now drives: (1) city matching (skipped for non-Pakistan — UI shows plain text, backend functions early-return), (2) phone validation (address country is the defaultCountry hint for ambiguous no-+-prefix numbers; + prefix always works internationally), (3) fulfillment channel (non-Pakistan auto-defaults to No-courier/Self-Fulfilled, overridable).
+- Pakistan behavior is UNCHANGED across all 3 areas (every guard checks `country && country !== 'Pakistan'` — Pakistan is the default/omitted path).
+- Audit: 2 low-risk UI fixes applied (CityMatchInfo non-Pakistan message + order-detail Country row); 1 edge case flagged for separate decision (booking-workbench bookable list + no-courier orders).
+- Files changed: src/lib/integrations/city-matcher.ts, src/lib/actions/booking.actions.ts, src/app/api/booking-workbench/book/route.ts, src/lib/actions/customer.actions.ts, src/components/customers/AddressSelector.tsx, src/components/customers/CreateCustomerForm.tsx, src/components/orders/order-create-view.tsx, src/components/orders/customer-detail-view.tsx, src/components/orders/order-detail-view.tsx.

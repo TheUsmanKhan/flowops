@@ -29,6 +29,7 @@ import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { validateAndNormalizePhone, isValidPhoneFormat } from '@/lib/phone-validation'
+import { countryNameToCode } from '@/lib/data/countries'
 import {
   createCustomerSchema,
   updateCustomerSchema,
@@ -368,6 +369,20 @@ export async function createCustomerInternal(
     }
     const d = parsed.data
 
+    // Phone validation country hint (Phase 3 — Country System): use the
+    // customer's default (or first) address's country as the defaultCountry
+    // for interpreting AMBIGUOUS phone numbers (those without a + prefix).
+    // This is a HINT only — numbers WITH a + prefix are always validated
+    // internationally regardless of this setting (libphonenumber-js's
+    // defaultCountry only applies to no-+-prefix numbers). So a Pakistani
+    // phone (+92...) on a UK-delivery order still validates fine, and a UK
+    // local number (no +) on a UK address validates against UK rules.
+    // Falls back to 'PK' (the existing default) when no address/country.
+    const phoneHintAddress = d.addresses.find((a) => a.is_default) ?? d.addresses[0]
+    const phoneCountryCode = phoneHintAddress?.country
+      ? (countryNameToCode(phoneHintAddress.country) ?? 'PK')
+      : 'PK'
+
     // 1. Validate + normalize every phone using libphonenumber-js (international).
     // This replaces the SQL normalize_phone() for the application-layer path.
     // The SQL function remains for DB-level triggers/matching.
@@ -378,7 +393,7 @@ export async function createCustomerInternal(
       isPrimary: boolean
     }> = []
     for (const p of d.phones) {
-      const { isValid, normalized } = validateAndNormalizePhone(p.phone.trim())
+      const { isValid, normalized } = validateAndNormalizePhone(p.phone.trim(), phoneCountryCode)
       if (!isValid || !normalized) {
         return {
           success: false,
@@ -729,8 +744,20 @@ async function validateCustomerAddressCity(
   addressId: string,
   city: string,
   companyId: string,
+  country?: string,
 ): Promise<void> {
   if (!city.trim()) return
+
+  // ── Country guard (Phase 3): skip for non-Pakistan addresses ──
+  // courier_operational_cities is 100% Pakistan-sourced (PostEx/TCS/Leopard
+  // only operate in Pakistan). A foreign city will never match, and running
+  // the check would just set an empty cityMatchedCouriers array + a misleading
+  // cityValidatedAt timestamp. For non-Pakistan, leave the cached fields
+  // untouched (they default to empty/null) — the UI treats the city as plain
+  // free text with no courier-matching UI either.
+  if (country && country !== 'Pakistan') {
+    return
+  }
 
   // Fetch all active courier integrations for this company
   const integrations = await db.companyIntegration.findMany({
@@ -834,7 +861,7 @@ export async function addCustomerAddress(
     // This is INFORMATIONAL — the authoritative check remains
     // revalidateCityAtBookingTime() at booking time. Non-blocking: if zero
     // couriers match, the address is still saved successfully.
-    validateCustomerAddressCity(address.id, d.city.trim(), ctx.company.id).catch(() => {})
+    validateCustomerAddressCity(address.id, d.city.trim(), ctx.company.id, d.country).catch(() => {})
 
     return { success: true, data: { addressId: address.id } }
   } catch (err) {
@@ -922,7 +949,7 @@ export async function updateCustomerAddress(
     // ── Phase 7: City validation (non-blocking early warning) ──
     // Re-validate the city if it changed. Non-blocking.
     if (updated.city !== address.city) {
-      validateCustomerAddressCity(updated.id, updated.city, ctx.company.id).catch(() => {})
+      validateCustomerAddressCity(updated.id, updated.city, ctx.company.id, d.country).catch(() => {})
     }
 
     return { success: true, data: { addressId: updated.id } }

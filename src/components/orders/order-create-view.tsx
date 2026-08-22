@@ -248,6 +248,14 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   const [deliveryCountry, setDeliveryCountry] = useState('Pakistan')
   const [courierName, setCourierName] = useState('')
   const [courierIntegrationId, setCourierIntegrationId] = useState('')
+  // Tracks whether the user has MANUALLY chosen a courier for this order.
+  // Used by the country-driven Self-Fulfilled auto-default (Phase 3): when
+  // the delivery country is NOT Pakistan, the courier auto-clears to 'No
+  // courier' (self-fulfilled — Pakistani couriers don't deliver abroad),
+  // but only if the user hasn't explicitly picked one. Once the user
+  // manually selects a courier, this flips to true and the auto-default
+  // stops overriding their choice (still overridable per the design).
+  const [userPickedCourier, setUserPickedCourier] = useState(false)
   const [dispatchLocationId, setDispatchLocationId] = useState('')
   const [notesForCourier, setNotesForCourier] = useState('')
   // Per-order pickup address override. When empty, booking uses the
@@ -427,12 +435,34 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     staleTime: 60_000,
   })
 
-  // Set default courier from settings when data loads
+  // Set default courier from settings when data loads.
+  // Phase 3 (Country System): only auto-apply the company-default courier
+  // when the delivery country IS Pakistan — Pakistani couriers (PostEx/TCS/
+  // Leopard) don't deliver internationally, so for a non-Pakistan address
+  // the default should be 'No courier' (self-fulfilled), handled by the
+  // separate effect below. This keeps Pakistan behavior unchanged.
   useEffect(() => {
-    if (orderSettingsQuery.data?.settings?.defaultCourierCompanyIntegrationId && !courierIntegrationId) {
+    if (orderSettingsQuery.data?.settings?.defaultCourierCompanyIntegrationId && !courierIntegrationId && deliveryCountry === 'Pakistan') {
       setCourierIntegrationId(orderSettingsQuery.data.settings.defaultCourierCompanyIntegrationId)
     }
-  }, [orderSettingsQuery.data, courierIntegrationId])
+  }, [orderSettingsQuery.data, courierIntegrationId, deliveryCountry])
+
+  // ── Phase 3 (Country System): Self-Fulfilled auto-default for non-Pakistan ──
+  // When the delivery country is NOT Pakistan, default the courier to 'No
+  // courier' (self-fulfilled) — the connected couriers are Pakistan-only and
+  // can't fulfil an international delivery. This is a DEFAULT only: the user
+  // can still manually pick a courier afterward (userPickedCourier flips
+  // to true and this effect stops clearing). When the country returns to
+  // Pakistan, the company-default effect above takes over again.
+  useEffect(() => {
+    if (deliveryCountry !== 'Pakistan' && !userPickedCourier) {
+      if (courierIntegrationId || courierName) {
+        setCourierIntegrationId('')
+        setCourierName('')
+        setPickupAddressId('')
+      }
+    }
+  }, [deliveryCountry, userPickedCourier]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch pickup addresses for the selected courier integration.
   // Used to populate the per-order pickup address override dropdown.
@@ -646,6 +676,9 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     setSaveAddressForNextTime(false)
     setDeliveryAddress('')
     setDeliveryCity('')
+    // Reset the manual-courier flag so a fresh customer selection can
+    // re-trigger the country-driven Self-Fulfilled auto-default (Phase 3).
+    setUserPickedCourier(false)
     setDeliveryCountry('Pakistan')
   }
 
@@ -1453,6 +1486,10 @@ function CustomerSection({
                   <Select
                     value={courierIntegrationId || '__none__'}
                     onValueChange={(v) => {
+                      // Mark that the user has manually chosen — stops the
+                      // country-driven Self-Fulfilled auto-default from
+                      // overriding their explicit selection (Phase 3).
+                      setUserPickedCourier(true)
                       if (v === '__none__') {
                         setCourierIntegrationId('')
                         setCourierName('')
@@ -1478,6 +1515,17 @@ function CustomerSection({
                   {courierIntegrations.length === 0 && (
                     <p className="text-[10px] text-amber-700">
                       No couriers connected. Connect one in Settings → Integrations.
+                    </p>
+                  )}
+                  {/* Phase 3 (Country System): Self-Fulfilled hint for non-Pakistan
+                      deliveries. Shown when no courier is selected AND the address
+                      country isn't Pakistan — the courier was auto-cleared because
+                      the connected couriers are Pakistan-only. The user can still
+                      pick a courier manually if they have an international option. */}
+                  {courierIntegrationId === '' && deliveryCountry !== 'Pakistan' && (
+                    <p className="text-[10px] text-emerald-700 flex items-center gap-1">
+                      <PackageCheck className="h-3 w-3" />
+                      Self-Fulfilled (international delivery — Pakistani couriers don&apos;t deliver abroad). Pick a courier only if you have an international option.
                     </p>
                   )}
                 </div>

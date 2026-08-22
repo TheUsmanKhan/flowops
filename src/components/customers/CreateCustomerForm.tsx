@@ -66,6 +66,16 @@ export function CreateCustomerForm({
     { _key: nextKey(), address: '', city: '', country: 'Pakistan', is_default: true, label: '' },
   ])
 
+  // Phone validation country hint (Phase 3 — Country System): derive the
+  // defaultCountry for libphonenumber-js from the default address's country.
+  // This is a HINT for ambiguous numbers (no + prefix) only — numbers with
+  // a + prefix are validated internationally regardless (so a Pakistani
+  // +92 number on a UK-delivery order still passes). Falls back to 'PK'.
+  const phoneHintAddress = addresses.find((a) => a.is_default) ?? addresses[0]
+  const phoneCountryCode = phoneHintAddress?.country
+    ? (countryNameToCode(phoneHintAddress.country) ?? 'PK')
+    : 'PK'
+
   const createMutation = useIdempotentMutation<{ customerId: string }, CreateCustomerInput>({
     url: '/api/customers',
     mutationOptions: {
@@ -114,7 +124,7 @@ export function CreateCustomerForm({
     for (let i = 0; i < phones.length; i++) {
       const phone = phones[i].phone.trim()
       if (!phone) { toast.error(`Phone ${i + 1} is empty`); return }
-      if (!isValidPhoneFormat(phone)) {
+      if (!isValidPhoneFormat(phone, phoneCountryCode)) {
         toast.error(`Phone ${i + 1} "${phone}" is not a valid phone number. Use format like 03001234567 or +923001234567.`)
         return
       }
@@ -178,9 +188,9 @@ export function CreateCustomerForm({
                 placeholder="0300-1234567"
                 value={entry.phone}
                 onChange={(e) => updatePhone(entry._key, 'phone', e.target.value)}
-                className={cn('text-sm', entry.phone.trim() && !isValidPhoneFormat(entry.phone) && 'border-destructive')}
+                className={cn('text-sm', entry.phone.trim() && !isValidPhoneFormat(entry.phone, phoneCountryCode) && 'border-destructive')}
               />
-              {entry.phone.trim() && !isValidPhoneFormat(entry.phone) && (
+              {entry.phone.trim() && !isValidPhoneFormat(entry.phone, phoneCountryCode) && (
                 <p className="text-[10px] text-destructive">Invalid phone format. Use 03001234567 or +923001234567.</p>
               )}
             </div>
@@ -281,13 +291,25 @@ export function CreateCustomerForm({
               </div>
               <div className="space-y-1">
                 {idx === 0 && <Label className="text-[10px]">City *</Label>}
-                <CityAutocomplete
-                  providerKey="all"
-                  value={entry.city}
-                  onChange={(city) => updateAddress(entry._key, 'city', city)}
-                  placeholder="e.g. Lahore"
-                  className="text-sm"
-                />
+                {/* Pakistan: courier-city autocomplete suggestions.
+                    Non-Pakistan: plain text Input — courier_operational_cities
+                    is Pakistan-sourced only, so suggestions would be noise. */}
+                {entry.country === 'Pakistan' ? (
+                  <CityAutocomplete
+                    providerKey="all"
+                    value={entry.city}
+                    onChange={(city) => updateAddress(entry._key, 'city', city)}
+                    placeholder="e.g. Lahore"
+                    className="text-sm"
+                  />
+                ) : (
+                  <Input
+                    placeholder="Enter city"
+                    value={entry.city}
+                    onChange={(e) => updateAddress(entry._key, 'city', e.target.value)}
+                    className="text-sm"
+                  />
+                )}
               </div>
               {/* Country — required, visible, defaults to Pakistan. The
                   selector returns alpha-2 codes; we store the NAME on the

@@ -66,6 +66,7 @@ import {
   CheckCircle2,
   Info,
   Lock,
+  Globe,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { formatPKR, formatDate, getErrorMessage, badgeForStatus } from './_shared'
@@ -1063,15 +1064,22 @@ function AddressCardView({
       </div>
       <div className="min-w-0">
         <p className="text-sm font-medium">{address.address}</p>
-        <p className="text-xs text-muted-foreground">{address.city}</p>
+        <p className="text-xs text-muted-foreground">
+          {address.city}{address.country ? `, ${address.country}` : ''}
+        </p>
       </div>
       {/* City validation — early warning, not blocking.
           The authoritative check is always revalidateCityAtBookingTime() at
           booking time (with its live fallback). This is informational only,
-          based on the cached courier_operational_cities table. */}
+          based on the cached courier_operational_cities table.
+          Phase 3 (Country System): for non-Pakistan addresses, courier city
+          matching is intentionally skipped (courier_operational_cities is
+          Pakistan-sourced) — show a clear N/A message instead of the
+          misleading "City check pending…" / "Not recognized" states. */}
       <CityMatchInfo
         matchedCouriers={address.cityMatchedCouriers ?? []}
         validatedAt={address.cityValidatedAt ?? null}
+        country={address.country}
       />
       {canManage && (
         <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t">
@@ -1151,10 +1159,24 @@ function AddressCardView({
 function CityMatchInfo({
   matchedCouriers,
   validatedAt,
+  country,
 }: {
   matchedCouriers: string[]
   validatedAt: string | null
+  country?: string | null
 }) {
+  // Phase 3 (Country System): non-Pakistan addresses skip courier city
+  // matching entirely (courier_operational_cities is Pakistan-sourced).
+  // Show a clear N/A instead of the misleading "pending" / "not recognized"
+  // states that would otherwise appear for a foreign city.
+  if (country && country !== 'Pakistan') {
+    return (
+      <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
+        <Globe className="h-2.5 w-2.5" />
+        <span>International address — courier city matching N/A</span>
+      </div>
+    )
+  }
   // Not validated yet — the background check is still running (or never ran)
   if (!validatedAt) {
     return (

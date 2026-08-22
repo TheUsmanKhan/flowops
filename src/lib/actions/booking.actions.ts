@@ -201,6 +201,11 @@ export async function bookOrderWithCourier(
       providerKey,
       deliveryCity,
       integration.id,
+      // Country guard (Phase 3): skip Pakistan-courier-city validation for
+      // non-Pakistan orders. International cities aren't in the Pakistan-
+      // sourced courier_operational_cities cache; blocking on that would be
+      // wrong. For non-Pakistan, the function short-circuits to `true`.
+      order.deliveryCountry ?? undefined,
     )
     mark('cityValidateEnd')
     measure('cityValidateStart', 'cityValidateEnd', '4_city_validation')

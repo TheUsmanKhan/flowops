@@ -134,7 +134,7 @@ async function bookExchangeShipment(
           phones: { select: { id: true, phoneRaw: true, isPrimary: true }, orderBy: { isPrimary: 'desc' } },
         },
       },
-      shippingAddress: { select: { address: true, city: true } },
+      shippingAddress: { select: { address: true, city: true, country: true } },
       shippingPhone: { select: { phoneRaw: true } },
       newOrgVariant: {
         select: { id: true, sku: true, weightKg: true, product: { select: { title: true } } },
@@ -175,7 +175,7 @@ async function bookExchangeShipment(
     return Response.json({ error: 'Customer phone is required.' }, { status: 400 })
   }
 
-  const cityValid = await revalidateCityAtBookingTime(providerKey, deliveryCity, integration.id)
+  const cityValid = await revalidateCityAtBookingTime(providerKey, deliveryCity, integration.id, shipment.shippingAddress?.country ?? undefined)
   if (!cityValid) {
     await db.exchangeShipment.update({
       where: { id: shipment.id },

@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import { MapPin, Star, Plus } from 'lucide-react'
@@ -207,19 +208,36 @@ export function AddressSelector({
         </div>
         <div className="space-y-1">
           <Label className="text-xs">City *</Label>
-          {courierProviderKey ? (
-            <CityAutocomplete
-              providerKey={courierProviderKey}
-              value={deliveryCity}
-              onChange={(city) => onChange({ ...value, deliveryCity: city })}
-              placeholder="Search city…"
-            />
+          {/* City input mode depends on the address's country:
+              - Pakistan: use CityAutocomplete (courier_operational_cities
+                cache + live fallback) to suggest valid courier cities.
+              - Non-Pakistan: courier_operational_cities is 100% Pakistan-
+                sourced, so autocomplete suggestions would be meaningless for
+                a foreign city. Fall back to a plain text Input — the city is
+                treated as free text with no matching/suggestion UI. */}
+          {deliveryCountry === 'Pakistan' ? (
+            courierProviderKey ? (
+              <CityAutocomplete
+                providerKey={courierProviderKey}
+                value={deliveryCity}
+                onChange={(city) => onChange({ ...value, deliveryCity: city })}
+                placeholder="Search city…"
+              />
+            ) : (
+              <CityAutocomplete
+                providerKey="all"
+                value={deliveryCity}
+                onChange={(city) => onChange({ ...value, deliveryCity: city })}
+                placeholder="Search city (all couriers)…"
+              />
+            )
           ) : (
-            <CityAutocomplete
-              providerKey="all"
+            <Input
+              placeholder="Enter city"
               value={deliveryCity}
-              onChange={(city) => onChange({ ...value, deliveryCity: city })}
-              placeholder="Search city (all couriers)…"
+              onChange={(e) => onChange({ ...value, deliveryCity: e.target.value })}
+              className="pl-8"
+              autoComplete="off"
             />
           )}
           {cityError && <p className="text-xs text-destructive">{cityError}</p>}

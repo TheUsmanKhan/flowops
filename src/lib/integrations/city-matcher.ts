@@ -97,14 +97,30 @@ const MAX_SUGGESTIONS = 3
  *   3. Run fuzzy similarity check against all cached cities for that provider,
  *      return top 3 suggestions above the 70% threshold.
  *   4. If nothing meets the threshold, return unresolved with empty suggestions.
+ *
+ * COUNTRY GUARD (Phase 3 — Country System): courier_operational_cities is
+ *   100% Pakistan-sourced data (PostEx/TCS/Leopard only operate in Pakistan).
+ *   Matching a foreign city against it is meaningless. When `country` is
+ *   provided AND it's not "Pakistan", skip all matching tiers and return
+ *   unresolved with no suggestions — the city is treated as plain free text.
+ *   When `country` is "Pakistan" (or omitted — backwards-compatible), all
+ *   existing matching behavior runs unchanged.
  */
 export async function matchCity(
   providerKey: string,
   typedCity: string,
   companyId?: string,
+  country?: string,
 ): Promise<MatchCityResult> {
   const normalizedTyped = typedCity.trim().toLowerCase()
   if (!normalizedTyped) {
+    return { status: 'unresolved', suggestions: [] }
+  }
+
+  // ── Country guard: skip matching for non-Pakistan addresses ──
+  // courier_operational_cities only contains Pakistani cities; a fuzzy
+  // match against it for a foreign city (e.g. "London") would be noise.
+  if (country && country !== 'Pakistan') {
     return { status: 'unresolved', suggestions: [] }
   }
 
@@ -369,13 +385,24 @@ export async function ensureCityCached(
  * @param companyIntegrationId Required for the live fallback (to decrypt
  *   credentials). If not provided, staleness check is skipped and only the
  *   pure local-cache lookup runs (degrades to original behavior).
+ * @param country Optional country NAME. When provided AND not "Pakistan",
+ *   the check short-circuits to `true` (allow booking) — courier_operational_cities
+ *   is 100% Pakistan-sourced, so a foreign city will never match and blocking
+ *   an international booking on that basis would be wrong. The caller (booking
+ *   flow) should still ensure a courier that actually serves the destination
+ *   is chosen, but that's a separate concern from city-cache validation.
  * @returns true if the city is a valid delivery city, false otherwise.
  */
 export async function revalidateCityAtBookingTime(
   providerKey: string,
   cityName: string,
   companyIntegrationId?: string,
+  country?: string,
 ): Promise<boolean> {
+  // ── Country guard: skip Pakistan-courier-city validation for non-Pakistan ──
+  if (country && country !== 'Pakistan') {
+    return true
+  }
   // 3-hour staleness threshold — matches the intended cron sync interval.
   const STALE_THRESHOLD_MS = 3 * 60 * 60 * 1000
 
