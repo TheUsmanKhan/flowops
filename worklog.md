@@ -10276,3 +10276,47 @@ Stage Summary:
   2. ORDER-LEVEL: discountAmount + discountReason (flat amount off the order total after subtotal). Fully wired with UI + persistence + display.
 - Removing unit_price override would NOT remove all discount capability — the order-level discountAmount mechanism remains intact and is the "official" discount path. BUT: unit_price override is the only way to give a per-ITEM discount (e.g. one SKU at a reduced price while others stay full price). If per-item discounting is a real use case, removing unit_price needs a replacement (e.g. per-item discount field, or a percent-off column on OrderItem).
 - Note: Shopify's total_discounts is parsed by the Zod schema but DISCARDED in ingestion — webhook-imported orders lose their discount. Separate gap (not part of this question but worth flagging).
+
+---
+Task ID: REVERT-MARKETS-COUNTRY-2026-08-30
+Agent: main (Z.ai Code)
+Task: User rolled back the Markets + Country systems (and everything built after them — Shopify, discount rework, currency rollup, order-create-view fixes) because the markets system introduced many bugs. Preserve ONLY the Leopard Fix 1 (PostEx guard removal) from this session — Shopify work + everything else post-markets is OK to lose (will be rebuilt later). Self-decision per user: Option B (backup branch + hard reset + cherry-pick Fix 1).
+
+Work Log:
+- Investigated git history. Earliest markets-related commit was a6c19c5 (2026-08-24 11:41 — Market + MarketVariantPricing models added). Pre-markets state = 5d566c9 (2026-08-24 11:02).
+- 35 commits since pre-markets (a6c19c5..355e613). Categorized: 7 MARKETS, 2 CURRENCY, 3 DISCOUNT, 2 SHOPIFY, 2 BOOKING/Fix1, ~10 ORDER-UI (mixed), ~10 other. The Shopify work (Parts 1-3) + Fix 1 were both in the post-markets era.
+- User decision: Shopify work not important (will redo), Leopard Fix 1 important (preserve), everything else post-markets not important.
+- Verified Fix 1 commit (355e613) was self-contained: touched only src/lib/actions/booking.actions.ts + src/app/api/booking-workbench/book/route.ts + worklog.md + dev.pid. The 2 booking files were identical between pre-markets base (5d566c9) and Fix 1's parent (005fb78) — confirmed via `git diff 5d566c9 005fb78 -- <booking files>` returning 0 lines. So cherry-picking Fix 1 onto the pre-markets base would drag in ZERO markets-era code.
+- STEP 1-2: Created safety tag 'pre-revert-snapshot-2026-08-30' (→ 355e613) + backup branch 'backup-pre-revert-2026-08-30' (→ 355e613). All 35 post-markets commits preserved in the backup branch. Nothing truly lost.
+- STEP 3: Hard reset main to 5d566c9 (pre-markets state). main now at 2026-08-24 11:02 base.
+- STEP 4: Re-applied Fix 1 via `git checkout backup-pre-revert-2026-08-30 -- src/lib/actions/booking.actions.ts src/app/api/booking-workbench/book/route.ts` — pulled ONLY the 2 booking files (no worklog/dev.pid noise), staged them.
+- STEP 5: Committed as 97df62d "Fix 1 — Remove PostEx-only guard from booking paths (cherry-picked onto pre-markets base)". main now: 97df62d (Fix 1) → 5d566c9 (pre-markets) → earlier history.
+- Verification (post-reset, post-cherry-pick):
+  * Markets code GONE: src/lib/markets.ts, src/components/markets/, src/lib/exchange-rates.ts, src/lib/analytics/revenue.ts all deleted.
+  * Market + MarketCountry + MarketProduct + MarketVariantPricing + ExchangeRateSnapshot models GONE from prisma/schema.prisma.
+  * Shopify work GONE: src/lib/integrations/ecommerce/shopify.adapter.ts back to 33-line STUB (no real HMAC); src/lib/integrations/webhook-context.ts doesn't exist; connectedByEmployeeId gone from schema + integration.actions.ts; injectedContext refactor gone from order.actions.ts; shopifyOrderWebhookSchema doesn't have country_code/country; webhook route has no X-Shopify-Topic routing.
+  * Core OMS intact: Order, Customer, CompanyIntegration, Employee, InventoryLocation, ExchangeShipment all still in schema. Leopard adapter (29KB real implementation) still present.
+  * Fix 1 preserved: postex guard removed from both booking files (line 124 has NOTE comment, no "Booking not yet implemented" string in either file).
+  * Sidebar Markets tab GONE. /api/markets/ routes GONE.
+- .env: was already correct (Supabase Mumbai URL) after the reset — verified, no restore needed.
+- prisma generate: succeeded (rebuilt client for pre-markets schema).
+- prisma db push --accept-data-loss: succeeded ("Your database is now in sync with your Prisma schema. Done in 11.64s"). Dropped from live Supabase: Market (14 rows), MarketCountry (14), MarketProduct (26), MarketVariantPricing (82), ExchangeRateSnapshot (4), OrderItem.originalUnitPrice column (150 non-null values from discount rework). All data loss expected + desired per user instruction.
+- Live DB verification: markets tables gone, core OMS tables intact, connectedByEmployeeId column gone, 150 orders preserved.
+- Lint: 0 errors, 12 pre-existing warnings (unchanged set — React Hook Form watch() memoization in unrelated product components, all pre-existing).
+- Dev server: started cleanly on port 3000 (killed leftover process from earlier session first). Instrumentation started PostEx poller (but NOT exchange-rate refresh, which was post-markets work — correct).
+- Agent-browser smoke test: http://localhost:3000 renders cleanly. Title "FlowOps — Multi-tenant ERP for Pakistani e-commerce". Login page shows correctly (Welcome back, email/password, Sign in, tagline). Zero page errors. Zero runtime errors in dev.log.
+- Booking route smoke test: GET /api/booking-workbench/book → HTTP 405 (Method Not Allowed — expected for GET on POST-only route; proves the route file compiles + Fix 1 changes load without errors). Compile time 233ms — clean.
+
+Stage Summary:
+- main is now at pre-markets state (2026-08-24 11:02 base) + ONE additional commit: Fix 1 (97df62d, PostEx guard removal for Leopard booking).
+- Markets + Country systems + Currency rollup + Discount rework + Shopify adapter (Parts 1-3) + webhook-context.ts + connectedByEmployeeId + injectedContext refactor + shopifyOrderWebhookSchema country_code/country fix + order-create-view scope-leak fixes — ALL reverted. Preserved in backup-pre-revert-2026-08-30 branch + pre-revert-snapshot-2026-08-30 tag if ever needed.
+- Live Supabase DB synced: markets tables DROPPED (14+14+26+82+4 rows + 150 originalUnitPrice values lost — expected, user wanted markets gone).
+- Core OMS fully functional: 150 orders preserved, all core models intact, Leopard real adapter intact, PostEx real adapter intact, booking workbench intact + now works for Leopard (Fix 1).
+- Dev server runs cleanly, home page + login render without errors, booking route compiles.
+- How to restore anything from backup if ever needed:
+  * View backup: `git log backup-pre-revert-2026-08-30`
+  * Cherry-pick a specific commit: `git cherry-pick <sha>`
+  * Restore everything: `git reset --hard backup-pre-revert-2026-08-30`
+  * View the lost Shopify adapter: `git show backup-pre-revert-2026-08-30:src/lib/integrations/ecommerce/shopify.adapter.ts`
+  * View the lost webhook-context helper: `git show backup-pre-revert-2026-08-30:src/lib/integrations/webhook-context.ts`
+- User can now build Shopify etc. fresh on this clean pre-markets base. Future markets system can be re-built later (the backup branch is the reference for what was tried).
