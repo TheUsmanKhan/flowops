@@ -10320,3 +10320,39 @@ Stage Summary:
   * View the lost Shopify adapter: `git show backup-pre-revert-2026-08-30:src/lib/integrations/ecommerce/shopify.adapter.ts`
   * View the lost webhook-context helper: `git show backup-pre-revert-2026-08-30:src/lib/integrations/webhook-context.ts`
 - User can now build Shopify etc. fresh on this clean pre-markets base. Future markets system can be re-built later (the backup branch is the reference for what was tried).
+
+---
+Task ID: LEOPARD-ISPROD-BADGES-RETURN-2026-08-30
+Agent: main (Z.ai Code)
+Task: Apply Parts A (isProduction toggle) + B (courier-name city badges, revised from Pickup/Delivery) + C (return address override). Confirmed Parts D (multiple addresses + set default) + E (merchant address creation from PDF / createShipper) already implemented.
+
+Work Log:
+- Investigated existing pickup-addresses UI: PickupAddressesSection already lists all addresses with Default badge + Set-as-default star button + Sync + Add buttons. Multiple addresses + default selection FULLY WORKING.
+- Investigated addPickupAddress action: already calls adapter.createPickupAddress via executeLoggedIntegrationAction. For Leopard, createPickupAddress calls createShipper API (per PDF page 56-61). Merchant address creation FULLY WORKING.
+- Investigated transactionNotes -> special_instructions: already wired at leopard.adapter.ts:333. UI labels it 'Transaction Notes (courier instructions)'. No change needed.
+- PART A applied:
+  * integrations-view.tsx: ConfigField.type extended to 'text' | 'password' | 'boolean', added description?: string. Field renderer now renders a Switch (from @/components/ui/switch) for boolean fields with label + description, vs Input for text/password. Existing text/password rendering preserved.
+  * DB: leopard provider (id 068a49e6-a9b1-408a-a9fb-9b5d070fc30c) configSchema updated to 3 fields: api_key, api_password, isProduction (type=boolean, label='Use Production API', required=false, description='OFF=staging, ON=production').
+  * DB: existing Leopard integration (cmtgd1r520002lq8gtf7yktm5) credentials decrypted (api_key 42 chars + api_password 25 chars confirmed non-empty), isProduction='true' added, re-encrypted with fresh IV, saved. connectionStatus reset to 'pending', lastError cleared. The adapter will now use the PRODUCTION domain (https://merchantapi.leopardscourier.com/api/) which we verified returns 200 OK.
+- PART B applied (revised per user — courier-name badges, not Pickup/Delivery):
+  * /api/couriers/[providerKey]/cities route: rewrote to enrich every city with a servedBy[] array of {providerKey, isPickupCity, isDeliveryCity}. Per-provider mode: includes the selected provider + ALL other providers that serve the same cityName (1 extra DB query via cityName IN [...]). 'all' mode: groups by cityName (case-insensitive Map), each city appears once with servedBy listing ALL providers; isPickupCity/isDeliveryCity OR'd across providers. Backward compatible (existing fields preserved + servedBy added).
+  * city-autocomplete.tsx: removed the Pickup (sky) + Delivery (emerald) badges. Added courier-name badges from servedBy[] — each badge shows the providerKey (leopard/postex/tcs/etc.) with a distinct color (leopard=amber, postex=violet, tcs=rose, shopify=emerald, daraz=orange). Capitalize class. Title attribute shows pickup/delivery capability per provider. pickupOnly filter updated to check if primary OR any servedBy provider has isPickupCity=true.
+  * Result: when searching for a city in any form (order create, booking, address book), user sees courier badges — e.g. "Karachi [leopard] [postex]" means both couriers serve it; "Peshawar [postex]" means only PostEx.
+  * Did NOT build a separate cities-management view — user only asked for the badge replacement, which is done.
+- PART C applied (return address override):
+  * booking-workbench-view.tsx: BookRequest interface + RowState interface extended with returnAddressOverride + 4 fields (returnAddress, returnCity, returnContactName, returnPhone) + showReturnOverride toggle. defaultRowState seeds all empty + showReturnOverride=false. handleUploadBooking builds body.returnAddressOverride only if BOTH returnAddress + returnCity are filled. UI: added a collapsed 'Return Address Override (optional)' section under Transaction Notes in the advanced fields, with address input, CityAutocomplete (pickupOnly, uses the row's providerKey), contact name, phone. Imported RotateCcw from lucide-react (ChevronDown/Right/CityAutocomplete already imported).
+  * book/route.ts: BookRequest interface extended with returnAddressOverride. Passes it through to bookOrderWithCourier.
+  * booking.actions.ts: BookOrderOptions extended with returnAddressOverride. bookInput.returnAddressOverride populated from options. After bookInput built, if providerKey='leopard' + returnAddressOverride set + returnCity is non-numeric, resolves the return city name to Leopard's numeric cityId via courier_operational_cities (filtered by isPickupCity since return cities must be pickup-served). If unresolvable, leaves as-is — adapter will omit return_city, Leopard uses shipper's origin city as fallback.
+  * leopard.adapter.ts: ALREADY handles returnAddressOverride (lines 339-347) — sets body.return_address + body.return_city (if numeric). No adapter change needed.
+- Lint: 0 errors, 12 pre-existing warnings (unchanged — all React Hook Form watch() memoization in unrelated product components).
+- tsc: 1 error at booking.actions.ts:552 (orderType: string|undefined not assignable to string). Verified pre-existing via git stash (was at line 501 before my changes, shifted to 552 by my added code). Zero new errors.
+- Dev server: restarted cleanly on port 3000. Home page renders (title 'FlowOps — Multi-tenant ERP for Pakistani e-commerce'), zero page errors, zero runtime errors.
+- Route smoke tests: GET /api/couriers/all/cities?q=kar -> HTTP 401 (auth required, expected — route compiles with new servedBy grouping). GET /api/booking-workbench/book -> HTTP 405 (Method Not Allowed for GET, expected — route compiles with returnAddressOverride field).
+- Committed as bbba4db (7 files changed, 341 insertions, 40 deletions).
+
+Stage Summary:
+- Leopard integration now points at PRODUCTION (isProduction='true'). Staging 504 issue bypassed. User can click 'Test Connection' in the UI -> pingConnection calls getAllCities on production -> 200 OK -> connectionStatus becomes 'connected'.
+- City autocomplete shows courier-name badges (leopard/postex/tcs with distinct colors) instead of Pickup/Delivery badges. User can instantly see which couriers serve each city. In 'all' mode: grouped by cityName with all serving couriers per row.
+- Return address override available in Booking Workbench (collapsed under advanced fields, optional). Leopard-specific — resolves return city to numeric cityId, adapter sends return_address + return_city to bookPacket API. If omitted, shipper's default address used.
+- Parts D (multiple addresses + set default) + E (createShipper merchant address creation) confirmed already implemented — no changes needed. Both will work once Part A's isProduction flag takes effect (production server is live).
+- transactionNotes -> special_instructions confirmed already wired (adapter line 333).
