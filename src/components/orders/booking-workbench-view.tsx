@@ -44,7 +44,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip
 import {
   RefreshCw, Loader2, CheckCircle2, XCircle, Upload, Inbox,
   AlertCircle, Search, AlertTriangle, Truck, ArrowRight,
-  ChevronDown, ChevronRight, StickyNote, FileText, Hash,
+  ChevronDown, ChevronRight, StickyNote, FileText, Hash, RotateCcw,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
@@ -128,6 +128,15 @@ interface BookRequest {
   transactionNotes?: string
   itemDescription?: string
   orderRefNumber?: string
+  // Optional return address override (Leopard-specific — per-booking return
+  // address different from the shipper's default. If omitted, the courier uses
+  // the shipper's registered address as the return address.)
+  returnAddressOverride?: {
+    address: string
+    cityName: string
+    contactPersonName: string
+    phone: string
+  }
 }
 interface BookSuccess {
   success: true
@@ -172,6 +181,16 @@ interface RowState {
   transactionNotes: string
   // Toggle to expand/collapse the per-row courier-reference fields
   showAdvanced: boolean
+  // Toggle to expand/collapse the optional return-address override section
+  showReturnOverride: boolean
+  // Optional return address override fields (Leopard-specific — if filled,
+  // these are passed as return_address + return_city to the courier instead
+  // of the shipper's default. cityName is resolved to a numeric cityId by the
+  // backend for Leopard.)
+  returnAddress: string
+  returnCity: string
+  returnContactName: string
+  returnPhone: string
   checked: boolean
   result: BookResult | null
   isBooking: boolean
@@ -240,6 +259,11 @@ function defaultRowState(row: BookableRow): RowState {
     orderDetail: row.orderDetail ?? '',
     transactionNotes: row.notesForCourier ?? '',
     showAdvanced: false,
+    showReturnOverride: false,
+    returnAddress: '',
+    returnCity: '',
+    returnContactName: '',
+    returnPhone: '',
     checked: false,
     result: null,
     isBooking: false,
@@ -411,6 +435,18 @@ export function BookingWorkbenchView() {
         orderRefNumber: state.orderRefNumber.trim() || undefined,
         itemDescription: state.orderDetail.trim() || undefined,
         transactionNotes: state.transactionNotes.trim() || undefined,
+      }
+      // Optional return address override — only send if the user filled in
+      // BOTH address AND city (the two required fields for Leopard's
+      // return_address + return_city). contactPersonName + phone are
+      // optional but recommended.
+      if (state.returnAddress.trim() && state.returnCity.trim()) {
+        body.returnAddressOverride = {
+          address: state.returnAddress.trim(),
+          cityName: state.returnCity.trim(),
+          contactPersonName: state.returnContactName.trim() || 'Return Contact',
+          phone: state.returnPhone.trim() || '0',
+        }
       }
       if (row.type === 'order') body.orderId = row.id
       else body.shipmentId = row.id
@@ -1032,6 +1068,78 @@ function BookableTableRow({
                 <p className="text-[10px] text-muted-foreground">
                   Free-text instructions appended to the courier booking.
                 </p>
+              </div>
+
+              {/* Return Address Override (optional — Leopard-specific) */}
+              <div className="space-y-1.5 mt-2 pt-2 border-t">
+                <button
+                  type="button"
+                  onClick={() => patch({ showReturnOverride: !state.showReturnOverride })}
+                  className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1 w-full"
+                  disabled={disabled}
+                >
+                  {state.showReturnOverride ? (
+                    <ChevronDown className="h-3 w-3" />
+                  ) : (
+                    <ChevronRight className="h-3 w-3" />
+                  )}
+                  <RotateCcw className="h-3 w-3" />
+                  Return Address Override
+                  <span className="text-amber-700">(optional)</span>
+                </button>
+                {state.showReturnOverride && (
+                  <div className="space-y-2 pt-1">
+                    <p className="text-[10px] text-muted-foreground italic">
+                      Override the shipper&apos;s default return address for this booking. If left
+                      empty, the courier uses the shipper&apos;s registered address as the return
+                      address.
+                    </p>
+                    <div className="space-y-1">
+                      <Label className="text-[10px]">Return Address *</Label>
+                      <Input
+                        value={state.returnAddress}
+                        onChange={(e) => patch({ returnAddress: e.target.value })}
+                        disabled={disabled}
+                        className="h-8 text-xs"
+                        placeholder="House 123, Block A, Gulshan-e-Iqbal"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-[10px]">Return City *</Label>
+                      <CityAutocomplete
+                        providerKey={providerKey}
+                        value={state.returnCity}
+                        onChange={(v) => patch({ returnCity: v })}
+                        disabled={disabled}
+                        placeholder="Search return city..."
+                        pickupOnly
+                        className="w-full"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <Label className="text-[10px]">Contact Name</Label>
+                        <Input
+                          value={state.returnContactName}
+                          onChange={(e) => patch({ returnContactName: e.target.value })}
+                          disabled={disabled}
+                          className="h-8 text-xs"
+                          placeholder="Return contact"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[10px]">Phone</Label>
+                        <Input
+                          value={state.returnPhone}
+                          onChange={(e) => patch({ returnPhone: e.target.value })}
+                          disabled={disabled}
+                          className="h-8 text-xs"
+                          placeholder="03001234567"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </TableCell>

@@ -31,6 +31,14 @@ interface BookRequest {
   itemDescription?: string
   orderRefNumber?: string
   pickupAddressCode?: string
+  // Optional return address override (Leopard-specific — per-booking return
+  // address different from the shipper's default)
+  returnAddressOverride?: {
+    address: string
+    cityName: string
+    contactPersonName: string
+    phone: string
+  }
 }
 
 /**
@@ -89,6 +97,7 @@ export async function POST(req: NextRequest) {
         itemDescription: body.itemDescription,
         orderRefNumber: body.orderRefNumber,
         pickupAddressCode: body.pickupAddressCode,
+        returnAddressOverride: body.returnAddressOverride,
       })
 
       if (!result.success) {

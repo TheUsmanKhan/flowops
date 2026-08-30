@@ -52,6 +52,18 @@ export interface BookOrderOptions {
   itemDescription?: string
   orderRefNumber?: string
   pickupAddressCode?: string
+  /**
+   * Optional return address override (Leopard-specific — per-booking return
+   * address different from the shipper's default). If provided, the adapter
+   * passes return_address + return_city to the courier API. If omitted, the
+   * courier uses the shipper's registered address as the return address.
+   */
+  returnAddressOverride?: {
+    address: string
+    cityName: string
+    contactPersonName: string
+    phone: string
+  }
 }
 
 /**
@@ -322,6 +334,45 @@ export async function bookOrderWithCourier(
       orderType,
       quantity: order.items.reduce((sum, i) => sum + i.quantity, 0),
       transactionNotes,
+      // Return address override (Leopard-specific — per-booking return
+      // address different from the shipper's default). Pass through as-is;
+      // the return city is resolved to a numeric cityId for Leopard BELOW
+      // (same lookup as deliveryCity, but filtered by isPickupCity since
+      // return cities must be pickup-served). For PostEx this field is
+      // ignored by the adapter.
+      returnAddressOverride: options.returnAddressOverride
+        ? {
+            address: options.returnAddressOverride.address,
+            cityName: options.returnAddressOverride.cityName,
+            contactPersonName: options.returnAddressOverride.contactPersonName,
+            phone: options.returnAddressOverride.phone,
+          }
+        : undefined,
+    }
+
+    // ── Resolve return city for Leopard (if returnAddressOverride is set) ──
+    // Leopard requires a numeric city_id for return_city. If the caller passed
+    // a city NAME (from the UI autocomplete), resolve it to the numeric ID.
+    // If we can't resolve it, leave the name as-is — the adapter will omit
+    // return_city and Leopard will use the shipper's origin city as fallback.
+    if (options.returnAddressOverride && providerKey === 'leopard' && bookInput.returnAddressOverride) {
+      const returnCityName = options.returnAddressOverride.cityName
+      if (!/^\d+$/.test(returnCityName)) {
+        const returnCityRecord = await db.courierOperationalCity.findFirst({
+          where: {
+            providerKey: 'leopard',
+            cityName: { equals: returnCityName, mode: 'insensitive' },
+            isPickupCity: true, // return cities must be pickup-served
+          },
+          select: { cityId: true },
+        })
+        if (returnCityRecord?.cityId) {
+          bookInput.returnAddressOverride = {
+            ...bookInput.returnAddressOverride,
+            cityName: returnCityRecord.cityId, // numeric ID as string
+          }
+        }
+      }
     }
 
     // ── Call the courier adapter ──
