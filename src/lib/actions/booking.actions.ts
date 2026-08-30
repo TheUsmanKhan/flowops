@@ -121,12 +121,14 @@ export async function bookOrderWithCourier(
     }
 
     const providerKey = integration.provider.providerKey
-    if (providerKey !== 'postex') {
-      return {
-        success: false,
-        error: `Booking not yet implemented for provider '${providerKey}'.`,
-      }
-    }
+    // NOTE: A hardcoded `providerKey !== 'postex'` guard previously lived here
+    // and blocked ALL non-PostEx couriers from booking. It was removed so the
+    // adapter's own bookShipment() runs for every registered provider. Stub
+    // adapters (e.g. tcs) already throw "not implemented" from their own
+    // bookShipment() — no booking-action-level allowlist is needed. The
+    // provider-specific branches below (Leopard city resolution at ~L281,
+    // PostEx/Leopard sub-status mapping at ~L387-390, slip download at
+    // ~L396) are now reachable for their respective providers.
 
     // ── Fetch the order with items + variant weights + customer ──
     mark('orderLoadStart')

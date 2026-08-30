@@ -121,9 +121,12 @@ async function bookExchangeShipment(
   }
 
   const providerKey = integration.provider.providerKey
-  if (providerKey !== 'postex') {
-    return Response.json({ error: `Booking not yet implemented for provider '${providerKey}'.` }, { status: 400 })
-  }
+  // NOTE: A hardcoded `providerKey !== 'postex'` guard previously lived here
+  // and blocked ALL non-PostEx couriers from booking exchange shipments. It
+  // was removed so the adapter's own bookShipment() runs for every
+  // registered provider. Stub adapters (e.g. tcs) already throw "not
+  // implemented" from their own bookShipment() — no booking-action-level
+  // allowlist is needed.
 
   const shipment = await db.exchangeShipment.findFirst({
     where: { id: body.shipmentId!, companyId },
