@@ -10389,3 +10389,24 @@ Stage Summary:
 - The "Sync" button in the pickup-addresses UI will now work (calls fetchExistingPickupAddresses -> scans 1-200 -> returns 65 unique -> upserts into FlowOps).
 - The "Sync Cities" button also now works (fetchOperationalCities -> 774 cities -> cached).
 - All 65 addresses are visible in the Integrations page -> Leopard card -> Pickup & Return Addresses section.
+
+---
+Task ID: BRIEFING-UPDATE-2026-08-30
+Agent: main (Z.ai Code)
+Task: Update FLOWOPS_BRIEFING.md to reflect all recent work (Leopard fixes, markets revert, courier badges, return address override).
+
+Work Log:
+- Read current briefing structure (1843 lines, 19 sections).
+- Section 12 (Third-Party Services): rewrote Leopard entry with staging+production URLs, isProduction flag, scan-by-ID getShipperDetails fix, return_address/return_city override, credentials form 3 fields, city IDs note. Rewrote Shopify entry as reverted (working implementation in backup-pre-revert-2026-08-30 branch).
+- Section 16 (What's Built): updated Leopard entry, added Booking Workbench return override, added courier-name city badges, added Pickup Address Book. Added 6 new 'Recently Fixed' entries (28-33): Leopard booking unblocked (PostEx guard removal), isProduction toggle, getShipperDetails scan, courier badges, return address override, markets+country revert. Updated Shopify 'Not Built' entry (reverted). Added Markets System to 'Not Built' (reverted, may rebuild later from backup branch). Updated multi-currency note.
+- Section 18 (Known Issues): added .env fix reference (Mumbai Supabase URL from DOCKER.md + start.sh canonical). Added 3 new Leopard issues: staging server down (504), stored credentials may belong to wrong account (TECHCITY test data, not user's real account), getShipperDetails no list-all mode (scan 1-200, MAX_ID adjustable).
+- Section 5 (Database): updated model count 60 -> 66 (after markets revert removed 5 models).
+- Section 19 (Prompt Generation Guide): updated context block with Leopard fixes (production endpoint, isProduction toggle, scan-by-ID), courier-name badges via servedBy[], return address override, booking guard removed, markets+country revert note (backup branch reference), Shopify revert note, Leopard staging down note. Added 3 new 'What NOT to Suggest' entries: don't rebuild markets from scratch (use backup branch), don't use Leopard staging (504), don't suggest list-all shippers for Leopard (API doesn't support it).
+- Committed as 6c0f0e8 (1 file changed, 43 insertions, 17 deletions).
+
+Stage Summary:
+- FLOWOPS_BRIEFING.md now reflects the current state of the codebase post-markets-revert + post-Leopard-fixes.
+- All 6 new fixes (Leopard booking unblock, isProduction toggle, getShipperDetails scan, courier badges, return override, markets revert) are documented.
+- Known issues section captures the 3 Leopard gotchas (staging down, wrong credentials, no list-all).
+- Prompt generation guide updated so future AI assistants know: markets/country/Shopify were reverted (backup branch reference), Leopard staging is down, Leopard doesn't support list-all shippers.
+- Briefing is now the authoritative reference for the current pre-markets base + Leopard fixes state.
