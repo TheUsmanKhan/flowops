@@ -10437,3 +10437,29 @@ Stage Summary:
 - Product selection (ItemsSection): verified CLEAN — no leaks. The 'variants' false positive was a string match inside a Label, not a real variable reference.
 - Country selection: confirmed already present in the form via AddressSelector's CountrySelector. The crash was preventing the user from seeing it.
 - This is the SAME bug class that was fixed in the markets era (passing props to module-level child functions) — the markets revert restored the pre-fix file, so the fix had to be re-applied. The Python analyzer confirms no other leaks exist in the current file.
+
+---
+Task ID: FIX-CITY-BADGE-SCOPING-2026-08-31
+Agent: main (Z.ai Code)
+Task: Fix the courier-badge scoping gap in GET /api/couriers/[providerKey]/cities — servedBy[] was returning ALL providers globally, not filtered to the calling company's connected integrations. Pure display-filter fix in the route handler; do NOT change the underlying CourierOperationalCity model or sync logic.
+
+Work Log:
+- Read the current route implementation (223 lines). Found 3 places where servedBy[] was built without per-company filtering: the 'all' mode query, the per-provider mode (no guard), and the per-provider servedBy enrichment lookup.
+- Confirmed the auth pattern used by sibling courier routes (sync-cities, match-city): getCurrentUser() → db.userSetting.findUnique({ where: { userId } }) → settings.activeCompanyId. Matched this pattern.
+- Applied the fix in 3 parts:
+  1. Added company resolution at the top of the handler: fetch userSetting → companyId → fetch CompanyIntegration rows (where: companyId, isActive=true, connectionStatus='connected') → build connectedProviderKeys Set.
+  2. 'all' mode: short-circuit to empty list if connectedProviderKeys.size === 0; otherwise filter the CourierOperationalCity query with providerKey: { in: connectedProviderKeys } so only connected providers' cities are grouped + shown.
+  3. Per-provider mode: added a guard at the top (after the 'all' branch) — if connectedProviderKeys.has(providerKey) is false, return empty list immediately. This prevents a company from querying a specific courier's cities they haven't connected (e.g. company with no Leopard integration can't fetch Leopard's city cache).
+  4. Per-provider servedBy enrichment: filtered the allProviders lookup with providerKey: { in: connectedProviderKeys } so badges only show connected providers on each city.
+- Updated comments throughout to document the scoping behavior. Did NOT touch the CourierOperationalCity model, the sync logic (city-sync.actions.ts), or the city-matcher. Pure route-handler display-filter change.
+- Lint: 0 errors, 12 pre-existing warnings (unchanged set).
+- tsc: 0 errors in the cities route.
+- Dev server: both /api/couriers/leopard/cities + /api/couriers/all/cities compile cleanly (HTTP 401 unauthenticated — expected without a session; proves the route file loads without syntax/type errors).
+- Committed as a14efc2 (1 file changed, 50 insertions, 2 deletions).
+
+Stage Summary:
+- A company with no Leopard integration (or a still-pending one) will no longer see 'leopard' badges in the city autocomplete — servedBy[] is now scoped to the calling company's active+connected CompanyIntegration rows.
+- 'all' mode: returns empty list if the company has 0 connected courier integrations (no point showing cities they can't book with).
+- Per-provider mode: returns empty list if the company has no connected integration for the requested provider (prevents querying a specific courier's cities they haven't connected).
+- The underlying CourierOperationalCity rows remain global reference data — the model + sync logic are unchanged. This is purely a display filter, scoped to what's shown to the calling company.
+- The auth pattern matches the sibling courier routes (sync-cities, match-city) — getCurrentUser() → userSetting → companyId. No new auth pattern introduced.
