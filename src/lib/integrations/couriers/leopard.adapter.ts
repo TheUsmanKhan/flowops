@@ -632,33 +632,93 @@ export class LeopardAdapter implements CourierAdapter {
     phone1: string
     phone2?: string
   }>> {
-    // getShipperDetails uses GET with query params
-    const params = {
-      api_key: this.apiKey,
-      api_password: this.apiPassword,
-      // request_param and request_value are optional — if omitted, returns all shippers
+    // ── Leopard's getShipperDetails API does NOT support "list all" mode ──
+    // The PDF + live testing both confirm: request_param + request_value are
+    // REQUIRED. The only valid request_param is 'shipment_id', with
+    // request_value=<integer_id>. There's no "return all shippers" endpoint.
+    //
+    // To fetch all shippers for this account, we SCAN IDs 1..MAX in parallel
+    // batches. Leopard returns "Shipper Not Found" (status=0) for IDs that
+    // don't exist, so we silently skip those.
+    //
+    // DEDUP: Leopard accounts often have many duplicate shippers — same name
+    // + phone + address but different shipment_ids (e.g. one merchant was
+    // created 34 times via the portal). We dedupe by (name|phone|address)
+    // and keep the LOWEST shipment_id (oldest). This prevents the FlowOps UI
+    // from showing 34 identical "TECHCITY - Karachi" entries.
+    //
+    // PERFORMANCE: 200 IDs × ~300ms/request, in batches of 20 parallel
+    // = ~3 seconds total on the production server. Acceptable for a Sync
+    // button the user clicks occasionally.
+    //
+    // The caller (syncPickupAddresses action) upserts by providerAddressCode
+    // (shipment_id), so the deduped list maps 1:1 to FlowOps address rows.
+    const MAX_ID = 200
+    const BATCH_SIZE = 20
+
+    const dedup = new Map<string, {
+      shipment_id: number
+      name: string
+      phone: string
+      address: string
+      city_id: string | number
+      contact: string
+    }>()
+
+    for (let start = 1; start <= MAX_ID; start += BATCH_SIZE) {
+      const promises: Promise<void>[] = []
+      for (let id = start; id < start + BATCH_SIZE && id <= MAX_ID; id++) {
+        promises.push(
+          (async () => {
+            const params = {
+              api_key: this.apiKey,
+              api_password: this.apiPassword,
+              request_param: 'shipment_id',
+              request_value: String(id),
+            }
+            try {
+              const resp = await this.getWithParams<LeopardShipper>('getShipperDetails', params)
+              if (resp.status !== 1 && resp.status !== '1') return // not found, skip
+              // Leopard returns a SINGLE shipper object (not an array) in data.
+              // The old code assumed data was an array and would always return
+              // empty — this fix handles the actual single-object response.
+              const s = resp.data
+              if (!s || Array.isArray(s)) return
+              const name = s.shipment_name_eng ?? s.shipment_name ?? 'Shipper'
+              const phone = String(s.shipment_phone ?? '')
+              const address = s.shipment_address ?? ''
+              const city_id = s.shipper_city_id ?? s.city_id ?? ''
+              const contact = s.shipment_contact_person ?? name
+              // Dedup key: name + phone + address, all lowercased + trimmed
+              const key = `${name}|${phone}|${address}`.toLowerCase().trim()
+              if (!dedup.has(key)) {
+                dedup.set(key, {
+                  shipment_id: id, // keep the LOWEST id (first-seen wins)
+                  name,
+                  phone,
+                  address,
+                  city_id,
+                  contact,
+                })
+              }
+            } catch {
+              // network/parse error for this ID — skip, continue with others
+            }
+          })(),
+        )
+      }
+      await Promise.all(promises)
     }
 
-    const resp = await this.getWithParams<LeopardShipper[]>('getShipperDetails', params)
-
-    if (resp.status !== 1 && resp.status !== '1') {
-      throw new Error(this.extractError(resp))
-    }
-
-    const shippers = resp.data
-    if (!shippers || !Array.isArray(shippers)) {
-      return []
-    }
-
-    return shippers.map((s) => ({
+    return Array.from(dedup.values()).map((s) => ({
       providerAddressCode: String(s.shipment_id),
-      label: s.shipment_name_eng ?? s.shipment_name ?? 'Shipper',
-      address: s.shipment_address ?? '',
-      // cityName: we don't have the name, only the city_id. The sync action
-      // will resolve the name from courier_operational_cities.
-      cityName: String(s.shipper_city_id ?? s.city_id ?? ''),
-      contactPersonName: s.shipment_contact_person ?? s.shipment_name_eng ?? s.shipment_name ?? '',
-      phone1: String(s.shipment_phone ?? ''),
+      label: s.name,
+      address: s.address,
+      // cityName: we pass the numeric city_id (as string). The sync action
+      // resolves it to the city name from courier_operational_cities.
+      cityName: String(s.city_id),
+      contactPersonName: s.contact,
+      phone1: s.phone,
     }))
   }
 
