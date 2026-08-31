@@ -1018,6 +1018,8 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
               courierIntegrationId={courierIntegrationId}
               setCourierIntegrationId={setCourierIntegrationId}
               courierIntegrations={courierIntegrations}
+              deliveryCountry={deliveryCountry}
+              setUserPickedCourier={setUserPickedCourier}
               pickupAddressId={pickupAddressId}
               setPickupAddressId={setPickupAddressId}
               pickupAddresses={pickupAddresses}
@@ -1235,6 +1237,13 @@ function CustomerSection({
   courierIntegrationId,
   setCourierIntegrationId,
   courierIntegrations,
+  // deliveryCountry + setUserPickedCourier: required by the country-driven
+  // Self-Fulfilled auto-default UI (lines ~1488-1529). These were leaking
+  // parent-scope state — passed as props to fix the "deliveryCountry is not
+  // defined" + "setUserPickedCourier is not defined" ReferenceError crashes
+  // when rendering the courier-selection block.
+  deliveryCountry,
+  setUserPickedCourier,
   pickupAddressId,
   setPickupAddressId,
   pickupAddresses,
@@ -1276,6 +1285,13 @@ function CustomerSection({
   courierIntegrationId: string
   setCourierIntegrationId: (v: string) => void
   courierIntegrations: Array<{ id: string; connectionName: string; provider: { providerKey: string; providerName: string } }>
+  /** The editable delivery country NAME (e.g. "Pakistan"). Drives the
+   *  Self-Fulfilled auto-default UI when the country isn't Pakistan. */
+  deliveryCountry: string
+  /** Marks that the user has manually chosen a courier — stops the
+   *  country-driven Self-Fulfilled auto-default from overriding their
+   *  explicit selection. */
+  setUserPickedCourier: (v: boolean) => void
   pickupAddressId: string
   setPickupAddressId: (v: string) => void
   pickupAddresses: Array<{ id: string; label: string; address: string; cityName: string; isDefault: boolean }>
