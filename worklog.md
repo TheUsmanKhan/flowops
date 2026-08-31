@@ -10410,3 +10410,30 @@ Stage Summary:
 - Known issues section captures the 3 Leopard gotchas (staging down, wrong credentials, no list-all).
 - Prompt generation guide updated so future AI assistants know: markets/country/Shopify were reverted (backup branch reference), Leopard staging is down, Leopard doesn't support list-all shippers.
 - Briefing is now the authoritative reference for the current pre-markets base + Leopard fixes state.
+
+---
+Task ID: FIX-ORDER-CREATE-SCOPE-LEAK-2026-08-30
+Agent: main (Z.ai Code)
+Task: Fix 'deliveryCountry is not defined' ReferenceError in order-create-view.tsx CustomerSection (recurrence of the markets-era scope-leak bug class after the markets revert restored the pre-markets file). Also check product selection + country selection field.
+
+Work Log:
+- Investigated order-create-view.tsx (2487 lines). Found 6 module-level child components: CustomerSection, CrmStatsWidget, ItemsSection, PaymentSection, ProofFileInput, SummarySection.
+- Wrote a Python scope-leak analyzer to find ALL parent-scope variables used in each child component without being passed as props. Scanned against 47 known parent state variables + setter functions.
+- Findings:
+  * CustomerSection: 2 leaks — deliveryCountry (line 1525, crash) + setUserPickedCourier (line 1492). Both in the courier-selection block (Self-Fulfilled auto-default UI for non-Pakistan countries).
+  * ItemsSection: 1 false positive — 'variants' matched inside a Label string 'Search products / variants' (not a real leak).
+  * CrmStatsWidget, PaymentSection, ProofFileInput, SummarySection: CLEAN (no leaks).
+- Confirmed markets-era variables (enabledProductIdsSet, pricedVariantIdsSet, resolvedMarketName, isMultiMarket, isCountryBlocked, countryBlockReason, fulfillmentChannel) do NOT exist in the pre-markets file (revert removed them all).
+- Country selection field: confirmed it IS in the form via AddressSelector's CountrySelector component (src/components/customers/AddressSelector.tsx:251). Always visible (not gated on manual-entry mode), defaults to Pakistan, translates between alpha-2 codes + country names. No change needed — the user's concern was the crash preventing them from seeing it.
+- Fix: added deliveryCountry + setUserPickedCourier to CustomerSection's props destructure + type signature (with explanatory comments about why they're required), and passed them from the parent call site (lines 1021-1022).
+- Lint: 0 errors, 12 pre-existing warnings (unchanged set).
+- tsc: 0 errors in order-create-view.tsx.
+- Dev server: order-create page compiles + renders without the crash (HTTP 200, no 'deliveryCountry is not defined' or 'CustomerSection' errors in dev log). The earlier 'Fast Refresh had to perform a full reload' warning was from the pre-fix crash — Turbopack recovered after the fix.
+- Committed as c1e7df8 (1 file changed, 16 insertions).
+
+Stage Summary:
+- 'deliveryCountry is not defined' crash FIXED — CustomerSection now receives deliveryCountry + setUserPickedCourier as props.
+- 'setUserPickedCourier is not defined' (would have crashed next) FIXED in the same change.
+- Product selection (ItemsSection): verified CLEAN — no leaks. The 'variants' false positive was a string match inside a Label, not a real variable reference.
+- Country selection: confirmed already present in the form via AddressSelector's CountrySelector. The crash was preventing the user from seeing it.
+- This is the SAME bug class that was fixed in the markets era (passing props to module-level child functions) — the markets revert restored the pre-fix file, so the fix had to be re-applied. The Python analyzer confirms no other leaks exist in the current file.
