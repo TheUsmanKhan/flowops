@@ -57,6 +57,27 @@ export async function GET(
     if (!user) throw new ApiError(401, 'Not authenticated')
     const { providerKey } = await params
 
+    // ── Resolve the caller's active company to scope servedBy[] ──
+    // CourierOperationalCity rows are global reference data (shared across
+    // tenants by design — see city-sync.actions.ts), but the courier-name
+    // badges shown to the user should only reflect providers the CALLING
+    // company has an active, connected integration for. A company with no
+    // Leopard integration (or a still-pending one) should never see a
+    // 'leopard' badge, even though the underlying city rows are shared.
+    //
+    // This matches the auth pattern used by the sibling courier routes
+    // (sync-cities, match-city): getCurrentUser() → userSetting → companyId.
+    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
+    const companyId = settings?.activeCompanyId
+    if (!companyId) throw new ApiError(403, 'No active company')
+    const connectedIntegrations = await db.companyIntegration.findMany({
+      where: { companyId, isActive: true, connectionStatus: 'connected' },
+      select: { provider: { select: { providerKey: true } } },
+    })
+    const connectedProviderKeys = new Set(
+      connectedIntegrations.map((i) => i.provider.providerKey),
+    )
+
     const { searchParams } = new URL(req.url)
     const q = (searchParams.get('q') ?? '').trim()
     const limit = Math.min(parseInt(searchParams.get('limit') ?? '20', 10), 50)
@@ -65,10 +86,20 @@ export async function GET(
     if (providerKey === 'all') {
       // Union mode — search across ALL providers' delivery cities.
       // GROUP by cityName (case-insensitive) — each city appears once with
-      // a servedBy array of ALL providers that serve it.
+      // a servedBy array of ALL providers that serve it AND that the calling
+      // company has an active, connected integration for. A provider the
+      // company hasn't connected (or whose integration is still pending)
+      // is excluded from servedBy[], so its badge never shows up.
+      //
+      // If the company has NO connected courier integrations, return an
+      // empty list immediately (no point querying the cache).
+      if (connectedProviderKeys.size === 0) {
+        return Response.json({ cities: [] })
+      }
       const allCities = await db.courierOperationalCity.findMany({
         where: {
           isDeliveryCity: true,
+          providerKey: { in: Array.from(connectedProviderKeys) },
           ...(q ? { cityName: { contains: q, mode: 'insensitive' as const } } : {}),
         },
         select: {
@@ -126,6 +157,16 @@ export async function GET(
       return Response.json({ cities: Array.from(grouped.values()) })
     }
 
+    // ── Per-provider mode guard ──
+    // If the calling company has NO active, connected integration for the
+    // requested providerKey, return an empty list. This prevents a company
+    // from querying a specific courier's cities they haven't connected
+    // (e.g. a company with no Leopard integration shouldn't see Leopard's
+    // city cache, even though the rows are globally shared).
+    if (!connectedProviderKeys.has(providerKey)) {
+      return Response.json({ cities: [] })
+    }
+
     const where = {
       providerKey,
       isDeliveryCity: true,
@@ -171,7 +212,10 @@ export async function GET(
     // ── Enrich with servedBy: which OTHER providers also serve each city ──
     // For each city in the result, look up ALL providers that have the same
     // cityName (case-insensitive). This powers the courier-name badges in the
-    // UI (e.g. "this city is served by Leopard AND PostEx").
+    // UI (e.g. "this city is served by Leopard AND PostEx"). FILTERED to only
+    // include providers the calling company has connected — a provider the
+    // company hasn't connected won't appear in servedBy[] even if it serves
+    // the same city globally.
     let citiesWithCoverage: Array<{
       id: string
       cityName: string
@@ -196,6 +240,10 @@ export async function GET(
         where: {
           cityName: { in: cityNames, mode: 'insensitive' as const },
           isDeliveryCity: true,
+          // Scope to providers the calling company has connected — same
+          // filter as the 'all' mode above. A provider the company hasn't
+          // connected won't show up as a badge on any city.
+          providerKey: { in: Array.from(connectedProviderKeys) },
         },
         select: { cityName: true, providerKey: true, isPickupCity: true, isDeliveryCity: true },
       })
