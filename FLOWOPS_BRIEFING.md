@@ -217,7 +217,7 @@ APP_URL="http://localhost:3000"
 
 > ⚠️ **KNOWN ISSUE**: The `.env` file keeps reverting to SQLite (`file:./db/custom.db`). The `predev` script guards against this — it refuses to start if `DATABASE_URL` doesn't start with `postgresql://`. Always verify `.env` before starting the server.
 
-### Schema: 60 Prisma Models
+### Schema: 66 Prisma Models
 
 #### Auth / Org / Tenancy (10 models)
 | Model | Purpose |
@@ -1457,25 +1457,31 @@ All creation flows use `useIdempotentMutation()` from `src/hooks/use-idempotent-
 - **Known issue**: Bulk tracking API intermittently returns HTTP 400 "Required List parameter 'TrackingNumbers' is not present" — handled with single-track fallback
 
 ### Courier: Leopard
-- **API Base**: `https://www.leopardscourierspk.com/services`
-- **Auth**: `api_key` + `api_password` in body/query
+- **API Base (staging)**: `https://merchantapistaging.leopardscourier.com/api/`
+- **API Base (production)**: `https://merchantapi.leopardscourier.com/api/`
+- **Domain selection**: per-integration `isProduction` flag in encrypted credentials (`'true'` = production, else staging). Configurable via the "Use Production API" toggle in the credentials form. Staging server is currently returning 504 Gateway Timeout — production is the only working endpoint.
+- **Auth**: `api_key` + `api_password` in body (POST) or query (GET)
 - **Endpoints used**:
-  - `POST /bookPacket/format/json/` — book shipment
+  - `POST /bookPacket/format/json/` — book shipment (accepts optional `return_address` + `return_city` for per-booking return override; if omitted, shipper's address used)
   - `POST /trackBookedPacket/format/json/` — track shipment
   - `POST /cancelBookedPackets/format/json/` — cancel shipment
-  - `POST /getAllCities/format/json/` — fetch all cities (returns `shipment_type` array per city)
-  - `POST /createShipper/format/json/` — create pickup address (shipper)
-  - `GET /getShipperDetails/format/json/` — fetch existing shippers
+  - `POST /getAllCities/format/json/` — fetch all cities (returns `shipment_type` array per city; used by `pingConnection` + Sync Cities)
+  - `POST /createShipper/format/json/` — create pickup address (shipper); returns `shipment_id`
+  - `GET /getShipperDetails/format/json/` — fetch shipper by `shipment_id` (does NOT support "list all" — requires `request_param=shipment_id` + `request_value=<id>`)
+- **getShipperDetails quirk (FIXED)**: the adapter's `fetchExistingPickupAddresses()` now scans `shipment_id` 1-200 in parallel batches of 20 + dedupes by (name|phone|address) keeping the lowest ID. Leopard accounts often have many duplicate shippers (e.g. one merchant created 34 times). The scan takes ~5 seconds on production.
 - **Status field**: 2-character codes (RC, SP, DP, AR, AC, DV, PN1, PN2, RO, RN1, RN2, NR, RW, DW, RS, DR)
 - **No HMAC webhook signature** — security relies on `webhookEndpointId` URL routing
+- **City IDs**: numeric integers (not names). Adapter resolves city names → numeric IDs via `courier_operational_cities` cache before booking.
+- **Credentials form**: 3 fields — `api_key` (password), `api_password` (password), `isProduction` (boolean toggle, default OFF/staging)
 
 ### Courier: TCS (NOT integrated)
 - **Status**: `framework_ready` (stub)
 - **Needed**: Real API integration
 
-### E-commerce: Shopify (NOT integrated)
+### E-commerce: Shopify (NOT integrated — reverted)
 - **Status**: `framework_ready` (stub)
-- **Partial work**: `createOrderFromShopifyWebhook()` exists in `order.actions.ts` but the Shopify adapter is a stub
+- **History**: A full Shopify adapter (HMAC-SHA256 webhook verification, parseWebhookOrder, injected WorkspaceContext for unauthenticated webhooks, X-Shopify-Topic routing, financial_status guard, idempotency) was built in a prior session but then **reverted** when the Markets + Country systems were rolled back (the adapter depended on markets/country code). All that work is preserved in the `backup-pre-revert-2026-08-30` git branch if needed for reference. The current codebase has the original stub adapter + the original `createOrderFromShopifyWebhook()` (which still has the markets-era 3-gate logic that no longer works post-revert).
+- **To rebuild**: restore from backup branch OR rebuild fresh on the clean pre-markets base. The backup branch has the working HMAC verification + webhook-context helper as reference.
 
 ### E-commerce: Daraz (NOT integrated)
 - **Status**: `framework_ready` (stub)
@@ -1576,9 +1582,9 @@ The sandbox exposes one port (81) via Caddy:
 12. **Cycle Counts** — create, count, adjust
 13. **Exchanges** — request, verify, dispatch replacement, settle price difference
 14. **Exchange Shipments** — reserve, dispatch, RTO, cancel
-15. **Courier Integrations** — PostEx (live), Leopard (live)
-16. **Booking Workbench** — book orders/shipments, load sheets
-17. **City Management** — sync, search, auto-fetch missing cities, fuzzy match, aliases
+15. **Courier Integrations** — PostEx (live), Leopard (live — production endpoint, scan-by-ID shipper fetch, isProduction toggle)
+16. **Booking Workbench** — book orders/shipments, load sheets, return address override (Leopard)
+17. **City Management** — sync, search, auto-fetch missing cities, fuzzy match, aliases, **courier-name badges** (city autocomplete shows which couriers serve each city — leopard/postex/tcs with distinct colors)
 18. **Courier Status Tracking** — auto-poller (30min), bulk+single fallback, status mapping, auto-dispatch/deliver/RTO
 19. **Webhook Receiver** — generic, PostEx + Leopard
 20. **Order Scan Module** — 6 scan modes, daily reports
@@ -1588,6 +1594,7 @@ The sandbox exposes one port (81) via Caddy:
 24. **Settings** — company, organization, order workflow, integrations
 25. **Inventory-OMS Connection** — reserve on confirm, deduct on dispatch, unreserve on cancel, restock on RTO (recently fixed)
 26. **Docker Deployment** — multi-stage Dockerfile (dev + prod), docker-compose files, local DB for testing, PostEx poller toggle (see DOCKER.md)
+27. **Pickup Address Book** — multiple addresses per courier, set default, sync from courier API, add new (calls `createShipper` for Leopard)
 
 ### 🔧 In-Process / Recently Fixed
 
@@ -1618,11 +1625,17 @@ The sandbox exposes one port (81) via Caddy:
 25. **Request payload logging** (FIXED) — `IntegrationActionLog.requestPayload` now populated for all outbound courier calls (book_shipment, cancel_shipment, track_shipment, etc.)
 26. **DB-level uniqueness** (FIXED) — partial unique index on `Invitation(companyId, invitedEmail) WHERE status='pending'`; `@@unique([companyId, providerId])` on `CompanyIntegration`
 27. **Button cursor fix** (FIXED) — `cursor-pointer` on all buttons; `disabled:cursor-not-allowed` replaces `disabled:pointer-events-none`
+28. **Leopard booking unblocked** (FIXED) — removed the hardcoded `providerKey !== 'postex'` guard in `bookOrderWithCourier()` + `bookExchangeShipment()` that blocked ALL non-PostEx couriers from booking. Leopard bookings now reach the adapter (which was already correct — checks `resp.status` + `track_number` properly). Stub adapters (tcs) still throw "not implemented" from their own methods.
+29. **Leopard isProduction toggle** (FIXED) — credentials form now exposes a "Use Production API" boolean toggle (default OFF/staging). Leopard's staging server returns 504 Gateway Timeout; production works. Existing integrations can be switched by editing credentials. The adapter reads `credentials.isProduction === 'true'` to select the domain.
+30. **Leopard getShipperDetails scan** (FIXED) — Leopard's API does NOT support "list all shippers" (requires `request_param=shipment_id` + `request_value=<id>`). The adapter now scans `shipment_id` 1-200 in parallel batches of 20 + dedupes by (name|phone|address). ~5 seconds on production.
+31. **Courier-name city badges** (FIXED) — city autocomplete dropdown now shows courier-name badges (leopard=amber, postex=violet, tcs=rose, etc.) instead of Pickup/Delivery badges. A city served by both Leopard + PostEx shows both badges. The `/api/couriers/[providerKey]/cities` route returns a `servedBy[]` array per city.
+32. **Return address override** (FIXED) — Booking Workbench advanced fields now include an optional "Return Address Override" section (collapsed by default). Leopard-specific — per-booking return address different from the shipper's default. Backend resolves the return city name → numeric cityId before calling the adapter.
+33. **Markets + Country system reverted** (FIXED) — the Markets system (C1-C3, D1-D3), Country system (alpha-2 codes, verification, blocking), Currency rollup (F1), Discount rework, and all post-markets-era work (Shopify adapter, order-create-view fixes) were rolled back because the markets system introduced many bugs. `git reset --hard 5d566c9` (pre-markets base, 2026-08-24 11:02) + cherry-picked only the Leopard booking guard removal (Fix 1). All reverted work preserved in `backup-pre-revert-2026-08-30` branch + `pre-revert-snapshot-2026-08-30` tag. Live DB synced (markets tables dropped: 14 markets, 26 market-products, 82 market-variant-pricing, 4 exchange rates, 150 originalUnitPrice values).
 
 ### ❌ Not Yet Built / Needed
 
 1. **TCS Courier Integration** — adapter is a stub, needs real API integration
-2. **Shopify E-commerce Integration** — adapter is a stub; `createOrderFromShopifyWebhook()` exists but the adapter that parses webhooks isn't implemented
+2. **Shopify E-commerce Integration** — adapter is a stub (was built + reverted with the markets system; see §12 + the `backup-pre-revert-2026-08-30` branch for the prior working implementation). `createOrderFromShopifyWebhook()` exists but has stale markets-era 3-gate logic that no longer works post-revert.
 3. **Daraz E-commerce Integration** — adapter is a stub
 4. **External Scheduler for Cron Jobs** — Vercel cron doesn't fire on this server. Options:
    - External service (cron-job.org, GitHub Actions) hitting the cron endpoints
@@ -1633,7 +1646,7 @@ The sandbox exposes one port (81) via Caddy:
 8. **Finance Module** — `FINANCE_VIEW` / `FINANCE_MANAGE` permissions exist but no finance module is built
 9. **Real-time Notifications** — no websocket/notification system (mini-services/postex-poller/ is a stub; examples/websocket/ is reference only)
 10. **Mobile App** — no mobile app (web-only, but responsive)
-11. **Multi-currency** — `baseCurrency` field exists but no currency conversion logic
+11. **Multi-currency** — `baseCurrency` field exists but no currency conversion logic. The markets-era currency rollup (F1) was reverted; if multi-currency is needed again, restore from `backup-pre-revert-2026-08-30` or rebuild.
 12. **Tax Management** — `taxAmount` / `taxLabel` fields exist but no tax calculation engine
 13. **Email Notifications** — no email sending (forgot-password is a stub)
 14. **SMS Notifications** — no SMS integration
@@ -1641,7 +1654,8 @@ The sandbox exposes one port (81) via Caddy:
 16. **Attribute Value Rules** — `AttributeValueRule` model exists but no rule engine UI
 17. **Advanced Inventory Features** — reorder points (`reorderPoint` / `reorderQuantity` fields exist) but no low-stock alerts
 18. **Data Export** — `REPORTS_EXPORT` permission exists but no CSV/Excel export
-19. ~~**`/api/auth/me` performance**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN. Latency reduced from ~696ms to ~210ms (67% faster). See §11.7.
+19. **Markets System** (reverted, may rebuild later) — the regional pricing / multi-market system (C1-C3, D1-D3) was reverted due to bugs. If needed again, restore from `backup-pre-revert-2026-08-30` branch (which has the full implementation: Market model, MarketProduct, MarketVariantPricing, 3-gate enforcement, markets UI, currency rollup). The backup also has the Country system (alpha-2 codes, verification, blocking).
+20. ~~**`/api/auth/me` performance**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN. Latency reduced from ~696ms to ~210ms (67% faster). See §11.7.
 
     > **Note (deferred, not forgotten)**: Server-side in-memory caching for `/api/auth/me` was considered and deliberately deferred after the raw-SQL JOIN fix brought warm requests to ~210ms. At current traffic levels, the marginal gain (shaving ~210ms to ~1-5ms only on repeat calls within a short window) didn't justify the added invalidation complexity (workspace switch, termination, role change, future isBlocked flag). Revisit this alongside introducing Redis, once either (a) a second server replica is deployed, or (b) concurrent DB read load from this endpoint becomes measurable.
 
@@ -1727,7 +1741,7 @@ import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-valid
 ## 18. Known Issues & Gotchas
 
 ### Environment
-1. **`.env` reverts to SQLite** — the `predev` script guards against this, but always verify before starting. If it happens, restore from DOCKER.md reference or git history.
+1. **`.env` reverts to SQLite** — the `predev` script guards against this, but always verify before starting. If it happens, restore from DOCKER.md reference (Mumbai Supabase URL: `postgresql://postgres.gobwxqkzfulbwhzbbsdj:123%40Usman123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres` — both `DATABASE_URL` + `DIRECT_URL` set to this) or git history. The `start.sh` script also has the reference URL baked in as the canonical fix.
 2. **DB latency** — Mumbai region (~100ms per query from sandbox). Performance optimizations (fire-and-forget, parallel queries, single-JOIN getWorkspace) have been applied. `/api/auth/me` is now ~210ms (was 500-1000ms) — FIXED (see item 14 for details).
 3. **Turbopack instability** — dev server can hang during compilation in the sandbox (memory issue). Clear `.next/` cache and restart.
 4. **Hydration mismatch from browser extensions** — Grammarly injects `data-gr-ext-installed` + `data-new-gr-c-s-check-loaded` attributes into `<body>`. Fixed via `suppressHydrationWarning` on `<body>` in `layout.tsx`. If new hydration errors appear, check for other browser-extension-injected attributes.
@@ -1739,6 +1753,9 @@ import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-valid
 6. **PostEx bulk tracking API** — intermittently returns HTTP 400. Handled with single-track fallback
 7. **Vercel cron doesn't fire** — on long-lived server. In-process poller added for PostEx (30min). Other crons (city sync, scan reports, Leopard safety-net) need manual triggering or external scheduler. The `ENABLE_IN_PROCESS_POLLER` env var (default `true`) can disable the poller for multi-replica deployments.
 8. **PostEx API lag** — parcels may be physically picked up but PostEx's API still shows "Booked" for hours. This is a PostEx issue, not FlowOps
+9. **Leopard staging server is down** — `merchantapistaging.leopardscourier.com` returns 504 Gateway Timeout (HTML, not JSON). All Leopard integrations should use `isProduction: 'true'` (production domain `merchantapi.leopardscourier.com` works — 200 OK, 102KB JSON from getAllCities, ~300ms latency). The credentials form exposes a "Use Production API" toggle for this.
+10. **Leopard stored credentials may belong to wrong account** — the current Leopard integration (`cmtgd1r520002lq8gtf7yktm5`) has credentials that return 65 shippers (mostly TECHCITY test data) — NOT the user's real account (which has 2 shippers). The user must disconnect + reconnect with their real Leopard portal credentials. The adapter's scan-by-ID fix is correct — it returns whatever shippers the credentials have access to.
+11. **Leopard getShipperDetails has no "list all" mode** — requires `request_param=shipment_id` + `request_value=<id>`. The adapter scans IDs 1-200 in parallel batches of 20 (~5 seconds). If an account has shippers with IDs > 200, they won't be found. The `MAX_ID` constant in `leopard.adapter.ts:656` can be increased if needed.
 
 ### Schema
 9. **SQL functions must be applied manually** — `generate_order_number()`, `normalize_phone()`, etc. are NOT in the Prisma schema. They must be applied via raw SQL to the DB (they were lost during DB migration). A consolidated file `supabase/functions-only.sql` contains all 23 functions + 2 sequences + 12 triggers.
@@ -1770,7 +1787,10 @@ When generating prompts for AI assistants working on FlowOps, use these patterns
 - API: 148 routes under src/app/api/, all use getWorkspace() + requirePermission()
 - Actions: 18 files under src/lib/actions/ contain all business logic
 - Inventory: src/lib/inventory.ts is the ONLY way to modify InventoryPool
-- Couriers: PostEx (live) + Leopard (live) + TCS (stub)
+- Couriers: PostEx (live) + Leopard (live — production endpoint, isProduction toggle, scan-by-ID shipper fetch) + TCS (stub)
+- City autocomplete: shows courier-name badges (leopard=amber, postex=violet, tcs=rose) per city via servedBy[] array
+- Booking: PostEx guard removed — all registered couriers can book (stub adapters throw "not implemented" from their own methods)
+- Return address override: Leopard-specific, per-booking (optional, in Booking Workbench advanced fields)
 - Fire-and-forget: insertAuditLog/insertMetricEvent return void
 - Performance: First Load JS 1,070 KB (code-split into 95 chunks). React.memo on leaf components.
 - CRITICAL: Do NOT add module-scope import() maps — use dynamic() in page.tsx only (causes duplicate chunks)
@@ -1778,6 +1798,9 @@ When generating prompts for AI assistants working on FlowOps, use these patterns
 - Phone validation: libphonenumber-js (isValidPhoneFormat) — client + server defense in depth
 - City propagation: corrected cities propagate to CustomerAddress at order creation + booking time
 - IntegrationActionLog: now logs requestPayload (not just responsePayload) for all outbound calls
+- Markets + Country system: REVERTED (2026-08-30) — pre-markets base at commit 5d566c9. All reverted work in backup-pre-revert-2026-08-30 branch. Do NOT suggest markets/country features without checking the backup branch first.
+- Shopify adapter: REVERTED to stub (was built + reverted with markets). Working implementation in backup-pre-revert-2026-08-30 branch.
+- Leopard staging server: DOWN (504 Gateway Timeout). Use isProduction='true' for all Leopard integrations.
 ```
 
 ### Module-Specific Context
@@ -1817,6 +1840,9 @@ Report the root cause without fixing it yet."
 - Don't suggest `React.Table` — FlowOps uses shadcn/ui `Table` component (`src/components/ui/table.tsx`)
 - Don't use check-then-create patterns for dedup — use DB-level unique constraints + catch P2002
 - Don't leave requestPayload null in executeLoggedIntegrationAction — always pass the business data
+- Don't suggest rebuilding the Markets + Country system from scratch — the full implementation is in `backup-pre-revert-2026-08-30` branch (restore from there if needed)
+- Don't suggest Leopard staging endpoint — it's down (504). Always use production (`isProduction: 'true'`)
+- Don't suggest "list all shippers" for Leopard — the API doesn't support it. Use the scan-by-ID approach (adapter already does this).
 
 ---
 
