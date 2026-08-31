@@ -10463,3 +10463,22 @@ Stage Summary:
 - Per-provider mode: returns empty list if the company has no connected integration for the requested provider (prevents querying a specific courier's cities they haven't connected).
 - The underlying CourierOperationalCity rows remain global reference data — the model + sync logic are unchanged. This is purely a display filter, scoped to what's shown to the calling company.
 - The auth pattern matches the sibling courier routes (sync-cities, match-city) — getCurrentUser() → userSetting → companyId. No new auth pattern introduced.
+
+---
+Task ID: FIX-ENV-ENCRYPTION-KEY-2026-08-31
+Agent: main (Z.ai Code)
+Task: User reported 'INTEGRATION_ENCRYPTION_KEY must be set to a 32-byte hex string (64 hex characters)' error when saving Leopard API key. Investigate + fix.
+
+Work Log:
+- Checked .env: only had DATABASE_URL + DIRECT_URL. INTEGRATION_ENCRYPTION_KEY was MISSING entirely.
+- Verified the existing Leopard integration's credentials were encrypted with the key documented in FLOWOPS_BRIEFING.md line 214 (1fbf4fd279d9476183566c878e38907764feac7e7843d16ac60065720a451951) — decrypt succeeded with that key, confirming it's the correct value.
+- Root cause: .env was missing all 4 required env vars beyond DATABASE_URL/DIRECT_URL (INTEGRATION_ENCRYPTION_KEY, SESSION_SECRET, CRON_SECRET, APP_URL per FLOWOPS_BRIEFING.md §5). The dev server couldn't decrypt any credentials.
+- Fix: added all 4 missing env vars to .env using the values from FLOWOPS_BRIEFING.md §5. The INTEGRATION_ENCRYPTION_KEY matches the existing encrypted credentials (so nothing breaks — existing integrations still decrypt).
+- Restarted dev server (pkill + setsid) to pick up the new env vars. Verified: no INTEGRATION_ENCRYPTION_KEY errors in dev.log.
+- Committed the .env update.
+
+Stage Summary:
+- 'INTEGRATION_ENCRYPTION_KEY must be set...' error FIXED.
+- .env now has all 6 required env vars (DATABASE_URL, DIRECT_URL, INTEGRATION_ENCRYPTION_KEY, SESSION_SECRET, CRON_SECRET, APP_URL).
+- The key value matches existing encrypted credentials — no re-encryption needed, no data loss.
+- User can now save/update Leopard credentials without the encryption error. The remaining 'Invalid API Key' error from Leopard's API (separate issue) is a credentials-value problem, not an encryption problem.
