@@ -206,7 +206,7 @@ export const companyPricingSchema = z.object({
 export type CompanyPricingInput = z.infer<typeof companyPricingSchema>
 
 export const setCompanyPricingSchema = z.object({
-  pricing: z.array(companyPricingSchema).min(1, 'At least one pricing entry is required'),
+  pricing: z.array(companyPricingSchema),
 })
 export type SetCompanyPricingInput = z.infer<typeof setCompanyPricingSchema>
 

@@ -32,12 +32,30 @@ export { createCustomerSchema, type CreateCustomerInput }
 export const orderItemInputSchema = z.object({
   org_variant_id: z.string().min(1, 'Variant is required'),
   quantity: z.number().int().positive('Quantity must be a positive integer'),
-  unit_price: z
-    .number()
-    .min(0, 'Unit price must be 0 or positive')
-    // Auto-filled from company_variant_pricing but overridable for manual
-    // orders (e.g. wholesale discounts)
-    .optional(),
+  // Per-item discount (Phase: Discount Rework). unit_price is NO LONGER
+  // accepted from the client — the server resolves originalUnitPrice from
+  // CompanyVariantPricing, then applies the discount to compute the final
+  // unitPrice. Clients can only request a discount (percentage or fixed),
+  // never override the base price directly.
+  discount_type: z.enum(['percentage', 'fixed']).optional(),
+  discount_value: z.number().min(0).optional(),
+}).refine((data) => {
+  // If discount_type is provided, discount_value must also be provided
+  if (data.discount_type !== undefined && data.discount_value === undefined) {
+    return false
+  }
+  // If discount_value is provided, discount_type must also be provided
+  if (data.discount_value !== undefined && data.discount_type === undefined) {
+    return false
+  }
+  // percentage must be 0-100
+  if (data.discount_type === 'percentage' && data.discount_value !== undefined) {
+    return data.discount_value >= 0 && data.discount_value <= 100
+  }
+  return true
+}, {
+  message: 'Invalid discount: type and value must both be provided; percentage must be 0-100',
+  path: ['discount_type'],
 })
 export type OrderItemInput = z.infer<typeof orderItemInputSchema>
 
@@ -76,12 +94,13 @@ export const createManualOrderSchema = z
     // Delivery (always required — the order's editable snapshot)
     delivery_address: z.string().min(2, 'Delivery address is required'),
     delivery_city: z.string().min(2, 'Delivery city is required'),
-    // Country (Phase: Country System). Optional — defaults to "Pakistan"
+    // Country (Phase: Country System). Optional — defaults to "PK"
     // server-side when absent (so existing callers that don't send it don't
-    // break). Stores the country NAME (e.g. "Pakistan"), NOT an alpha-2
-    // code — consistent with CustomerAddress.country. The frontend
-    // AddressSelector always sends this; the default is a safety net.
-    delivery_country: z.string().max(100).optional(),
+    // break). Stores the ISO 3166-1 alpha-2 CODE (e.g. "PK", "GB"), NOT the
+    // country name — consistent with CustomerAddress.country + Shopify's
+    // default_address.country_code. The frontend AddressSelector always sends
+    // this; the default is a safety net.
+    delivery_country: z.string().max(2).optional(),
     // Logistics
     courier_name: z.string().max(100).optional().or(z.literal('')),
     courier_company_integration_id: z.string().optional().or(z.literal('')),
@@ -102,6 +121,11 @@ export const createManualOrderSchema = z
     // (i.e. used_customer_address_id is null), persist delivery_address as
     // a new customer_addresses row after order creation.
     save_address_for_next_time: z.boolean().optional().default(false),
+    // Fulfillment channel (Phase B1 — Self-Fulfilled Channel). 'courier' =
+    // booked via a connected courier. 'self_fulfilled' = merchant handles
+    // delivery themselves (generates an SF-YYYY-NNNNN reference, skips
+    // auto-booking + city-courier-matching). Defaults to 'courier'.
+    fulfillment_channel: z.enum(['courier', 'self_fulfilled']).default('courier'),
   })
   .refine((data) => data.customer_id || data.new_customer, {
     message: 'Either customer_id (existing) or new_customer is required',
@@ -216,6 +240,16 @@ export const shopifyOrderWebhookSchema = z.object({
         address1: z.string().nullable().optional(),
         city: z.string().nullable().optional(),
         province: z.string().nullable().optional(),
+        // Country (Phase: Country System). Shopify sends BOTH:
+        //   - country_code: ISO 3166-1 alpha-2 (e.g. "PK", "GB") — preferred
+        //   - country:      full name (e.g. "Pakistan") — fallback
+        // createOrderFromShopifyWebhook reads both (prefer country_code,
+        // fall back to country via countryNameToCode, then Company.countryCode).
+        // Declared here so the typed payload exposes them and the contract
+        // is explicit (previously these fields were read but not declared,
+        // so the type system didn't surface them).
+        country_code: z.string().nullable().optional(),
+        country: z.string().nullable().optional(),
       })
       .optional(),
   }),

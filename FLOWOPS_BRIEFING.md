@@ -2,7 +2,7 @@
 
 > **Purpose**: This document is the single source of truth for the FlowOps ERP system. It covers every module, the API system, dependencies, database schema, frontend, backend, third-party services, what's built, what's in process, and what needs to be built. Use this to train AI assistants so they can generate correct, context-aware prompts.
 >
-> **Last Updated**: August 2026 (updated after idempotency system, courier cancel fix, city propagation, phone validation, request payload logging, LCP/perf optimization, products table, hydration fixes)
+> **Last Updated**: August 2026 (updated after international phone validation, country system, self-fulfilled channel, discount rework, audit fixes, order-create scope-leak fixes, slip PDF binary response fix)
 > **App URL**: Single-page app at `/` (Next.js 16 App Router)
 > **Stack**: Next.js 16 + React 19 + TypeScript + Prisma 6 + Supabase PostgreSQL + Tailwind 4 + shadcn/ui
 >
@@ -40,7 +40,7 @@
 
 **Core value proposition**: One system to manage products, inventory, orders, customers, and courier bookings — replacing the spreadsheets + WhatsApp + manual courier portal workflow that Pakistani e-commerce sellers currently use.
 
-**Scale**: 60 Prisma models, 148 API routes, ~153 React components (101 non-UI + 52 shadcn/ui), 21 SQL migrations, 30 permission keys, 2 live courier integrations.
+**Scale**: 63 Prisma models, 155+ API routes, ~160 React components (108 non-UI + 52 shadcn/ui), 21 SQL migrations, 30 permission keys, 2 live courier integrations, 4 cron jobs.
 
 **Performance posture** (as of latest optimization pass):
 - First Load JS: **1,070 KB** (down from 3,148 KB baseline — 66% reduction via code-splitting)
@@ -142,7 +142,9 @@ Every transition has inventory side-effects:
 ### Other Key Libraries
 | Library | Purpose |
 |---|---|
-| `@react-pdf/renderer` | Scan report PDF generation |
+| `@react-pdf/renderer` | Scan report + internal slip PDF generation |
+| `jsbarcode` | CODE128 barcode generation for self-fulfilled slip PDFs |
+| `sharp` | Image processing (SVG → PNG conversion for barcodes) |
 | `recharts` | Dashboard charts |
 | `date-fns` | Date utilities |
 | `bcryptjs` | Password hashing (actually uses Node `crypto.scrypt` in `src/lib/auth.ts`) |
@@ -217,7 +219,7 @@ APP_URL="http://localhost:3000"
 
 > ⚠️ **KNOWN ISSUE**: The `.env` file keeps reverting to SQLite (`file:./db/custom.db`). The `predev` script guards against this — it refuses to start if `DATABASE_URL` doesn't start with `postgresql://`. Always verify `.env` before starting the server.
 
-### Schema: 66 Prisma Models
+### Schema: 68 Prisma Models
 
 #### Auth / Org / Tenancy (10 models)
 | Model | Purpose |
@@ -242,12 +244,12 @@ APP_URL="http://localhost:3000"
 | `OrgAttributeValue` | Attribute value |
 | `AttributeValueRule` | Rules over attribute values |
 | `OrgProduct` | Org-level product template |
-| `OrgProductVariant` | Org-level variant (SKU, weight, cost, fulfillmentType) |
+| `OrgProductVariant` | Org-level variant (SKU, weight, cost, fulfillmentType, isActive toggle) |
 | `OrgProductImage` | Product image |
 | `OrgProductBundle` | Product bundle composition |
 | `SelectiveProductAccess` | Which companies can subscribe to which org products |
 | `CompanyProductSetting` | Company-level product subscription state |
-| `CompanyVariantPricing` | Company-specific pricing override |
+| `CompanyVariantPricing` | Company-specific pricing |
 | `ProductFulfillmentCost` | Per-product fulfillment cost |
 | `ReturnedStitchedInventory` | Returned-stitched inventory bucket (for made-to-order) |
 
@@ -274,16 +276,16 @@ APP_URL="http://localhost:3000"
 | Model | Purpose |
 |---|---|
 | `Customer` | Customer master (org-level, shared across companies) |
-| `CustomerPhone` | Multi-phone (normalized + raw). Has `isValidFormat Boolean @default(true)` field — false = phone came from external platform with unvalidated format (e.g. from external platform). Order creation shows amber warning banner for `isValidFormat=false`. |
-| `CustomerAddress` | Multi-address |
-| `CustomerExternalIdentity` | External ID mapping (Shopify/Daraz customer ID) |
+| `CustomerPhone` | Multi-phone (normalized + raw). Has `isValidFormat Boolean @default(true)` field — false = phone came from external platform with unvalidated format. International numbers validated via libphonenumber-js (NOT normalize_phone() SQL). |
+| `CustomerAddress` | Multi-address. Has `country String @default("PK")` — ISO 3166-1 alpha-2 code. Populated via CountrySelector. |
+| `CustomerExternalIdentity` | External ID mapping (Shopify/Daraz customer ID). Now accepts optional `country` param. |
 
 #### OMS / Orders (3 models)
 | Model | Purpose |
 |---|---|
 | `CompanyOrderSetting` | Company-level order workflow config (requireOrderConfirmation, courierBookingMode, defaultCourier, defaultDispatchLocation) |
-| `Order` | Order header — LARGE model (status, payment, courier, tracking, timestamps, totals) |
-| `OrderItem` | Order line item (fulfillmentStatus, fulfillmentTypeSnapshot, reservedLocationId, productionOrderId) |
+| `Order` | Order header — LARGE model (status, payment, courier, tracking, timestamps, totals, deliveryCountry, fulfillmentChannel, selfFulfilledReferenceNumber) |
+| `OrderItem` | Order line item (fulfillmentStatus, fulfillmentTypeSnapshot, reservedLocationId, productionOrderId, originalUnitPrice, discountType, discountValue) |
 
 **Order.status enum**: `pending | confirmed | partially_backordered | processing | dispatched | delivered | rto | cancelled | refunded`
 
@@ -330,13 +332,15 @@ APP_URL="http://localhost:3000"
 | Function | Purpose |
 |---|---|
 | `generate_order_number(companyId TEXT)` | Generates `ORD-{year}-{seq}` per company per year |
-| `generate_exchange_shipment_number()` | Generates `EXCH-{year}-{seq}` |
+| `generate_self_fulfilled_reference(companyId TEXT)` | Generates `SF-{year}-{seq}` per company per year (MAX-based, per-company) |
+| `generate_exchange_shipment_number()` | Generates `EXCH-{year}-{seq}` (global sequence) |
 | `generate_draft_number()` | Generates draft numbers |
-| `normalize_phone(phone TEXT)` | Normalizes Pakistani phone numbers |
+| `normalize_phone(phone TEXT)` | Normalizes Pakistani phone numbers. International pass-through: `+`-prefixed non-PK numbers returned unchanged (fix prevents mangling of UK/UAE/US numbers). |
 | `recompute_order_status(orderId)` | Recomputes order status from items |
 | RLS helpers | `get_active_company_id()`, `get_active_org_id()`, `has_permission()`, `is_elevated_employee()` |
 | Triggers | `backfill_order_timestamps()`, `update_*_updatedAt()` |
 | `invitation_pending_email_unique` (partial index) | UNIQUE INDEX on `Invitation(companyId, invitedEmail) WHERE status='pending'` — prevents duplicate pending invites. Applied manually (not in Prisma schema). Documented in `supabase/functions-only.sql`. |
+| `match_or_create_customer(...)` | Customer matching SQL function (4-layer: exact_identity, phone_match, email_match, create). Now accepts 7 params including `p_country` (alpha-2 code). |
 
 ### Migrations
 21 SQL migration files in `supabase/migrations/` (numbered 001–021, with 015 and 017 missing). These are reference SQL — the live schema is managed via `prisma db push`.
@@ -915,6 +919,11 @@ Permissions use dot-notation `module.action`:
 | POST/GET | `/api/cron/poll-leopard-safety-net` | `0 */12 * * *` (12h) | Leopard safety-net poll |
 | POST/GET | `/api/cron/generate-scan-reports` | `0 1 * * *` (daily 1AM) | Generate scan reports |
 
+#### Self-Fulfilled (1)
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/orders/[id]/self-fulfilled-slip` | Generate internal slip PDF with CODE128 barcode |
+
 ---
 
 ## 9. Backend Server Actions
@@ -1457,31 +1466,25 @@ All creation flows use `useIdempotentMutation()` from `src/hooks/use-idempotent-
 - **Known issue**: Bulk tracking API intermittently returns HTTP 400 "Required List parameter 'TrackingNumbers' is not present" — handled with single-track fallback
 
 ### Courier: Leopard
-- **API Base (staging)**: `https://merchantapistaging.leopardscourier.com/api/`
-- **API Base (production)**: `https://merchantapi.leopardscourier.com/api/`
-- **Domain selection**: per-integration `isProduction` flag in encrypted credentials (`'true'` = production, else staging). Configurable via the "Use Production API" toggle in the credentials form. Staging server is currently returning 504 Gateway Timeout — production is the only working endpoint.
-- **Auth**: `api_key` + `api_password` in body (POST) or query (GET)
+- **API Base**: `https://www.leopardscourierspk.com/services`
+- **Auth**: `api_key` + `api_password` in body/query
 - **Endpoints used**:
-  - `POST /bookPacket/format/json/` — book shipment (accepts optional `return_address` + `return_city` for per-booking return override; if omitted, shipper's address used)
+  - `POST /bookPacket/format/json/` — book shipment
   - `POST /trackBookedPacket/format/json/` — track shipment
   - `POST /cancelBookedPackets/format/json/` — cancel shipment
-  - `POST /getAllCities/format/json/` — fetch all cities (returns `shipment_type` array per city; used by `pingConnection` + Sync Cities)
-  - `POST /createShipper/format/json/` — create pickup address (shipper); returns `shipment_id`
-  - `GET /getShipperDetails/format/json/` — fetch shipper by `shipment_id` (does NOT support "list all" — requires `request_param=shipment_id` + `request_value=<id>`)
-- **getShipperDetails quirk (FIXED)**: the adapter's `fetchExistingPickupAddresses()` now scans `shipment_id` 1-200 in parallel batches of 20 + dedupes by (name|phone|address) keeping the lowest ID. Leopard accounts often have many duplicate shippers (e.g. one merchant created 34 times). The scan takes ~5 seconds on production.
+  - `POST /getAllCities/format/json/` — fetch all cities (returns `shipment_type` array per city)
+  - `POST /createShipper/format/json/` — create pickup address (shipper)
+  - `GET /getShipperDetails/format/json/` — fetch existing shippers
 - **Status field**: 2-character codes (RC, SP, DP, AR, AC, DV, PN1, PN2, RO, RN1, RN2, NR, RW, DW, RS, DR)
 - **No HMAC webhook signature** — security relies on `webhookEndpointId` URL routing
-- **City IDs**: numeric integers (not names). Adapter resolves city names → numeric IDs via `courier_operational_cities` cache before booking.
-- **Credentials form**: 3 fields — `api_key` (password), `api_password` (password), `isProduction` (boolean toggle, default OFF/staging)
 
 ### Courier: TCS (NOT integrated)
 - **Status**: `framework_ready` (stub)
 - **Needed**: Real API integration
 
-### E-commerce: Shopify (NOT integrated — reverted)
+### E-commerce: Shopify (NOT integrated)
 - **Status**: `framework_ready` (stub)
-- **History**: A full Shopify adapter (HMAC-SHA256 webhook verification, parseWebhookOrder, injected WorkspaceContext for unauthenticated webhooks, X-Shopify-Topic routing, financial_status guard, idempotency) was built in a prior session but then **reverted** when the Markets + Country systems were rolled back (the adapter depended on markets/country code). All that work is preserved in the `backup-pre-revert-2026-08-30` git branch if needed for reference. The current codebase has the original stub adapter + the original `createOrderFromShopifyWebhook()` (which still has the markets-era 3-gate logic that no longer works post-revert).
-- **To rebuild**: restore from backup branch OR rebuild fresh on the clean pre-markets base. The backup branch has the working HMAC verification + webhook-context helper as reference.
+- **Partial work**: `createOrderFromShopifyWebhook()` exists in `order.actions.ts` but the Shopify adapter is a stub
 
 ### E-commerce: Daraz (NOT integrated)
 - **Status**: `framework_ready` (stub)
@@ -1495,7 +1498,7 @@ All creation flows use `useIdempotentMutation()` from `src/hooks/use-idempotent-
 ## 13. Background Jobs & Cron
 
 ### Vercel Cron (`vercel.json`)
-4 cron schedules — but **only work on Vercel deployments** (the app currently runs on a long-lived Bun server, so these DON'T fire automatically):
+5. **Vercel cron** (`vercel.json`) — 5 cron schedules — but **only work on Vercel deployments** (the app currently runs on a long-lived Bun server, so these DON'T fire automatically):
 
 | Schedule | Path | Purpose |
 |---|---|---|
@@ -1505,11 +1508,9 @@ All creation flows use `useIdempotentMutation()` from `src/hooks/use-idempotent-
 | `0 1 * * *` (daily 1AM) | `/api/cron/generate-scan-reports` | Generate scan reports |
 
 ### In-Process Poller (`instrumentation.ts`)
-Since the app runs on a long-lived server (not Vercel), the PostEx status poller is started in-process via Next.js's instrumentation hook:
-- **Schedule**: every 30 minutes (matches vercel.json)
-- **Initial delay**: 1 minute after server boot
-- **Mechanism**: `setInterval` calling `pollPostExOrderStatuses()`
-- **Guarded**: only runs in `nodejs` runtime, only once per process
+Since the app runs on a long-lived server (not Vercel), a background job is started in-process via Next.js's instrumentation hook:
+- **PostEx status poller**: every 30 minutes (matches vercel.json). Guarded by `ENABLE_IN_PROCESS_POLLER` env var (default `true`).
+- Uses dynamic `import()` inside async closure (avoids bundling at build time). Singleton guard via module-level boolean flag.
 
 ### Manual Triggers
 All cron routes accept GET (manual) + POST (cron-triggered with `x-cron-secret` header). The `CRON_SECRET` is `flowops-cron-secret-v1-change-in-production`.
@@ -1522,9 +1523,13 @@ All cron routes accept GET (manual) + POST (cron-triggered with `x-cron-secret` 
 | Path | Purpose |
 |---|---|
 | `public/uploads/company-logos/` | Company logo images |
+| `public/uploads/scan-reports/` | Scan report PDFs |
+| `public/uploads/payslips/` | Payslip PDFs |
+| `public/uploads/self-fulfilled-slips/` | Self-fulfilled internal slip PDFs (with CODE128 barcode) |
+| `public/uploads/load-sheets/` | PostEx load sheet PDFs |
 | `public/uploads/courier-slips/` | Downloaded courier slip PDFs (stored locally, not trusted to external URLs) |
-| `public/uploads/scan-reports/` | Daily scan report PDFs |
 | `public/uploads/product-images/` | Product images (uploaded via `/api/products/[id]/images`) |
+| `public/uploads/payment-proofs/` | Payment proof screenshot uploads |
 
 ### File Upload Pattern
 - Images: `sharp` for processing → stored in `public/uploads/`
@@ -1582,9 +1587,9 @@ The sandbox exposes one port (81) via Caddy:
 12. **Cycle Counts** — create, count, adjust
 13. **Exchanges** — request, verify, dispatch replacement, settle price difference
 14. **Exchange Shipments** — reserve, dispatch, RTO, cancel
-15. **Courier Integrations** — PostEx (live), Leopard (live — production endpoint, scan-by-ID shipper fetch, isProduction toggle)
-16. **Booking Workbench** — book orders/shipments, load sheets, return address override (Leopard)
-17. **City Management** — sync, search, auto-fetch missing cities, fuzzy match, aliases, **courier-name badges** (city autocomplete shows which couriers serve each city — leopard/postex/tcs with distinct colors)
+15. **Courier Integrations** — PostEx (live), Leopard (live)
+16. **Booking Workbench** — book orders/shipments, load sheets
+17. **City Management** — sync, search, auto-fetch missing cities, fuzzy match, aliases
 18. **Courier Status Tracking** — auto-poller (30min), bulk+single fallback, status mapping, auto-dispatch/deliver/RTO
 19. **Webhook Receiver** — generic, PostEx + Leopard
 20. **Order Scan Module** — 6 scan modes, daily reports
@@ -1594,7 +1599,10 @@ The sandbox exposes one port (81) via Caddy:
 24. **Settings** — company, organization, order workflow, integrations
 25. **Inventory-OMS Connection** — reserve on confirm, deduct on dispatch, unreserve on cancel, restock on RTO (recently fixed)
 26. **Docker Deployment** — multi-stage Dockerfile (dev + prod), docker-compose files, local DB for testing, PostEx poller toggle (see DOCKER.md)
-27. **Pickup Address Book** — multiple addresses per courier, set default, sync from courier API, add new (calls `createShipper` for Leopard)
+27. **International Phone Validation** — libphonenumber-js for international numbers (UK, UAE, US, etc.); normalize_phone() SQL has pass-through fix for `+`-prefixed non-PK numbers; manual creation blocks on invalid; external flags isValidFormat=false
+28. **Country System** — CustomerAddress.country + Order.deliveryCountry (alpha-2 codes, @default("PK")); CountrySelector in AddressSelector + CreateCustomerForm; non-PK addresses skip courier city-matching; phone validation uses address country as a hint (not a hard rule); Shopify fallback: country_code → country name → Company.countryCode
+29. **Self-Fulfilled Channel** — Order.fulfillmentChannel ('courier' | 'self_fulfilled'); SF-YYYY-NNNNN per-company reference via SQL function; auto-defaults to self_fulfilled for non-PK (overridable); skips auto-booking + city-matching; internal slip PDF with CODE128 barcode via jsbarcode → SVG → sharp → PNG; processScan() resolves both trackingNumber + selfFulfilledReferenceNumber
+30. **Discount Rework** — per-item discount (percentage/fixed) with validation; Order.discountAmount/discountReason (order-wide) works independently; Shopify total_discounts now captured
 
 ### 🔧 In-Process / Recently Fixed
 
@@ -1625,18 +1633,13 @@ The sandbox exposes one port (81) via Caddy:
 25. **Request payload logging** (FIXED) — `IntegrationActionLog.requestPayload` now populated for all outbound courier calls (book_shipment, cancel_shipment, track_shipment, etc.)
 26. **DB-level uniqueness** (FIXED) — partial unique index on `Invitation(companyId, invitedEmail) WHERE status='pending'`; `@@unique([companyId, providerId])` on `CompanyIntegration`
 27. **Button cursor fix** (FIXED) — `cursor-pointer` on all buttons; `disabled:cursor-not-allowed` replaces `disabled:pointer-events-none`
-28. **Leopard booking unblocked** (FIXED) — removed the hardcoded `providerKey !== 'postex'` guard in `bookOrderWithCourier()` + `bookExchangeShipment()` that blocked ALL non-PostEx couriers from booking. Leopard bookings now reach the adapter (which was already correct — checks `resp.status` + `track_number` properly). Stub adapters (tcs) still throw "not implemented" from their own methods.
-29. **Leopard isProduction toggle** (FIXED) — credentials form now exposes a "Use Production API" boolean toggle (default OFF/staging). Leopard's staging server returns 504 Gateway Timeout; production works. Existing integrations can be switched by editing credentials. The adapter reads `credentials.isProduction === 'true'` to select the domain.
-30. **Leopard getShipperDetails scan** (FIXED) — Leopard's API does NOT support "list all shippers" (requires `request_param=shipment_id` + `request_value=<id>`). The adapter now scans `shipment_id` 1-200 in parallel batches of 20 + dedupes by (name|phone|address). ~5 seconds on production.
-31. **Courier-name city badges** (FIXED) — city autocomplete dropdown now shows courier-name badges (leopard=amber, postex=violet, tcs=rose, etc.) instead of Pickup/Delivery badges. A city served by both Leopard + PostEx shows both badges. The `/api/couriers/[providerKey]/cities` route returns a `servedBy[]` array per city.
-32. **Return address override** (FIXED) — Booking Workbench advanced fields now include an optional "Return Address Override" section (collapsed by default). Leopard-specific — per-booking return address different from the shipper's default. Backend resolves the return city name → numeric cityId before calling the adapter.
-33. **Markets + Country system reverted** (FIXED) — the Markets system (C1-C3, D1-D3), Country system (alpha-2 codes, verification, blocking), Currency rollup (F1), Discount rework, and all post-markets-era work (Shopify adapter, order-create-view fixes) were rolled back because the markets system introduced many bugs. `git reset --hard 5d566c9` (pre-markets base, 2026-08-24 11:02) + cherry-picked only the Leopard booking guard removal (Fix 1). All reverted work preserved in `backup-pre-revert-2026-08-30` branch + `pre-revert-snapshot-2026-08-30` tag. Live DB synced (markets tables dropped: 14 markets, 26 market-products, 82 market-variant-pricing, 4 exchange rates, 150 originalUnitPrice values).
+28. **Self-fulfilled slip PDF 404 fix** (FIXED) — The slip PDF API previously returned a URL path (`/uploads/self-fulfilled-slips/...`) and the frontend did `window.open(url)` to open it, but the Caddy gateway didn't serve the static file correctly (404). Fixed: the API now returns the PDF as a **binary response** (`Content-Type: application/pdf`), and the frontend uses `fetch()` → `response.blob()` → `URL.createObjectURL(blob)` → `window.open(blobUrl)` — no static file serving needed, no 404 possible.
 
 ### ❌ Not Yet Built / Needed
 
 1. **TCS Courier Integration** — adapter is a stub, needs real API integration
-2. **Shopify E-commerce Integration** — adapter is a stub (was built + reverted with the markets system; see §12 + the `backup-pre-revert-2026-08-30` branch for the prior working implementation). `createOrderFromShopifyWebhook()` exists but has stale markets-era 3-gate logic that no longer works post-revert.
-3. **Daraz E-commerce Integration** — adapter is a stub
+2. **Shopify E-commerce Integration** — `createOrderFromShopifyWebhook()` is fully implemented (with total_discounts capture). The webhook parsing + customer matching works. However, the adapter that parses Shopify webhooks into the `ShopifyOrderWebhook` payload shape is a stub — needs real webhook signature verification + payload mapping.
+3. **Daraz E-commerce Integration** — adapter is a stub (`notImplemented`). No order creation path.
 4. **External Scheduler for Cron Jobs** — Vercel cron doesn't fire on this server. Options:
    - External service (cron-job.org, GitHub Actions) hitting the cron endpoints
    - OR deploy to Vercel (where the cron config works natively)
@@ -1646,7 +1649,7 @@ The sandbox exposes one port (81) via Caddy:
 8. **Finance Module** — `FINANCE_VIEW` / `FINANCE_MANAGE` permissions exist but no finance module is built
 9. **Real-time Notifications** — no websocket/notification system (mini-services/postex-poller/ is a stub; examples/websocket/ is reference only)
 10. **Mobile App** — no mobile app (web-only, but responsive)
-11. **Multi-currency** — `baseCurrency` field exists but no currency conversion logic. The markets-era currency rollup (F1) was reverted; if multi-currency is needed again, restore from `backup-pre-revert-2026-08-30` or rebuild.
+11. **Multi-currency** — not yet built; per-currency revenue rollup + exchange rate conversion (display-only, never touches stored prices).
 12. **Tax Management** — `taxAmount` / `taxLabel` fields exist but no tax calculation engine
 13. **Email Notifications** — no email sending (forgot-password is a stub)
 14. **SMS Notifications** — no SMS integration
@@ -1654,8 +1657,7 @@ The sandbox exposes one port (81) via Caddy:
 16. **Attribute Value Rules** — `AttributeValueRule` model exists but no rule engine UI
 17. **Advanced Inventory Features** — reorder points (`reorderPoint` / `reorderQuantity` fields exist) but no low-stock alerts
 18. **Data Export** — `REPORTS_EXPORT` permission exists but no CSV/Excel export
-19. **Markets System** (reverted, may rebuild later) — the regional pricing / multi-market system (C1-C3, D1-D3) was reverted due to bugs. If needed again, restore from `backup-pre-revert-2026-08-30` branch (which has the full implementation: Market model, MarketProduct, MarketVariantPricing, 3-gate enforcement, markets UI, currency rollup). The backup also has the Country system (alpha-2 codes, verification, blocking).
-20. ~~**`/api/auth/me` performance**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN. Latency reduced from ~696ms to ~210ms (67% faster). See §11.7.
+19. ~~**`/api/auth/me` performance**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN. Latency reduced from ~696ms to ~210ms (67% faster). See §11.7.
 
     > **Note (deferred, not forgotten)**: Server-side in-memory caching for `/api/auth/me` was considered and deliberately deferred after the raw-SQL JOIN fix brought warm requests to ~210ms. At current traffic levels, the marginal gain (shaving ~210ms to ~1-5ms only on repeat calls within a short window) didn't justify the added invalidation complexity (workspace switch, termination, role change, future isBlocked flag). Revisit this alongside introducing Redis, once either (a) a second server replica is deployed, or (b) concurrent DB read load from this endpoint becomes measurable.
 
@@ -1733,15 +1735,37 @@ const { result, wasReplay } = await withIdempotency({
 // Client-side: isValidPhoneFormat(phone) blocks submission
 // Server-side: validateAndNormalizePhone(phone) returns { isValid, normalized }
 // External platform: isValidFormat=false on CustomerPhone row (not blocked)
+// International: normalize_phone() SQL has pass-through fix for + non-PK numbers
+// matchOrCreateExternalCustomer: pre-normalizes international numbers via libphonenumber-js before SQL call
 import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-validation'
 ```
+
+### Country System
+- `CustomerAddress.country` + `Order.deliveryCountry` store ISO 3166-1 alpha-2 codes (e.g. "PK", "GB"), defaulting to "PK"
+- `CountrySelector` component (reusable) returns alpha-2 codes directly
+- Non-PK addresses skip courier city-matching (matchCity, revalidateCityAtBookingTime, validateCustomerAddressCity all early-return for non-PK)
+- Phone validation uses the address's country as a HINT for no-`+`-prefix numbers (never a hard rule)
+- Shopify fallback: `country_code → countryNameToCode(country) → customer.addresses[0].country → Company.countryCode → 'PK'`
+
+### Self-Fulfilled Channel
+- `Order.fulfillmentChannel`: `'courier' | 'self_fulfilled'` (default `'courier'`)
+- Auto-defaults to `'self_fulfilled'` when `deliveryCountry !== 'PK'` (always overridable)
+- `generate_self_fulfilled_reference(companyId)` SQL: per-company MAX-based `SF-YYYY-NNNNN`
+- Self-fulfilled orders skip auto-booking + city-courier-matching entirely
+- Internal slip PDF: jsbarcode CODE128 barcode → SVG → sharp → PNG → @react-pdf/renderer
+- `processScan()` resolves via `OR: [trackingNumber, selfFulfilledReferenceNumber]`
+
+### Pricing Resolution (Discount)
+- Per-item discount (`discountType`/`discountValue`): percentage (0-100) or fixed (≤ originalUnitPrice), clamped at 0
+- `unitPrice = originalUnitPrice - discount` (final charged price)
+- `Order.discountAmount`/`discountReason` (order-wide flat discount) works independently
 
 ---
 
 ## 18. Known Issues & Gotchas
 
 ### Environment
-1. **`.env` reverts to SQLite** — the `predev` script guards against this, but always verify before starting. If it happens, restore from DOCKER.md reference (Mumbai Supabase URL: `postgresql://postgres.gobwxqkzfulbwhzbbsdj:123%40Usman123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres` — both `DATABASE_URL` + `DIRECT_URL` set to this) or git history. The `start.sh` script also has the reference URL baked in as the canonical fix.
+1. **`.env` reverts to SQLite** — the `predev` script guards against this, but always verify before starting. If it happens, restore from DOCKER.md reference or git history.
 2. **DB latency** — Mumbai region (~100ms per query from sandbox). Performance optimizations (fire-and-forget, parallel queries, single-JOIN getWorkspace) have been applied. `/api/auth/me` is now ~210ms (was 500-1000ms) — FIXED (see item 14 for details).
 3. **Turbopack instability** — dev server can hang during compilation in the sandbox (memory issue). Clear `.next/` cache and restart.
 4. **Hydration mismatch from browser extensions** — Grammarly injects `data-gr-ext-installed` + `data-new-gr-c-s-check-loaded` attributes into `<body>`. Fixed via `suppressHydrationWarning` on `<body>` in `layout.tsx`. If new hydration errors appear, check for other browser-extension-injected attributes.
@@ -1751,24 +1775,22 @@ import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-valid
 
 ### Integrations
 6. **PostEx bulk tracking API** — intermittently returns HTTP 400. Handled with single-track fallback
-7. **Vercel cron doesn't fire** — on long-lived server. In-process poller added for PostEx (30min). Other crons (city sync, scan reports, Leopard safety-net) need manual triggering or external scheduler. The `ENABLE_IN_PROCESS_POLLER` env var (default `true`) can disable the poller for multi-replica deployments.
+7. **Vercel cron doesn't fire** — on long-lived server. In-process poller added for PostEx (30min). Other crons (city sync, scan reports, Leopard safety-net) need manual triggering or external scheduler. The `ENABLE_IN_PROCESS_POLLER` env var (default `true`) can disable for multi-replica deployments.
 8. **PostEx API lag** — parcels may be physically picked up but PostEx's API still shows "Booked" for hours. This is a PostEx issue, not FlowOps
-9. **Leopard staging server is down** — `merchantapistaging.leopardscourier.com` returns 504 Gateway Timeout (HTML, not JSON). All Leopard integrations should use `isProduction: 'true'` (production domain `merchantapi.leopardscourier.com` works — 200 OK, 102KB JSON from getAllCities, ~300ms latency). The credentials form exposes a "Use Production API" toggle for this.
-10. **Leopard stored credentials may belong to wrong account** — the current Leopard integration (`cmtgd1r520002lq8gtf7yktm5`) has credentials that return 65 shippers (mostly TECHCITY test data) — NOT the user's real account (which has 2 shippers). The user must disconnect + reconnect with their real Leopard portal credentials. The adapter's scan-by-ID fix is correct — it returns whatever shippers the credentials have access to.
-11. **Leopard getShipperDetails has no "list all" mode** — requires `request_param=shipment_id` + `request_value=<id>`. The adapter scans IDs 1-200 in parallel batches of 20 (~5 seconds). If an account has shippers with IDs > 200, they won't be found. The `MAX_ID` constant in `leopard.adapter.ts:656` can be increased if needed.
 
 ### Schema
-9. **SQL functions must be applied manually** — `generate_order_number()`, `normalize_phone()`, etc. are NOT in the Prisma schema. They must be applied via raw SQL to the DB (they were lost during DB migration). A consolidated file `supabase/functions-only.sql` contains all 23 functions + 2 sequences + 12 triggers.
+9. **SQL functions must be applied manually** — `generate_order_number()`, `generate_self_fulfilled_reference()`, `normalize_phone()` (with international pass-through fix), `match_or_create_customer()` (now 7 params), etc. are NOT in the Prisma schema. They must be applied via raw SQL to the DB. A consolidated file `supabase/functions-only.sql` contains all 24+ functions + 2 sequences + 12 triggers + 1 partial unique index (`invitation_pending_email_unique`).
 10. **No DB-level RLS** — all multi-tenant isolation is in the app layer. A bug in `getWorkspace()` or a missing `companyId` filter could leak data across tenants
 11. **No `available` column** — `available = onHand - reserved` is computed in app code every time
+12. **Order-create child components are module-level functions** — `CustomerSection`, `ItemsSection`, `PaymentSection`, etc. in `order-create-view.tsx` are declared at the module level (NOT closures inside `OrderCreateView`). Any new state variable used in these child components MUST be passed as a prop — referencing it directly will compile fine but crash at runtime with `ReferenceError`. TypeScript does NOT catch this. When adding new state/hooks to `OrderCreateView` that child components need, always: (1) add it to the child's destructured props, (2) add it to the child's type definition, (3) pass it from `<OrderCreateView>` to `<ChildComponent>`.
 
 ### Performance
-12. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
-13. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
-14. ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1 + Phase 2)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw query JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. See `src/lib/session-payload.ts`. Phase 2: client-side stale-while-revalidate caching added via TanStack Query (`refetchOnWindowFocus: true` scoped to session query only — see §11.1). Server-side in-memory cache deliberately deferred (see §16 item 19 note).
-15. **Booking-time city corrections were not persisted** (FIXED) — `order.update` in `bookOrderWithCourier()` now includes `deliveryCity` + `deliveryAddress`. Pre-fix, corrected cities were sent to the courier API but not saved on the Order row. Historical data cannot be backfilled (requestPayload was null for pre-fix logs). Going forward, requestPayload is logged for all outbound calls.
-16. **Employee invite had race window** (FIXED) — was check-then-create (findFirst then create). Now has partial unique index `invitation_pending_email_unique` on `(companyId, invitedEmail) WHERE status='pending'` + catches P2002 constraint violation.
-17. **Company integration had race window** (FIXED) — was find-then-create. Now has `@@unique([companyId, providerId])` + catches P2002 → re-fetches + reactivates.
+13. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
+14. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
+15. ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1 + Phase 2)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw query JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. See `src/lib/session-payload.ts`. Phase 2: client-side stale-while-revalidate caching added via TanStack Query (`refetchOnWindowFocus: true` scoped to session query only — see §11.1). Server-side in-memory cache deliberately deferred (see §16 item 19 note).
+16. **Booking-time city corrections were not persisted** (FIXED) — `order.update` in `bookOrderWithCourier()` now includes `deliveryCity` + `deliveryAddress`. Pre-fix, corrected cities were sent to the courier API but not saved on the Order row. Historical data cannot be backfilled (requestPayload was null for pre-fix logs). Going forward, requestPayload is logged for all outbound calls.
+17. **Employee invite had race window** (FIXED) — was check-then-create (findFirst then create). Now has partial unique index `invitation_pending_email_unique` on `(companyId, invitedEmail) WHERE status='pending'` + catches P2002 constraint violation.
+18. **Company integration had race window** (FIXED) — was find-then-create. Now has `@@unique([companyId, providerId])` + catches P2002 → re-fetches + reactivates.
 
 ---
 
@@ -1783,24 +1805,21 @@ When generating prompts for AI assistants working on FlowOps, use these patterns
 - Multi-tenant: Organization → Company → Employee
 - Auth: custom HMAC sessions (not NextAuth), dual-channel (Bearer + cookie)
 - State: Zustand (client) + TanStack Query (server) — ALL 70 data-fetching views use useQuery/useMutation
-- Single SPA route at /, ~62 named view states, all lazy-loaded via next/dynamic (ssr: false)
-- API: 148 routes under src/app/api/, all use getWorkspace() + requirePermission()
+- Single SPA route at /, ~70 named view states, all lazy-loaded via next/dynamic (ssr: false)
+- API: 170+ routes under src/app/api/, all use getWorkspace() + requirePermission()
 - Actions: 18 files under src/lib/actions/ contain all business logic
 - Inventory: src/lib/inventory.ts is the ONLY way to modify InventoryPool
-- Couriers: PostEx (live) + Leopard (live — production endpoint, isProduction toggle, scan-by-ID shipper fetch) + TCS (stub)
-- City autocomplete: shows courier-name badges (leopard=amber, postex=violet, tcs=rose) per city via servedBy[] array
-- Booking: PostEx guard removed — all registered couriers can book (stub adapters throw "not implemented" from their own methods)
-- Return address override: Leopard-specific, per-booking (optional, in Booking Workbench advanced fields)
+- Couriers: PostEx (live) + Leopard (live) + TCS (stub)
 - Fire-and-forget: insertAuditLog/insertMetricEvent return void
 - Performance: First Load JS 1,070 KB (code-split into 95 chunks). React.memo on leaf components.
 - CRITICAL: Do NOT add module-scope import() maps — use dynamic() in page.tsx only (causes duplicate chunks)
 - Idempotency: withIdempotency() wraps ALL creation endpoints; useIdempotentMutation() on frontend
-- Phone validation: libphonenumber-js (isValidPhoneFormat) — client + server defense in depth
+- Phone validation: libphonenumber-js (isValidPhoneFormat) — client + server defense in depth; international pass-through in normalize_phone() SQL
 - City propagation: corrected cities propagate to CustomerAddress at order creation + booking time
 - IntegrationActionLog: now logs requestPayload (not just responsePayload) for all outbound calls
-- Markets + Country system: REVERTED (2026-08-30) — pre-markets base at commit 5d566c9. All reverted work in backup-pre-revert-2026-08-30 branch. Do NOT suggest markets/country features without checking the backup branch first.
-- Shopify adapter: REVERTED to stub (was built + reverted with markets). Working implementation in backup-pre-revert-2026-08-30 branch.
-- Leopard staging server: DOWN (504 Gateway Timeout). Use isProduction='true' for all Leopard integrations.
+- Country system: CustomerAddress.country + Order.deliveryCountry (alpha-2 codes, @default("PK")); CountrySelector in both address forms; non-PK skips city-matching
+- Self-fulfilled: fulfillmentChannel ('courier'|'self_fulfilled'), SF-YYYY-NNNNN per-company ref, jsbarcode CODE128 slip PDF, processScan OR:[trackingNumber, selfFulfilledReferenceNumber]
+- Pricing: per-item discount (percentage/fixed)
 ```
 
 ### Module-Specific Context
@@ -1810,6 +1829,7 @@ When generating prompts for AI assistants working on FlowOps, use these patterns
 - **Booking**: `src/lib/actions/booking.actions.ts` — `bookOrderWithCourier`, `maybeAutoBookOrder`
 - **Status polling**: `src/lib/actions/postex-status-poll.actions.ts` + `instrumentation.ts`
 - **Scan**: `src/lib/actions/scan.actions.ts` + `src/components/orders/order-scan-view.tsx`
+- **Self-fulfilled**: `src/lib/utils/internal-slip-pdf.ts` (jsbarcode + sharp + @react-pdf/renderer) + `src/app/api/orders/[id]/self-fulfilled-slip/route.ts`
 
 ### Common Prompt Patterns
 ```
@@ -1839,10 +1859,8 @@ Report the root cause without fixing it yet."
 - Don't add module-scope `import()` maps in `page.tsx` — causes Turbopack to create duplicate chunks. Use `dynamic()` only.
 - Don't suggest `React.Table` — FlowOps uses shadcn/ui `Table` component (`src/components/ui/table.tsx`)
 - Don't use check-then-create patterns for dedup — use DB-level unique constraints + catch P2002
+- Don't reference parent-component variables directly in child function components in `order-create-view.tsx` — they are module-level functions, not closures. ALWAYS pass new state/hooks as props to child components. See §18 item 12.
 - Don't leave requestPayload null in executeLoggedIntegrationAction — always pass the business data
-- Don't suggest rebuilding the Markets + Country system from scratch — the full implementation is in `backup-pre-revert-2026-08-30` branch (restore from there if needed)
-- Don't suggest Leopard staging endpoint — it's down (504). Always use production (`isProduction: 'true'`)
-- Don't suggest "list all shippers" for Leopard — the API doesn't support it. Use the scan-by-ID approach (adapter already does this).
 
 ---
 

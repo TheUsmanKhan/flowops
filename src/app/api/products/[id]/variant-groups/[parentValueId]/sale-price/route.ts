@@ -66,14 +66,24 @@ export async function POST(
       return Response.json({ success: true, updated_count: 0 })
     }
 
-    // Fetch existing pricing rows that are synced
+    // Fetch existing pricing rows that are synced (for this company).
+    // Preserves the exact cascade logic: only synced children are updated;
+    // detached children (salePriceSyncedWithParent=false) stay independent.
     const syncedPricing = await db.companyVariantPricing.findMany({
       where: {
         companyId: company.id,
-        orgVariantId: { in: targetVariantIds },
+        variantId: { in: targetVariantIds },
         salePriceSyncedWithParent: true,
       },
     })
+
+    // Also find variants in the group that have NO CompanyVariantPricing row yet
+    // (e.g. a newly-added variant). These get UPSERTed with the cascade values +
+    // synced=true so the cascade works even on fresh variants. Detached variants
+    // (existing rows with salePriceSyncedWithParent=false) are NOT touched —
+    // preserving the "detached children stay independent" rule.
+    const existingVariantIds = new Set(syncedPricing.map((p) => p.variantId))
+    const missingVariantIds = targetVariantIds.filter((vid) => !existingVariantIds.has(vid))
 
     let updatedCount = 0
     for (const pricing of syncedPricing) {
@@ -83,6 +93,21 @@ export async function POST(
       }
       await db.companyVariantPricing.update({ where: { id: pricing.id }, data: updateData })
       updatedCount++
+    }
+    // Create rows for variants that don't have one yet (synced=true by default).
+    if (missingVariantIds.length > 0) {
+      const created = await db.companyVariantPricing.createMany({
+        data: missingVariantIds.map((vid) => ({
+          companyId: company.id,
+          organizationId: orgId,
+          variantId: vid,
+          salePrice: body.sale_price!,
+          comparePrice: body.compare_price ?? null,
+          salePriceSyncedWithParent: true,
+          comparePriceSyncedWithParent: true,
+        })),
+      })
+      updatedCount += created.count
     }
 
     insertAuditLog({

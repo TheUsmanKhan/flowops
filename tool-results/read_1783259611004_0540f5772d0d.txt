@@ -1,0 +1,1280 @@
+     1→     1→You are an Expert Senior Full-Stack Engineer working on FlowOps ERP.
+     2→     2→Sprint 1 (Authentication, Employees, RBAC) are already complete. You are now fixing and building the
+     3→     3→complete Organization and Company management system.
+     4→     4→
+     5→     5→DO NOT touch database schema or existing migration files.
+     6→     6→DO NOT rewrite server actions that already work.
+     7→     7→DO NOT break any existing pages.
+     8→     8→Build ONLY what is described in this prompt.
+     9→     9→Write 100% production-ready code — no placeholders, no TODOs.
+    10→    10→
+    11→    11→TECH STACK (same as always):
+    12→    12→  Next.js 15 App Router, TypeScript strict, shadcn/ui, Tailwind CSS v4,
+    13→    13→  React Hook Form + Zod, TanStack Query v5, Zustand, Sonner, Lucide React
+    14→    14→  Supabase (PostgreSQL + Auth + Storage)
+    15→    15→
+    16→    16→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    17→    17→ARCHITECTURAL CONTEXT — READ FIRST
+    18→    18→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    19→    19→
+    20→    20→THE RELATIONSHIP HIERARCHY:
+    21→    21→  One USER can own/belong to MULTIPLE ORGANIZATIONS
+    22→    22→  One ORGANIZATION can have MULTIPLE COMPANIES
+    23→    23→  One USER can be EMPLOYEE of MULTIPLE COMPANIES
+    24→    24→  (across different organizations)
+    25→    25→
+    26→    26→EXAMPLE — How One User's World Looks:
+    27→    27→  Usman (one account, one login)
+    28→    28→  │
+    29→    29→  ├── ORGANIZATION: "Hafeez Group"
+    30→    30→  │   ├── Company: Hafeez Textiles Pvt Ltd   (Owner)
+    31→    31→  │   ├── Company: Hafeez Online Store        (Owner)
+    32→    32→  │   └── Company: Hafeez Retail Faisalabad   (Owner)
+    33→    33→  │
+    34→    34→  ├── ORGANIZATION: "Usman Foods Group"
+    35→    35→  │   ├── Company: Burger Point Faisalabad    (Owner)
+    36→    36→  │   └── Company: Pizza Corner Lahore        (Owner)
+    37→    37→  │
+    38→    38→  └── INVITED EMPLOYEE (someone else's company):
+    39→    39→      └── Company: TCS Partner Store           (Sales Manager)
+    40→    40→
+    41→    41→ACTIVE WORKSPACE:
+    42→    42→  user_settings table stores:
+    43→    43→    active_company_id  → which company user is working in NOW
+    44→    44→    active_org_id      → which org that company belongs to
+    45→    45→
+    46→    46→  When user switches company:
+    47→    47→    → active_company_id updates
+    48→    48→    → active_org_id updates to match
+    49→    49→    → RLS re-evaluates → only new company data visible
+    50→    50→    → Full UI reloads
+    51→    51→
+    52→    52→CURRENT PROBLEMS TO FIX:
+    53→    53→  1. Cannot create second organization after signup
+    54→    54→  2. Cannot create second company after signup
+    55→    55→  3. Cannot switch between companies or organizations
+    56→    56→  4. No company settings page
+    57→    57→  5. No organization settings page
+    58→    58→  6. No logo upload for company or org
+    59→    59→  7. Workspace switcher is broken or missing
+    60→    60→
+    61→    61→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    62→    62→PART 1: CURRENCY DATA — BUILD THIS FIRST
+    63→    63→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    64→    64→
+    65→    65→Create file: /lib/data/currencies.ts
+    66→    66→
+    67→    67→This file exports a complete list of world currencies for the
+    68→    68→searchable currency selector used in company creation and settings.
+    69→    69→FlowOps will launch internationally — every world currency needed.
+    70→    70→
+    71→    71→Export this exact structure:
+    72→    72→
+    73→    73→export const CURRENCIES = [
+    74→    74→  // Most common (show at top of list)
+    75→    75→  { code: "PKR", name: "Pakistani Rupee",         symbol: "₨",  flag: "🇵🇰" },
+    76→    76→  { code: "USD", name: "US Dollar",                symbol: "$",  flag: "🇺🇸" },
+    77→    77→  { code: "GBP", name: "British Pound",            symbol: "£",  flag: "🇬🇧" },
+    78→    78→  { code: "EUR", name: "Euro",                     symbol: "€",  flag: "🇪🇺" },
+    79→    79→  { code: "AED", name: "UAE Dirham",               symbol: "د.إ",flag: "🇦🇪" },
+    80→    80→  { code: "SAR", name: "Saudi Riyal",              symbol: "﷼",  flag: "🇸🇦" },
+    81→    81→  { code: "CAD", name: "Canadian Dollar",          symbol: "CA$",flag: "🇨🇦" },
+    82→    82→  { code: "AUD", name: "Australian Dollar",        symbol: "A$", flag: "🇦🇺" },
+    83→    83→  // --- then ALL other world currencies alphabetically ---
+    84→    84→  { code: "AFN", name: "Afghan Afghani",           symbol: "؋",  flag: "🇦🇫" },
+    85→    85→  { code: "ALL", name: "Albanian Lek",             symbol: "L",  flag: "🇦🇱" },
+    86→    86→  { code: "AMD", name: "Armenian Dram",            symbol: "֏",  flag: "🇦🇲" },
+    87→    87→  { code: "ANG", name: "Netherlands Antillean Guilder", symbol: "ƒ", flag: "🇨🇼" },
+    88→    88→  { code: "AOA", name: "Angolan Kwanza",           symbol: "Kz", flag: "🇦🇴" },
+    89→    89→  { code: "ARS", name: "Argentine Peso",           symbol: "$",  flag: "🇦🇷" },
+    90→    90→  { code: "AWG", name: "Aruban Florin",            symbol: "ƒ",  flag: "🇦🇼" },
+    91→    91→  { code: "AZN", name: "Azerbaijani Manat",        symbol: "₼",  flag: "🇦🇿" },
+    92→    92→  { code: "BAM", name: "Bosnia-Herzegovina Mark",  symbol: "KM", flag: "🇧🇦" },
+    93→    93→  { code: "BBD", name: "Barbadian Dollar",         symbol: "$",  flag: "🇧🇧" },
+    94→    94→  { code: "BDT", name: "Bangladeshi Taka",         symbol: "৳",  flag: "🇧🇩" },
+    95→    95→  { code: "BGN", name: "Bulgarian Lev",            symbol: "лв", flag: "🇧🇬" },
+    96→    96→  { code: "BHD", name: "Bahraini Dinar",           symbol: ".د.ب",flag:"🇧🇭" },
+    97→    97→  { code: "BIF", name: "Burundian Franc",          symbol: "Fr", flag: "🇧🇮" },
+    98→    98→  { code: "BMD", name: "Bermudan Dollar",          symbol: "$",  flag: "🇧🇲" },
+    99→    99→  { code: "BND", name: "Brunei Dollar",            symbol: "$",  flag: "🇧🇳" },
+   100→   100→  { code: "BOB", name: "Bolivian Boliviano",       symbol: "Bs.",flag: "🇧🇴" },
+   101→   101→  { code: "BRL", name: "Brazilian Real",           symbol: "R$", flag: "🇧🇷" },
+   102→   102→  { code: "BSD", name: "Bahamian Dollar",          symbol: "$",  flag: "🇧🇸" },
+   103→   103→  { code: "BTN", name: "Bhutanese Ngultrum",       symbol: "Nu", flag: "🇧🇹" },
+   104→   104→  { code: "BWP", name: "Botswanan Pula",           symbol: "P",  flag: "🇧🇼" },
+   105→   105→  { code: "BYN", name: "Belarusian Ruble",         symbol: "Br", flag: "🇧🇾" },
+   106→   106→  { code: "BZD", name: "Belize Dollar",            symbol: "$",  flag: "🇧🇿" },
+   107→   107→  { code: "CDF", name: "Congolese Franc",          symbol: "Fr", flag: "🇨🇩" },
+   108→   108→  { code: "CHF", name: "Swiss Franc",              symbol: "Fr", flag: "🇨🇭" },
+   109→   109→  { code: "CLP", name: "Chilean Peso",             symbol: "$",  flag: "🇨🇱" },
+   110→   110→  { code: "CNY", name: "Chinese Yuan",             symbol: "¥",  flag: "🇨🇳" },
+   111→   111→  { code: "COP", name: "Colombian Peso",           symbol: "$",  flag: "🇨🇴" },
+   112→   112→  { code: "CRC", name: "Costa Rican Colón",        symbol: "₡",  flag: "🇨🇷" },
+   113→   113→  { code: "CUP", name: "Cuban Peso",               symbol: "$",  flag: "🇨🇺" },
+   114→   114→  { code: "CVE", name: "Cape Verdean Escudo",      symbol: "$",  flag: "🇨🇻" },
+   115→   115→  { code: "CZK", name: "Czech Koruna",             symbol: "Kč", flag: "🇨🇿" },
+   116→   116→  { code: "DJF", name: "Djiboutian Franc",         symbol: "Fr", flag: "🇩🇯" },
+   117→   117→  { code: "DKK", name: "Danish Krone",             symbol: "kr", flag: "🇩🇰" },
+   118→   118→  { code: "DOP", name: "Dominican Peso",           symbol: "$",  flag: "🇩🇴" },
+   119→   119→  { code: "DZD", name: "Algerian Dinar",           symbol: "د.ج",flag: "🇩🇿" },
+   120→   120→  { code: "EGP", name: "Egyptian Pound",           symbol: "£",  flag: "🇪🇬" },
+   121→   121→  { code: "ERN", name: "Eritrean Nakfa",           symbol: "Nfk",flag: "🇪🇷" },
+   122→   122→  { code: "ETB", name: "Ethiopian Birr",           symbol: "Br", flag: "🇪🇹" },
+   123→   123→  { code: "FJD", name: "Fijian Dollar",            symbol: "$",  flag: "🇫🇯" },
+   124→   124→  { code: "FKP", name: "Falkland Islands Pound",   symbol: "£",  flag: "🇫🇰" },
+   125→   125→  { code: "GEL", name: "Georgian Lari",            symbol: "₾",  flag: "🇬🇪" },
+   126→   126→  { code: "GHS", name: "Ghanaian Cedi",            symbol: "₵",  flag: "🇬🇭" },
+   127→   127→  { code: "GIP", name: "Gibraltar Pound",          symbol: "£",  flag: "🇬🇮" },
+   128→   128→  { code: "GMD", name: "Gambian Dalasi",           symbol: "D",  flag: "🇬🇲" },
+   129→   129→  { code: "GNF", name: "Guinean Franc",            symbol: "Fr", flag: "🇬🇳" },
+   130→   130→  { code: "GTQ", name: "Guatemalan Quetzal",       symbol: "Q",  flag: "🇬🇹" },
+   131→   131→  { code: "GYD", name: "Guyanaese Dollar",         symbol: "$",  flag: "🇬🇾" },
+   132→   132→  { code: "HKD", name: "Hong Kong Dollar",         symbol: "$",  flag: "🇭🇰" },
+   133→   133→  { code: "HNL", name: "Honduran Lempira",         symbol: "L",  flag: "🇭🇳" },
+   134→   134→  { code: "HRK", name: "Croatian Kuna",            symbol: "kn", flag: "🇭🇷" },
+   135→   135→  { code: "HTG", name: "Haitian Gourde",           symbol: "G",  flag: "🇭🇹" },
+   136→   136→  { code: "HUF", name: "Hungarian Forint",         symbol: "Ft", flag: "🇭🇺" },
+   137→   137→  { code: "IDR", name: "Indonesian Rupiah",        symbol: "Rp", flag: "🇮🇩" },
+   138→   138→  { code: "ILS", name: "Israeli New Shekel",       symbol: "₪",  flag: "🇮🇱" },
+   139→   139→  { code: "INR", name: "Indian Rupee",             symbol: "₹",  flag: "🇮🇳" },
+   140→   140→  { code: "IQD", name: "Iraqi Dinar",              symbol: "ع.د",flag: "🇮🇶" },
+   141→   141→  { code: "IRR", name: "Iranian Rial",             symbol: "﷼",  flag: "🇮🇷" },
+   142→   142→  { code: "ISK", name: "Icelandic Króna",          symbol: "kr", flag: "🇮🇸" },
+   143→   143→  { code: "JMD", name: "Jamaican Dollar",          symbol: "$",  flag: "🇯🇲" },
+   144→   144→  { code: "JOD", name: "Jordanian Dinar",          symbol: "د.ا",flag: "🇯🇴" },
+   145→   145→  { code: "JPY", name: "Japanese Yen",             symbol: "¥",  flag: "🇯🇵" },
+   146→   146→  { code: "KES", name: "Kenyan Shilling",          symbol: "Ksh",flag: "🇰🇪" },
+   147→   147→  { code: "KGS", name: "Kyrgystani Som",           symbol: "с",  flag: "🇰🇬" },
+   148→   148→  { code: "KHR", name: "Cambodian Riel",           symbol: "៛",  flag: "🇰🇭" },
+   149→   149→  { code: "KMF", name: "Comorian Franc",           symbol: "Fr", flag: "🇰🇲" },
+   150→   150→  { code: "KPW", name: "North Korean Won",         symbol: "₩",  flag: "🇰🇵" },
+   151→   151→  { code: "KRW", name: "South Korean Won",         symbol: "₩",  flag: "🇰🇷" },
+   152→   152→  { code: "KWD", name: "Kuwaiti Dinar",            symbol: "د.ك",flag: "🇰🇼" },
+   153→   153→  { code: "KYD", name: "Cayman Islands Dollar",    symbol: "$",  flag: "🇰🇾" },
+   154→   154→  { code: "KZT", name: "Kazakhstani Tenge",        symbol: "₸",  flag: "🇰🇿" },
+   155→   155→  { code: "LAK", name: "Laotian Kip",              symbol: "₭",  flag: "🇱🇦" },
+   156→   156→  { code: "LBP", name: "Lebanese Pound",           symbol: "£",  flag: "🇱🇧" },
+   157→   157→  { code: "LKR", name: "Sri Lankan Rupee",         symbol: "₨",  flag: "🇱🇰" },
+   158→   158→  { code: "LRD", name: "Liberian Dollar",          symbol: "$",  flag: "🇱🇷" },
+   159→   159→  { code: "LSL", name: "Lesotho Loti",             symbol: "L",  flag: "🇱🇸" },
+   160→   160→  { code: "LYD", name: "Libyan Dinar",             symbol: "ل.د",flag: "🇱🇾" },
+   161→   161→  { code: "MAD", name: "Moroccan Dirham",          symbol: "د.م.",flag:"🇲🇦" },
+   162→   162→  { code: "MDL", name: "Moldovan Leu",             symbol: "L",  flag: "🇲🇩" },
+   163→   163→  { code: "MGA", name: "Malagasy Ariary",          symbol: "Ar", flag: "🇲🇬" },
+   164→   164→  { code: "MKD", name: "Macedonian Denar",         symbol: "ден",flag: "🇲🇰" },
+   165→   165→  { code: "MMK", name: "Myanmar Kyat",             symbol: "K",  flag: "🇲🇲" },
+   166→   166→  { code: "MNT", name: "Mongolian Tugrik",         symbol: "₮",  flag: "🇲🇳" },
+   167→   167→  { code: "MOP", name: "Macanese Pataca",          symbol: "P",  flag: "🇲🇴" },
+   168→   168→  { code: "MRU", name: "Mauritanian Ouguiya",      symbol: "UM", flag: "🇲🇷" },
+   169→   169→  { code: "MUR", name: "Mauritian Rupee",          symbol: "₨",  flag: "🇲🇺" },
+   170→   170→  { code: "MVR", name: "Maldivian Rufiyaa",        symbol: "Rf", flag: "🇲🇻" },
+   171→   171→  { code: "MWK", name: "Malawian Kwacha",          symbol: "MK", flag: "🇲🇼" },
+   172→   172→  { code: "MXN", name: "Mexican Peso",             symbol: "$",  flag: "🇲🇽" },
+   173→   173→  { code: "MYR", name: "Malaysian Ringgit",        symbol: "RM", flag: "🇲🇾" },
+   174→   174→  { code: "MZN", name: "Mozambican Metical",       symbol: "MT", flag: "🇲🇿" },
+   175→   175→  { code: "NAD", name: "Namibian Dollar",          symbol: "$",  flag: "🇳🇦" },
+   176→   176→  { code: "NGN", name: "Nigerian Naira",           symbol: "₦",  flag: "🇳🇬" },
+   177→   177→  { code: "NIO", name: "Nicaraguan Córdoba",       symbol: "C$", flag: "🇳🇮" },
+   178→   178→  { code: "NOK", name: "Norwegian Krone",          symbol: "kr", flag: "🇳🇴" },
+   179→   179→  { code: "NPR", name: "Nepalese Rupee",           symbol: "₨",  flag: "🇳🇵" },
+   180→   180→  { code: "NZD", name: "New Zealand Dollar",       symbol: "$",  flag: "🇳🇿" },
+   181→   181→  { code: "OMR", name: "Omani Rial",               symbol: "﷼",  flag: "🇴🇲" },
+   182→   182→  { code: "PAB", name: "Panamanian Balboa",        symbol: "B/.",flag: "🇵🇦" },
+   183→   183→  { code: "PEN", name: "Peruvian Sol",             symbol: "S/.",flag: "🇵🇪" },
+   184→   184→  { code: "PGK", name: "Papua New Guinean Kina",   symbol: "K",  flag: "🇵🇬" },
+   185→   185→  { code: "PHP", name: "Philippine Peso",          symbol: "₱",  flag: "🇵🇭" },
+   186→   186→  { code: "PLN", name: "Polish Zloty",             symbol: "zł", flag: "🇵🇱" },
+   187→   187→  { code: "PYG", name: "Paraguayan Guarani",       symbol: "₲",  flag: "🇵🇾" },
+   188→   188→  { code: "QAR", name: "Qatari Rial",              symbol: "﷼",  flag: "🇶🇦" },
+   189→   189→  { code: "RON", name: "Romanian Leu",             symbol: "lei",flag: "🇷🇴" },
+   190→   190→  { code: "RSD", name: "Serbian Dinar",            symbol: "din",flag: "🇷🇸" },
+   191→   191→  { code: "RUB", name: "Russian Ruble",            symbol: "₽",  flag: "🇷🇺" },
+   192→   192→  { code: "RWF", name: "Rwandan Franc",            symbol: "Fr", flag: "🇷🇼" },
+   193→   193→  { code: "SEK", name: "Swedish Krona",            symbol: "kr", flag: "🇸🇪" },
+   194→   194→  { code: "SGD", name: "Singapore Dollar",         symbol: "$",  flag: "🇸🇬" },
+   195→   195→  { code: "SHP", name: "Saint Helena Pound",       symbol: "£",  flag: "🇸🇭" },
+   196→   196→  { code: "SLL", name: "Sierra Leonean Leone",     symbol: "Le", flag: "🇸🇱" },
+   197→   197→  { code: "SOS", name: "Somali Shilling",          symbol: "Sh", flag: "🇸🇴" },
+   198→   198→  { code: "SRD", name: "Surinamese Dollar",        symbol: "$",  flag: "🇸🇷" },
+   199→   199→  { code: "STN", name: "São Tomé & Príncipe Dobra",symbol: "Db", flag: "🇸🇹" },
+   200→   200→  { code: "SVC", name: "Salvadoran Colón",         symbol: "₡",  flag: "🇸🇻" },
+   201→   201→  { code: "SYP", name: "Syrian Pound",             symbol: "£",  flag: "🇸🇾" },
+   202→   202→  { code: "SZL", name: "Swazi Lilangeni",          symbol: "L",  flag: "🇸🇿" },
+   203→   203→  { code: "THB", name: "Thai Baht",                symbol: "฿",  flag: "🇹🇭" },
+   204→   204→  { code: "TJS", name: "Tajikistani Somoni",       symbol: "SM", flag: "🇹🇯" },
+   205→   205→  { code: "TMT", name: "Turkmenistani Manat",      symbol: "T",  flag: "🇹🇲" },
+   206→   206→  { code: "TND", name: "Tunisian Dinar",           symbol: "د.ت",flag: "🇹🇳" },
+   207→   207→  { code: "TOP", name: "Tongan Paʻanga",           symbol: "T$", flag: "🇹🇴" },
+   208→   208→  { code: "TRY", name: "Turkish Lira",             symbol: "₺",  flag: "🇹🇷" },
+   209→   209→  { code: "TTD", name: "Trinidad & Tobago Dollar", symbol: "$",  flag: "🇹🇹" },
+   210→   210→  { code: "TWD", name: "New Taiwan Dollar",        symbol: "$",  flag: "🇹🇼" },
+   211→   211→  { code: "TZS", name: "Tanzanian Shilling",       symbol: "Sh", flag: "🇹🇿" },
+   212→   212→  { code: "UAH", name: "Ukrainian Hryvnia",        symbol: "₴",  flag: "🇺🇦" },
+   213→   213→  { code: "UGX", name: "Ugandan Shilling",         symbol: "Sh", flag: "🇺🇬" },
+   214→   214→  { code: "UYU", name: "Uruguayan Peso",           symbol: "$",  flag: "🇺🇾" },
+   215→   215→  { code: "UZS", name: "Uzbekistani Som",          symbol: "so'm",flag:"🇺🇿" },
+   216→   216→  { code: "VES", name: "Venezuelan Bolívar",       symbol: "Bs", flag: "🇻🇪" },
+   217→   217→  { code: "VND", name: "Vietnamese Dong",          symbol: "₫",  flag: "🇻🇳" },
+   218→   218→  { code: "VUV", name: "Vanuatu Vatu",             symbol: "Vt", flag: "🇻🇺" },
+   219→   219→  { code: "WST", name: "Samoan Tala",              symbol: "T",  flag: "🇼🇸" },
+   220→   220→  { code: "XAF", name: "Central African CFA Franc",symbol: "Fr", flag: "🇨🇲" },
+   221→   221→  { code: "XCD", name: "East Caribbean Dollar",    symbol: "$",  flag: "🇦🇬" },
+   222→   222→  { code: "XOF", name: "West African CFA Franc",   symbol: "Fr", flag: "🇧🇯" },
+   223→   223→  { code: "YER", name: "Yemeni Rial",              symbol: "﷼",  flag: "🇾🇪" },
+   224→   224→  { code: "ZAR", name: "South African Rand",       symbol: "R",  flag: "🇿🇦" },
+   225→   225→  { code: "ZMW", name: "Zambian Kwacha",           symbol: "ZK", flag: "🇿🇲" },
+   226→   226→  { code: "ZWL", name: "Zimbabwean Dollar",        symbol: "$",  flag: "🇿🇼" },
+   227→   227→]
+   228→   228→
+   229→   229→Also export these helpers:
+   230→   230→  export const POPULAR_CURRENCIES = ["PKR","USD","GBP","EUR","AED","SAR","CAD","AUD"]
+   231→   231→  -- shown at the top of dropdown before the full alphabetical list
+   232→   232→
+   233→   233→  export function getCurrencyByCode(code: string) -- lookup by code
+   234→   234→  export function formatCurrencyLabel(currency) -- returns "🇵🇰 PKR — Pakistani Rupee"
+   235→   235→
+   236→   236→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   237→   237→PART 2: CURRENCY SELECTOR COMPONENT
+   238→   238→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   239→   239→
+   240→   240→Create: /components/ui/CurrencySelector.tsx
+   241→   241→
+   242→   242→A reusable searchable currency dropdown used everywhere
+   243→   243→currency selection is needed (company creation, settings, etc.)
+   244→   244→
+   245→   245→BEHAVIOR:
+   246→   246→  Shows as a button that opens a popover/command palette
+   247→   247→  
+   248→   248→  Closed state (button):
+   249→   249→    🇵🇰  PKR — Pakistani Rupee    ▼
+   250→   250→  
+   251→   251→  Open state (popover with Command component from shadcn):
+   252→   252→    ┌──────────────────────────────────────┐
+   253→   253→    │ 🔍 Search currency...               │
+   254→   254→    ├──────────────────────────────────────┤
+   255→   255→    │ POPULAR                              │
+   256→   256→    │   🇵🇰  PKR  Pakistani Rupee  ✓      │ ← currently selected
+   257→   257→    │   🇺🇸  USD  US Dollar                │
+   258→   258→    │   🇬🇧  GBP  British Pound            │
+   259→   259→    │   🇪🇺  EUR  Euro                     │
+   260→   260→    │   🇦🇪  AED  UAE Dirham               │
+   261→   261→    │   🇸🇦  SAR  Saudi Riyal              │
+   262→   262→    │   🇨🇦  CAD  Canadian Dollar          │
+   263→   263→    │   🇦🇺  AUD  Australian Dollar        │
+   264→   264→    ├──────────────────────────────────────┤
+   265→   265→    │ ALL CURRENCIES                       │
+   266→   266→    │   🇦🇫  AFN  Afghan Afghani           │
+   267→   267→    │   🇦🇱  ALL  Albanian Lek             │
+   268→   268→    │   ...                                │
+   269→   269→    └──────────────────────────────────────┘
+   270→   270→  
+   271→   271→  Search behavior:
+   272→   272→    Typing "rup" → shows PKR, INR, NPR, LKR, IDR, MUR
+   273→   273→    Typing "dollar" → shows USD, CAD, AUD, NZD, HKD, SGD etc.
+   274→   274→    Typing "UAE" → shows AED
+   275→   275→    Typing "pound" → shows GBP, EGP, LBP, SYP etc.
+   276→   276→    Search works on: code, name, symbol
+   277→   277→  
+   278→   278→  Props:
+   279→   279→    value: string (currency code e.g. "PKR")
+   280→   280→    onChange: (code: string) => void
+   281→   281→    disabled?: boolean
+   282→   282→    placeholder?: string (default: "Select currency")
+   283→   283→
+   284→   284→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   285→   285→PART 3: SERVER ACTIONS
+   286→   286→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   287→   287→
+   288→   288→Create or update: /lib/actions/organization.actions.ts
+   289→   289→
+   290→   290→─────────────────────────────
+   291→   291→ACTION 1: createOrganization()
+   292→   292→─────────────────────────────
+   293→   293→Creates a brand new organization AND its first company together.
+   294→   294→Called when user wants a completely new business umbrella.
+   295→   295→
+   296→   296→  Input:
+   297→   297→    org_name: string
+   298→   298→    org_logo_file?: File (optional)
+   299→   299→    company_name: string
+   300→   300→    company_legal_name?: string
+   301→   301→    company_logo_file?: File (optional)
+   302→   302→    base_currency: string  (e.g. "PKR")
+   303→   303→    country_code: string   (e.g. "PK")
+   304→   304→    province?: string
+   305→   305→    city?: string
+   306→   306→    address?: string
+   307→   307→    phone?: string
+   308→   308→    email?: string
+   309→   309→    website?: string
+   310→   310→    ntn?: string
+   311→   311→    strn?: string
+   312→   312→    timezone: string       (default "Asia/Karachi")
+   313→   313→    fiscal_year_start: number (1-12, default 1)
+   314→   314→
+   315→   315→  Server Action steps:
+   316→   316→    1. Validate all inputs with Zod
+   317→   317→    2. If org_logo_file provided:
+   318→   318→       Upload to Supabase Storage:
+   319→   319→       'organizations/{user_id}/{timestamp}-logo.jpg'
+   320→   320→       Get public URL
+   321→   321→    3. Generate unique slug from org_name
+   322→   322→       (slugify + check uniqueness, append random suffix if taken)
+   323→   323→    4. INSERT organizations row:
+   324→   324→       { name, slug, logo_url, owner_id: current_user_id }
+   325→   325→    5. If company_logo_file provided:
+   326→   326→       Upload to Supabase Storage:
+   327→   327→       'companies/{new_org_id}/{timestamp}-logo.jpg'
+   328→   328→    6. Generate unique slug from company_name
+   329→   329→    7. INSERT companies row:
+   330→   330→       { organization_id: new_org.id, name, legal_name, logo_url,
+   331→   331→         base_currency, country_code, province, city, address,
+   332→   332→         phone, email, website, tax_id: ntn, tax_id_type: 'NTN',
+   333→   333→         timezone, fiscal_year_start, created_by: current_user_id }
+   334→   334→    8. INSERT 4 system roles for this company:
+   335→   335→       - { name:'Owner', system_role_key:'owner', role_tier:'elevated', is_system_role:true }
+   336→   336→       - { name:'Founder', system_role_key:'founder', role_tier:'elevated', is_system_role:true }
+   337→   337→       - { name:'Co-Founder', system_role_key:'co_founder', role_tier:'elevated', is_system_role:true }
+   338→   338→       - { name:'Investor', system_role_key:'investor', role_tier:'elevated', is_system_role:true }
+   339→   339→    9. INSERT employees row:
+   340→   340→       { company_id: new_company.id, user_id: current_user_id,
+   341→   341→         role_id: owner_role.id, status: 'active' }
+   342→   342→    10. UPDATE user_settings:
+   343→   343→        { active_company_id: new_company.id,
+   344→   344→          active_org_id: new_org.id }
+   345→   345→    11. If STRN also provided: store separately in company metadata
+   346→   346→        or as second tax record (metadata JSONB field)
+   347→   347→    12. INSERT audit_log: action='organization.created'
+   348→   348→    13. INSERT audit_log: action='company.created'
+   349→   349→    14. Return { success: true, org_id, company_id }
+   350→   350→
+   351→   351→─────────────────────────────
+   352→   352→ACTION 2: createCompany()
+   353→   353→─────────────────────────────
+   354→   354→Adds a new company to an EXISTING organization.
+   355→   355→Called when user already has an org and wants another company under it.
+   356→   356→
+   357→   357→  Input:
+   358→   358→    organization_id: string   (existing org UUID)
+   359→   359→    company_name: string
+   360→   360→    company_legal_name?: string
+   361→   361→    company_logo_file?: File
+   362→   362→    base_currency: string
+   363→   363→    country_code: string
+   364→   364→    province?: string
+   365→   365→    city?: string
+   366→   366→    address?: string
+   367→   367→    phone?: string
+   368→   368→    email?: string
+   369→   369→    website?: string
+   370→   370→    ntn?: string
+   371→   371→    strn?: string
+   372→   372→    timezone: string
+   373→   373→    fiscal_year_start: number
+   374→   374→
+   375→   375→  Server Action steps:
+   376→   376→    1. Validate inputs with Zod
+   377→   377→    2. Verify user owns this organization:
+   378→   378→       SELECT * FROM organizations WHERE id = org_id AND owner_id = current_user
+   379→   379→       If not found: throw 'Unauthorized'
+   380→   380→    3. Upload logo if provided
+   381→   381→    4. Generate unique company slug
+   382→   382→    5. INSERT companies row (same as above, under existing org)
+   383→   383→    6. INSERT 4 system roles
+   384→   384→    7. INSERT employees row (Owner)
+   385→   385→    8. UPDATE user_settings to new company
+   386→   386→    9. INSERT audit_logs
+   387→   387→    10. Return { success: true, company_id }
+   388→   388→
+   389→   389→─────────────────────────────
+   390→   390→ACTION 3: switchWorkspace()
+   391→   391→─────────────────────────────
+   392→   392→Switches the user's active company and org.
+   393→   393→
+   394→   394→  Input:
+   395→   395→    company_id: string
+   396→   396→    org_id: string
+   397→   397→
+   398→   398→  Steps:
+   399→   399→    1. Verify user is active employee of this company:
+   400→   400→       SELECT * FROM employees WHERE company_id = ? AND user_id = ? AND status = 'active'
+   401→   401→       If not found: throw 'Unauthorized'
+   402→   402→    2. UPDATE user_settings:
+   403→   403→       { active_company_id: company_id, active_org_id: org_id }
+   404→   404→    3. Return { success: true }
+   405→   405→    -- Client handles cache clear + router.refresh()
+   406→   406→
+   407→   407→─────────────────────────────
+   408→   408→ACTION 4: getUserWorkspaces()
+   409→   409→─────────────────────────────
+   410→   410→Fetches all companies the current user is active employee of.
+   411→   411→Groups them by organization for the workspace switcher UI.
+   412→   412→
+   413→   413→  Returns:
+   414→   414→    {
+   415→   415→      workspaces: [
+   416→   416→        {
+   417→   417→          org_id: string
+   418→   418→          org_name: string
+   419→   419→          org_logo_url: string | null
+   420→   420→          org_slug: string
+   421→   421→          is_owner: boolean  ← user owns this org
+   422→   422→          companies: [
+   423→   423→            {
+   424→   424→              company_id: string
+   425→   425→              company_name: string
+   426→   426→              company_logo_url: string | null
+   427→   427→              company_slug: string
+   428→   428→              role_name: string      ← "Owner", "Manager" etc.
+   429→   429→              role_tier: string      ← "elevated" | "standard"
+   430→   430→              employee_status: string
+   431→   431→              is_active_workspace: boolean
+   432→   432→            }
+   433→   433→          ]
+   434→   434→        }
+   435→   435→      ]
+   436→   436→    }
+   437→   437→
+   438→   438→  Query logic:
+   439→   439→    SELECT employees, companies, organizations, roles, user_settings
+   440→   440→    WHERE employees.user_id = current_user
+   441→   441→    AND employees.status = 'active'
+   442→   442→    JOIN companies ON employees.company_id
+   443→   443→    JOIN organizations ON companies.organization_id
+   444→   444→    JOIN roles ON employees.role_id
+   445→   445→    LEFT JOIN user_settings ON user_settings.user_id = current_user
+   446→   446→    ORDER BY organizations.name, companies.name
+   447→   447→
+   448→   448→─────────────────────────────
+   449→   449→ACTION 5: updateOrganization()
+   450→   450→─────────────────────────────
+   451→   451→Updates org profile. Owner only.
+   452→   452→
+   453→   453→  Input: org_id, name?, logo_file?, description?, website?
+   454→   454→  
+   455→   455→  Steps:
+   456→   456→    1. Verify owner_id = current_user
+   457→   457→    2. If new logo: upload to storage, delete old logo
+   458→   458→    3. UPDATE organizations row
+   459→   459→    4. INSERT audit_log: action='organization.updated'
+   460→   460→    5. Return { success: true }
+   461→   461→
+   462→   462→─────────────────────────────
+   463→   463→ACTION 6: updateCompany()
+   464→   464→─────────────────────────────
+   465→   465→Updates company settings. Elevated roles only.
+   466→   466→
+   467→   467→  Input: company_id + all editable company fields
+   468→   468→
+   469→   469→  Steps:
+   470→   470→    1. Verify is_elevated_employee(company_id) = true
+   471→   471→    2. If currency changed: show warning (handled client-side)
+   472→   472→    3. If new logo: upload to storage, delete old
+   473→   473→    4. UPDATE companies row
+   474→   474→    5. INSERT audit_log: action='company.updated'
+   475→   475→       old_values = previous company data
+   476→   476→       new_values = updated company data
+   477→   477→    6. Return { success: true }
+   478→   478→
+   479→   479→─────────────────────────────
+   480→   480→ACTION 7: archiveCompany()
+   481→   481→─────────────────────────────
+   482→   482→Archives a company. Owner only. Requires name confirmation.
+   483→   483→
+   484→   484→  Input: company_id, confirmation_text (must match company name)
+   485→   485→  
+   486→   486→  Steps:
+   487→   487→    1. Verify owner
+   488→   488→    2. Verify confirmation_text === company.name
+   489→   489→    3. UPDATE companies: is_active = FALSE
+   490→   490→    4. UPDATE all employees: status = 'terminated' (access revoked via RLS)
+   491→   491→    5. If this was active_company: clear user_settings.active_company_id
+   492→   492→    6. INSERT audit_log: action='company.archived'
+   493→   493→    7. Return { success: true }
+   494→   494→
+   495→   495→─────────────────────────────
+   496→   496→ACTION 8: archiveOrganization()
+   497→   497→─────────────────────────────
+   498→   498→Archives entire org + all companies. Owner only.
+   499→   499→
+   500→   500→  Input: org_id, confirmation_text (must match org name)
+   501→   501→  
+   502→   502→  Steps:
+   503→   503→    1. Verify owner
+   504→   504→    2. Verify confirmation_text === org.name
+   505→   505→    3. For each company in org: run archiveCompany() logic
+   506→   506→    4. UPDATE organizations: is_active = FALSE
+   507→   507→    5. INSERT audit_log: action='organization.archived'
+   508→   508→    6. Return { success: true }
+   509→   509→
+   510→   510→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   511→   511→PART 4: VALIDATION SCHEMAS
+   512→   512→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   513→   513→
+   514→   514→Create: /lib/validations/organization.schemas.ts
+   515→   515→
+   516→   516→export const createOrganizationSchema = z.object({
+   517→   517→  org_name: z.string().min(2).max(100),
+   518→   518→  company_name: z.string().min(2).max(100),
+   519→   519→  company_legal_name: z.string().max(150).optional(),
+   520→   520→  base_currency: z.string().length(3),    -- exactly 3 char currency code
+   521→   521→  country_code: z.string().length(2),     -- ISO 2-letter country code
+   522→   522→  province: z.string().optional(),
+   523→   523→  city: z.string().optional(),
+   524→   524→  address: z.string().optional(),
+   525→   525→  phone: z.string().optional(),
+   526→   526→  email: z.string().email().optional().or(z.literal('')),
+   527→   527→  website: z.string().url().optional().or(z.literal('')),
+   528→   528→  ntn: z.string().optional(),
+   529→   529→  strn: z.string().optional(),
+   530→   530→  timezone: z.string().default('Asia/Karachi'),
+   531→   531→  fiscal_year_start: z.number().int().min(1).max(12).default(1),
+   532→   532→})
+   533→   533→
+   534→   534→export const createCompanySchema = createOrganizationSchema
+   535→   535→  .omit({ org_name: true })
+   536→   536→  .extend({ organization_id: z.string().uuid() })
+   537→   537→
+   538→   538→export const updateCompanySchema = createCompanySchema
+   539→   539→  .partial()
+   540→   540→  .extend({ company_id: z.string().uuid() })
+   541→   541→
+   542→   542→export const updateOrganizationSchema = z.object({
+   543→   543→  org_id: z.string().uuid(),
+   544→   544→  name: z.string().min(2).max(100).optional(),
+   545→   545→  description: z.string().optional(),
+   546→   546→  website: z.string().url().optional().or(z.literal('')),
+   547→   547→})
+   548→   548→
+   549→   549→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   550→   550→PART 5: WORKSPACE SWITCHER — COMPLETE REBUILD
+   551→   551→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   552→   552→
+   553→   553→Create: /components/workspace/WorkspaceSwitcher.tsx
+   554→   554→
+   555→   555→This component lives in the Navbar. It is the main way users
+   556→   556→switch between companies and create new ones.
+   557→   557→
+   558→   558→CLOSED STATE (button in navbar):
+   559→   559→  Shows active company logo (or initials avatar) + name:
+   560→   560→  ┌──────────────────────────────────┐
+   561→   561→  │ [HT] Hafeez Textiles         ▼  │
+   562→   562→  └──────────────────────────────────┘
+   563→   563→
+   564→   564→  Logo display:
+   565→   565→    If company has logo_url → show as rounded square (32×32px)
+   566→   566→    If no logo → show initials avatar:
+   567→   567→      Take first letter of each word in company name
+   568→   568→      e.g. "Hafeez Textiles" → "HT"
+   569→   569→      Background: deterministic color from company_id hash
+   570→   570→      (same company always gets same color — not random on reload)
+   571→   571→
+   572→   572→OPEN STATE (dropdown popover):
+   573→   573→
+   574→   574→  ┌─────────────────────────────────────────┐
+   575→   575→  │ MY WORKSPACES                           │
+   576→   576→  ├─────────────────────────────────────────┤
+   577→   577→  │                                         │
+   578→   578→  │  📁 Hafeez Group              ← Org 1  │
+   579→   579→  │  ─────────────────────────────          │
+   580→   580→  │  [HT] Hafeez Textiles   ✓ ACTIVE       │ ← checkmark = current
+   581→   581→  │       Owner · 12 employees             │
+   582→   582→  │                                         │
+   583→   583→  │  [HO] Hafeez Online Store               │ ← click to switch
+   584→   584→  │       Owner · 4 employees              │
+   585→   585→  │                                         │
+   586→   586→  │  [HR] Hafeez Retail FSD                 │
+   587→   587→  │       Owner · 6 employees              │
+   588→   588→  │                                         │
+   589→   589→  │  [+ Add Company to Hafeez Group]        │ ← create company shortcut
+   590→   590→  │                                         │
+   591→   591→  ├─────────────────────────────────────────┤
+   592→   592→  │                                         │
+   593→   593→  │  📁 Usman Foods Group         ← Org 2  │
+   594→   594→  │  ─────────────────────────────          │
+   595→   595→  │  [BP] Burger Point FSD                  │
+   596→   596→  │       Owner · 3 employees              │
+   597→   597→  │                                         │
+   598→   598→  │  [PC] Pizza Corner Lahore               │
+   599→   599→  │       Owner · 2 employees              │
+   600→   600→  │                                         │
+   601→   601→  │  [+ Add Company to Usman Foods]         │
+   602→   602→  │                                         │
+   603→   603→  ├─────────────────────────────────────────┤
+   604→   604→  │                                         │
+   605→   605→  │  📋 OTHER COMPANIES         ← Invited  │
+   606→   606→  │  ─────────────────────────────          │
+   607→   607→  │  [TC] TCS Partner Store                 │
+   608→   608→  │       Sales Manager · not your org     │
+   609→   609→  │                                         │
+   610→   610→  ├─────────────────────────────────────────┤
+   611→   611→  │  [+ Create New Organization]            │ ← bottom option
+   612→   612→  └─────────────────────────────────────────┘
+   613→   613→
+   614→   614→SWITCHING LOGIC (when user clicks a company):
+   615→   615→  1. Show loading spinner on clicked item
+   616→   616→  2. Call switchWorkspace(company_id, org_id)
+   617→   617→  3. On success:
+   618→   618→     a. Update Zustand workspaceStore immediately (optimistic)
+   619→   619→     b. Clear ALL TanStack Query cache:
+   620→   620→        queryClient.clear()
+   621→   621→     c. Call router.refresh()
+   622→   622→        (re-runs all server components with new RLS context)
+   623→   623→  4. Dropdown closes
+   624→   624→  5. Navbar now shows new company name
+   625→   625→
+   626→   626→"Add Company to [Org Name]" click:
+   627→   627→  → Navigates to /create-company?org_id=[org_id]
+   628→   628→  → org selection pre-filled and locked to this org
+   629→   629→
+   630→   630→"Create New Organization" click:
+   631→   631→  → Navigates to /create-organization
+   632→   632→
+   633→   633→LOADING STATE:
+   634→   634→  While getUserWorkspaces() is fetching:
+   635→   635→  Show skeleton placeholders (3 items)
+   636→   636→
+   637→   637→ERROR STATE:
+   638→   638→  If fetch fails: "Could not load workspaces. Retry."
+   639→   639→
+   640→   640→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   641→   641→PART 6: CREATE ORGANIZATION PAGE
+   642→   642→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   643→   643→
+   644→   644→Create page: /app/(dashboard)/create-organization/page.tsx
+   645→   645→
+   646→   646→This is a 3-step wizard. Accessible from workspace switcher.
+   647→   647→Protected: must be logged in (middleware handles this).
+   648→   648→
+   649→   649→WIZARD HEADER:
+   650→   650→  "Create New Organization"
+   651→   651→  Step indicator: [1] Org Info → [2] First Company → [3] Review
+   652→   652→
+   653→   653→━━━━━━━━━━━━━━━━━━
+   654→   654→STEP 1: ORGANIZATION INFO
+   655→   655→━━━━━━━━━━━━━━━━━━
+   656→   656→
+   657→   657→  LOGO UPLOAD SECTION (top of form):
+   658→   658→    Large centered upload area (150×150px circle):
+   659→   659→    ┌─────────────────────┐
+   660→   660→    │                     │
+   661→   661→    │    [📷 upload]      │
+   662→   662→    │                     │
+   663→   663→    │  Click or drag to   │
+   664→   664→    │  upload org logo    │
+   665→   665→    │  JPG, PNG — max 2MB │
+   666→   666→    └─────────────────────┘
+   667→   667→    
+   668→   668→    After upload: shows image preview in circle
+   669→   669→    Remove button (×) in top-right of preview
+   670→   670→
+   671→   671→  Organization Name: (required)
+   672→   672→    Text input
+   673→   673→    Below it: auto-shows slug preview:
+   674→   674→    "URL: flowops.com/org/hafeez-group"
+   675→   675→    Slug auto-generates from name (slugify function)
+   676→   676→    Slug uniqueness checked onBlur via server action
+   677→   677→
+   678→   678→  Description: (optional)
+   679→   679→    Textarea, max 500 chars, char counter shown
+   680→   680→
+   681→   681→  Website: (optional)
+   682→   682→    URL input with https:// prefix hint
+   683→   683→
+   684→   684→  [Continue →] button
+   685→   685→
+   686→   686→━━━━━━━━━━━━━━━━━━
+   687→   687→STEP 2: FIRST COMPANY
+   688→   688→━━━━━━━━━━━━━━━━━━
+   689→   689→
+   690→   690→  Explanation text:
+   691→   691→  "Every organization needs at least one company.
+   692→   692→   This is your main legal/operating entity."
+   693→   693→
+   694→   694→  COMPANY LOGO UPLOAD:
+   695→   695→    Same upload UI as org logo (smaller, 120×120px)
+   696→   696→
+   697→   697→  Company Name: (required)
+   698→   698→  
+   699→   699→  Legal Name: (optional)
+   700→   700→    "Official registered name if different from above"
+   701→   701→    e.g. Company Name: "Hafeez Online" 
+   702→   702→         Legal Name: "Hafeez E-Commerce Pvt Ltd"
+   703→   703→
+   704→   704→  TAX REGISTRATION SECTION:
+   705→   705→    Label: "Tax Registration (Pakistan)"
+   706→   706→    
+   707→   707→    NTN Number: (optional)
+   708→   708→      [1234567-8              ]
+   709→   709→      Helper text: "National Tax Number from FBR"
+   710→   710→    
+   711→   711→    STRN Number: (optional)
+   712→   712→      [03-04-9999-100-88      ]
+   713→   713→      Helper text: "Sales Tax Registration No. (if GST registered)"
+   714→   714→    
+   715→   715→    Note shown in info box:
+   716→   716→    "ℹ️ You can add these later in Company Settings.
+   717→   717→     Both NTN and STRN are required for legal invoicing."
+   718→   718→
+   719→   719→  BASE CURRENCY: (required)
+   720→   720→    CurrencySelector component (from Part 2)
+   721→   721→    Default: PKR
+   722→   722→    Helper text: "This is the primary currency for all
+   723→   723→                  financial reports in this company."
+   724→   724→
+   725→   725→  COUNTRY: (required)
+   726→   726→    Searchable country dropdown (similar to currency selector)
+   727→   727→    Default: Pakistan (PK)
+   728→   728→
+   729→   729→  PROVINCE: (shows when country = Pakistan)
+   730→   730→    Dropdown:
+   731→   731→      Punjab / Sindh / Khyber Pakhtunkhwa / Balochistan /
+   732→   732→      Islamabad Capital Territory / Azad Jammu & Kashmir /
+   733→   733→      Gilgit-Baltistan
+   734→   734→    For other countries: text input
+   735→   735→
+   736→   736→  CITY: Text input
+   737→   737→
+   738→   738→  ADDRESS: Textarea (street address)
+   739→   739→
+   740→   740→  CONTACT SECTION:
+   741→   741→    Phone: text input
+   742→   742→    Email: email input
+   743→   743→    Website: URL input
+   744→   744→
+   745→   745→  FINANCIAL SETTINGS:
+   746→   746→    Fiscal Year Starts In:
+   747→   747→      Month dropdown (January, February... December)
+   748→   748→      Default: January
+   749→   749→      
+   750→   750→      Live preview below:
+   751→   751→      "Your fiscal year: January 2025 → December 2025"
+   752→   752→      
+   753→   753→      Pakistan tip shown:
+   754→   754→      "💡 Pakistan's tax year runs July to June.
+   755→   755→       Government contractors often use this."
+   756→   756→    
+   757→   757→    Timezone:
+   758→   758→      Searchable dropdown of IANA timezones
+   759→   759→      Default: Asia/Karachi
+   760→   760→      Most common shown first:
+   761→   761→        Asia/Karachi, Asia/Dubai, Europe/London,
+   762→   762→        America/New_York, America/Los_Angeles,
+   763→   763→        Australia/Sydney, etc.
+   764→   764→
+   765→   765→  [← Back] [Continue →] buttons
+   766→   766→
+   767→   767→━━━━━━━━━━━━━━━━━━
+   768→   768→STEP 3: REVIEW & CREATE
+   769→   769→━━━━━━━━━━━━━━━━━━
+   770→   770→
+   771→   771→  "Review your new organization and company before creating."
+   772→   772→
+   773→   773→  Two cards side by side:
+   774→   774→  
+   775→   775→  LEFT CARD: Organization Summary
+   776→   776→    [Logo preview or initials]
+   777→   777→    Name: Hafeez Group
+   778→   778→    Slug: hafeez-group
+   779→   779→    Description: (if provided)
+   780→   780→  
+   781→   781→  RIGHT CARD: Company Summary
+   782→   782→    [Logo preview or initials]
+   783→   783→    Name: Hafeez Textiles Pvt Ltd
+   784→   784→    Currency: 🇵🇰 PKR — Pakistani Rupee
+   785→   785→    Country: Pakistan
+   786→   786→    Province: Punjab | City: Faisalabad
+   787→   787→    NTN: 1234567-8
+   788→   788→    Fiscal Year: January → December
+   789→   789→    Timezone: Asia/Karachi
+   790→   790→
+   791→   791→  What will happen section:
+   792→   792→    ✓ Organization "Hafeez Group" will be created
+   793→   793→    ✓ Company "Hafeez Textiles Pvt Ltd" will be created under it
+   794→   794→    ✓ You will be set as Owner automatically
+   795→   795→    ✓ Owner, Founder, Co-Founder, Investor roles will be created
+   796→   796→    ✓ Your active workspace will switch to this company
+   797→   797→
+   798→   798→  [← Back] [Create Organization & Company] button
+   799→   799→    → Shows loading spinner on click
+   800→   800→    → Calls createOrganization() server action
+   801→   801→    → On success: redirect to /dashboard with success toast:
+   802→   802→      "Hafeez Group created! Welcome to your new workspace."
+   803→   803→    → On error: show error toast, stay on page
+   804→   804→
+   805→   805→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   806→   806→PART 7: CREATE COMPANY PAGE
+   807→   807→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   808→   808→
+   809→   809→Create page: /app/(dashboard)/create-company/page.tsx
+   810→   810→
+   811→   811→Adds a new company to an existing org.
+   812→   812→URL can be: /create-company or /create-company?org_id=xxx
+   813→   813→
+   814→   814→STEP 1: CHOOSE ORGANIZATION
+   815→   815→
+   816→   816→  "Which organization should this company belong to?"
+   817→   817→  
+   818→   818→  Shows user's owned organizations as selectable cards:
+   819→   819→  ┌─────────────────────────────────┐
+   820→   820→  │ ● Hafeez Group           SELECT │ ← pre-selected if org_id in URL
+   821→   821→  │   3 companies · Owner           │
+   822→   822→  └─────────────────────────────────┘
+   823→   823→  ┌─────────────────────────────────┐
+   824→   824→  │   Usman Foods Group             │
+   825→   825→  │   2 companies · Owner           │
+   826→   826→  └─────────────────────────────────┘
+   827→   827→  ┌─────────────────────────────────┐
+   828→   828→  │ + Create a new organization     │ ← link to /create-organization
+   829→   829→  │   Start a completely new        │
+   830→   830→  │   business umbrella             │
+   831→   831→  └─────────────────────────────────┘
+   832→   832→  
+   833→   833→  If org_id query param exists: pre-select that org,
+   834→   834→  keep selector visible but that card highlighted
+   835→   835→
+   836→   836→STEP 2: COMPANY DETAILS
+   837→   837→  Exact same form as Step 2 in Create Organization wizard
+   838→   838→  (company name, legal name, NTN, STRN, currency, country,
+   839→   839→   province, city, address, phone, email, fiscal year, timezone)
+   840→   840→
+   841→   841→STEP 3: REVIEW & CREATE
+   842→   842→  Similar to org wizard review
+   843→   843→  Shows selected org + company summary
+   844→   844→  What will happen bullets
+   845→   845→  [Create Company] button → calls createCompany() → redirect
+   846→   846→
+   847→   847→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   848→   848→PART 8: COMPANY SETTINGS PAGE
+   849→   849→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   850→   850→
+   851→   851→Create page: /app/(dashboard)/company/[companyId]/settings/page.tsx
+   852→   852→
+   853→   853→GUARD: Only accessible if user is elevated employee of this company
+   854→   854→       AND this is their active_company_id
+   855→   855→       If not: show 403 "You don't have permission to access settings"
+   856→   856→
+   857→   857→PAGE HEADER:
+   858→   858→  [Company Logo — large]  Company Name
+   859→   859→  "Company Settings"
+   860→   860→  Subtitle: "Manage your company profile, legal info, and preferences"
+   861→   861→
+   862→   862→TABS:
+   863→   863→  Profile | Tax & Legal | Address & Contact | Financial | Danger Zone
+   864→   864→
+   865→   865→━━━━━━━━━━━━━━━━━━
+   866→   866→TAB 1: PROFILE
+   867→   867→━━━━━━━━━━━━━━━━━━
+   868→   868→
+   869→   869→  LOGO SECTION:
+   870→   870→    Current logo displayed (200×200px rounded square)
+   871→   871→    OR initials avatar if no logo
+   872→   872→    
+   873→   873→    [Upload New Logo] button
+   874→   874→      → File picker: JPG, PNG, WebP, max 2MB
+   875→   875→      → Immediate preview before saving
+   876→   876→      → [Save Logo] confirmation button
+   877→   877→      → Uploads to: 'companies/{company_id}/logo/{timestamp}.jpg'
+   878→   878→      → Deletes old logo from storage
+   879→   879→    
+   880→   880→    [Remove Logo] link (shown only if logo exists)
+   881→   881→      → Confirmation dialog: "Remove logo? Initials will show instead."
+   882→   882→
+   883→   883→  COMPANY NAME:
+   884→   884→    Label: Company Display Name
+   885→   885→    Input: [Hafeez Textiles                    ]
+   886→   886→    Helper: "This name appears throughout the app"
+   887→   887→    
+   888→   888→  LEGAL NAME:
+   889→   889→    Label: Legal / Registered Name (optional)
+   890→   890→    Input: [Hafeez Textiles Private Limited     ]
+   891→   891→    Helper: "Used on invoices and legal documents"
+   892→   892→  
+   893→   893→  COMPANY SLUG:
+   894→   894→    Label: Company Slug
+   895→   895→    Input: [hafeez-textiles] (read-only with lock icon)
+   896→   896→    Helper: "Cannot be changed after creation — used in URLs"
+   897→   897→  
+   898→   898→  STATUS BADGE:
+   899→   899→    Active ✅ (read-only display, archiving is in Danger Zone)
+   900→   900→  
+   901→   901→  [Save Profile] button → calls updateCompany() → success toast
+   902→   902→
+   903→   903→━━━━━━━━━━━━━━━━━━
+   904→   904→TAB 2: TAX & LEGAL
+   905→   905→━━━━━━━━━━━━━━━━━━
+   906→   906→
+   907→   907→  Pakistan Tax Registration section:
+   908→   908→  
+   909→   909→  NTN (National Tax Number):
+   910→   910→    Input: [1234567-8                          ]
+   911→   911→    Helper: "7-digit number followed by a check digit, issued by FBR"
+   912→   912→    Info box: "NTN is required for filing income tax returns with FBR.
+   913→   913→               Every registered business must have one."
+   914→   914→  
+   915→   915→  STRN (Sales Tax Registration Number):
+   916→   916→    Input: [03-04-9999-100-88                  ]
+   917→   917→    Helper: "Required if your annual turnover exceeds Rs. 1 crore"
+   918→   918→    Info box: "STRN is needed if you charge GST/Sales Tax on invoices.
+   919→   919→               Format: Registration-Type-NTN-Activity-Branch"
+   920→   920→
+   921→   921→  International Tax ID (shown if country ≠ Pakistan):
+   922→   922→    Tax ID Type: (dropdown: VAT Number / GST Number / EIN / Other)
+   923→   923→    Tax ID Number: (text input)
+   924→   924→
+   925→   925→  [Save Tax Information] button
+   926→   926→
+   927→   927→━━━━━━━━━━━━━━━━━━
+   928→   928→TAB 3: ADDRESS & CONTACT
+   929→   929→━━━━━━━━━━━━━━━━━━
+   930→   930→
+   931→   931→  REGISTERED ADDRESS:
+   932→   932→    Street Address: [textarea]
+   933→   933→    
+   934→   934→    If country = Pakistan:
+   935→   935→      Province: [dropdown — 7 provinces + territories]
+   936→   936→      City: [text input]
+   937→   937→    Else:
+   938→   938→      State/Region: [text input]
+   939→   939→      City: [text input]
+   940→   940→    
+   941→   941→    Postal Code: [text input]
+   942→   942→    Country: [searchable country dropdown — same as creation]
+   943→   943→  
+   944→   944→  CONTACT INFORMATION:
+   945→   945→    Phone Number: [text — with Pakistan +92 hint if PK]
+   946→   946→    Email Address: [email input]
+   947→   947→    Website URL: [url input]
+   948→   948→  
+   949→   949→  [Save Address & Contact] button
+   950→   950→
+   951→   951→━━━━━━━━━━━━━━━━━━
+   952→   952→TAB 4: FINANCIAL
+   953→   953→━━━━━━━━━━━━━━━━━━
+   954→   954→
+   955→   955→  BASE CURRENCY:
+   956→   956→    CurrencySelector component
+   957→   957→    Current: 🇵🇰 PKR — Pakistani Rupee
+   958→   958→    
+   959→   959→    WARNING BANNER (shown when currency changes):
+   960→   960→    ⚠️ "Changing base currency affects how all financial reports
+   961→   961→       are calculated. This will NOT convert existing prices or
+   962→   962→       costs — only the display currency label will change.
+   963→   963→       Are you sure?"
+   964→   964→    
+   965→   965→    Two buttons appear:
+   966→   966→    [Cancel Currency Change] [Yes, Change Currency]
+   967→   967→
+   968→   968→  FISCAL YEAR:
+   969→   969→    Fiscal Year Starts In:
+   970→   970→      Month dropdown (January default)
+   971→   971→      Live preview: "Your fiscal year: July 2024 → June 2025"
+   972→   972→      
+   973→   973→      Info box:
+   974→   974→      "This controls how yearly reports, annual summaries,
+   975→   975→       and year-to-date calculations work.
+   976→   976→       Pakistan standard: January (calendar year)
+   977→   977→       Pakistan tax year: July (as per FBR)"
+   978→   978→
+   979→   979→  TIMEZONE:
+   980→   980→    Searchable timezone dropdown
+   981→   981→    Default: Asia/Karachi
+   982→   982→    Helper: "Used for scheduling, timestamps, and reports"
+   983→   983→
+   984→   984→  DATE FORMAT: (display only, auto from country)
+   985→   985→    Pakistan: DD/MM/YYYY
+   986→   986→    USA: MM/DD/YYYY
+   987→   987→    ISO: YYYY-MM-DD
+   988→   988→
+   989→   989→  DEFAULT PAYMENT TERMS:
+   990→   990→    Select: Immediate | Net 15 | Net 30 | Net 45 | Net 60 | Custom
+   991→   991→    Helper: "Used as default when creating invoices (Finance module)"
+   992→   992→
+   993→   993→  [Save Financial Settings] button
+   994→   994→
+   995→   995→━━━━━━━━━━━━━━━━━━
+   996→   996→TAB 5: DANGER ZONE
+   997→   997→━━━━━━━━━━━━━━━━━━
+   998→   998→
+   999→   999→  Red-bordered section at bottom.
+  1000→  1000→  
+  1001→  1001→  ARCHIVE COMPANY:
+  1002→  1002→    Title: "Archive This Company"
+  1003→  1003→    Description: "Archiving will permanently disable this company.
+  1004→  1004→      All employees will lose access immediately.
+  1005→  1005→      All data will be preserved — nothing is deleted.
+  1006→  1006→      You cannot undo this without contacting support."
+  1007→  1007→    
+  1008→  1008→    [Archive Company] button (red, outlined)
+  1009→  1009→    
+  1010→  1010→    Click → opens confirmation dialog:
+  1011→  1011→    ┌──────────────────────────────────────────┐
+  1012→  1012→    │ Archive Hafeez Textiles?                 │
+  1013→  1013→    │                                          │
+  1014→  1014→    │ This will:                               │
+  1015→  1015→    │ • Disable access for 12 employees        │
+  1016→  1016→    │ • Stop all operations for this company   │
+  1017→  1017→    │ • Preserve all historical data           │
+  1018→  1018→    │                                          │
+  1019→  1019→    │ Type company name to confirm:            │
+  1020→  1020→    │ [                                      ] │
+  1021→  1021→    │ Must type: "Hafeez Textiles"             │
+  1022→  1022→    │                                          │
+  1023→  1023→    │ [Cancel]    [Archive Company] (red btn)  │
+  1024→  1024→    └──────────────────────────────────────────┘
+  1025→  1025→    
+  1026→  1026→    Archive button only enables when exact name is typed.
+  1027→  1027→    Calls archiveCompany() → redirects to /dashboard
+  1028→  1028→
+  1029→  1029→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1030→  1030→PART 9: ORGANIZATION SETTINGS PAGE
+  1031→  1031→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1032→  1032→
+  1033→  1033→Create page: /app/(dashboard)/org/[orgId]/settings/page.tsx
+  1034→  1034→
+  1035→  1035→GUARD: Only org owner can access this page.
+  1036→  1036→
+  1037→  1037→TABS:
+  1038→  1038→  Profile | Companies | Subscription | Danger Zone
+  1039→  1039→
+  1040→  1040→━━━━━━━━━━━━━━━━━━
+  1041→  1041→TAB 1: PROFILE
+  1042→  1042→━━━━━━━━━━━━━━━━━━
+  1043→  1043→
+  1044→  1044→  ORG LOGO:
+  1045→  1045→    Same upload UI as company logo
+  1046→  1046→    Storage: 'organizations/{org_id}/logo/{timestamp}.jpg'
+  1047→  1047→  
+  1048→  1048→  Organization Name: [text input]
+  1049→  1049→  Slug: [read-only]
+  1050→  1050→  Description: [textarea — optional, 500 char max]
+  1051→  1051→  Website: [url input]
+  1052→  1052→  
+  1053→  1053→  [Save Profile] button → calls updateOrganization()
+  1054→  1054→
+  1055→  1055→━━━━━━━━━━━━━━━━━━
+  1056→  1056→TAB 2: COMPANIES
+  1057→  1057→━━━━━━━━━━━━━━━━━━
+  1058→  1058→
+  1059→  1059→  HEADER:
+  1060→  1060→    "Companies in Hafeez Group"
+  1061→  1061→    [+ Add New Company] button (top right)
+  1062→  1062→    → Navigates to /create-company?org_id=[orgId]
+  1063→  1063→  
+  1064→  1064→  COMPANIES TABLE:
+  1065→  1065→  ┌──────────────────┬──────────┬──────────┬────────────┬──────────┐
+  1066→  1066→  │ Company          │ Currency │ Employees│ Status     │ Actions  │
+  1067→  1067→  ├──────────────────┼──────────┼──────────┼────────────┼──────────┤
+  1068→  1068→  │ [HT]             │          │          │            │          │
+  1069→  1069→  │ Hafeez Textiles  │ 🇵🇰 PKR │ 12       │ Active ✅  │[Manage]  │
+  1070→  1070→  ├──────────────────┼──────────┼──────────┼────────────┼──────────┤
+  1071→  1071→  │ [HO]             │          │          │            │          │
+  1072→  1072→  │ Hafeez Online    │ 🇵🇰 PKR │ 4        │ Active ✅  │[Manage]  │
+  1073→  1073→  ├──────────────────┼──────────┼──────────┼────────────┼──────────┤
+  1074→  1074→  │ [HR]             │          │          │            │          │
+  1075→  1075→  │ Hafeez Retail    │ 🇵🇰 PKR │ 6        │ Active ✅  │[Manage]  │
+  1076→  1076→  └──────────────────┴──────────┴──────────┴────────────┴──────────┘
+  1077→  1077→  
+  1078→  1078→  [Manage] → navigates to /company/[companyId]/settings
+  1079→  1079→
+  1080→  1080→  EMPTY STATE (if only 1 company):
+  1081→  1081→    "Add more companies to expand Hafeez Group.
+  1082→  1082→     Each company has its own employees, inventory, and finances."
+  1083→  1083→    [+ Add Company] button
+  1084→  1084→
+  1085→  1085→━━━━━━━━━━━━━━━━━━
+  1086→  1086→TAB 3: SUBSCRIPTION
+  1087→  1087→━━━━━━━━━━━━━━━━━━
+  1088→  1088→
+  1089→  1089→  CURRENT PLAN:
+  1090→  1090→    Plan badge: FREE / STARTER / GROWTH / ENTERPRISE
+  1091→  1091→    
+  1092→  1092→    Plan details card:
+  1093→  1093→    ┌──────────────────────────────────────────┐
+  1094→  1094→    │ FREE PLAN                    Active ✅   │
+  1095→  1095→    ├──────────────────────────────────────────┤
+  1096→  1096→    │ Companies:      2 / 2 used              │
+  1097→  1097→    │ Employees/co:   5 / 5 used              │
+  1098→  1098→    │ Storage:        1 GB / 0.3 GB used      │
+  1099→  1099→    │ Products:       100 / 67 used           │
+  1100→  1100→    └──────────────────────────────────────────┘
+  1101→  1101→    
+  1102→  1102→    [Upgrade Plan] button (prominent — links to pricing page)
+  1103→  1103→    "Need more? Contact us at support@flowops.com"
+  1104→  1104→
+  1105→  1105→━━━━━━━━━━━━━━━━━━
+  1106→  1106→TAB 4: DANGER ZONE
+  1107→  1107→━━━━━━━━━━━━━━━━━━
+  1108→  1108→
+  1109→  1109→  ARCHIVE ORGANIZATION:
+  1110→  1110→    "This will archive ALL companies under Hafeez Group.
+  1111→  1111→     All employees across all companies will lose access.
+  1112→  1112→     All data is preserved."
+  1113→  1113→    
+  1114→  1114→    [Archive Organization] button (red)
+  1115→  1115→    
+  1116→  1116→    Confirmation dialog:
+  1117→  1117→    Type org name to confirm: "Hafeez Group"
+  1118→  1118→    Shows: "This will affect 3 companies and 22 employees"
+  1119→  1119→    Calls archiveOrganization()
+  1120→  1120→    → Redirects to /dashboard (or /onboarding if no other active workspace)
+  1121→  1121→
+  1122→  1122→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1123→  1123→PART 10: ZUSTAND STORE UPDATE
+  1124→  1124→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1125→  1125→
+  1126→  1126→Update: /lib/stores/workspace.store.ts
+  1127→  1127→
+  1128→  1128→The workspace store must hold complete current context:
+  1129→  1129→
+  1130→  1130→interface WorkspaceState {
+  1131→  1131→  -- Active workspace
+  1132→  1132→  activeCompanyId: string | null
+  1133→  1133→  activeOrgId: string | null
+  1134→  1134→  activeCompanyName: string | null
+  1135→  1135→  activeCompanyLogo: string | null
+  1136→  1136→  activeOrgName: string | null
+  1137→  1137→  activeOrgLogo: string | null
+  1138→  1138→  activeRoleName: string | null
+  1139→  1139→  activeRoleTier: 'elevated' | 'standard' | null
+  1140→  1140→  activePermissions: string[]  ← list of permission keys
+  1141→  1141→
+  1142→  1142→  -- All workspaces (for switcher)
+  1143→  1143→  workspaces: WorkspaceGroup[]
+  1144→  1144→  workspacesLoaded: boolean
+  1145→  1145→
+  1146→  1146→  -- Actions
+  1147→  1147→  setActiveWorkspace: (company, org, role, permissions) => void
+  1148→  1148→  setWorkspaces: (groups: WorkspaceGroup[]) => void
+  1149→  1149→  clearWorkspace: () => void
+  1150→  1150→}
+  1151→  1151→
+  1152→  1152→This store is hydrated on app load from:
+  1153→  1153→  1. user_settings (active_company_id, active_org_id)
+  1154→  1154→  2. getUserWorkspaces() result
+  1155→  1155→  3. Current employee's role + permissions
+  1156→  1156→
+  1157→  1157→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1158→  1158→PART 11: NAVIGATION UPDATES
+  1159→  1159→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1160→  1160→
+  1161→  1161→Update sidebar to add:
+  1162→  1162→
+  1163→  1163→COMPANY SECTION (bottom of sidebar):
+  1164→  1164→  ⚙️ Company Settings    → /company/[active_company_id]/settings
+  1165→  1165→     (only show if user is elevated in active company)
+  1166→  1166→
+  1167→  1167→ORG SECTION (elevated roles only):
+  1168→  1168→  🏢 Organization
+  1169→  1169→    ├── Overview         → /org/[active_org_id]
+  1170→  1170→    ├── Org Catalog      → /org/[active_org_id]/catalog
+  1171→  1171→    ├── Companies        → /org/[active_org_id]/settings (companies tab)
+  1172→  1172→    └── Org Settings     → /org/[active_org_id]/settings
+  1173→  1173→
+  1174→  1174→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1175→  1175→PART 12: INITIALS AVATAR COMPONENT
+  1176→  1176→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1177→  1177→
+  1178→  1178→Create: /components/ui/InitialsAvatar.tsx
+  1179→  1179→
+  1180→  1180→Used everywhere a company or org logo might be missing.
+  1181→  1181→
+  1182→  1182→Props:
+  1183→  1183→  name: string          → source for initials
+  1184→  1184→  id: string            → used to deterministically pick color
+  1185→  1185→  size: 'sm'|'md'|'lg'  → 24px / 40px / 80px
+  1186→  1186→  className?: string
+  1187→  1187→
+  1188→  1188→Logic:
+  1189→  1189→  1. Extract initials:
+  1190→  1190→     "Hafeez Textiles Pvt Ltd" → "HT" (first letter of first 2 words)
+  1191→  1191→     "Burger Point" → "BP"
+  1192→  1192→     "TCS" → "TC"
+  1193→  1193→     Single word "LAMHA" → "LA"
+  1194→  1194→  
+  1195→  1195→  2. Deterministic color from id:
+  1196→  1196→     const colors = ['blue','green','purple','orange','red','teal','pink']
+  1197→  1197→     const index = id.charCodeAt(0) % colors.length
+  1198→  1198→     Always same color for same company
+  1199→  1199→
+  1200→  1200→  3. Renders as a rounded square (for companies) or circle (for orgs)
+  1201→  1201→     with initials text centered in chosen background color
+  1202→  1202→
+  1203→  1203→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1204→  1204→IMPLEMENTATION ORDER — FOLLOW EXACTLY
+  1205→  1205→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1206→  1206→
+  1207→  1207→Build in this exact order:
+  1208→  1208→
+  1209→  1209→1. /lib/data/currencies.ts
+  1210→  1210→   (needed by all forms)
+  1211→  1211→
+  1212→  1212→2. /components/ui/CurrencySelector.tsx
+  1213→  1213→   (needed by all forms)
+  1214→  1214→
+  1215→  1215→3. /components/ui/InitialsAvatar.tsx
+  1216→  1216→   (needed by workspace switcher)
+  1217→  1217→
+  1218→  1218→4. /lib/stores/workspace.store.ts — update
+  1219→  1219→   (needed by workspace switcher)
+  1220→  1220→
+  1221→  1221→5. /lib/validations/organization.schemas.ts
+  1222→  1222→
+  1223→  1223→6. /lib/actions/organization.actions.ts
+  1224→  1224→   All 8 server actions
+  1225→  1225→
+  1226→  1226→7. /components/workspace/WorkspaceSwitcher.tsx — rebuild
+  1227→  1227→   (with getUserWorkspaces + switchWorkspace)
+  1228→  1228→
+  1229→  1229→8. /app/(dashboard)/create-organization/page.tsx
+  1230→  1230→   3-step wizard
+  1231→  1231→
+  1232→  1232→9. /app/(dashboard)/create-company/page.tsx
+  1233→  1233→   3-step wizard
+  1234→  1234→
+  1235→  1235→10. /app/(dashboard)/company/[companyId]/settings/page.tsx
+  1236→  1236→    All 5 tabs
+  1237→  1237→
+  1238→  1238→11. /app/(dashboard)/org/[orgId]/settings/page.tsx
+  1239→  1239→    All 4 tabs
+  1240→  1240→
+  1241→  1241→12. Sidebar navigation update
+  1242→  1242→
+  1243→  1243→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1244→  1244→CRITICAL RULES
+  1245→  1245→━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1246→  1246→
+  1247→  1247→1. NEVER modify database schema or migration files.
+  1248→  1248→
+  1249→  1249→2. Workspace switch MUST call router.refresh() AND queryClient.clear()
+  1250→  1250→   Both are required — one without the other causes stale data.
+  1251→  1251→
+  1252→  1252→3. Logo uploads MUST delete old file from Supabase Storage
+  1253→  1253→   before uploading new one — prevent storage waste.
+  1254→  1254→
+  1255→  1255→4. Currency change in company settings MUST show warning.
+  1256→  1256→   Changing currency does NOT convert existing monetary values.
+  1257→  1257→   Only changes the label going forward.
+  1258→  1258→
+  1259→  1259→5. Archive confirmation MUST require typing exact name.
+  1260→  1260→   This prevents accidental archiving.
+  1261→  1261→   Button stays disabled until typed name matches exactly.
+  1262→  1262→
+  1263→  1263→6. Slug generation must check database uniqueness.
+  1264→  1264→   "hafeez-group" taken → try "hafeez-group-2" → "hafeez-group-3"
+  1265→  1265→
+  1266→  1266→7. All forms: loading state on submit, Zod validation,
+  1267→  1267→   Sonner toast on success and error.
+  1268→  1268→
+  1269→  1269→8. All server actions return:
+  1270→  1270→   { success: boolean, data?: T, error?: string }
+  1271→  1271→
+  1272→  1272→9. Workspace switcher must use TanStack Query with staleTime: 30000
+  1273→  1273→   (30 seconds) to avoid refetching on every render.
+  1274→  1274→   Invalidate on createOrg, createCompany, switchWorkspace.
+  1275→  1275→
+  1276→  1276→10. If user has NO active workspace after archiving a company:
+  1277→  1277→    Redirect to /onboarding so they can pick another workspace
+  1278→  1278→    or create a new one.
+  1279→  1279→
+  1280→  1280→

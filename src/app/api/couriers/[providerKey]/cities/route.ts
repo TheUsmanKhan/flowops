@@ -30,23 +30,11 @@ export const dynamic = 'force-dynamic'
  *
  * Special providerKey='all': searches across ALL providers' cities
  * (union). Used by the Order Create form when no specific courier is
- *   selected yet — the user still gets city suggestions from the union
- *   of all connected couriers' cached cities. Results are GROUPED by
- *   cityName (case-insensitive) — each city appears once with a
- *   `servedBy` array listing ALL providers that serve it. This powers
- *   the courier-name badges in the autocomplete dropdown.
- *   (live=true is NOT supported in 'all' mode — there's no single courier
- *   to fetch from.)
- *
- * COURIER BADGES (servedBy):
- *   Every city in the response includes a `servedBy` array:
- *     [{ providerKey: 'leopard', isPickupCity: true, isDeliveryCity: true },
- *      { providerKey: 'postex', isPickupCity: true, isDeliveryCity: true }]
- *   The UI uses this to show courier-name badges (PostEx/Leopard/etc.) per
- *   city instead of Pickup/Delivery badges. In per-provider mode, servedBy
- *   includes the selected provider + any OTHER providers that also serve
- *   the same city name. In 'all' mode, servedBy includes ALL providers
- *   that serve the city.
+ * selected yet — the user still gets city suggestions from the union
+ * of all connected couriers' cached cities. Results are deduplicated
+ * by cityName (case-insensitive), keeping the first provider's entry.
+ * (live=true is NOT supported in 'all' mode — there's no single courier
+ * to fetch from.)
  */
 export async function GET(
   req: NextRequest,
@@ -57,27 +45,6 @@ export async function GET(
     if (!user) throw new ApiError(401, 'Not authenticated')
     const { providerKey } = await params
 
-    // ── Resolve the caller's active company to scope servedBy[] ──
-    // CourierOperationalCity rows are global reference data (shared across
-    // tenants by design — see city-sync.actions.ts), but the courier-name
-    // badges shown to the user should only reflect providers the CALLING
-    // company has an active, connected integration for. A company with no
-    // Leopard integration (or a still-pending one) should never see a
-    // 'leopard' badge, even though the underlying city rows are shared.
-    //
-    // This matches the auth pattern used by the sibling courier routes
-    // (sync-cities, match-city): getCurrentUser() → userSetting → companyId.
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
-    const connectedIntegrations = await db.companyIntegration.findMany({
-      where: { companyId, isActive: true, connectionStatus: 'connected' },
-      select: { provider: { select: { providerKey: true } } },
-    })
-    const connectedProviderKeys = new Set(
-      connectedIntegrations.map((i) => i.provider.providerKey),
-    )
-
     const { searchParams } = new URL(req.url)
     const q = (searchParams.get('q') ?? '').trim()
     const limit = Math.min(parseInt(searchParams.get('limit') ?? '20', 10), 50)
@@ -85,21 +52,11 @@ export async function GET(
 
     if (providerKey === 'all') {
       // Union mode — search across ALL providers' delivery cities.
-      // GROUP by cityName (case-insensitive) — each city appears once with
-      // a servedBy array of ALL providers that serve it AND that the calling
-      // company has an active, connected integration for. A provider the
-      // company hasn't connected (or whose integration is still pending)
-      // is excluded from servedBy[], so its badge never shows up.
-      //
-      // If the company has NO connected courier integrations, return an
-      // empty list immediately (no point querying the cache).
-      if (connectedProviderKeys.size === 0) {
-        return Response.json({ cities: [] })
-      }
+      // Deduplicate by case-insensitive cityName, keeping the first match.
+      // live=true is NOT supported in 'all' mode (no single courier to fetch from).
       const allCities = await db.courierOperationalCity.findMany({
         where: {
           isDeliveryCity: true,
-          providerKey: { in: Array.from(connectedProviderKeys) },
           ...(q ? { cityName: { contains: q, mode: 'insensitive' as const } } : {}),
         },
         select: {
@@ -111,60 +68,26 @@ export async function GET(
           providerKey: true,
         },
         orderBy: { cityName: 'asc' },
-        take: limit * 5, // over-fetch to allow grouping without losing results
+        take: limit * 3, // over-fetch to allow dedup without losing results
       })
-
-      // Group by cityName (case-insensitive), preserving first-seen order
-      const grouped = new Map<string, {
+      const seen = new Set<string>()
+      const cities: Array<{
         id: string
         cityName: string
         cityId: string | null
         isPickupCity: boolean
         isDeliveryCity: boolean
         providerKey: string
-        servedBy: Array<{ providerKey: string; isPickupCity: boolean; isDeliveryCity: boolean }>
-      }>()
+      }> = []
       for (const c of allCities) {
         const key = c.cityName.toLowerCase()
-        const existing = grouped.get(key)
-        if (existing) {
-          // Add this provider to servedBy; also OR the pickup/delivery flags
-          // so the primary fields reflect "at least one provider supports this"
-          existing.servedBy.push({
-            providerKey: c.providerKey,
-            isPickupCity: c.isPickupCity,
-            isDeliveryCity: c.isDeliveryCity,
-          })
-          existing.isPickupCity = existing.isPickupCity || c.isPickupCity
-          existing.isDeliveryCity = existing.isDeliveryCity || c.isDeliveryCity
-        } else {
-          grouped.set(key, {
-            id: c.id,
-            cityName: c.cityName,
-            cityId: c.cityId,
-            isPickupCity: c.isPickupCity,
-            isDeliveryCity: c.isDeliveryCity,
-            providerKey: c.providerKey,
-            servedBy: [{
-              providerKey: c.providerKey,
-              isPickupCity: c.isPickupCity,
-              isDeliveryCity: c.isDeliveryCity,
-            }],
-          })
+        if (!seen.has(key)) {
+          seen.add(key)
+          cities.push(c)
         }
-        if (grouped.size >= limit) break
+        if (cities.length >= limit) break
       }
-      return Response.json({ cities: Array.from(grouped.values()) })
-    }
-
-    // ── Per-provider mode guard ──
-    // If the calling company has NO active, connected integration for the
-    // requested providerKey, return an empty list. This prevents a company
-    // from querying a specific courier's cities they haven't connected
-    // (e.g. a company with no Leopard integration shouldn't see Leopard's
-    // city cache, even though the rows are globally shared).
-    if (!connectedProviderKeys.has(providerKey)) {
-      return Response.json({ cities: [] })
+      return Response.json({ cities })
     }
 
     const where = {
@@ -209,62 +132,7 @@ export async function GET(
       })
     }
 
-    // ── Enrich with servedBy: which OTHER providers also serve each city ──
-    // For each city in the result, look up ALL providers that have the same
-    // cityName (case-insensitive). This powers the courier-name badges in the
-    // UI (e.g. "this city is served by Leopard AND PostEx"). FILTERED to only
-    // include providers the calling company has connected — a provider the
-    // company hasn't connected won't appear in servedBy[] even if it serves
-    // the same city globally.
-    let citiesWithCoverage: Array<{
-      id: string
-      cityName: string
-      cityId: string | null
-      isPickupCity: boolean
-      isDeliveryCity: boolean
-      providerKey: string
-      servedBy: Array<{ providerKey: string; isPickupCity: boolean; isDeliveryCity: boolean }>
-    }> = cities.map((c) => ({
-      ...c,
-      providerKey,
-      servedBy: [{
-        providerKey,
-        isPickupCity: c.isPickupCity,
-        isDeliveryCity: c.isDeliveryCity,
-      }],
-    }))
-
-    if (cities.length > 0) {
-      const cityNames = cities.map((c) => c.cityName)
-      const allProviders = await db.courierOperationalCity.findMany({
-        where: {
-          cityName: { in: cityNames, mode: 'insensitive' as const },
-          isDeliveryCity: true,
-          // Scope to providers the calling company has connected — same
-          // filter as the 'all' mode above. A provider the company hasn't
-          // connected won't show up as a badge on any city.
-          providerKey: { in: Array.from(connectedProviderKeys) },
-        },
-        select: { cityName: true, providerKey: true, isPickupCity: true, isDeliveryCity: true },
-      })
-      // Build a lookup: cityName(lower) -> [{ providerKey, isPickupCity, isDeliveryCity }]
-      const byCity = new Map<string, Array<{ providerKey: string; isPickupCity: boolean; isDeliveryCity: boolean }>>()
-      for (const c of allProviders) {
-        const key = c.cityName.toLowerCase()
-        if (!byCity.has(key)) byCity.set(key, [])
-        byCity.get(key)!.push({
-          providerKey: c.providerKey,
-          isPickupCity: c.isPickupCity,
-          isDeliveryCity: c.isDeliveryCity,
-        })
-      }
-      citiesWithCoverage = citiesWithCoverage.map((c) => ({
-        ...c,
-        servedBy: byCity.get(c.cityName.toLowerCase()) ?? c.servedBy,
-      }))
-    }
-
-    return Response.json({ cities: citiesWithCoverage })
+    return Response.json({ cities })
   } catch (err) {
     return handleError(err)
   }

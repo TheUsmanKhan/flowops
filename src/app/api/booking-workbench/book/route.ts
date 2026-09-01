@@ -31,14 +31,6 @@ interface BookRequest {
   itemDescription?: string
   orderRefNumber?: string
   pickupAddressCode?: string
-  // Optional return address override (Leopard-specific — per-booking return
-  // address different from the shipper's default)
-  returnAddressOverride?: {
-    address: string
-    cityName: string
-    contactPersonName: string
-    phone: string
-  }
 }
 
 /**
@@ -97,7 +89,6 @@ export async function POST(req: NextRequest) {
         itemDescription: body.itemDescription,
         orderRefNumber: body.orderRefNumber,
         pickupAddressCode: body.pickupAddressCode,
-        returnAddressOverride: body.returnAddressOverride,
       })
 
       if (!result.success) {
@@ -130,12 +121,9 @@ async function bookExchangeShipment(
   }
 
   const providerKey = integration.provider.providerKey
-  // NOTE: A hardcoded `providerKey !== 'postex'` guard previously lived here
-  // and blocked ALL non-PostEx couriers from booking exchange shipments. It
-  // was removed so the adapter's own bookShipment() runs for every
-  // registered provider. Stub adapters (e.g. tcs) already throw "not
-  // implemented" from their own bookShipment() — no booking-action-level
-  // allowlist is needed.
+  if (providerKey !== 'postex') {
+    return Response.json({ error: `Booking not yet implemented for provider '${providerKey}'.` }, { status: 400 })
+  }
 
   const shipment = await db.exchangeShipment.findFirst({
     where: { id: body.shipmentId!, companyId },

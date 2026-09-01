@@ -90,6 +90,7 @@ type SelectedCustomer = NonNullable<CustomerSearchResult['customer']>
 
 interface VariantOption {
   variantId: string
+  productId: string
   sku: string
   productTitle: string
   costPrice: number
@@ -97,6 +98,10 @@ interface VariantOption {
   fulfillmentType: string
   primaryImage: string | null
   attributeValues: Record<string, string>
+  /** Gate 1 of the 3-gate visibility system. When false, the variant is
+   *  toggled off (OrgProductVariant.isActive=false) and renders as disabled
+   *  in the picker with the reason "Not enabled for your company". */
+  isActive?: boolean
 }
 
 interface ProductsResponse {
@@ -111,6 +116,7 @@ interface ProductsResponse {
       salePrice: number | null
       fulfillmentType: string
       attributeValues: Record<string, string>
+      isActive?: boolean
     }>
   }>
 }
@@ -242,10 +248,16 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   // here for buildPayload + validation).
   const [deliveryAddress, setDeliveryAddress] = useState('')
   const [deliveryCity, setDeliveryCity] = useState('')
-  // Country (Phase: Country System). Defaults to "Pakistan" (current
-  // majority use case). Stored as a NAME (not alpha-2 code) — consistent
-  // with CustomerAddress.country + Shopify's default_address.country.
-  const [deliveryCountry, setDeliveryCountry] = useState('Pakistan')
+  // Country (Phase: Country System). Defaults to "PK" (current
+  // majority use case). Stored as an alpha-2 CODE (not a name) — consistent
+  // with CustomerAddress.country + Shopify's default_address.country_code.
+  const [deliveryCountry, setDeliveryCountry] = useState('PK')
+  // Fulfillment channel (Phase B1 — Self-Fulfilled Channel). 'courier' =
+  // booked via a connected courier. 'self_fulfilled' = merchant handles
+  // delivery themselves. Defaults to 'self_fulfilled' when deliveryCountry
+  // is NOT 'PK' (Pakistani couriers don't deliver internationally); defaults
+  // to 'courier' for PK. Always visible + overridable by the user.
+  const [fulfillmentChannel, setFulfillmentChannel] = useState<'courier' | 'self_fulfilled'>('courier')
   const [courierName, setCourierName] = useState('')
   const [courierIntegrationId, setCourierIntegrationId] = useState('')
   // Tracks whether the user has MANUALLY chosen a courier for this order.
@@ -436,31 +448,36 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   })
 
   // Set default courier from settings when data loads.
-  // Phase 3 (Country System): only auto-apply the company-default courier
-  // when the delivery country IS Pakistan — Pakistani couriers (PostEx/TCS/
-  // Leopard) don't deliver internationally, so for a non-Pakistan address
-  // the default should be 'No courier' (self-fulfilled), handled by the
-  // separate effect below. This keeps Pakistan behavior unchanged.
+  // Phase B1: only auto-apply the company-default courier when the delivery
+  // country IS Pakistan AND the fulfillment channel is 'courier'. For
+  // self-fulfilled orders, no courier is needed. For non-PK addresses, the
+  // fulfillment channel auto-defaults to 'self_fulfilled' (see below).
   useEffect(() => {
-    if (orderSettingsQuery.data?.settings?.defaultCourierCompanyIntegrationId && !courierIntegrationId && deliveryCountry === 'Pakistan') {
+    if (orderSettingsQuery.data?.settings?.defaultCourierCompanyIntegrationId && !courierIntegrationId && deliveryCountry === 'PK' && fulfillmentChannel === 'courier') {
       setCourierIntegrationId(orderSettingsQuery.data.settings.defaultCourierCompanyIntegrationId)
     }
-  }, [orderSettingsQuery.data, courierIntegrationId, deliveryCountry])
+  }, [orderSettingsQuery.data, courierIntegrationId, deliveryCountry, fulfillmentChannel])
 
-  // ── Phase 3 (Country System): Self-Fulfilled auto-default for non-Pakistan ──
-  // When the delivery country is NOT Pakistan, default the courier to 'No
-  // courier' (self-fulfilled) — the connected couriers are Pakistan-only and
-  // can't fulfil an international delivery. This is a DEFAULT only: the user
-  // can still manually pick a courier afterward (userPickedCourier flips
-  // to true and this effect stops clearing). When the country returns to
-  // Pakistan, the company-default effect above takes over again.
+  // ── Phase B1: Self-Fulfilled auto-default for non-PK ──
+  // When the delivery country is NOT Pakistan (PK), default the fulfillment
+  // channel to 'self_fulfilled' (Pakistani couriers don't deliver internationally).
+  // This is a DEFAULT only: the user can still toggle back to 'courier' manually
+  // (e.g. if they have an international courier option). When the country returns
+  // to PK, default back to 'courier'. The userPickedCourier flag prevents this
+  // from clearing a manually-selected courier.
   useEffect(() => {
-    if (deliveryCountry !== 'Pakistan' && !userPickedCourier) {
+    if (deliveryCountry !== 'PK' && !userPickedCourier) {
+      if (fulfillmentChannel !== 'self_fulfilled') {
+        setFulfillmentChannel('self_fulfilled')
+      }
       if (courierIntegrationId || courierName) {
         setCourierIntegrationId('')
         setCourierName('')
         setPickupAddressId('')
       }
+    } else if (deliveryCountry === 'PK' && !userPickedCourier && fulfillmentChannel === 'self_fulfilled') {
+      // Country returned to PK + user hasn't manually picked — reset to courier
+      setFulfillmentChannel('courier')
     }
   }, [deliveryCountry, userPickedCourier]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -484,7 +501,10 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
   // Auto-compute order detail from cart items (moved after variantOptions declaration)
   const productsQuery = useQuery<ProductsResponse>({
     queryKey: ['products', 'for-order-create'],
-    queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100'),
+    // include_inactive_variants=true so toggled-off variants appear in the
+    // picker as disabled (gate 1) instead of being hidden. The picker renders
+    // them grayed out with "Not enabled for your company".
+    queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100&include_inactive_variants=true'),
     staleTime: 60_000,
   })
 
@@ -495,6 +515,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       for (const v of p.variants) {
         list.push({
           variantId: v.id,
+          productId: p.id,
           sku: v.sku,
           productTitle: p.title,
           costPrice: v.costPrice,
@@ -502,6 +523,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
           fulfillmentType: v.fulfillmentType,
           primaryImage: p.primaryImage,
           attributeValues: v.attributeValues ?? {},
+          isActive: v.isActive,
         })
       }
     }
@@ -660,7 +682,7 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     setUsedCustomerAddressId(defaultAddr?.id ?? null)
     setDeliveryAddress(defaultAddr?.address ?? '')
     setDeliveryCity(defaultAddr?.city ?? '')
-    setDeliveryCountry(defaultAddr?.country ?? 'Pakistan')
+    setDeliveryCountry(defaultAddr?.country ?? 'PK')
 
     setRecipientName(c.name)
     setSaveAddressForNextTime(false)
@@ -679,7 +701,8 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
     // Reset the manual-courier flag so a fresh customer selection can
     // re-trigger the country-driven Self-Fulfilled auto-default (Phase 3).
     setUserPickedCourier(false)
-    setDeliveryCountry('Pakistan')
+    setDeliveryCountry('PK')
+    setFulfillmentChannel('courier')
   }
 
   // When the user clicks "+ Create New Customer" in the autocomplete dropdown,
@@ -715,12 +738,16 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       items: cart.map((i) => ({
         org_variant_id: i.variantId,
         quantity: i.quantity,
-        unit_price: i.unitPrice,
+        // Phase: Discount Rework — unit_price is NO LONGER sent from the client.
+        // The server resolves originalUnitPrice from CompanyVariantPricing.
+        // Per-item discount fields will be added here when the UI discount
+        // control is built (discount_type/discount_value).
       })),
       payment_type: paymentType,
       delivery_address: deliveryAddress.trim(),
       delivery_city: deliveryCity.trim(),
       delivery_country: deliveryCountry,
+      fulfillment_channel: fulfillmentChannel,
       courier_name: courierName.trim() || undefined,
       courier_company_integration_id: courierIntegrationId || undefined,
       dispatch_location_id: dispatchLocationId,
@@ -1018,8 +1045,6 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
               courierIntegrationId={courierIntegrationId}
               setCourierIntegrationId={setCourierIntegrationId}
               courierIntegrations={courierIntegrations}
-              deliveryCountry={deliveryCountry}
-              setUserPickedCourier={setUserPickedCourier}
               pickupAddressId={pickupAddressId}
               setPickupAddressId={setPickupAddressId}
               pickupAddresses={pickupAddresses}
@@ -1042,6 +1067,11 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
               locations={locationsQuery.data?.locations ?? []}
               isLoadingLocations={locationsQuery.isLoading}
               fieldError={fieldError}
+              fulfillmentChannel={fulfillmentChannel}
+              setFulfillmentChannel={setFulfillmentChannel}
+              userPickedCourier={userPickedCourier}
+              setUserPickedCourier={setUserPickedCourier}
+              deliveryCountry={deliveryCountry}
             />
           </div>
 
@@ -1237,13 +1267,6 @@ function CustomerSection({
   courierIntegrationId,
   setCourierIntegrationId,
   courierIntegrations,
-  // deliveryCountry + setUserPickedCourier: required by the country-driven
-  // Self-Fulfilled auto-default UI (lines ~1488-1529). These were leaking
-  // parent-scope state — passed as props to fix the "deliveryCountry is not
-  // defined" + "setUserPickedCourier is not defined" ReferenceError crashes
-  // when rendering the courier-selection block.
-  deliveryCountry,
-  setUserPickedCourier,
   pickupAddressId,
   setPickupAddressId,
   pickupAddresses,
@@ -1263,6 +1286,11 @@ function CustomerSection({
   locations,
   isLoadingLocations,
   fieldError,
+  fulfillmentChannel,
+  setFulfillmentChannel,
+  userPickedCourier,
+  setUserPickedCourier,
+  deliveryCountry,
 }: {
   selectedCustomer: SelectedCustomer | null
   showCreateForm: boolean
@@ -1285,13 +1313,6 @@ function CustomerSection({
   courierIntegrationId: string
   setCourierIntegrationId: (v: string) => void
   courierIntegrations: Array<{ id: string; connectionName: string; provider: { providerKey: string; providerName: string } }>
-  /** The editable delivery country NAME (e.g. "Pakistan"). Drives the
-   *  Self-Fulfilled auto-default UI when the country isn't Pakistan. */
-  deliveryCountry: string
-  /** Marks that the user has manually chosen a courier — stops the
-   *  country-driven Self-Fulfilled auto-default from overriding their
-   *  explicit selection. */
-  setUserPickedCourier: (v: boolean) => void
   pickupAddressId: string
   setPickupAddressId: (v: string) => void
   pickupAddresses: Array<{ id: string; label: string; address: string; cityName: string; isDefault: boolean }>
@@ -1311,6 +1332,11 @@ function CustomerSection({
   locations: InventoryLocation[]
   isLoadingLocations: boolean
   fieldError: (...paths: string[]) => string | undefined
+  fulfillmentChannel: 'courier' | 'self_fulfilled'
+  setFulfillmentChannel: (v: 'courier' | 'self_fulfilled') => void
+  userPickedCourier: boolean
+  setUserPickedCourier: (v: boolean) => void
+  deliveryCountry: string
 }) {
   return (
     <Card>
@@ -1491,11 +1517,69 @@ function CustomerSection({
               />
             </div>
 
-            {/* ── Delivery Logistics (courier, dispatch, discount — NO address fields here) ── */}
+            {/* ── Delivery Logistics (fulfillment channel, courier, dispatch, discount) ── */}
             <div className="space-y-3">
               <p className="text-sm font-medium flex items-center gap-1.5">
                 <Truck className="h-4 w-4 text-muted-foreground" /> Delivery Logistics
               </p>
+
+              {/* Fulfillment channel toggle (Phase B1). Always visible + overridable.
+                  Defaults to 'self_fulfilled' for non-PK addresses (auto-set above),
+                  'courier' for PK. When 'self_fulfilled', the courier dropdown below
+                  is hidden (no courier needed) + an SF-YYYY-NNNNN reference is generated. */}
+              <div className="space-y-1">
+                <Label className="text-xs">Fulfillment Channel</Label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFulfillmentChannel('courier')
+                      // Don't set userPickedCourier here — this is the channel toggle,
+                      // not a courier selection. The auto-default effect still runs.
+                    }}
+                    className={cn(
+                      'rounded-md border p-2 text-xs font-medium transition-colors text-left',
+                      fulfillmentChannel === 'courier'
+                        ? 'border-primary bg-primary/5 ring-1 ring-primary/20 text-primary'
+                        : 'border-border text-muted-foreground hover:bg-muted/40',
+                    )}
+                  >
+                    <Truck className="h-3.5 w-3.5 mb-1" />
+                    <div>Courier Delivery</div>
+                    <div className="text-[10px] font-normal text-muted-foreground mt-0.5">Booked via connected courier</div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFulfillmentChannel('self_fulfilled')
+                      // Clear any selected courier — self-fulfilled doesn't use one
+                      setCourierIntegrationId('')
+                      setCourierName('')
+                      setPickupAddressId('')
+                    }}
+                    className={cn(
+                      'rounded-md border p-2 text-xs font-medium transition-colors text-left',
+                      fulfillmentChannel === 'self_fulfilled'
+                        ? 'border-primary bg-primary/5 ring-1 ring-primary/20 text-primary'
+                        : 'border-border text-muted-foreground hover:bg-muted/40',
+                    )}
+                  >
+                    <PackageCheck className="h-3.5 w-3.5 mb-1" />
+                    <div>Self-Fulfilled</div>
+                    <div className="text-[10px] font-normal text-muted-foreground mt-0.5">Merchant handles delivery (SF-YYYY-NNNNN ref)</div>
+                  </button>
+                </div>
+                {fulfillmentChannel === 'self_fulfilled' && (
+                  <p className="text-[10px] text-emerald-700 flex items-center gap-1 pt-0.5">
+                    <PackageCheck className="h-3 w-3" />
+                    A self-fulfilled reference number (SF-YYYY-NNNNN) will be generated on order creation. No courier booking or city-matching will run.
+                  </p>
+                )}
+              </div>
+
+              {/* Courier dropdown — only shown for 'courier' channel. Hidden for
+                  'self_fulfilled' (no courier needed). */}
+              {fulfillmentChannel === 'courier' && (
               <div className="grid sm:grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label className="text-xs">Courier</Label>
@@ -1538,7 +1622,7 @@ function CustomerSection({
                       country isn't Pakistan — the courier was auto-cleared because
                       the connected couriers are Pakistan-only. The user can still
                       pick a courier manually if they have an international option. */}
-                  {courierIntegrationId === '' && deliveryCountry !== 'Pakistan' && (
+                  {courierIntegrationId === '' && deliveryCountry !== 'PK' && (
                     <p className="text-[10px] text-emerald-700 flex items-center gap-1">
                       <PackageCheck className="h-3 w-3" />
                       Self-Fulfilled (international delivery — Pakistani couriers don&apos;t deliver abroad). Pick a courier only if you have an international option.
@@ -1639,6 +1723,7 @@ function CustomerSection({
                   </p>
                 </div>
               </div>
+              )} {/* end fulfillmentChannel === 'courier' conditional */}
 
               {/* Discount (compact, within logistics section) */}
               <div className="grid sm:grid-cols-2 gap-3">
@@ -1860,32 +1945,59 @@ function ItemsSection({
             ) : (
               variantSearchResults.map((v) => {
                 const badge = stockBadgeFor(v.fulfillmentType)
+                // ── Variant gate check ──────────────────────────────────
+                // Show only the FIRST failing reason. Only the variant's
+                // isActive toggle is enforced client-side; price/enablement
+                // checks happen on the server at order-create time.
+                let gateReason: string | null = null
+                if (v.isActive === false) {
+                  gateReason = 'Not enabled for your company'
+                }
+                const variantDisabled = gateReason !== null
                 return (
-                  <button
+                  <div
                     key={v.variantId}
-                    type="button"
-                    onClick={() => addVariant(v)}
-                    className="w-full text-left rounded-lg border p-3 hover:border-primary/40 hover:bg-muted/40 transition-colors flex items-center justify-between gap-3"
+                    className={cn(
+                      'w-full text-left rounded-lg border p-3 transition-colors flex items-center justify-between gap-3',
+                      variantDisabled
+                        ? 'border-muted bg-muted/30 opacity-60 cursor-not-allowed'
+                        : 'hover:border-primary/40 hover:bg-muted/40',
+                    )}
+                    role={variantDisabled ? 'presentation' : undefined}
+                    aria-disabled={variantDisabled || undefined}
                   >
                     <div className="flex items-start gap-3 min-w-0 flex-1">
                       <VariantThumbnail url={v.primaryImage} title={v.productTitle} />
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-medium truncate">{v.productTitle}</p>
                         <p className="text-xs text-muted-foreground font-mono">{v.sku}</p>
-                        <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
-                          {badge.label}
-                        </Badge>
+                        {variantDisabled ? (
+                          <Badge variant="outline" className="mt-1 text-[10px] bg-muted-foreground/10 text-muted-foreground border-muted-foreground/30">
+                            {gateReason}
+                          </Badge>
+                        ) : (
+                          <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
+                            {badge.label}
+                          </Badge>
+                        )}
                       </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
                       <span className="text-sm font-medium tabular-nums">
                         {v.salePrice ? formatPKR(v.salePrice) : formatPKR(v.costPrice)}
                       </span>
-                      <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-                        <Plus className="h-4 w-4" />
-                      </div>
+                      {!variantDisabled && (
+                        <button
+                          type="button"
+                          onClick={() => addVariant(v)}
+                          className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90"
+                          aria-label={`Add ${v.productTitle} (${v.sku}) to order`}
+                        >
+                          <Plus className="h-4 w-4" />
+                        </button>
+                      )}
                     </div>
-                  </button>
+                  </div>
                 )
               })
             )}
@@ -1943,18 +2055,9 @@ function ItemsSection({
                     </div>
                     <div>
                       <Label className="text-[10px] text-muted-foreground">Unit Price</Label>
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        className="h-8 text-sm tabular-nums"
-                        value={item.unitPrice}
-                        onChange={(e) =>
-                          updateItem(item.variantId, {
-                            unitPrice: parsePrice(e.target.value),
-                          })
-                        }
-                      />
+                      <span className="text-sm font-medium tabular-nums px-2 py-1 rounded bg-muted/30">
+                        {formatPKR(item.unitPrice)}
+                      </span>
                     </div>
                   </div>
                   <div className="flex items-center justify-between text-xs">
@@ -2062,7 +2165,8 @@ function PaymentSection({
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
-        {/* Selectable payment type cards */}
+        {/* Selectable payment type cards. All three payment types are always
+            available. */}
         <div className="grid gap-3">
           <PaymentTypeCard
             active={paymentType === 'full_cod'}

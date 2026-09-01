@@ -1169,7 +1169,7 @@ function CityMatchInfo({
   // matching entirely (courier_operational_cities is Pakistan-sourced).
   // Show a clear N/A instead of the misleading "pending" / "not recognized"
   // states that would otherwise appear for a foreign city.
-  if (country && country !== 'Pakistan') {
+  if (country && country !== 'PK') {
     return (
       <div className="flex items-center gap-1 text-[10px] text-muted-foreground">
         <Globe className="h-2.5 w-2.5" />

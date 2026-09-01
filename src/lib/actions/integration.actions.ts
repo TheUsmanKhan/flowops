@@ -246,6 +246,10 @@ export async function connectIntegration(input: {
           lastError: null,
           webhookEndpointId,
           webhookSecret,
+          // Shopify Adapter Foundation: track the employee re-connecting this
+          // integration (used by the webhook route to build an injected
+          // WorkspaceContext for webhook-triggered actions).
+          connectedByEmployeeId: ctx.employee.id,
         },
         select: { id: true },
       })
@@ -284,6 +288,10 @@ export async function connectIntegration(input: {
             webhookSecret,
             connectionStatus: 'pending',
             createdBy: ctx.employee.id,
+            // Shopify Adapter Foundation: track the employee connecting this
+            // integration (used by the webhook route to build an injected
+            // WorkspaceContext for webhook-triggered actions).
+            connectedByEmployeeId: ctx.employee.id,
           },
           select: { id: true },
         })
@@ -342,6 +350,9 @@ export async function connectIntegration(input: {
               lastError: null,
               webhookEndpointId,
               webhookSecret: raceWebhookSecret,
+              // Shopify Adapter Foundation: track the employee connecting this
+              // integration (race-recovery path — same as the main create path).
+              connectedByEmployeeId: ctx.employee.id,
             },
             select: { id: true },
           })
@@ -432,6 +443,10 @@ export async function updateIntegrationCredentials(
         isActive: true, // reactivate if disconnected
         connectionStatus: 'pending', // reset to pending — needs re-test
         lastError: null,
+        // Shopify Adapter Foundation: this route doubles as the Reconnect
+        // button's handler — the employee clicking Reconnect is connecting
+        // Shopify, so update connectedByEmployeeId here too.
+        connectedByEmployeeId: ctx.employee.id,
       },
     })
 

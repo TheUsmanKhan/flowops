@@ -41,6 +41,7 @@ export interface WorkspaceContext {
     slug: string
     logoUrl: string | null
     baseCurrency: string
+    countryCode: string
     organizationId: string
   }
 }
@@ -91,6 +92,10 @@ export async function getWorkspace(): Promise<WorkspaceContext> {
               slug: true,
               logoUrl: true,
               baseCurrency: true,
+              // Country (Phase: Country System). Needed by createOrderFromShopify
+              // as the final fallback for Order.deliveryCountry when Shopify
+              // sends neither country_code nor country.
+              countryCode: true,
               organizationId: true,
               isActive: true,
             },
@@ -171,6 +176,7 @@ export async function getWorkspace(): Promise<WorkspaceContext> {
       slug: company.slug,
       logoUrl: company.logoUrl,
       baseCurrency: company.baseCurrency,
+      countryCode: company.countryCode,
       organizationId: company.organizationId,
     },
   }

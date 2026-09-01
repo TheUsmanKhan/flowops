@@ -49,10 +49,10 @@ export type PhoneInput = z.infer<typeof phoneInputSchema>
 /**
  * A single delivery address for a customer.
  * - NO province field (per product decision).
- * - `country` stores the country NAME (e.g. "Pakistan", "United Arab
- *   Emirates") — NOT an alpha-2 code. This matches Shopify's
- *   default_address.country field directly (no translation at ingestion)
- *   and is human-readable in the DB. Optional with default "Pakistan"
+ * - `country` stores the ISO 3166-1 alpha-2 CODE (e.g. "PK", "GB", "AE") —
+ *   NOT the country name. This matches CountrySelector's output (returns
+ *   alpha-2 codes) + Shopify's default_address.country_code directly, with
+ *   no translation at the form boundary. Optional with default "PK"
  *   (current majority use case) — callers that don't send it get the
  *   sensible default, so this is additive and non-breaking for existing
  *   flows that don't yet ask for country.
@@ -64,7 +64,7 @@ export const addressInputSchema = z.object({
   label: z.string().max(50).optional().or(z.literal('')),
   address: z.string().min(2, 'Address is required').max(500),
   city: z.string().min(2, 'City is required').max(100),
-  country: z.string().max(100).optional().default('Pakistan'),
+  country: z.string().max(2).optional().default('PK'),
   is_default: z.boolean().default(false),
 })
 export type AddressInput = z.infer<typeof addressInputSchema>
@@ -150,6 +150,12 @@ export const matchExternalCustomerSchema = z.object({
   phone: z.string().max(20).optional().or(z.literal('')),
   email: z.string().email('Invalid email').optional().or(z.literal('')),
   name: z.string().max(200).optional().or(z.literal('')),
+  // Optional country (alpha-2 code, e.g. "PK", "GB"). When provided, persisted
+  // onto the customer_addresses row created for newly-created customers.
+  // Falls back to "PK" server-side if absent. Sourced from Shopify's
+  // default_address.country_code (preferred) or default_address.country
+  // (name, normalized to alpha-2 by the caller).
+  country: z.string().max(2).optional().or(z.literal('')),
 })
 export type MatchExternalCustomerInput = z.infer<typeof matchExternalCustomerSchema>
 

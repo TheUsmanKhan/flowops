@@ -1,0 +1,2002 @@
+     1→'use client'
+     2→
+     3→import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+     4→import { useQuery } from '@tanstack/react-query'
+     5→import {
+     6→  Bar,
+     7→  BarChart,
+     8→  CartesianGrid,
+     9→  Line,
+    10→  LineChart,
+    11→  ResponsiveContainer,
+    12→  Tooltip,
+    13→  XAxis,
+    14→  YAxis,
+    15→} from 'recharts'
+    16→import { api, FetchError } from '@/lib/api-client'
+    17→import { useAppStore, useCan } from '@/stores/app-store'
+    18→import { PERMISSIONS } from '@/lib/permissions'
+    19→import { PageHeader } from '@/components/layout/dashboard-shell'
+    20→import { Card, CardContent } from '@/components/ui/card'
+    21→import { Button } from '@/components/ui/button'
+    22→import { Input } from '@/components/ui/input'
+    23→import { Label } from '@/components/ui/label'
+    24→import { Badge } from '@/components/ui/badge'
+    25→import { Skeleton } from '@/components/ui/skeleton'
+    26→import { Checkbox } from '@/components/ui/checkbox'
+    27→import {
+    28→  Select,
+    29→  SelectContent,
+    30→  SelectItem,
+    31→  SelectTrigger,
+    32→  SelectValue,
+    33→} from '@/components/ui/select'
+    34→import {
+    35→  Sheet,
+    36→  SheetContent,
+    37→  SheetDescription,
+    38→  SheetFooter,
+    39→  SheetHeader,
+    40→  SheetTitle,
+    41→  SheetTrigger,
+    42→} from '@/components/ui/sheet'
+    43→import {
+    44→  Table,
+    45→  TableBody,
+    46→  TableCell,
+    47→  TableHead,
+    48→  TableHeader,
+    49→  TableRow,
+    50→} from '@/components/ui/table'
+    51→import {
+    52→  ShoppingCart,
+    53→  Plus,
+    54→  Search,
+    55→  RefreshCw,
+    56→  AlertCircle,
+    57→  Clock,
+    58→  PackageX,
+    59→  Banknote,
+    60→  ArrowRight,
+    61→  SlidersHorizontal,
+    62→  X,
+    63→  Loader2,
+    64→  CheckCircle2,
+    65→  TrendingUp,
+    66→  Percent,
+    67→  CalendarDays,
+    68→  RotateCcw,
+    69→  AlertTriangle,
+    70→  Truck,
+    71→} from 'lucide-react'
+    72→import { cn } from '@/lib/utils'
+    73→import { CancelCourierBookingButton } from './cancel-courier-booking-button'
+    74→
+    75→// ─────────────────────────────────────────────────────────────────────────────
+    76→// Types — match GET /api/orders response shape
+    77→// ─────────────────────────────────────────────────────────────────────────────
+    78→
+    79→interface OrderRow {
+    80→  id: string
+    81→  flowopsOrderNumber: string
+    82→  externalOrderReference: string | null
+    83→  orderSource: string
+    84→  status: string
+    85→  paymentType: string
+    86→  paymentStatus: string
+    87→  totalOrderValue: number
+    88→  advanceAmount: number | null
+    89→  remainingCodAmount: number | null
+    90→  codCollected: boolean
+    91→  customerName: string
+    92→  customerPhone: string
+    93→  customerId: string
+    94→  deliveryCity: string | null
+    95→  createdAt: string
+    96→  // Courier tracking fields (Prompt 4/5)
+    97→  courierCityStatus?: string
+    98→  courierSubStatus?: string | null
+    99→  needsShipperAdvice?: boolean
+   100→  trackingNumber?: string | null
+   101→  courierName?: string | null
+   102→  courierCompanyIntegrationId?: string | null
+   103→  courierBookingStatus?: string
+   104→  estimatedDeliveryCharge?: number | null
+   105→  taxAmount?: number | null
+   106→  taxLabel?: string | null
+   107→  // Universal courier reference fields (migration 015)
+   108→  orderRefNumber?: string | null
+   109→  orderDetail?: string | null
+   110→  notesForCourier?: string | null
+   111→}
+   112→
+   113→interface OrdersListResponse {
+   114→  orders: OrderRow[]
+   115→  total: number
+   116→}
+   117→
+   118→interface ProductOption {
+   119→  productId: string
+   120→  variantId: string
+   121→  sku: string
+   122→  title: string
+   123→  fulfillmentType: string | null
+   124→  salePrice: number | null
+   125→}
+   126→
+   127→interface ProductsResponse {
+   128→  products: Array<{
+   129→    id: string
+   130→    title: string
+   131→    variants: Array<{
+   132→      id: string
+   133→      sku: string
+   134→      fulfillmentType: string | null
+   135→      salePrice: number | null
+   136→    }>
+   137→  }>
+   138→  total: number
+   139→}
+   140→
+   141→interface CustomerOption {
+   142→  id: string
+   143→  name: string
+   144→  phone: string
+   145→  totalOrdersCount: number
+   146→  totalRtoCount: number
+   147→  isFlagged: boolean
+   148→}
+   149→
+   150→interface CustomersSearchResponse {
+   151→  customers: CustomerOption[]
+   152→  total: number
+   153→}
+   154→
+   155→// ─────────────────────────────────────────────────────────────────────────────
+   156→// Display maps — status + payment + source badges
+   157→// ─────────────────────────────────────────────────────────────────────────────
+   158→
+   159→const ORDER_STATUS_BADGE: Record<string, { label: string; className: string }> = {
+   160→  pending: { label: 'Pending', className: 'bg-gray-100 text-gray-700 border-gray-200' },
+   161→  confirmed: { label: 'Confirmed', className: 'bg-sky-50 text-sky-700 border-sky-200' },
+   162→  partially_backordered: {
+   163→    label: 'Backordered',
+   164→    className: 'bg-amber-50 text-amber-700 border-amber-200',
+   165→  },
+   166→  processing: { label: 'Processing', className: 'bg-blue-50 text-blue-700 border-blue-200' },
+   167→  dispatched: { label: 'Dispatched', className: 'bg-violet-50 text-violet-700 border-violet-200' },
+   168→  delivered: { label: 'Delivered', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+   169→  rto: { label: 'RTO', className: 'bg-rose-50 text-rose-700 border-rose-200' },
+   170→  cancelled: { label: 'Cancelled', className: 'bg-slate-100 text-slate-600 border-slate-200' },
+   171→  refunded: { label: 'Refunded', className: 'bg-purple-50 text-purple-700 border-purple-200' },
+   172→}
+   173→
+   174→const PAYMENT_STATUS_BADGE: Record<string, { label: string; className: string }> = {
+   175→  cod_pending: { label: 'COD Pending', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+   176→  advance_paid: { label: 'Advance Paid', className: 'bg-sky-50 text-sky-700 border-sky-200' },
+   177→  fully_prepaid: { label: 'Prepaid', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+   178→  cod_collected: {
+   179→    label: 'COD Collected',
+   180→    className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+   181→  },
+   182→}
+   183→
+   184→const SOURCE_BADGE: Record<string, { label: string; className: string }> = {
+   185→  manual: { label: 'Manual', className: 'bg-gray-100 text-gray-700 border-gray-200' },
+   186→  shopify: { label: 'Shopify', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+   187→  daraz: { label: 'Daraz', className: 'bg-orange-50 text-orange-700 border-orange-200' },
+   188→  instagram: { label: 'Instagram', className: 'bg-pink-50 text-pink-700 border-pink-200' },
+   189→}
+   190→
+   191→const PAYMENT_TYPE_LABEL: Record<string, string> = {
+   192→  full_cod: 'Full COD',
+   193→  partial_advance: 'Partial Advance',
+   194→  fully_prepaid: 'Fully Prepaid',
+   195→}
+   196→
+   197→// ─────────────────────────────────────────────────────────────────────────────
+   198→// Filter option lists
+   199→// ─────────────────────────────────────────────────────────────────────────────
+   200→
+   201→const STATUS_OPTIONS = [
+   202→  { value: 'pending', label: 'Pending' },
+   203→  { value: 'confirmed', label: 'Confirmed' },
+   204→  { value: 'partially_backordered', label: 'Backordered' },
+   205→  { value: 'processing', label: 'Processing' },
+   206→  { value: 'dispatched', label: 'Dispatched' },
+   207→  { value: 'delivered', label: 'Delivered' },
+   208→  { value: 'rto', label: 'RTO' },
+   209→  { value: 'cancelled', label: 'Cancelled' },
+   210→  { value: 'refunded', label: 'Refunded' },
+   211→]
+   212→
+   213→const PAYMENT_TYPE_OPTIONS = [
+   214→  { value: 'full_cod', label: 'Full COD' },
+   215→  { value: 'partial_advance', label: 'Partial Advance' },
+   216→  { value: 'fully_prepaid', label: 'Fully Prepaid' },
+   217→]
+   218→
+   219→const PAYMENT_STATUS_OPTIONS = [
+   220→  { value: 'cod_pending', label: 'COD Pending' },
+   221→  { value: 'advance_paid', label: 'Advance Paid' },
+   222→  { value: 'fully_prepaid', label: 'Fully Prepaid' },
+   223→  { value: 'cod_collected', label: 'COD Collected' },
+   224→]
+   225→
+   226→const SOURCE_OPTIONS = [
+   227→  { value: 'manual', label: 'Manual' },
+   228→  { value: 'shopify', label: 'Shopify' },
+   229→  { value: 'daraz', label: 'Daraz' },
+   230→  { value: 'instagram', label: 'Instagram' },
+   231→]
+   232→
+   233→// ─────────────────────────────────────────────────────────────────────────────
+   234→// Time-span selector
+   235→// ─────────────────────────────────────────────────────────────────────────────
+   236→
+   237→type TimeSpanValue =
+   238→  | 'today'
+   239→  | 'yesterday'
+   240→  | 'last_7_days'
+   241→  | 'last_30_days'
+   242→  | 'this_month'
+   243→  | 'last_month'
+   244→  | 'this_year'
+   245→  | 'custom'
+   246→
+   247→interface TimeSpanOption {
+   248→  value: TimeSpanValue
+   249→  label: string
+   250→}
+   251→
+   252→const TIME_SPAN_OPTIONS: TimeSpanOption[] = [
+   253→  { value: 'today', label: 'Today' },
+   254→  { value: 'yesterday', label: 'Yesterday' },
+   255→  { value: 'last_7_days', label: 'Last 7 Days' },
+   256→  { value: 'last_30_days', label: 'Last 30 Days' },
+   257→  { value: 'this_month', label: 'This Month' },
+   258→  { value: 'last_month', label: 'Last Month' },
+   259→  { value: 'this_year', label: 'This Year' },
+   260→  { value: 'custom', label: 'Custom Range' },
+   261→]
+   262→
+   263→interface DateRange {
+   264→  from: string // YYYY-MM-DD
+   265→  to: string // YYYY-MM-DD
+   266→}
+   267→
+   268→function toISODate(d: Date): string {
+   269→  const y = d.getFullYear()
+   270→  const m = String(d.getMonth() + 1).padStart(2, '0')
+   271→  const day = String(d.getDate()).padStart(2, '0')
+   272→  return `${y}-${m}-${day}`
+   273→}
+   274→
+   275→function resolveTimeSpan(value: TimeSpanValue, custom?: DateRange): DateRange {
+   276→  const now = new Date()
+   277→  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+   278→
+   279→  switch (value) {
+   280→    case 'today':
+   281→      return { from: toISODate(today), to: toISODate(today) }
+   282→    case 'yesterday': {
+   283→      const y = new Date(today)
+   284→      y.setDate(y.getDate() - 1)
+   285→      return { from: toISODate(y), to: toISODate(y) }
+   286→    }
+   287→    case 'last_7_days': {
+   288→      const from = new Date(today)
+   289→      from.setDate(from.getDate() - 6)
+   290→      return { from: toISODate(from), to: toISODate(today) }
+   291→    }
+   292→    case 'last_30_days': {
+   293→      const from = new Date(today)
+   294→      from.setDate(from.getDate() - 29)
+   295→      return { from: toISODate(from), to: toISODate(today) }
+   296→    }
+   297→    case 'this_month': {
+   298→      const from = new Date(now.getFullYear(), now.getMonth(), 1)
+   299→      return { from: toISODate(from), to: toISODate(today) }
+   300→    }
+   301→    case 'last_month': {
+   302→      const firstOfThis = new Date(now.getFullYear(), now.getMonth(), 1)
+   303→      const from = new Date(firstOfThis)
+   304→      from.setMonth(from.getMonth() - 1)
+   305→      const to = new Date(firstOfThis.getFullYear(), firstOfThis.getMonth(), 0)
+   306→      return { from: toISODate(from), to: toISODate(to) }
+   307→    }
+   308→    case 'this_year': {
+   309→      const from = new Date(now.getFullYear(), 0, 1)
+   310→      return { from: toISODate(from), to: toISODate(today) }
+   311→    }
+   312→    case 'custom':
+   313→      return {
+   314→        from: custom?.from ?? toISODate(today),
+   315→        to: custom?.to ?? toISODate(today),
+   316→      }
+   317→  }
+   318→}
+   319→
+   320→function spanDayCount(range: DateRange): number {
+   321→  const from = new Date(range.from + 'T00:00:00')
+   322→  const to = new Date(range.to + 'T23:59:59')
+   323→  const diff = to.getTime() - from.getTime()
+   324→  return Math.max(1, Math.round(diff / (1000 * 60 * 60 * 24)) + 1)
+   325→}
+   326→
+   327→function isMonthlyGranularity(range: DateRange): boolean {
+   328→  return spanDayCount(range) > 30
+   329→}
+   330→
+   331→// ─────────────────────────────────────────────────────────────────────────────
+   332→// Helpers
+   333→// ─────────────────────────────────────────────────────────────────────────────
+   334→
+   335→const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
+   336→
+   337→function formatPKR(n: number): string {
+   338→  return `Rs. ${PKR.format(n)}`
+   339→}
+   340→
+   341→function formatCompactPKR(n: number): string {
+   342→  if (Math.abs(n) >= 1_000_000) return `Rs. ${(n / 1_000_000).toFixed(1)}M`
+   343→  if (Math.abs(n) >= 1_000) return `Rs. ${(n / 1_000).toFixed(1)}k`
+   344→  return formatPKR(n)
+   345→}
+   346→
+   347→function formatDate(iso: string): string {
+   348→  try {
+   349→    return new Date(iso).toLocaleDateString('en-PK', {
+   350→      day: '2-digit',
+   351→      month: 'short',
+   352→      year: 'numeric',
+   353→    })
+   354→  } catch {
+   355→    return iso
+   356→  }
+   357→}
+   358→
+   359→function getErrorMessage(err: unknown): string {
+   360→  if (err instanceof FetchError) return err.message
+   361→  if (err instanceof Error) return err.message
+   362→  return 'Something went wrong. Please try again.'
+   363→}
+   364→
+   365→function sourceLabel(source: string): string {
+   366→  return SOURCE_BADGE[source]?.label ?? source.charAt(0).toUpperCase() + source.slice(1)
+   367→}
+   368→
+   369→// ─────────────────────────────────────────────────────────────────────────────
+   370→// Search type selector
+   371→// ─────────────────────────────────────────────────────────────────────────────
+   372→
+   373→type SearchType = 'order_number' | 'customer' | 'product' | 'city'
+   374→
+   375→const SEARCH_TYPE_OPTIONS: { value: SearchType; label: string }[] = [
+   376→  { value: 'order_number', label: 'Order Number' },
+   377→  { value: 'customer', label: 'Customer' },
+   378→  { value: 'product', label: 'Product / Variant' },
+   379→  { value: 'city', label: 'City' },
+   380→]
+   381→
+   382→// ─────────────────────────────────────────────────────────────────────────────
+   383→// Chart metric definitions
+   384→// ─────────────────────────────────────────────────────────────────────────────
+   385→
+   386→type ChartMetric =
+   387→  | 'total_orders'
+   388→  | 'revenue'
+   389→  | 'rto_rate'
+   390→  | 'cancellation_rate'
+   391→  | 'pending_current'
+   392→  | 'backordered_current'
+   393→
+   394→interface ChartPoint {
+   395→  label: string
+   396→  value: number
+   397→  count?: number
+   398→  total?: number
+   399→}
+   400→
+   401→// ─────────────────────────────────────────────────────────────────────────────
+   402→// Filters state shape
+   403→// ─────────────────────────────────────────────────────────────────────────────
+   404→
+   405→interface FilterState {
+   406→  statuses: string[]
+   407→  paymentTypes: string[]
+   408→  paymentStatuses: string[]
+   409→  orderSources: string[]
+   410→  dateFrom: string
+   411→  dateTo: string
+   412→  amountMin: string
+   413→  amountMax: string
+   414→  orgVariantId: string
+   415→  orgVariantLabel: string
+   416→  customerId: string
+   417→  customerLabel: string
+   418→  deliveryCity: string
+   419→  courier: string
+   420→}
+   421→
+   422→const EMPTY_FILTERS: FilterState = {
+   423→  statuses: [],
+   424→  paymentTypes: [],
+   425→  paymentStatuses: [],
+   426→  orderSources: [],
+   427→  dateFrom: '',
+   428→  dateTo: '',
+   429→  amountMin: '',
+   430→  amountMax: '',
+   431→  orgVariantId: '',
+   432→  orgVariantLabel: '',
+   433→  customerId: '',
+   434→  customerLabel: '',
+   435→  deliveryCity: '',
+   436→  courier: '',
+   437→}
+   438→
+   439→function toggleArray(arr: string[], value: string): string[] {
+   440→  return arr.includes(value) ? arr.filter((v) => v !== value) : [...arr, value]
+   441→}
+   442→
+   443→function countActiveFilters(f: FilterState): number {
+   444→  let n = 0
+   445→  if (f.statuses.length) n++
+   446→  if (f.paymentTypes.length) n++
+   447→  if (f.paymentStatuses.length) n++
+   448→  if (f.orderSources.length) n++
+   449→  if (f.dateFrom || f.dateTo) n++
+   450→  if (f.amountMin || f.amountMax) n++
+   451→  if (f.orgVariantId) n++
+   452→  if (f.customerId) n++
+   453→  if (f.deliveryCity.trim()) n++
+   454→  if (f.courier.trim()) n++
+   455→  return n
+   456→}
+   457→
+   458→// ─────────────────────────────────────────────────────────────────────────────
+   459→// Date-preset helper for the Filters sheet (existing — kept for back-compat)
+   460→// ─────────────────────────────────────────────────────────────────────────────
+   461→
+   462→const DATE_PRESETS = [
+   463→  { value: 'today', label: 'Today' },
+   464→  { value: '7d', label: 'Last 7 Days' },
+   465→  { value: '30d', label: 'Last 30 Days' },
+   466→  { value: 'this_month', label: 'This Month' },
+   467→] as const
+   468→
+   469→type DatePresetValue = (typeof DATE_PRESETS)[number]['value']
+   470→
+   471→function applyPreset(preset: DatePresetValue): { from: string; to: string } {
+   472→  const now = new Date()
+   473→  const to = new Date(now)
+   474→  const from = new Date(now)
+   475→  if (preset === 'today') {
+   476→    // from = today
+   477→  } else if (preset === '7d') {
+   478→    from.setDate(now.getDate() - 6)
+   479→  } else if (preset === '30d') {
+   480→    from.setDate(now.getDate() - 29)
+   481→  } else if (preset === 'this_month') {
+   482→    from.setDate(1)
+   483→  }
+   484→  return { from: toISODate(from), to: toISODate(to) }
+   485→}
+   486→
+   487→// ─────────────────────────────────────────────────────────────────────────────
+   488→// Main view
+   489→// ─────────────────────────────────────────────────────────────────────────────
+   490→
+   491→export function OrdersView() {
+   492→  const navigate = useAppStore((s) => s.navigate)
+   493→  const can = useCan()
+   494→
+   495→  const [search, setSearch] = useState('')
+   496→  const [searchType, setSearchType] = useState<SearchType>('order_number')
+   497→  const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS)
+   498→  const [sheetOpen, setSheetOpen] = useState(false)
+   499→
+   500→  // Time-span state for activity-based stat cards + drill-down charts
+   501→  const [timeSpan, setTimeSpan] = useState<TimeSpanValue>('last_30_days')
+   502→  const [customRange, setCustomRange] = useState<DateRange>(() =>
+   503→    resolveTimeSpan('last_30_days'),
+   504→  )
+   505→
+   506→  // Active chart metric — controls the drill-down panel
+   507→  const [activeChart, setActiveChart] = useState<ChartMetric | null>(null)
+   508→
+   509→  const canView = can(PERMISSIONS.ORDERS_VIEW)
+   510→  const canCreate = can(PERMISSIONS.ORDERS_CREATE)
+   511→
+   512→  // ── Resolve the time span into a date range ──────────────────────────────
+   513→  const dateRange = useMemo(
+   514→    () => resolveTimeSpan(timeSpan, customRange),
+   515→    [timeSpan, customRange],
+   516→  )
+   517→  const monthly = isMonthlyGranularity(dateRange)
+   518→
+   519→  // ── Build the query string for the main orders list ──────────────────────
+   520→  const queryString = useMemo(() => {
+   521→    const params = new URLSearchParams()
+   522→    if (filters.statuses.length) params.set('statuses', filters.statuses.join(','))
+   523→    if (filters.paymentTypes.length) params.set('paymentTypes', filters.paymentTypes.join(','))
+   524→    if (filters.paymentStatuses.length)
+   525→      params.set('paymentStatuses', filters.paymentStatuses.join(','))
+   526→    if (filters.orderSources.length) params.set('orderSources', filters.orderSources.join(','))
+   527→    if (filters.dateFrom) params.set('dateFrom', filters.dateFrom)
+   528→    if (filters.dateTo) params.set('dateTo', filters.dateTo)
+   529→    if (filters.amountMin) params.set('amountMin', filters.amountMin)
+   530→    if (filters.amountMax) params.set('amountMax', filters.amountMax)
+   531→    if (filters.orgVariantId) params.set('orgVariantId', filters.orgVariantId)
+   532→    if (filters.customerId) params.set('customer_id', filters.customerId)
+   533→    if (filters.deliveryCity.trim()) params.set('delivery_city', filters.deliveryCity.trim())
+   534→    if (filters.courier.trim()) params.set('courier', filters.courier.trim())
+   535→    if (search.trim() && searchType === 'order_number') params.set('search', search.trim())
+   536→    const qs = params.toString()
+   537→    return qs ? `?${qs}` : ''
+   538→  }, [filters, search, searchType])
+   539→
+   540→  const { data, isLoading, isError, refetch, isFetching, error } = useQuery<OrdersListResponse>({
+   541→    queryKey: ['orders', queryString],
+   542→    queryFn: () => api.get<OrdersListResponse>(`/api/orders${queryString}`),
+   543→    staleTime: 15_000,
+   544→    enabled: canView,
+   545→  })
+   546→
+   547→  const orders = data?.orders ?? []
+   548→
+   549→  // ── Separate stats query — fetches ALL orders in the time span (no other
+   550→  //    filters) so the activity-based cards are accurate regardless of any
+   551→  //    filter applied to the table below. Limit bumped to the server max.
+   552→  const statsQueryString = useMemo(() => {
+   553→    const params = new URLSearchParams()
+   554→    params.set('dateFrom', dateRange.from)
+   555→    params.set('dateTo', dateRange.to)
+   556→    params.set('limit', '100')
+   557→    return `?${params.toString()}`
+   558→  }, [dateRange])
+   559→
+   560→  const { data: statsData, isLoading: statsLoading } = useQuery<OrdersListResponse>({
+   561→    queryKey: ['orders-stats', statsQueryString],
+   562→    queryFn: () => api.get<OrdersListResponse>(`/api/orders${statsQueryString}`),
+   563→    staleTime: 15_000,
+   564→    enabled: canView,
+   565→  })
+   566→
+   567→  const statsOrders = statsData?.orders ?? []
+   568→
+   569→  // ── Stat-card values (4 activity-based, 2 current-state) ─────────────────
+   570→  const stats = useMemo(() => {
+   571→    const list = statsOrders
+   572→    const total = list.length
+   573→
+   574→    const revenue = list
+   575→      .filter((o) => o.status !== 'cancelled')
+   576→      .reduce((sum, o) => sum + o.totalOrderValue, 0)
+   577→
+   578→    const rtoCount = list.filter((o) => o.status === 'rto').length
+   579→    const cancelledCount = list.filter((o) => o.status === 'cancelled').length
+   580→    const rtoRate = total > 0 ? (rtoCount / total) * 100 : 0
+   581→    const cancelRate = total > 0 ? (cancelledCount / total) * 100 : 0
+   582→
+   583→    // Current-state cards — counted RIGHT NOW from the loaded orders list
+   584→    // (uses the same data we already fetched for the table; this gives a
+   585→    // "currently pending / backordered" snapshot independent of the time span).
+   586→    const pendingCurrent = orders.filter((o) => o.status === 'pending').length
+   587→    const backorderedCurrent = orders.filter((o) => o.status === 'partially_backordered').length
+   588→
+   589→    return {
+   590→      total,
+   591→      revenue,
+   592→      rtoCount,
+   593→      rtoRate,
+   594→      cancelledCount,
+   595→      cancelRate,
+   596→      pendingCurrent,
+   597→      backorderedCurrent,
+   598→    }
+   599→  }, [statsOrders, orders])
+   600→
+   601→  // ── Drill-down chart data (computed client-side from the stats query) ────
+   602→  const chartData = useMemo<ChartPoint[]>(() => {
+   603→    if (!activeChart) return []
+   604→    return buildChartData(statsOrders, dateRange, monthly, activeChart)
+   605→  }, [statsOrders, dateRange, monthly, activeChart])
+   606→
+   607→  const activeFilterCount = countActiveFilters(filters)
+   608→  const hasAnyFilter =
+   609→    activeFilterCount > 0 || (search.trim() !== '' && searchType === 'order_number')
+   610→
+   611→  // ── Handlers for the structured search selections ───────────────────────
+   612→  const handleSelectCustomer = useCallback((c: CustomerOption) => {
+   613→    setFilters((p) => ({ ...p, customerId: c.id, customerLabel: `${c.name} · ${c.phone}` }))
+   614→    setSearch('')
+   615→  }, [])
+   616→
+   617→  const handleSelectProduct = useCallback((v: ProductOption) => {
+   618→    setFilters((p) => ({
+   619→      ...p,
+   620→      orgVariantId: v.variantId,
+   621→      orgVariantLabel: `${v.title} (${v.sku})`,
+   622→    }))
+   623→    setSearch('')
+   624→  }, [])
+   625→
+   626→  const handleSelectCity = useCallback((city: string) => {
+   627→    setFilters((p) => ({ ...p, deliveryCity: city }))
+   628→    setSearch('')
+   629→  }, [])
+   630→
+   631→  // ── Stat card click → toggle chart ───────────────────────────────────────
+   632→  const handleCardClick = useCallback((metric: ChartMetric) => {
+   633→    setActiveChart((prev) => (prev === metric ? null : metric))
+   634→  }, [])
+   635→
+   636→  // ── Permission gate ───────────────────────────────────────────────────────
+   637→  if (!canView) {
+   638→    return (
+   639→      <div className="space-y-6">
+   640→        <PageHeader title="Orders" description="Manage all customer orders" />
+   641→        <Card>
+   642→          <CardContent className="p-10 text-center">
+   643→            <AlertCircle className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
+   644→            <p className="text-sm text-muted-foreground">
+   645→              You don&apos;t have permission to view orders. Contact your administrator.
+   646→            </p>
+   647→          </CardContent>
+   648→        </Card>
+   649→      </div>
+   650→    )
+   651→  }
+   652→
+   653→  return (
+   654→    <div className="space-y-6">
+   655→      <PageHeader
+   656→        title="Orders"
+   657→        description="Manage all customer orders"
+   658→        actions={
+   659→          <div className="flex items-center gap-2">
+   660→            <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+   661→              <RefreshCw className={isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+   662→              Refresh
+   663→            </Button>
+   664→            <Button variant="outline" size="sm" onClick={() => navigate({ name: 'booking-workbench' })}>
+   665→              <Truck className="h-4 w-4" />
+   666→              Booking Workbench
+   667→            </Button>
+   668→            {canCreate && (
+   669→              <Button size="sm" onClick={() => navigate({ name: 'order-create' })}>
+   670→                <Plus className="h-4 w-4" />
+   671→                Create Order
+   672→              </Button>
+   673→            )}
+   674→          </div>
+   675→        }
+   676→      />
+   677→
+   678→      {/* ── Time-span selector ─────────────────────────────────────────────── */}
+   679→      <Card>
+   680→        <CardContent className="p-4">
+   681→          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+   682→            <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+   683→              <CalendarDays className="h-4 w-4" />
+   684→              <span>Time Span</span>
+   685→            </div>
+   686→            <div className="flex flex-1 flex-col sm:flex-row sm:items-center gap-2">
+   687→              <Select
+   688→                value={timeSpan}
+   689→                onValueChange={(v) => {
+   690→                  const next = v as TimeSpanValue
+   691→                  setTimeSpan(next)
+   692→                  if (next !== 'custom') setCustomRange(resolveTimeSpan(next))
+   693→                }}
+   694→              >
+   695→                <SelectTrigger size="sm" className="h-9 w-full sm:w-56">
+   696→                  <SelectValue placeholder="Select time span" />
+   697→                </SelectTrigger>
+   698→                <SelectContent>
+   699→                  {TIME_SPAN_OPTIONS.map((opt) => (
+   700→                    <SelectItem key={opt.value} value={opt.value}>
+   701→                      {opt.label}
+   702→                    </SelectItem>
+   703→                  ))}
+   704→                </SelectContent>
+   705→              </Select>
+   706→
+   707→              {timeSpan === 'custom' && (
+   708→                <div className="flex items-center gap-2">
+   709→                  <Input
+   710→                    type="date"
+   711→                    className="h-9 w-full sm:w-40 text-sm"
+   712→                    value={customRange.from}
+   713→                    onChange={(e) =>
+   714→                      setCustomRange((p) => ({ ...p, from: e.target.value }))
+   715→                    }
+   716→                    aria-label="From date"
+   717→                  />
+   718→                  <span className="text-xs text-muted-foreground">→</span>
+   719→                  <Input
+   720→                    type="date"
+   721→                    className="h-9 w-full sm:w-40 text-sm"
+   722→                    value={customRange.to}
+   723→                    onChange={(e) =>
+   724→                      setCustomRange((p) => ({ ...p, to: e.target.value }))
+   725→                    }
+   726→                    aria-label="To date"
+   727→                  />
+   728→                </div>
+   729→              )}
+   730→
+   731→              <div className="text-xs text-muted-foreground sm:ml-auto">
+   732→                {dateRange.from} → {dateRange.to}{' '}
+   733→                <span className="ml-1 rounded bg-muted px-1.5 py-0.5">
+   734→                  {monthly ? 'monthly' : 'daily'}
+   735→                </span>
+   736→              </div>
+   737→            </div>
+   738→          </div>
+   739→        </CardContent>
+   740→      </Card>
+   741→
+   742→      {/* ── Stat cards (4 activity-based + 2 current-state) ────────────────── */}
+   743→      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+   744→        <StatCard
+   745→          label="Total Orders"
+   746→          sublabel={`Created · ${monthly ? 'monthly' : 'daily'} view`}
+   747→          value={statsLoading ? undefined : String(stats.total)}
+   748→          icon={<ShoppingCart className="h-5 w-5" />}
+   749→          tone="emerald"
+   750→          loading={statsLoading}
+   751→          active={activeChart === 'total_orders'}
+   752→          onClick={() => handleCardClick('total_orders')}
+   753→        />
+   754→        <StatCard
+   755→          label="Revenue"
+   756→          sublabel="Non-cancelled orders"
+   757→          value={statsLoading ? undefined : formatCompactPKR(stats.revenue)}
+   758→          icon={<Banknote className="h-5 w-5" />}
+   759→          tone="sky"
+   760→          loading={statsLoading}
+   761→          active={activeChart === 'revenue'}
+   762→          onClick={() => handleCardClick('revenue')}
+   763→        />
+   764→        <StatCard
+   765→          label="RTO Rate"
+   766→          sublabel={`${stats.rtoCount} of ${stats.total} orders`}
+   767→          value={statsLoading ? undefined : `${stats.rtoRate.toFixed(1)}%`}
+   768→          icon={<RotateCcw className="h-5 w-5" />}
+   769→          tone="rose"
+   770→          loading={statsLoading}
+   771→          active={activeChart === 'rto_rate'}
+   772→          onClick={() => handleCardClick('rto_rate')}
+   773→        />
+   774→        <StatCard
+   775→          label="Cancellation Rate"
+   776→          sublabel={`${stats.cancelledCount} of ${stats.total} orders`}
+   777→          value={statsLoading ? undefined : `${stats.cancelRate.toFixed(1)}%`}
+   778→          icon={<Percent className="h-5 w-5" />}
+   779→          tone="amber"
+   780→          loading={statsLoading}
+   781→          active={activeChart === 'cancellation_rate'}
+   782→          onClick={() => handleCardClick('cancellation_rate')}
+   783→        />
+   784→        <StatCard
+   785→          label="Pending Confirmation"
+   786→          sublabel="(current)"
+   787→          value={isLoading ? undefined : String(stats.pendingCurrent)}
+   788→          icon={<Clock className="h-5 w-5" />}
+   789→          tone="sky"
+   790→          loading={isLoading}
+   791→          active={activeChart === 'pending_current'}
+   792→          onClick={() => handleCardClick('pending_current')}
+   793→        />
+   794→        <StatCard
+   795→          label="Backordered"
+   796→          sublabel="(current)"
+   797→          value={isLoading ? undefined : String(stats.backorderedCurrent)}
+   798→          icon={<PackageX className="h-5 w-5" />}
+   799→          tone="rose"
+   800→          loading={isLoading}
+   801→          active={activeChart === 'backordered_current'}
+   802→          onClick={() => handleCardClick('backordered_current')}
+   803→        />
+   804→      </div>
+   805→
+   806→      {/* ── Drill-down chart panel ─────────────────────────────────────────── */}
+   807→      {activeChart && (
+   808→        <ChartPanel
+   809→          metric={activeChart}
+   810→          data={chartData}
+   811→          monthly={monthly}
+   812→          dateRange={dateRange}
+   813→          onClose={() => setActiveChart(null)}
+   814→        />
+   815→      )}
+   816→
+   817→      {/* ── Search + filter bar ────────────────────────────────────────────── */}
+   818→      <Card>
+   819→        <CardContent className="p-4">
+   820→          <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
+   821→            <Select
+   822→              value={searchType}
+   823→              onValueChange={(v) => {
+   824→                setSearchType(v as SearchType)
+   825→                setSearch('')
+   826→              }}
+   827→            >
+   828→              <SelectTrigger size="sm" className="h-9 w-full lg:w-44 shrink-0">
+   829→                <SelectValue />
+   830→              </SelectTrigger>
+   831→              <SelectContent>
+   832→                {SEARCH_TYPE_OPTIONS.map((opt) => (
+   833→                  <SelectItem key={opt.value} value={opt.value}>
+   834→                    {opt.label}
+   835→                  </SelectItem>
+   836→                ))}
+   837→              </SelectContent>
+   838→            </Select>
+   839→
+   840→            <div className="flex-1">
+   841→              {searchType === 'order_number' && (
+   842→                <div className="relative">
+   843→                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+   844→                  <Input
+   845→                    placeholder="Search order #, external ref, customer…"
+   846→                    className="pl-9 h-9"
+   847→                    value={search}
+   848→                    onChange={(e) => setSearch(e.target.value)}
+   849→                  />
+   850→                </div>
+   851→              )}
+   852→              {searchType === 'customer' && (
+   853→                <CustomerAutocomplete
+   854→                  onSelect={handleSelectCustomer}
+   855→                  onClear={() => setSearch('')}
+   856→                />
+   857→              )}
+   858→              {searchType === 'product' && (
+   859→                <ProductAutocomplete
+   860→                  onSelect={handleSelectProduct}
+   861→                  onClear={() => setSearch('')}
+   862→                />
+   863→              )}
+   864→              {searchType === 'city' && (
+   865→                <CityAutocomplete onSelect={handleSelectCity} onClear={() => setSearch('')} />
+   866→              )}
+   867→            </div>
+   868→
+   869→            <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
+   870→              <SheetTrigger asChild>
+   871→                <Button variant="outline" size="sm" className="h-9 shrink-0">
+   872→                  <SlidersHorizontal className="h-4 w-4" />
+   873→                  Filters
+   874→                  {activeFilterCount > 0 && (
+   875→                    <Badge
+   876→                      variant="secondary"
+   877→                      className="ml-1 h-5 px-1.5 text-[10px] bg-primary text-primary-foreground"
+   878→                    >
+   879→                      {activeFilterCount}
+   880→                    </Badge>
+   881→                  )}
+   882→                </Button>
+   883→              </SheetTrigger>
+   884→              <FiltersSheet
+   885→                filters={filters}
+   886→                onChange={setFilters}
+   887→                onClose={() => setSheetOpen(false)}
+   888→              />
+   889→            </Sheet>
+   890→            {hasAnyFilter && (
+   891→              <Button
+   892→                variant="ghost"
+   893→                size="sm"
+   894→                className="h-9 shrink-0 text-muted-foreground"
+   895→                onClick={() => {
+   896→                  setSearch('')
+   897→                  setFilters(EMPTY_FILTERS)
+   898→                }}
+   899→              >
+   900→                <X className="h-3.5 w-3.5" />
+   901→                Clear all
+   902→              </Button>
+   903→            )}
+   904→          </div>
+   905→        </CardContent>
+   906→      </Card>
+   907→
+   908→      {/* ── Active filter chips ─────────────────────────────────────────────── */}
+   909→      {activeFilterCount > 0 && (
+   910→        <div className="flex flex-wrap items-center gap-2">
+   911→          {filters.statuses.map((s) => (
+   912→            <FilterChip
+   913→              key={`st-${s}`}
+   914→              label={`Status: ${STATUS_OPTIONS.find((o) => o.value === s)?.label ?? s}`}
+   915→              onRemove={() =>
+   916→                setFilters((p) => ({ ...p, statuses: p.statuses.filter((v) => v !== s) }))
+   917→              }
+   918→            />
+   919→          ))}
+   920→          {filters.paymentTypes.map((s) => (
+   921→            <FilterChip
+   922→              key={`pt-${s}`}
+   923→              label={`Payment: ${PAYMENT_TYPE_OPTIONS.find((o) => o.value === s)?.label ?? s}`}
+   924→              onRemove={() =>
+   925→                setFilters((p) => ({
+   926→                  ...p,
+   927→                  paymentTypes: p.paymentTypes.filter((v) => v !== s),
+   928→                }))
+   929→              }
+   930→            />
+   931→          ))}
+   932→          {filters.paymentStatuses.map((s) => (
+   933→            <FilterChip
+   934→              key={`ps-${s}`}
+   935→              label={`Pay Status: ${PAYMENT_STATUS_OPTIONS.find((o) => o.value === s)?.label ?? s}`}
+   936→              onRemove={() =>
+   937→                setFilters((p) => ({
+   938→                  ...p,
+   939→                  paymentStatuses: p.paymentStatuses.filter((v) => v !== s),
+   940→                }))
+   941→              }
+   942→            />
+   943→          ))}
+   944→          {filters.orderSources.map((s) => (
+   945→            <FilterChip
+   946→              key={`os-${s}`}
+   947→              label={`Source: ${SOURCE_OPTIONS.find((o) => o.value === s)?.label ?? s}`}
+   948→              onRemove={() =>
+   949→                setFilters((p) => ({
+   950→                  ...p,
+   951→                  orderSources: p.orderSources.filter((v) => v !== s),
+   952→                }))
+   953→              }
+   954→            />
+   955→          ))}
+   956→          {(filters.dateFrom || filters.dateTo) && (
+   957→            <FilterChip
+   958→              label={`Date: ${filters.dateFrom || '…'} → ${filters.dateTo || '…'}`}
+   959→              onRemove={() => setFilters((p) => ({ ...p, dateFrom: '', dateTo: '' }))}
+   960→            />
+   961→          )}
+   962→          {(filters.amountMin || filters.amountMax) && (
+   963→            <FilterChip
+   964→              label={`Amount: ${filters.amountMin ? formatPKR(Number(filters.amountMin)) : 'Rs. 0'}–${
+   965→                filters.amountMax ? formatPKR(Number(filters.amountMax)) : '∞'
+   966→              }`}
+   967→              onRemove={() => setFilters((p) => ({ ...p, amountMin: '', amountMax: '' }))}
+   968→            />
+   969→          )}
+   970→          {filters.orgVariantId && (
+   971→            <FilterChip
+   972→              label={`Product: ${filters.orgVariantLabel || filters.orgVariantId}`}
+   973→              onRemove={() =>
+   974→                setFilters((p) => ({ ...p, orgVariantId: '', orgVariantLabel: '' }))
+   975→              }
+   976→            />
+   977→          )}
+   978→          {filters.customerId && (
+   979→            <FilterChip
+   980→              label={`Customer: ${filters.customerLabel || filters.customerId}`}
+   981→              onRemove={() => setFilters((p) => ({ ...p, customerId: '', customerLabel: '' }))}
+   982→            />
+   983→          )}
+   984→          {filters.deliveryCity.trim() && (
+   985→            <FilterChip
+   986→              label={`City: ${filters.deliveryCity.trim()}`}
+   987→              onRemove={() => setFilters((p) => ({ ...p, deliveryCity: '' }))}
+   988→            />
+   989→          )}
+   990→          {filters.courier.trim() && (
+   991→            <FilterChip
+   992→              label={`Courier: ${filters.courier.trim()}`}
+   993→              onRemove={() => setFilters((p) => ({ ...p, courier: '' }))}
+   994→            />
+   995→          )}
+   996→        </div>
+   997→      )}
+   998→
+   999→      {/* ── Orders table ───────────────────────────────────────────────────── */}
+  1000→      <Card>
+  1001→        <CardContent className="p-0">
+  1002→          {isLoading ? (
+  1003→            <OrdersTableSkeleton />
+  1004→          ) : isError ? (
+  1005→            <div className="text-center py-12">
+  1006→              <AlertCircle className="h-10 w-10 mx-auto text-rose-500 mb-3" />
+  1007→              <p className="text-sm text-muted-foreground mb-4">
+  1008→                {getErrorMessage(error) || 'Couldn&apos;t load orders. The server may have restarted.'}
+  1009→              </p>
+  1010→              <Button variant="outline" onClick={() => refetch()}>
+  1011→                Try again
+  1012→              </Button>
+  1013→            </div>
+  1014→          ) : orders.length === 0 ? (
+  1015→            <EmptyState
+  1016→              hasFilters={hasAnyFilter}
+  1017→              canCreate={canCreate}
+  1018→              onCreate={() => navigate({ name: 'order-create' })}
+  1019→              onClear={() => {
+  1020→                setSearch('')
+  1021→                setFilters(EMPTY_FILTERS)
+  1022→              }}
+  1023→            />
+  1024→          ) : (
+  1025→            <div className="overflow-x-auto">
+  1026→              <Table>
+  1027→                <TableHeader>
+  1028→                  <TableRow>
+  1029→                    <TableHead>Order #</TableHead>
+  1030→                    <TableHead>Customer</TableHead>
+  1031→                    <TableHead className="text-right">Total</TableHead>
+  1032→                    <TableHead>Status</TableHead>
+  1033→                    <TableHead>Payment</TableHead>
+  1034→                    <TableHead className="text-right">To Collect</TableHead>
+  1035→                    <TableHead>Courier</TableHead>
+  1036→                    <TableHead>Tracking #</TableHead>
+  1037→                    <TableHead>Reference</TableHead>
+  1038→                    <TableHead>Created</TableHead>
+  1039→                    <TableHead className="text-right">Delivery</TableHead>
+  1040→                    <TableHead className="text-right">Tax</TableHead>
+  1041→                    <TableHead className="text-right">Actions</TableHead>
+  1042→                  </TableRow>
+  1043→                </TableHeader>
+  1044→                <TableBody>
+  1045→                  {orders.map((order) => {
+  1046→                    const statusBadge = ORDER_STATUS_BADGE[order.status] ?? {
+  1047→                      label: order.status,
+  1048→                      className: 'bg-gray-100 text-gray-700 border-gray-200',
+  1049→                    }
+  1050→                    const paymentBadge = PAYMENT_STATUS_BADGE[order.paymentStatus] ?? {
+  1051→                      label: order.paymentStatus,
+  1052→                      className: 'bg-gray-100 text-gray-700 border-gray-200',
+  1053→                    }
+  1054→                    const showExternalRef =
+  1055→                      !!order.externalOrderReference && order.orderSource !== 'manual'
+  1056→                    const toCollect =
+  1057→                      order.paymentType === 'fully_prepaid'
+  1058→                        ? 0
+  1059→                        : order.remainingCodAmount ?? 0
+  1060→                    return (
+  1061→                      <TableRow
+  1062→                        key={order.id}
+  1063→                        className="cursor-pointer hover:bg-muted/40"
+  1064→                        onClick={() => navigate({ name: 'order-detail', id: order.id })}
+  1065→                      >
+  1066→                        <TableCell>
+  1067→                          <div className="flex flex-col">
+  1068→                            <span className="font-medium text-sm">
+  1069→                              {order.flowopsOrderNumber}
+  1070→                            </span>
+  1071→                            {showExternalRef && (
+  1072→                              <span className="text-xs text-muted-foreground">
+  1073→                                {sourceLabel(order.orderSource)}: {order.externalOrderReference}
+  1074→                              </span>
+  1075→                            )}
+  1076→                          </div>
+  1077→                        </TableCell>
+  1078→                        <TableCell>
+  1079→                          <div className="flex flex-col">
+  1080→                            <div className="flex items-center gap-1.5">
+  1081→                              <span className="font-medium text-sm">{order.customerName}</span>
+  1082→                              {order.courierCityStatus === 'unresolved' && (
+  1083→                                <span title="City mismatch — needs resolution before booking" className="inline-flex items-center gap-0.5 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1 py-0.5">
+  1084→                                  <AlertTriangle className="h-2.5 w-2.5" /> City
+  1085→                                </span>
+  1086→                              )}
+  1087→                              {order.needsShipperAdvice && (
+  1088→                                <span title="Courier status requires shipper advice" className="inline-flex items-center gap-0.5 text-[10px] text-rose-700 bg-rose-50 border border-rose-200 rounded px-1 py-0.5">
+  1089→                                  <AlertCircle className="h-2.5 w-2.5" /> Advice
+  1090→                                </span>
+  1091→                              )}
+  1092→                            </div>
+  1093→                            <span className="text-xs text-muted-foreground font-mono">
+  1094→                              {order.customerPhone}
+  1095→                            </span>
+  1096→                          </div>
+  1097→                        </TableCell>
+  1098→                        <TableCell className="text-right tabular-nums font-medium">
+  1099→                          {formatPKR(order.totalOrderValue)}
+  1100→                        </TableCell>
+  1101→                        <TableCell>
+  1102→                          <Badge variant="outline" className={statusBadge.className}>
+  1103→                            {statusBadge.label}
+  1104→                          </Badge>
+  1105→                        </TableCell>
+  1106→                        <TableCell>
+  1107→                          <div className="flex flex-col gap-1">
+  1108→                            <Badge variant="outline" className={paymentBadge.className}>
+  1109→                              {paymentBadge.label}
+  1110→                            </Badge>
+  1111→                            <span className="text-[11px] text-muted-foreground">
+  1112→                              {PAYMENT_TYPE_LABEL[order.paymentType] ?? order.paymentType}
+  1113→                            </span>
+  1114→                          </div>
+  1115→                        </TableCell>
+  1116→                        <TableCell className="text-right tabular-nums">
+  1117→                          {order.paymentType === 'fully_prepaid' ? (
+  1118→                            <span className="text-xs text-emerald-600 inline-flex items-center gap-1">
+  1119→                              <CheckCircle2 className="h-3 w-3" />
+  1120→                              Paid
+  1121→                            </span>
+  1122→                          ) : order.codCollected ? (
+  1123→                            <span className="text-xs text-emerald-600 inline-flex items-center gap-1">
+  1124→                              <CheckCircle2 className="h-3 w-3" />
+  1125→                              Collected
+  1126→                            </span>
+  1127→                          ) : (
+  1128→                            <span
+  1129→                              className={cn(
+  1130→                                'font-medium',
+  1131→                                toCollect > 0 ? 'text-amber-700' : 'text-muted-foreground',
+  1132→                              )}
+  1133→                            >
+  1134→                              {formatPKR(toCollect)}
+  1135→                            </span>
+  1136→                          )}
+  1137→                        </TableCell>
+  1138→                        {/* Courier — name + booking status badge */}
+  1139→                        <TableCell>
+  1140→                          {order.courierName ? (
+  1141→                            <div className="flex flex-col gap-0.5">
+  1142→                              <span className="text-xs font-medium">{order.courierName}</span>
+  1143→                              {order.courierBookingStatus && order.courierBookingStatus !== 'booked' && (
+  1144→                                <span
+  1145→                                  title={order.courierBookingStatus}
+  1146→                                  className={cn(
+  1147→                                    'text-[9px] inline-flex items-center gap-0.5 px-1 py-0.5 rounded border w-fit',
+  1148→                                    order.courierBookingStatus === 'failed'
+  1149→                                      ? 'bg-rose-50 text-rose-700 border-rose-200'
+  1150→                                      : 'bg-gray-50 text-gray-600 border-gray-200',
+  1151→                                  )}
+  1152→                                >
+  1153→                                  {order.courierBookingStatus === 'failed' ? 'Failed' : 'Not booked'}
+  1154→                                </span>
+  1155→                              )}
+  1156→                            </div>
+  1157→                          ) : (
+  1158→                            <span className="text-xs text-muted-foreground">—</span>
+  1159→                          )}
+  1160→                        </TableCell>
+  1161→                        {/* Tracking # — monospace, click to copy */}
+  1162→                        <TableCell>
+  1163→                          {order.trackingNumber ? (
+  1164→                            <span
+  1165→                              className="text-xs font-mono text-primary cursor-pointer hover:underline"
+  1166→                              title="Click to copy"
+  1167→                              onClick={(e) => {
+  1168→                                e.stopPropagation()
+  1169→                                navigator.clipboard?.writeText(order.trackingNumber!).catch(() => {})
+  1170→                              }}
+  1171→                            >
+  1172→                              {order.trackingNumber}
+  1173→                            </span>
+  1174→                          ) : (
+  1175→                            <span className="text-xs text-muted-foreground">—</span>
+  1176→                          )}
+  1177→                        </TableCell>
+  1178→                        {/* Reference — universal courier reference (migration 015) */}
+  1179→                        <TableCell>
+  1180→                          {order.orderRefNumber ? (
+  1181→                            <span className="text-xs font-mono" title={order.orderDetail ?? ''}>
+  1182→                              {order.orderRefNumber}
+  1183→                            </span>
+  1184→                          ) : (
+  1185→                            <span className="text-xs text-muted-foreground">—</span>
+  1186→                          )}
+  1187→                        </TableCell>
+  1188→                        <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
+  1189→                          {formatDate(order.createdAt)}
+  1190→                        </TableCell>
+  1191→                        <TableCell className="text-right tabular-nums text-xs">
+  1192→                          {order.estimatedDeliveryCharge != null && order.estimatedDeliveryCharge > 0
+  1193→                            ? formatPKR(order.estimatedDeliveryCharge)
+  1194→                            : <span className="text-muted-foreground">—</span>}
+  1195→                        </TableCell>
+  1196→                        <TableCell className="text-right tabular-nums text-xs">
+  1197→                          {order.taxAmount != null && order.taxAmount > 0 ? (
+  1198→                            <span title={order.taxLabel || ''}>
+  1199→                              {formatPKR(order.taxAmount)}
+  1200→                            </span>
+  1201→                          ) : (
+  1202→                            <span className="text-muted-foreground">—</span>
+  1203→                          )}
+  1204→                        </TableCell>
+  1205→                        <TableCell className="text-right">
+  1206→                          <div className="flex items-center justify-end gap-1">
+  1207→                            <CancelCourierBookingButton
+  1208→                              entityType="order"
+  1209→                              entityId={order.id}
+  1210→                              courierSubStatus={order.courierSubStatus}
+  1211→                            />
+  1212→                            <Button
+  1213→                              variant="ghost"
+  1214→                              size="sm"
+  1215→                              onClick={(e) => {
+  1216→                                e.stopPropagation()
+  1217→                                navigate({ name: 'order-detail', id: order.id })
+  1218→                              }}
+  1219→                            >
+  1220→                              View
+  1221→                              <ArrowRight className="h-3.5 w-3.5" />
+  1222→                            </Button>
+  1223→                          </div>
+  1224→                        </TableCell>
+  1225→                      </TableRow>
+  1226→                    )
+  1227→                  })}
+  1228→                </TableBody>
+  1229→              </Table>
+  1230→              <p className="text-xs text-muted-foreground mt-3 mb-3 ml-4">
+  1231→                Showing {orders.length} of {data?.total ?? 0} orders
+  1232→              </p>
+  1233→            </div>
+  1234→          )}
+  1235→        </CardContent>
+  1236→      </Card>
+  1237→    </div>
+  1238→  )
+  1239→}
+  1240→
+  1241→// ─────────────────────────────────────────────────────────────────────────────
+  1242→// Chart data builder
+  1243→// ─────────────────────────────────────────────────────────────────────────────
+  1244→
+  1245→function buildChartData(
+  1246→  orders: OrderRow[],
+  1247→  range: DateRange,
+  1248→  monthly: boolean,
+  1249→  metric: ChartMetric,
+  1250→): ChartPoint[] {
+  1251→  // Build the list of interval buckets
+  1252→  const buckets = buildIntervalBuckets(range, monthly)
+  1253→
+  1254→  // For each order, compute its bucket key (yyyy-mm-dd or yyyy-mm)
+  1255→  for (const o of orders) {
+  1256→    const created = new Date(o.createdAt)
+  1257→    if (Number.isNaN(created.getTime())) continue
+  1258→    const key = monthly
+  1259→      ? `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(2, '0')}`
+  1260→      : toISODate(created)
+  1261→    const b = buckets.find((x) => x.key === key)
+  1262→    if (!b) continue
+  1263→    b.total += 1
+  1264→    if (o.status === 'rto') b.rto += 1
+  1265→    if (o.status === 'cancelled') b.cancelled += 1
+  1266→    if (o.status !== 'cancelled') b.revenue += o.totalOrderValue
+  1267→    if (o.status === 'pending') b.pending += 1
+  1268→    if (o.status === 'partially_backordered') b.backordered += 1
+  1269→  }
+  1270→
+  1271→  return buckets.map((b) => {
+  1272→    let value = 0
+  1273→    let count: number | undefined
+  1274→    let total: number | undefined
+  1275→    switch (metric) {
+  1276→      case 'total_orders':
+  1277→        value = b.total
+  1278→        break
+  1279→      case 'revenue':
+  1280→        value = b.revenue
+  1281→        break
+  1282→      case 'rto_rate':
+  1283→        value = b.total > 0 ? (b.rto / b.total) * 100 : 0
+  1284→        count = b.rto
+  1285→        total = b.total
+  1286→        break
+  1287→      case 'cancellation_rate':
+  1288→        value = b.total > 0 ? (b.cancelled / b.total) * 100 : 0
+  1289→        count = b.cancelled
+  1290→        total = b.total
+  1291→        break
+  1292→      case 'pending_current':
+  1293→        value = b.pending
+  1294→        break
+  1295→      case 'backordered_current':
+  1296→        value = b.backordered
+  1297→        break
+  1298→    }
+  1299→    return { label: b.label, value, count, total }
+  1300→  })
+  1301→}
+  1302→
+  1303→interface Bucket {
+  1304→  key: string
+  1305→  label: string
+  1306→  total: number
+  1307→  revenue: number
+  1308→  rto: number
+  1309→  cancelled: number
+  1310→  pending: number
+  1311→  backordered: number
+  1312→}
+  1313→
+  1314→function buildIntervalBuckets(range: DateRange, monthly: boolean): Bucket[] {
+  1315→  const out: Bucket[] = []
+  1316→  const start = new Date(range.from + 'T00:00:00')
+  1317→  const end = new Date(range.to + 'T23:59:59')
+  1318→
+  1319→  if (monthly) {
+  1320→    // Iterate by month from start month to end month (inclusive)
+  1321→    const cursor = new Date(start.getFullYear(), start.getMonth(), 1)
+  1322→    const endMonth = new Date(end.getFullYear(), end.getMonth(), 1)
+  1323→    while (cursor <= endMonth) {
+  1324→      const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`
+  1325→      const label = cursor.toLocaleDateString('en-PK', { month: 'short', year: '2-digit' })
+  1326→      out.push({ key, label, total: 0, revenue: 0, rto: 0, cancelled: 0, pending: 0, backordered: 0 })
+  1327→      cursor.setMonth(cursor.getMonth() + 1)
+  1328→    }
+  1329→  } else {
+  1330→    // Iterate by day from start to end (inclusive)
+  1331→    const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate())
+  1332→    const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate())
+  1333→    while (cursor <= endDay) {
+  1334→      const key = toISODate(cursor)
+  1335→      const label = cursor.toLocaleDateString('en-PK', { day: '2-digit', month: 'short' })
+  1336→      out.push({ key, label, total: 0, revenue: 0, rto: 0, cancelled: 0, pending: 0, backordered: 0 })
+  1337→      cursor.setDate(cursor.getDate() + 1)
+  1338→    }
+  1339→  }
+  1340→  return out
+  1341→}
+  1342→
+  1343→// ─────────────────────────────────────────────────────────────────────────────
+  1344→// Sub-components
+  1345→// ─────────────────────────────────────────────────────────────────────────────
+  1346→
+  1347→const FilterChip = memo(function FilterChip({ label, onRemove }: { label: string; onRemove: () => void }) {
+  1348→  return (
+  1349→    <span className="inline-flex items-center gap-1 rounded-full border bg-background px-2.5 py-1 text-xs font-medium text-foreground">
+  1350→      {label}
+  1351→      <button
+  1352→        type="button"
+  1353→        onClick={onRemove}
+  1354→        className="ml-0.5 rounded-full p-0.5 hover:bg-muted text-muted-foreground hover:text-foreground"
+  1355→        aria-label={`Remove filter ${label}`}
+  1356→      >
+  1357→        <X className="h-3 w-3" />
+  1358→      </button>
+  1359→    </span>
+  1360→  )
+  1361→})
+  1362→
+  1363→type StatTone = 'emerald' | 'amber' | 'rose' | 'sky'
+  1364→
+  1365→const STAT_TONE_CLASSES: Record<StatTone, string> = {
+  1366→  emerald: 'bg-emerald-50 text-emerald-600',
+  1367→  amber: 'bg-amber-50 text-amber-600',
+  1368→  rose: 'bg-rose-50 text-rose-600',
+  1369→  sky: 'bg-sky-50 text-sky-600',
+  1370→}
+  1371→
+  1372→const STAT_ACTIVE_RING: Record<StatTone, string> = {
+  1373→  emerald: 'ring-emerald-400/60 bg-emerald-50/40',
+  1374→  amber: 'ring-amber-400/60 bg-amber-50/40',
+  1375→  rose: 'ring-rose-400/60 bg-rose-50/40',
+  1376→  sky: 'ring-sky-400/60 bg-sky-50/40',
+  1377→}
+  1378→
+  1379→const StatCard = memo(function StatCard({
+  1380→  label,
+  1381→  sublabel,
+  1382→  value,
+  1383→  icon,
+  1384→  tone,
+  1385→  loading,
+  1386→  active,
+  1387→  onClick,
+  1388→}: {
+  1389→  label: string
+  1390→  sublabel?: string
+  1391→  value?: string
+  1392→  icon: React.ReactNode
+  1393→  tone: StatTone
+  1394→  loading?: boolean
+  1395→  active?: boolean
+  1396→  onClick?: () => void
+  1397→}) {
+  1398→  return (
+  1399→    <Card
+  1400→      role={onClick ? 'button' : undefined}
+  1401→      tabIndex={onClick ? 0 : undefined}
+  1402→      onClick={onClick}
+  1403→      onKeyDown={(e) => {
+  1404→        if (!onClick) return
+  1405→        if (e.key === 'Enter' || e.key === ' ') {
+  1406→          e.preventDefault()
+  1407→          onClick()
+  1408→        }
+  1409→      }}
+  1410→      className={cn(
+  1411→        'transition-all',
+  1412→        onClick && 'cursor-pointer hover:shadow-md hover:-translate-y-0.5',
+  1413→        active && cn('ring-2', STAT_ACTIVE_RING[tone]),
+  1414→      )}
+  1415→    >
+  1416→      <CardContent className="p-5">
+  1417→        <div className="flex items-center justify-between">
+  1418→          <div
+  1419→            className={cn(
+  1420→              'flex h-10 w-10 items-center justify-center rounded-lg',
+  1421→              STAT_TONE_CLASSES[tone],
+  1422→            )}
+  1423→          >
+  1424→            {icon}
+  1425→          </div>
+  1426→          {active && (
+  1427→            <TrendingUp className={cn('h-4 w-4', STAT_TONE_CLASSES[tone].split(' ')[1])} />
+  1428→          )}
+  1429→        </div>
+  1430→        <div className="mt-3">
+  1431→          {loading ? (
+  1432→            <Skeleton className="h-7 w-24" />
+  1433→          ) : (
+  1434→            <span className="text-xl font-semibold tracking-tight tabular-nums">
+  1435→              {value ?? '—'}
+  1436→            </span>
+  1437→          )}
+  1438→          <p className="mt-1 text-sm font-medium text-foreground/80">{label}</p>
+  1439→          {sublabel && (
+  1440→            <p className="text-[11px] text-muted-foreground mt-0.5">{sublabel}</p>
+  1441→          )}
+  1442→        </div>
+  1443→      </CardContent>
+  1444→    </Card>
+  1445→  )
+  1446→})
+  1447→
+  1448→// ─────────────────────────────────────────────────────────────────────────────
+  1449→// Chart panel
+  1450→// ─────────────────────────────────────────────────────────────────────────────
+  1451→
+  1452→const CHART_METRIC_META: Record<
+  1453→  ChartMetric,
+  1454→  { title: string; description: string; format: 'count' | 'currency' | 'percent' }
+  1455→> = {
+  1456→  total_orders: {
+  1457→    title: 'Total Orders Created',
+  1458→    description: 'Orders created per interval within the selected time span',
+  1459→    format: 'count',
+  1460→  },
+  1461→  revenue: {
+  1462→    title: 'Revenue',
+  1463→    description: 'Sum of total order value (non-cancelled) per interval',
+  1464→    format: 'currency',
+  1465→  },
+  1466→  rto_rate: {
+  1467→    title: 'RTO Rate',
+  1468→    description: 'RTO orders as a % of total orders per interval',
+  1469→    format: 'percent',
+  1470→  },
+  1471→  cancellation_rate: {
+  1472→    title: 'Cancellation Rate',
+  1473→    description: 'Cancelled orders as a % of total orders per interval',
+  1474→    format: 'percent',
+  1475→  },
+  1476→  pending_current: {
+  1477→    title: 'Pending Confirmation (current)',
+  1478→    description: 'Orders created per interval that are currently pending',
+  1479→    format: 'count',
+  1480→  },
+  1481→  backordered_current: {
+  1482→    title: 'Backordered (current)',
+  1483→    description: 'Orders created per interval that are currently backordered',
+  1484→    format: 'count',
+  1485→  },
+  1486→}
+  1487→
+  1488→function ChartPanel({
+  1489→  metric,
+  1490→  data,
+  1491→  monthly,
+  1492→  dateRange,
+  1493→  onClose,
+  1494→}: {
+  1495→  metric: ChartMetric
+  1496→  data: ChartPoint[]
+  1497→  monthly: boolean
+  1498→  dateRange: DateRange
+  1499→  onClose: () => void
+  1500→}) {
+  1501→  const meta = CHART_METRIC_META[metric]
+  1502→  const isRate = meta.format === 'percent'
+  1503→  const isCurrency = meta.format === 'currency'
+  1504→
+  1505→  const tooltipFormatter = useCallback(
+  1506→    (val: number) => {
+  1507→      if (isCurrency) return [formatPKR(val), meta.title]
+  1508→      if (isRate) return [`${val.toFixed(1)}%`, meta.title]
+  1509→      return [String(val), meta.title]
+  1510→    },
+  1511→    [isCurrency, isRate, meta.title],
+  1512→  )
+  1513→
+  1514→  // Choose chart type: line for revenue & rates; bar for counts
+  1515→  const useLine = isCurrency || isRate
+  1516→  const barColor = 'hsl(158 64% 40%)' // emerald-600
+  1517→  const lineColor = 'hsl(199 89% 40%)' // sky-600
+  1518→
+  1519→  return (
+  1520→    <Card>
+  1521→      <CardContent className="p-5">
+  1522→        <div className="flex items-start justify-between gap-2 mb-4">
+  1523→          <div>
+  1524→            <h3 className="text-sm font-semibold flex items-center gap-2">
+  1525→              <TrendingUp className="h-4 w-4 text-muted-foreground" />
+  1526→              {meta.title}
+  1527→            </h3>
+  1528→            <p className="text-xs text-muted-foreground mt-0.5">{meta.description}</p>
+  1529→            <p className="text-[11px] text-muted-foreground mt-1">
+  1530→              {dateRange.from} → {dateRange.to} · {monthly ? 'monthly' : 'daily'} granularity ·{' '}
+  1531→              {data.length} {monthly ? 'months' : 'days'}
+  1532→            </p>
+  1533→          </div>
+  1534→          <Button variant="ghost" size="sm" className="h-8 shrink-0" onClick={onClose}>
+  1535→            <X className="h-4 w-4" />
+  1536→            Close
+  1537→          </Button>
+  1538→        </div>
+  1539→
+  1540→        {data.length === 0 ? (
+  1541→          <div className="h-[250px] flex items-center justify-center text-sm text-muted-foreground">
+  1542→            No data in this time span.
+  1543→          </div>
+  1544→        ) : (
+  1545→          <ResponsiveContainer width="100%" height={280}>
+  1546→            {useLine ? (
+  1547→              <LineChart data={data} margin={{ top: 8, right: 16, left: 8, bottom: 0 }}>
+  1548→                <CartesianGrid strokeDasharray="3 3" stroke="hsl(0 0% 90%)" vertical={false} />
+  1549→                <XAxis
+  1550→                  dataKey="label"
+  1551→                  tick={{ fontSize: 11, fill: 'hsl(0 0% 45%)' }}
+  1552→                  tickLine={false}
+  1553→                  axisLine={{ stroke: 'hsl(0 0% 90%)' }}
+  1554→                />
+  1555→                <YAxis
+  1556→                  tick={{ fontSize: 11, fill: 'hsl(0 0% 45%)' }}
+  1557→                  tickLine={false}
+  1558→                  axisLine={false}
+  1559→                  width={isCurrency ? 60 : 40}
+  1560→                  tickFormatter={(v: number) =>
+  1561→                    isCurrency ? formatCompactPKR(v) : isRate ? `${v}%` : String(v)
+  1562→                  }
+  1563→                />
+  1564→                <Tooltip
+  1565→                  formatter={tooltipFormatter}
+  1566→                  contentStyle={{
+  1567→                    borderRadius: 8,
+  1568→                    border: '1px solid hsl(0 0% 90%)',
+  1569→                    fontSize: 12,
+  1570→                  }}
+  1571→                />
+  1572→                <Line
+  1573→                  type="monotone"
+  1574→                  dataKey="value"
+  1575→                  stroke={lineColor}
+  1576→                  strokeWidth={2}
+  1577→                  dot={{ r: 3, fill: lineColor }}
+  1578→                  activeDot={{ r: 5 }}
+  1579→                  name={meta.title}
+  1580→                />
+  1581→              </LineChart>
+  1582→            ) : (
+  1583→              <BarChart data={data} margin={{ top: 8, right: 16, left: 8, bottom: 0 }}>
+  1584→                <CartesianGrid strokeDasharray="3 3" stroke="hsl(0 0% 90%)" vertical={false} />
+  1585→                <XAxis
+  1586→                  dataKey="label"
+  1587→                  tick={{ fontSize: 11, fill: 'hsl(0 0% 45%)' }}
+  1588→                  tickLine={false}
+  1589→                  axisLine={{ stroke: 'hsl(0 0% 90%)' }}
+  1590→                />
+  1591→                <YAxis
+  1592→                  tick={{ fontSize: 11, fill: 'hsl(0 0% 45%)' }}
+  1593→                  tickLine={false}
+  1594→                  axisLine={false}
+  1595→                  width={40}
+  1596→                  allowDecimals={false}
+  1597→                />
+  1598→                <Tooltip
+  1599→                  formatter={tooltipFormatter}
+  1600→                  contentStyle={{
+  1601→                    borderRadius: 8,
+  1602→                    border: '1px solid hsl(0 0% 90%)',
+  1603→                    fontSize: 12,
+  1604→                  }}
+  1605→                />
+  1606→                <Bar dataKey="value" fill={barColor} radius={[4, 4, 0, 0]} name={meta.title} />
+  1607→              </BarChart>
+  1608→            )}
+  1609→          </ResponsiveContainer>
+  1610→        )}
+  1611→      </CardContent>
+  1612→    </Card>
+  1613→  )
+  1614→}
+  1615→
+  1616→// ─────────────────────────────────────────────────────────────────────────────
+  1617→// Customer autocomplete (debounced + keyboard nav)
+  1618→// ─────────────────────────────────────────────────────────────────────────────
+  1619→
+  1620→function CustomerAutocomplete({
+  1621→  onSelect,
+  1622→  onClear,
+  1623→}: {
+  1624→  onSelect: (c: CustomerOption) => void
+  1625→  onClear: () => void
+  1626→}) {
+  1627→  const [query, setQuery] = useState('')
+  1628→  const [debounced, setDebounced] = useState('')
+  1629→  const [open, setOpen] = useState(false)
+  1630→  const [highlight, setHighlight] = useState(-1)
+  1631→  const containerRef = useRef<HTMLDivElement>(null)
+  1632→
+  1633→  // Debounce 300ms
+  1634→  useEffect(() => {
+  1635→    const t = setTimeout(() => setDebounced(query.trim()), 300)
+  1636→    return () => clearTimeout(t)
+  1637→  }, [query])
+  1638→
+  1639→  const { data, isFetching, isLoading } = useQuery<CustomersSearchResponse>({
+  1640→    queryKey: ['customers', 'autocomplete', debounced],
+  1641→    queryFn: () =>
+  1642→      api.get<CustomersSearchResponse>(
+  1643→        `/api/customers?search=${encodeURIComponent(debounced)}&limit=10`,
+  1644→      ),
+  1645→    enabled: debounced.length >= 2,
+  1646→    staleTime: 10_000,
+  1647→  })
+  1648→
+  1649→  const results = data?.customers ?? []
+  1650→
+  1651→  // Reset highlight when results change
+  1652→  useEffect(() => {
+  1653→    setHighlight(results.length > 0 ? 0 : -1)
+  1654→  }, [results])
+  1655→
+  1656→  // Close on outside click
+  1657→  useEffect(() => {
+  1658→    function onDoc(e: MouseEvent) {
+  1659→      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+  1660→        setOpen(false)
+  1661→      }
+  1662→    }
+  1663→    document.addEventListener('mousedown', onDoc)
+  1664→    return () => document.removeEventListener('mousedown', onDoc)
+  1665→  }, [])
+  1666→
+  1667→  const choose = (c: CustomerOption) => {
+  1668→    onSelect(c)
+  1669→    setQuery('')
+  1670→    setDebounced('')
+  1671→    setOpen(false)
+  1672→    onClear()
+  1673→  }
+  1674→
+  1675→  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  1676→    if (e.key === 'ArrowDown') {
+  1677→      e.preventDefault()
+  1678→      setOpen(true)
+  1679→      setHighlight((h) => Math.min(h + 1, results.length - 1))
+  1680→    } else if (e.key === 'ArrowUp') {
+  1681→      e.preventDefault()
+  1682→      setHighlight((h) => Math.max(h - 1, 0))
+  1683→    } else if (e.key === 'Enter') {
+  1684→      e.preventDefault()
+  1685→      if (highlight >= 0 && highlight < results.length) choose(results[highlight])
+  1686→    } else if (e.key === 'Escape') {
+  1687→      setOpen(false)
+  1688→    }
+  1689→  }
+  1690→
+  1691→  const showDropdown = open && debounced.length >= 2
+  1692→
+  1693→  return (
+  1694→    <div ref={containerRef} className="relative">
+  1695→      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+  1696→      <Input
+  1697→        placeholder="Type customer name or phone (min 2 chars)…"
+  1698→        className="pl-9 h-9"
+  1699→        value={query}
+  1700→        onChange={(e) => {
+  1701→          setQuery(e.target.value)
+  1702→          setOpen(true)
+  1703→        }}
+  1704→        onFocus={() => setOpen(true)}
+  1705→        onKeyDown={onKeyDown}
+  1706→        aria-label="Search customers"
+  1707→        aria-expanded={showDropdown}
+  1708→        aria-autocomplete="list"
+  1709→        role="combobox"
+  1710→      />
+  1711→      {isFetching && (
+  1712→        <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+  1713→      )}
+  1714→
+  1715→      {showDropdown && (
+  1716→        <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover shadow-md overflow-hidden">
+  1717→          {isLoading ? (
+  1718→            <div className="space-y-1 p-2">
+  1719→              {Array.from({ length: 4 }).map((_, i) => (
+  1720→                <Skeleton key={i} className="h-8" />
+  1721→              ))}
+  1722→            </div>
+  1723→          ) : results.length === 0 ? (
+  1724→            <div className="p-3 text-xs text-muted-foreground flex items-center gap-2">
+  1725→              <AlertCircle className="h-3.5 w-3.5" />
+  1726→              No customers found for &ldquo;{debounced}&rdquo;
+  1727→            </div>
+  1728→          ) : (
+  1729→            <ul role="listbox" className="max-h-72 overflow-y-auto py-1">
+  1730→              {results.map((c, idx) => (
+  1731→                <li key={c.id} role="option" aria-selected={idx === highlight}>
+  1732→                  <button
+  1733→                    type="button"
+  1734→                    onMouseEnter={() => setHighlight(idx)}
+  1735→                    onClick={() => choose(c)}
+  1736→                    className={cn(
+  1737→                      'w-full text-left px-3 py-2 flex items-center justify-between gap-2',
+  1738→                      idx === highlight ? 'bg-muted/80' : 'hover:bg-muted/40',
+  1739→                    )}
+  1740→                  >
+  1741→                    <div className="min-w-0">
+  1742→                      <div className="flex items-center gap-2">
+  1743→                        <span className="text-sm font-medium truncate">{c.name}</span>
+  1744→                        {c.isFlagged && (
+  1745→                          <Badge
+  1746→                            variant="outline"
+  1747→                            className="h-4 px-1 text-[10px] bg-rose-50 text-rose-700 border-rose-200"
+  1748→                          >
+  1749→                            RTO risk
+  1750→                          </Badge>
+  1751→                        )}
+  1752→                      </div>
+  1753→                      <div className="text-xs text-muted-foreground font-mono">{c.phone}</div>
+  1754→                    </div>
+  1755→                    <div className="text-right shrink-0">
+  1756→                      <div className="text-xs text-muted-foreground">
+  1757→                        {c.totalOrdersCount} order{c.totalOrdersCount === 1 ? '' : 's'}
+  1758→                      </div>
+  1759→                      {c.totalRtoCount > 0 && (
+  1760→                        <div className="text-[10px] text-rose-600">
+  1761→                          {c.totalRtoCount} RTO
+  1762→                        </div>
+  1763→                      )}
+  1764→                    </div>
+  1765→                  </button>
+  1766→                </li>
+  1767→              ))}
+  1768→            </ul>
+  1769→          )}
+  1770→        </div>
+  1771→      )}
+  1772→    </div>
+  1773→  )
+  1774→}
+  1775→
+  1776→// ─────────────────────────────────────────────────────────────────────────────
+  1777→// Product / Variant autocomplete
+  1778→// ─────────────────────────────────────────────────────────────────────────────
+  1779→
+  1780→function ProductAutocomplete({
+  1781→  onSelect,
+  1782→  onClear,
+  1783→}: {
+  1784→  onSelect: (v: ProductOption) => void
+  1785→  onClear: () => void
+  1786→}) {
+  1787→  const [query, setQuery] = useState('')
+  1788→  const [debounced, setDebounced] = useState('')
+  1789→  const [open, setOpen] = useState(false)
+  1790→  const [highlight, setHighlight] = useState(-1)
+  1791→  const containerRef = useRef<HTMLDivElement>(null)
+  1792→
+  1793→  useEffect(() => {
+  1794→    const t = setTimeout(() => setDebounced(query.trim()), 300)
+  1795→    return () => clearTimeout(t)
+  1796→  }, [query])
+  1797→
+  1798→  const { data, isFetching, isLoading } = useQuery<ProductsResponse>({
+  1799→    queryKey: ['products', 'autocomplete', debounced],
+  1800→    queryFn: () =>
+  1801→      api.get<ProductsResponse>(
+  1802→        `/api/products?search=${encodeURIComponent(debounced)}&pageSize=10`,
+  1803→      ),
+  1804→    enabled: debounced.length >= 2,
+  1805→    staleTime: 30_000,
+  1806→  })
+  1807→
+  1808→  const results = useMemo<ProductOption[]>(() => {
+  1809→    const list: ProductOption[] = []
+  1810→    for (const p of data?.products ?? []) {
+  1811→      for (const v of p.variants) {
+  1812→        list.push({
+  1813→          productId: p.id,
+  1814→          variantId: v.id,
+  1815→          sku: v.sku,
+  1816→          title: p.title,
+  1817→          fulfillmentType: v.fulfillmentType,
+  1818→          salePrice: v.salePrice,
+  1819→        })
+  1820→      }
+  1821→    }
+  1822→    return list
+  1823→  }, [data])
+  1824→
+  1825→  useEffect(() => {
+  1826→    setHighlight(results.length > 0 ? 0 : -1)
+  1827→  }, [results])
+  1828→
+  1829→  useEffect(() => {
+  1830→    function onDoc(e: MouseEvent) {
+  1831→      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+  1832→        setOpen(false)
+  1833→      }
+  1834→    }
+  1835→    document.addEventListener('mousedown', onDoc)
+  1836→    return () => document.removeEventListener('mousedown', onDoc)
+  1837→  }, [])
+  1838→
+  1839→  const choose = (v: ProductOption) => {
+  1840→    onSelect(v)
+  1841→    setQuery('')
+  1842→    setDebounced('')
+  1843→    setOpen(false)
+  1844→    onClear()
+  1845→  }
+  1846→
+  1847→  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  1848→    if (e.key === 'ArrowDown') {
+  1849→      e.preventDefault()
+  1850→      setOpen(true)
+  1851→      setHighlight((h) => Math.min(h + 1, results.length - 1))
+  1852→    } else if (e.key === 'ArrowUp') {
+  1853→      e.preventDefault()
+  1854→      setHighlight((h) => Math.max(h - 1, 0))
+  1855→    } else if (e.key === 'Enter') {
+  1856→      e.preventDefault()
+  1857→      if (highlight >= 0 && highlight < results.length) choose(results[highlight])
+  1858→    } else if (e.key === 'Escape') {
+  1859→      setOpen(false)
+  1860→    }
+  1861→  }
+  1862→
+  1863→  const showDropdown = open && debounced.length >= 2
+  1864→
+  1865→  return (
+  1866→    <div ref={containerRef} className="relative">
+  1867→      <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+  1868→      <Input
+  1869→        placeholder="Type product title or SKU (min 2 chars)…"
+  1870→        className="pl-9 h-9"
+  1871→        value={query}
+  1872→        onChange={(e) => {
+  1873→          setQuery(e.target.value)
+  1874→          setOpen(true)
+  1875→        }}
+  1876→        onFocus={() => setOpen(true)}
+  1877→        onKeyDown={onKeyDown}
+  1878→        aria-label="Search products"
+  1879→        aria-expanded={showDropdown}
+  1880→        aria-autocomplete="list"
+  1881→        role="combobox"
+  1882→      />
+  1883→      {isFetching && (
+  1884→        <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+  1885→      )}
+  1886→
+  1887→      {showDropdown && (
+  1888→        <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover shadow-md overflow-hidden">
+  1889→          {isLoading ? (
+  1890→            <div className="space-y-1 p-2">
+  1891→              {Array.from({ length: 4 }).map((_, i) => (
+  1892→                <Skeleton key={i} className="h-8" />
+  1893→              ))}
+  1894→            </div>
+  1895→          ) : results.length === 0 ? (
+  1896→            <div className="p-3 text-xs text-muted-foreground flex items-center gap-2">
+  1897→              <AlertCircle className="h-3.5 w-3.5" />
+  1898→              No products found for &ldquo;{debounced}&rdquo;
+  1899→            </div>
+  1900→          ) : (
+  1901→            <ul role="listbox" className="max-h-72 overflow-y-auto py-1">
+  1902→              {results.map((v, idx) => (
+  1903→                <li key={v.variantId} role="option" aria-selected={idx === highlight}>
+  1904→                  <button
+  1905→                    type="button"
+  1906→                    onMouseEnter={() => setHighlight(idx)}
+  1907→                    onClick={() => choose(v)}
+  1908→                    className={cn(
+  1909→                      'w-full text-left px-3 py-2 flex items-center justify-between gap-2',
+  1910→                      idx === highlight ? 'bg-muted/80' : 'hover:bg-muted/40',
+  1911→                    )}
+  1912→                  >
+  1913→                    <div className="min-w-0">
+  1914→                      <div className="text-sm font-medium truncate">{v.title}</div>
+  1915→                      <div className="text-xs text-muted-foreground font-mono">
+  1916→                        SKU: {v.sku}
+  1917→                      </div>
+  1918→                    </div>
+  1919→                    <div className="flex items-center gap-1.5 shrink-0">
+  1920→                      {v.salePrice != null && (
+  1921→                        <span className="text-xs text-muted-foreground tabular-nums">
+  1922→                          {formatPKR(v.salePrice)}
+  1923→                        </span>
+  1924→                      )}
+  1925→                      <FulfillmentBadge type={v.fulfillmentType} />
+  1926→                    </div>
+  1927→                  </button>
+  1928→                </li>
+  1929→              ))}
+  1930→            </ul>
+  1931→          )}
+  1932→        </div>
+  1933→      )}
+  1934→    </div>
+  1935→  )
+  1936→}
+  1937→
+  1938→const FulfillmentBadge = memo(function FulfillmentBadge({ type }: { type: string | null }) {
+  1939→  if (!type) return null
+  1940→  const map: Record<string, { label: string; cls: string }> = {
+  1941→    stock_based: { label: 'In Stock', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+  1942→    made_to_order: {
+  1943→      label: 'Made to Order',
+  1944→      cls: 'bg-purple-50 text-purple-700 border-purple-200',
+  1945→    },
+  1946→    backorder: { label: 'Backorder', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+  1947→  }
+  1948→  const meta = map[type] ?? { label: type, cls: 'bg-gray-100 text-gray-700 border-gray-200' }
+  1949→  return (
+  1950→    <Badge variant="outline" className={cn('h-5 px-1.5 text-[10px]', meta.cls)}>
+  1951→      {meta.label}
+  1952→    </Badge>
+  1953→  )
+  1954→})
+  1955→
+  1956→// ─────────────────────────────────────────────────────────────────────────────
+  1957→// City autocomplete (datalist of distinct cities from loaded orders)
+  1958→// ─────────────────────────────────────────────────────────────────────────────
+  1959→
+  1960→function CityAutocomplete({
+  1961→  onSelect,
+  1962→  onClear,
+  1963→}: {
+  1964→  onSelect: (city: string) => void
+  1965→  onClear: () => void
+  1966→}) {
+  1967→  const [query, setQuery] = useState('')
+  1968→  const [open, setOpen] = useState(false)
+  1969→  const [highlight, setHighlight] = useState(-1)
+  1970→  const containerRef = useRef<HTMLDivElement>(null)
+  1971→
+  1972→  // Fetch a broad set of orders (no other filters) to compute distinct cities
+  1973→  const { data, isLoading } = useQuery<OrdersListResponse>({
+  1974→    queryKey: ['orders-cities'],
+  1975→    queryFn: () => api.get<OrdersListResponse>(`/api/orders?limit=100`),
+  1976→    staleTime: 60_000,
+  1977→  })
+  1978→
+  1979→  const cities = useMemo(() => {
+  1980→    const set = new Set<string>()
+  1981→    for (const o of data?.orders ?? []) {
+  1982→      if (o.deliveryCity && o.deliveryCity.trim()) set.add(o.deliveryCity.trim())
+  1983→    }
+  1984→    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  1985→  }, [data])
+  1986→
+  1987→  const results = useMemo(() => {
+  1988→    const q = query.trim().toLowerCase()
+  1989→    if (!q) return cities
+  1990→    return cities.filter((c) => c.toLowerCase().includes(q))
+  1991→  }, [cities, query])
+  1992→
+  1993→  useEffect(() => {
+  1994→    setHighlight(results.length > 0 ? 0 : -1)
+  1995→  }, [results])
+  1996→
+  1997→  useEffect(() => {
+  1998→    function onDoc(e: MouseEvent) {
+  1999→      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+  2000→        setOpen(false)
+
+[showing lines 1-2000 of 2599; use offset=2001 with limit to continue reading]

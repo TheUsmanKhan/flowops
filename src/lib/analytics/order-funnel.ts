@@ -24,6 +24,8 @@ export interface OrderFunnelFilter {
   customerId?: string
   /** Company scope (required — all orders are company-scoped). */
   companyId: string
+  /** The company's base currency (for revenue conversion). Phase F1. */
+  baseCurrency?: string
   /** Optional date range filter on Order.createdAt. */
   dateFrom?: Date
   dateTo?: Date
@@ -82,7 +84,7 @@ export async function computeOrderFunnelStats(
     }
   }
 
-  // Single query: fetch all matching orders with their status + totalOrderValue.
+  // Single query: fetch all matching orders with their status + totalOrderValue + deliveryCountry.
   // For itemsSoldQty, we use a separate aggregate query (sum of OrderItem.quantity).
   const [orders, itemsAgg] = await Promise.all([
     db.order.findMany({
@@ -90,6 +92,7 @@ export async function computeOrderFunnelStats(
       select: {
         status: true,
         totalOrderValue: true,
+        deliveryCountry: true,
       },
     }),
     // Sum of OrderItem.quantity for the matching orders

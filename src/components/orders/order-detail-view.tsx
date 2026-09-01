@@ -44,6 +44,7 @@ import {
   RefreshCw,
   AlertCircle,
   Loader2,
+  Printer,
   User,
   Flag,
   Truck,
@@ -82,6 +83,7 @@ interface OrderItem {
   fulfillmentTypeSnapshot: string
   returnedStitchedUsed: boolean
   needsReview: boolean
+  needsReviewReason: string | null
   backorderedAt: string | null
   fulfilledAt: string | null
   productionOrderId: string | null
@@ -130,6 +132,8 @@ interface OrderDetail {
     deliveryAddress: string | null
     deliveryCity: string | null
     deliveryCountry: string | null
+    fulfillmentChannel: string
+    selfFulfilledReferenceNumber: string | null
     courierName: string | null
     trackingNumber: string | null
     courierCompanyIntegrationId?: string | null
@@ -553,6 +557,10 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
         }
         actions={
           <div className="flex items-center gap-2">
+            {/* Self-fulfilled slip (Phase B2) — only visible for self_fulfilled orders */}
+            {order.fulfillmentChannel === 'self_fulfilled' && (
+              <SlipButton orderId={order.id} sfRef={order.selfFulfilledReferenceNumber} />
+            )}
             <Button
               variant="outline"
               size="sm"
@@ -595,6 +603,7 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
         <Badge variant="outline" className={statusBadge.className}>
           {statusBadge.label}
         </Badge>
+
         {order.packedAt && order.status !== 'dispatched' && order.status !== 'delivered' && order.status !== 'rto' && order.status !== 'cancelled' && (
           <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">
             Packed
@@ -807,8 +816,9 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                                   <Badge
                                     variant="outline"
                                     className="text-[10px] bg-amber-50 text-amber-700 border-amber-200"
+                                    title={item.needsReviewReason ?? undefined}
                                   >
-                                    Needs Review
+                                    {item.needsReviewReason ? `Needs Review: ${item.needsReviewReason}` : 'Needs Review'}
                                   </Badge>
                                 )}
                               </div>
@@ -1106,7 +1116,7 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
               />
               <InfoRow label="City" value={order.deliveryCity ?? '—'} />
               <InfoRow label="Country" value={order.deliveryCountry ?? '—'} />
-              {order.courierCityStatus === 'unresolved' && order.deliveryCity && !(order.deliveryCountry && order.deliveryCountry !== 'Pakistan') && (
+              {order.courierCityStatus === 'unresolved' && order.deliveryCity && !(order.deliveryCountry && order.deliveryCountry !== 'PK') && (
                 <div className="rounded-lg border border-amber-300 bg-amber-50 p-2 mt-1">
                   <div className="flex items-center gap-1.5 mb-1">
                     <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
@@ -2035,6 +2045,61 @@ function RetryBookingButton({
         <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Retrying…</>
       ) : (
         <><RotateCcw className="h-3.5 w-3.5" /> Retry Booking</>
+      )}
+    </Button>
+  )
+}
+
+/**
+ * SlipButton — generates + downloads the internal slip PDF for a
+ * self-fulfilled order (Phase B2). Calls POST /api/orders/[id]/self-fulfilled-slip,
+ * which generates the PDF (with CODE128 barcode) + returns the public URL,
+ * then opens it in a new tab / triggers a download.
+ */
+function SlipButton({ orderId, sfRef }: { orderId: string; sfRef: string | null }) {
+  const [generating, setGenerating] = useState(false)
+
+  async function handleGenerate() {
+    setGenerating(true)
+    try {
+      // The API now returns the PDF as a binary response (not a URL)
+      // We fetch it as a blob and open it in a new tab
+      const response = await fetch(`/api/orders/${orderId}/self-fulfilled-slip`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+      })
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null)
+        throw new Error(errorData?.error ?? 'Failed to generate slip')
+      }
+      const blob = await response.blob()
+      const url = URL.createObjectURL(blob)
+      window.open(url, '_blank')
+      // Clean up the blob URL after a delay (let the browser open it first)
+      setTimeout(() => URL.revokeObjectURL(url), 60000)
+      toast.success('Slip generated.')
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to generate slip.')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={handleGenerate}
+      disabled={generating || !sfRef}
+      title={sfRef ? `Generate slip for ${sfRef}` : 'No reference number'}
+    >
+      {generating ? (
+        <><Loader2 className="h-4 w-4 animate-spin" /> Generating…</>
+      ) : (
+        <><Printer className="h-4 w-4" /> Print Slip</>
       )}
     </Button>
   )

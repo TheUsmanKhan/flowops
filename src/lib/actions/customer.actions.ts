@@ -29,7 +29,7 @@ import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { validateAndNormalizePhone, isValidPhoneFormat } from '@/lib/phone-validation'
-import { countryNameToCode } from '@/lib/data/countries'
+// No countryNameToCode import needed — country is stored as alpha-2 code directly.
 import {
   createCustomerSchema,
   updateCustomerSchema,
@@ -378,10 +378,10 @@ export async function createCustomerInternal(
     // phone (+92...) on a UK-delivery order still validates fine, and a UK
     // local number (no +) on a UK address validates against UK rules.
     // Falls back to 'PK' (the existing default) when no address/country.
+    // NOTE: country is now stored as an alpha-2 code directly — no
+    // name→code translation needed.
     const phoneHintAddress = d.addresses.find((a) => a.is_default) ?? d.addresses[0]
-    const phoneCountryCode = phoneHintAddress?.country
-      ? (countryNameToCode(phoneHintAddress.country) ?? 'PK')
-      : 'PK'
+    const phoneCountryCode = phoneHintAddress?.country || 'PK'
 
     // 1. Validate + normalize every phone using libphonenumber-js (international).
     // This replaces the SQL normalize_phone() for the application-layer path.
@@ -438,9 +438,9 @@ export async function createCustomerInternal(
       label: a.label?.trim() || null,
       address: a.address.trim(),
       city: a.city.trim(),
-      // Country (Phase: Country System). Defaults to "Pakistan" when the
+      // Country (Phase: Country System). Defaults to "PK" when the
       // caller didn't send one (addressInputSchema default).
-      country: a.country?.trim() || 'Pakistan',
+      country: a.country?.trim() || 'PK',
       isDefault: a.is_default,
       lastUsedAt: null,
     }))
@@ -755,7 +755,7 @@ async function validateCustomerAddressCity(
   // cityValidatedAt timestamp. For non-Pakistan, leave the cached fields
   // untouched (they default to empty/null) — the UI treats the city as plain
   // free text with no courier-matching UI either.
-  if (country && country !== 'Pakistan') {
+  if (country && country !== 'PK') {
     return
   }
 
@@ -1081,6 +1081,40 @@ export async function matchOrCreateExternalCustomer(
     }
     const d = parsed.data
 
+    // ── Pre-normalize international phones (Phase: Country System) ──
+    // normalize_phone() (SQL) historically mangled international numbers by
+    // blindly prepending +92 (e.g. +447911123456 → +92447911123456). The SQL
+    // function now passes through + prefixed non-Pakistani numbers unchanged,
+    // BUT it doesn't validate/canonicalize them. For a phone like "+44 7911
+    // 123456" (with spaces) or "+44(0)7911112345", the SQL function would
+    // pass the raw string through with spaces intact — which wouldn't match
+    // a stored "+447911123456" for dedup.
+    //
+    // So: if the phone looks international (+ prefix that isn't +92, OR a
+    // local-format number that validateAndNormalizePhone can parse with a
+    // non-PK country hint), normalize it HERE via libphonenumber-js to a
+    // clean E.164 string BEFORE passing to the SQL function. The SQL function
+    // then passes it through (it sees a + non-92 prefix) and stores/matches
+    // the canonical E.164 value. Pakistani-shaped numbers (0300..., +92...)
+    // are passed through to the SQL function's normalize_phone() unchanged —
+    // no behavior change for the working case.
+    let phoneForSql = d.phone || null
+    if (phoneForSql) {
+      const trimmed = phoneForSql.trim()
+      const looksInternational = trimmed.startsWith('+') && !trimmed.startsWith('+92')
+      if (looksInternational) {
+        const { normalized } = validateAndNormalizePhone(trimmed, 'GB')
+        // Use the libphonenumber-js E.164 output if it parsed successfully.
+        // If it didn't parse (truly invalid number), fall back to the raw
+        // trimmed input — the SQL function's pass-through will store it as-is,
+        // and the isValidFormat flagging below will mark it for correction.
+        phoneForSql = normalized ?? trimmed
+      }
+      // Pakistani-shaped numbers (+92... or 0300... or 10-11 digit local)
+      // are left as-is — the SQL function's normalize_phone() handles them
+      // correctly (proven by existing behavior).
+    }
+
     // Check whether an external identity mapping already exists BEFORE
     // calling the SQL function, so we can report wasNewlyCreated accurately.
     const existingMapping = await db.customerExternalIdentity.findUnique({
@@ -1095,14 +1129,21 @@ export async function matchOrCreateExternalCustomer(
     })
 
     // Call the SQL function — it handles all 4 layers race-safely.
+    // phoneForSql is pre-normalized for international numbers (E.164) so
+    // normalize_phone()'s pass-through stores/matches the canonical value.
+    // d.country (alpha-2 code, optional) is passed through so the SQL function
+    // can persist it onto the customer_addresses row for newly-created customers.
+    // Defaults to 'PK' if absent.
+    const countryForSql = d.country?.trim() || 'PK'
     const rows = await db.$queryRaw<{ customer_id: string }[]>`
       SELECT match_or_create_customer(
         ${input.organizationId}::TEXT,
         ${d.platform}::TEXT,
         ${d.external_customer_id}::TEXT,
-        ${d.phone || null}::TEXT,
+        ${phoneForSql}::TEXT,
         ${d.email || null}::TEXT,
-        ${d.name || null}::TEXT
+        ${d.name || null}::TEXT,
+        ${countryForSql}::TEXT
       ) AS customer_id
     `
     const customerId = rows[0]?.customer_id
@@ -1118,15 +1159,25 @@ export async function matchOrCreateExternalCustomer(
     // isValidFormat=false so it can be surfaced for correction later.
     // We do NOT block creation — external platforms may send unformatted
     // or invalid phones, and the customer still needs to be importable.
-    if (wasNewlyCreated && d.phone) {
-      const phoneValid = isValidPhoneFormat(d.phone)
+    //
+    // Phase: Country System — use the pre-normalized phone (phoneForSql) for
+    // the validity check. For international numbers, isValidPhoneFormat is
+    // called with the default PK country but libphonenumber-js validates +
+    // prefixed numbers internationally regardless of defaultCountry, so a
+    // valid +44... number passes. For Pakistani local numbers, the default
+    // PK country is correct. The phoneRaw match uses phoneForSql (the
+    // pre-normalized value the SQL function stored as phoneRaw) — note the
+    // SQL function stores p_phone (the raw arg) as phoneRaw, which is now
+    // the pre-normalized E.164 value for international numbers.
+    if (wasNewlyCreated && phoneForSql) {
+      const phoneValid = isValidPhoneFormat(phoneForSql)
       if (!phoneValid) {
         // Find the phone row that was just created by the SQL function and
         // flag it. This is fire-and-forget — the customer is already created.
         db.customerPhone.updateMany({
           where: {
             customerId,
-            phoneRaw: d.phone,
+            phoneRaw: phoneForSql,
           },
           data: { isValidFormat: false },
         }).catch(() => {
@@ -1246,6 +1297,7 @@ export async function updateCustomerStats(customerId: string): Promise<ActionRes
     const totalOrderValue = orders
       .filter((o) => o.status === 'delivered' || o.status === 'dispatched')
       .reduce((sum, o) => sum + Number(o.totalOrderValue), 0)
+
     const totalRtoCount = orders.filter((o) => o.status === 'rto').length
 
     await db.customer.update({

@@ -75,6 +75,7 @@ export async function GET(
     const stats = await computeOrderFunnelStats({
       employeeId: employee.id,
       companyId: ctx.company.id,
+      baseCurrency: ctx.company.baseCurrency,
       dateFrom,
       dateTo,
     })

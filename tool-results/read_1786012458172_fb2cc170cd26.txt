@@ -1,0 +1,2002 @@
+     1→/**
+     2→ * OMS — Order server actions.
+     3→ *
+     4→ * Step 2: Order creation + basic lifecycle transitions (confirm, cancel,
+     5→ * payment conversion).
+     6→ * Step 3: Wired to the REAL Inventory system — reservation at confirmation,
+     7→ * dispatch deduction, cancellation unreservation, backorder auto-fulfillment.
+     8→ * Step 4: Comprehensive metric_events coverage on every mutation.
+     9→ *
+    10→ * Every mutation calls insertAuditLog() AND insertMetricEvent().
+    11→ */
+    12→
+    13→import { db } from '@/lib/db'
+    14→import { getCurrentUser } from '@/lib/session'
+    15→import { getWorkspace, requirePermission, isElevated, ApiError } from '@/lib/workspace'
+    16→import { insertAuditLog } from '@/lib/audit'
+    17→import { insertMetricEvent } from '@/lib/metrics'
+    18→import { PERMISSIONS } from '@/lib/permissions'
+    19→import {
+    20→  reserveStockForOrder,
+    21→  unreserveStockForOrder,
+    22→  dispatchOrder as dispatchInventory,
+    23→  checkAndFulfillMadeToOrderVariant,
+    24→} from '@/lib/inventory'
+    25→import {
+    26→  createManualOrderSchema,
+    27→  convertPaymentSchema,
+    28→  markCodCollectedSchema,
+    29→  cancelOrderSchema,
+    30→  shopifyOrderWebhookSchema,
+    31→  updatePaymentScreenshotSchema,
+    32→  type CreateManualOrderInput,
+    33→  type ConvertPaymentInput,
+    34→  type MarkCodCollectedInput,
+    35→  type CancelOrderInput,
+    36→  type ShopifyOrderWebhook,
+    37→  type UpdatePaymentScreenshotInput,
+    38→} from '@/lib/validations/order.schemas'
+    39→import { updateCustomerStats, createCustomer, markAddressAsUsed, matchOrCreateExternalCustomer } from './customer.actions'
+    40→import type { Prisma } from '@prisma/client'
+    41→
+    42→// ──────────────────────────────────────────────────────────────
+    43→// Types
+    44→// ──────────────────────────────────────────────────────────────
+    45→
+    46→interface ActionResult<T = unknown> {
+    47→  success: boolean
+    48→  data?: T
+    49→  error?: string
+    50→}
+    51→
+    52→interface OrderFilters {
+    53→  // Multi-select filters (preferred — used by the OMS filter panel)
+    54→  statuses?: string[]        // multi-select status filter
+    55→  paymentTypes?: string[]    // multi-select payment_type filter
+    56→  paymentStatuses?: string[] // multi-select payment_status filter
+    57→  orderSources?: string[]    // multi-select order_source filter
+    58→  courierNames?: string[]    // multi-select courier filter
+    59→  // Range / scalar filters
+    60→  dateFrom?: string
+    61→  dateTo?: string
+    62→  amountMin?: number         // total_order_value >=
+    63→  amountMax?: number         // total_order_value <=
+    64→  orgVariantId?: string      // filter to orders containing this variant
+    65→  customerId?: string
+    66→  deliveryCity?: string      // case-insensitive contains on delivery_city
+    67→  search?: string
+    68→  limit?: number
+    69→  offset?: number
+    70→  // Backward compat with single-value filters
+    71→  status?: string
+    72→  paymentType?: string
+    73→  paymentStatus?: string
+    74→  orderSource?: string
+    75→  courierName?: string
+    76→}
+    77→
+    78→// ──────────────────────────────────────────────────────────────
+    79→// Helper: generate order number via the DB function
+    80→// ──────────────────────────────────────────────────────────────
+    81→
+    82→async function generateOrderNumber(companyId: string): Promise<string> {
+    83→  const result = await db.$queryRaw<{ generate_order_number: string }[]>`
+    84→    SELECT generate_order_number(${companyId}::TEXT)
+    85→  `
+    86→  return result[0].generate_order_number
+    87→}
+    88→
+    89→// ──────────────────────────────────────────────────────────────
+    90→// Helper: reserveOrderStock — shared internal function
+    91→// ──────────────────────────────────────────────────────────────
+    92→// Processes ALL order_items for an order and attempts to reserve
+    93→// stock for each based on its fulfillment_type_snapshot.
+    94→//
+    95→// For stock_based items:
+    96→//   - If sufficient available stock → reserveStockForOrder(), fulfillment_status='reserved'
+    97→//   - If insufficient + inventory_policy='continue' → fulfillment_status='backordered'
+    98→//   - If insufficient + inventory_policy='deny' → outcome='failed'
+    99→//
+   100→// For made_to_order items:
+   101→//   - checkAndFulfillMadeToOrderVariant() checks returned stock first
+   102→//   - If existing_stock → fulfillment_status='reserved', returned_stitched_used=true
+   103→//   - If fresh_production → fulfillment_status='reserved', production_order_id set
+   104→//   - If error → outcome='failed'
+   105→//
+   106→// After processing: if ANY item is 'backordered', order status → 'partially_backordered'.
+   107→// If ALL items are 'reserved', order stays 'confirmed'.
+   108→//
+   109→// Called from:
+   110→//   - createManualOrder() IF the order auto-confirmed at creation
+   111→//   - confirmOrder() when a 'pending' order is manually confirmed
+   112→//   - dispatchOrderAction() if status is still 'pending' at dispatch time
+   113→
+   114→async function reserveOrderStock(
+   115→  orderId: string,
+   116→  ctx: { company: { id: string; organizationId: string }; user: { id: string }; employee: { id: string } },
+   117→): Promise<{
+   118→  success: boolean
+   119→  results: Array<{ orderItemId: string; outcome: 'reserved' | 'backordered' | 'failed'; reason?: string }>
+   120→}> {
+   121→  const order = await db.order.findUnique({
+   122→    where: { id: orderId },
+   123→    select: { dispatchLocationId: true, companyId: true, organizationId: true },
+   124→  })
+   125→  if (!order) return { success: false, results: [] }
+   126→
+   127→  const items = await db.orderItem.findMany({
+   128→    where: { orderId },
+   129→    include: {
+   130→      orgVariant: {
+   131→        select: { id: true, fulfillmentType: true, inventoryPolicy: true, stitchingCharges: true },
+   132→      },
+   133→    },
+   134→  })
+   135→
+   136→  const results: Array<{ orderItemId: string; outcome: 'reserved' | 'backordered' | 'failed'; reason?: string }> = []
+   137→  let hasBackordered = false
+   138→
+   139→  for (const item of items) {
+   140→    if (item.fulfillmentStatus === 'reserved' || item.fulfillmentStatus === 'dispatched') {
+   141→      // Already processed (e.g. re-confirmation attempt) — skip
+   142→      results.push({ orderItemId: item.id, outcome: 'reserved' })
+   143→      continue
+   144→    }
+   145→
+   146→    const locationId = item.reservedLocationId ?? order.dispatchLocationId
+   147→    if (!locationId) {
+   148→      results.push({ orderItemId: item.id, outcome: 'failed', reason: 'No dispatch location set' })
+   149→      continue
+   150→    }
+   151→
+   152→    if (item.fulfillmentTypeSnapshot === 'stock_based') {
+   153→      // Check available stock at the dispatch location
+   154→      const pool = await db.inventoryPool.findUnique({
+   155→        where: {
+   156→          orgVariantId_locationId: {
+   157→            orgVariantId: item.orgVariantId,
+   158→            locationId,
+   159→          },
+   160→        },
+   161→      })
+   162→
+   163→      const available = pool ? pool.onHand - pool.reserved : 0
+   164→
+   165→      if (available >= item.quantity) {
+   166→        // Sufficient stock — reserve it
+   167→        const reserveResult = await reserveStockForOrder({
+   168→          orgVariantId: item.orgVariantId,
+   169→          locationId,
+   170→          organizationId: order.organizationId,
+   171→          companyId: order.companyId,
+   172→          employeeId: ctx.employee.id,
+   173→          quantity: item.quantity,
+   174→          orderId,
+   175→        })
+   176→
+   177→        if (reserveResult.success) {
+   178→          await db.orderItem.update({
+   179→            where: { id: item.id },
+   180→            data: { fulfillmentStatus: 'reserved', reservedLocationId: locationId },
+   181→          })
+   182→          results.push({ orderItemId: item.id, outcome: 'reserved' })
+   183→        } else {
+   184→          results.push({ orderItemId: item.id, outcome: 'failed', reason: reserveResult.error })
+   185→        }
+   186→      } else if (item.orgVariant.inventoryPolicy === 'continue') {
+   187→        // Insufficient stock but backordering allowed
+   188→        await db.orderItem.update({
+   189→          where: { id: item.id },
+   190→          data: { fulfillmentStatus: 'backordered', backorderedAt: new Date() },
+   191→        })
+   192→        await insertMetricEvent({
+   193→          companyId: order.companyId,
+   194→          entityType: 'product',
+   195→          entityId: item.orgVariantId,
+   196→          metricKey: 'order.backordered',
+   197→          numericValue: item.quantity,
+   198→          dimensions: { order_id: orderId },
+   199→        }).catch(() => {})
+   200→        hasBackordered = true
+   201→        results.push({
+   202→          orderItemId: item.id,
+   203→          outcome: 'backordered',
+   204→          reason: `Available: ${available}, required: ${item.quantity}`,
+   205→        })
+   206→      } else {
+   207→        // Insufficient stock + policy='deny' — fail
+   208→        results.push({
+   209→          orderItemId: item.id,
+   210→          outcome: 'failed',
+   211→          reason: `Insufficient stock (available: ${available}, required: ${item.quantity}) and inventory_policy='deny'`,
+   212→        })
+   213→      }
+   214→    } else if (item.fulfillmentTypeSnapshot === 'made_to_order') {
+   215→      // Made-to-order: check returned stock first, then trigger production
+   216→      const mtoResult = await checkAndFulfillMadeToOrderVariant(
+   217→        item.orgVariantId,
+   218→        item.quantity,
+   219→        order.companyId,
+   220→        locationId,
+   221→      )
+   222→
+   223→      if (mtoResult.source === 'existing_stock' && mtoResult.locationId) {
+   224→        // Returned stock available — reserve it
+   225→        const reserveResult = await reserveStockForOrder({
+   226→          orgVariantId: item.orgVariantId,
+   227→          locationId: mtoResult.locationId,
+   228→          organizationId: order.organizationId,
+   229→          companyId: order.companyId,
+   230→          employeeId: ctx.employee.id,
+   231→          quantity: item.quantity,
+   232→          orderId,
+   233→        })
+   234→
+   235→        if (reserveResult.success) {
+   236→          await db.orderItem.update({
+   237→            where: { id: item.id },
+   238→            data: {
+   239→              fulfillmentStatus: 'reserved',
+   240→              returnedStitchedUsed: true,
+   241→              reservedLocationId: mtoResult.locationId,
+   242→            },
+   243→          })
+   244→          await insertMetricEvent({
+   245→            companyId: order.companyId,
+   246→            entityType: 'product',
+   247→            entityId: item.orgVariantId,
+   248→            metricKey: 'order.made_to_order_from_returned_stock',
+   249→            numericValue: 1,
+   250→            dimensions: { order_id: orderId, stitching_cost_saved: Number(item.orgVariant.stitchingCharges) || 0 },
+   251→          }).catch(() => {})
+   252→          results.push({ orderItemId: item.id, outcome: 'reserved' })
+   253→        } else {
+   254→          results.push({ orderItemId: item.id, outcome: 'failed', reason: reserveResult.error })
+   255→        }
+   256→      } else if (mtoResult.source === 'fresh_production' && mtoResult.productionOrderId) {
+   257→        // Fresh production triggered — link the production order
+   258→        await db.orderItem.update({
+   259→          where: { id: item.id },
+   260→          data: {
+   261→            fulfillmentStatus: 'reserved',
+   262→            productionOrderId: mtoResult.productionOrderId,
+   263→          },
+   264→        })
+   265→        // Also link the order_item back to the production order
+   266→        await db.productionOrder.update({
+   267→          where: { id: mtoResult.productionOrderId },
+   268→          data: { orderItemId: item.id },
+   269→        })
+   270→        await insertMetricEvent({
+   271→          companyId: order.companyId,
+   272→          entityType: 'product',
+   273→          entityId: item.orgVariantId,
+   274→          metricKey: 'order.made_to_order_production_triggered',
+   275→          numericValue: 1,
+   276→          dimensions: { order_id: orderId, production_order_id: mtoResult.productionOrderId },
+   277→        }).catch(() => {})
+   278→        results.push({ orderItemId: item.id, outcome: 'reserved' })
+   279→      } else {
+   280→        // Error (no fabric source, insufficient fabric, etc.)
+   281→        results.push({
+   282→          orderItemId: item.id,
+   283→          outcome: 'failed',
+   284→          reason: mtoResult.error ?? 'Made-to-order fulfillment failed',
+   285→        })
+   286→      }
+   287→    }
+   288→  }
+   289→
+   290→  // Update order status based on results
+   291→  if (hasBackordered) {
+   292→    await db.order.update({
+   293→      where: { id: orderId },
+   294→      data: { status: 'partially_backordered' },
+   295→    })
+   296→  }
+   297→  // If no backordered items, order stays 'confirmed' (or whatever it was)
+   298→
+   299→  return { success: true, results }
+   300→}
+   301→
+   302→// ──────────────────────────────────────────────────────────────
+   303→// createManualOrder
+   304→// ──────────────────────────────────────────────────────────────
+   305→
+   306→export async function createManualOrder(
+   307→  input: CreateManualOrderInput,
+   308→): Promise<ActionResult<{
+   309→  orderId: string
+   310→  flowopsOrderNumber: string
+   311→  orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
+   312→}>> {
+   313→  try {
+   314→    const ctx = await getWorkspace()
+   315→    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+   316→
+   317→    // 1. Validate
+   318→    const parsed = createManualOrderSchema.safeParse(input)
+   319→    if (!parsed.success) {
+   320→      return {
+   321→        success: false,
+   322→        error: parsed.error.issues[0]?.message ?? 'Invalid order data',
+   323→      }
+   324→    }
+   325→    const d = parsed.data
+   326→
+   327→    // 2. Resolve customer (existing customer_id OR inline new_customer).
+   328→    //    Also resolve optional saved address/phone selection and recipient_name.
+   329→    let customerId: string
+   330→    let customerName: string
+   331→    let usedCustomerAddressId: string | null = null
+   332→    let usedCustomerPhoneId: string | null = null
+   333→    let saveAddressForNextTime = d.save_address_for_next_time ?? false
+   334→    // Whether the delivery_address came from a saved customer_addresses row
+   335→    // (vs. typed as a one-off). Used to decide whether to bump lastUsedAt.
+   336→    let selectedSavedAddressId: string | null = null
+   337→
+   338→    if (d.customer_id) {
+   339→      // Existing customer path — verify they belong to this org.
+   340→      const existing = await db.customer.findFirst({
+   341→        where: { id: d.customer_id, organizationId: ctx.company.organizationId },
+   342→        select: { id: true, name: true },
+   343→      })
+   344→      if (!existing) return { success: false, error: 'Customer not found' }
+   345→      customerId = existing.id
+   346→      customerName = existing.name
+   347→
+   348→      // If a saved address was selected, verify it belongs to this customer.
+   349→      if (d.used_customer_address_id) {
+   350→        const addr = await db.customerAddress.findFirst({
+   351→          where: {
+   352→            id: d.used_customer_address_id,
+   353→            customerId: existing.id,
+   354→            organizationId: ctx.company.organizationId,
+   355→          },
+   356→          select: { id: true, address: true, city: true },
+   357→        })
+   358→        if (addr) {
+   359→          usedCustomerAddressId = addr.id
+   360→          selectedSavedAddressId = addr.id
+   361→          // The delivery_address snapshot is the order's own editable copy.
+   362→          // If the caller passed the same address text, we trust it; if they
+   363→          // passed different text (edited it), we still record the link to
+   364→          // the saved address for lastUsedAt tracking but keep the edited text
+   365→          // as the order's snapshot. Either way, delivery_address comes from
+   366→          // the input — we do NOT override it here.
+   367→        }
+   368→      }
+   369→
+   370→      // If a saved phone was selected, verify it belongs to this customer.
+   371→      if (d.used_customer_phone_id) {
+   372→        const phone = await db.customerPhone.findFirst({
+   373→          where: {
+   374→            id: d.used_customer_phone_id,
+   375→            customerId: existing.id,
+   376→            organizationId: ctx.company.organizationId,
+   377→          },
+   378→          select: { id: true },
+   379→        })
+   380→        if (phone) {
+   381→          usedCustomerPhoneId = phone.id
+   382→        }
+   383→      }
+   384→    } else if (d.new_customer) {
+   385→      // Inline new-customer path — create the customer + their phones +
+   386→      // addresses now via the Customer Management System. The first phone is
+   387→      // primary and the first address is default (validated by createCustomerSchema).
+   388→      const createResult = await createCustomer(d.new_customer)
+   389→      if (!createResult.success || !createResult.data) {
+   390→        return { success: false, error: createResult.error ?? 'Failed to create customer' }
+   391→      }
+   392→      customerId = createResult.data.customerId
+   393→      customerName = d.new_customer.name.trim()
+   394→      // For a brand-new customer, the first address they provided IS the
+   395→      // saved default address. Mark it as the selected address so we bump
+   396→      // its lastUsedAt after order creation.
+   397→      const newAddr = await db.customerAddress.findFirst({
+   398→        where: { customerId, isDefault: true },
+   399→        select: { id: true },
+   400→      })
+   401→      if (newAddr) {
+   402→        usedCustomerAddressId = newAddr.id
+   403→        selectedSavedAddressId = newAddr.id
+   404→      }
+   405→      // Same for the primary phone.
+   406→      const newPhone = await db.customerPhone.findFirst({
+   407→        where: { customerId, isPrimary: true },
+   408→        select: { id: true },
+   409→      })
+   410→      if (newPhone) {
+   411→        usedCustomerPhoneId = newPhone.id
+   412→      }
+   413→      // For a brand-new customer, we already saved the address as part of
+   414→      // createCustomer — don't double-save it.
+   415→      saveAddressForNextTime = false
+   416→    } else {
+   417→      return { success: false, error: 'Either customer_id or new_customer is required' }
+   418→    }
+   419→
+   420→    // 3. recipient_name defaults to the customer's name if not explicitly overridden.
+   421→    const recipientName = (d.recipient_name && d.recipient_name.trim()) || customerName
+   422→
+   423→    // 3. Fetch variants + their pricing for this company + fulfillment_type snapshot
+   424→    const variantIds = d.items.map((i) => i.org_variant_id)
+   425→    const variants = await db.orgProductVariant.findMany({
+   426→      where: { id: { in: variantIds }, organizationId: ctx.company.organizationId },
+   427→      include: {
+   428→        companyPricing: { where: { companyId: ctx.company.id } },
+   429→      },
+   430→    })
+   431→
+   432→    if (variants.length !== variantIds.length) {
+   433→      return { success: false, error: 'One or more variants not found in this organization' }
+   434→    }
+   435→
+   436→    // 4. Compute subtotal + build order items data
+   437→    let subtotal = 0
+   438→    const orderItemsData: Array<{
+   439→      orgVariantId: string
+   440→      quantity: number
+   441→      unitPrice: number
+   442→      lineTotal: number
+   443→      fulfillmentTypeSnapshot: string
+   444→    }> = []
+   445→
+   446→    for (const item of d.items) {
+   447→      const variant = variants.find((v) => v.id === item.org_variant_id)
+   448→      if (!variant) continue
+   449→
+   450→      // Use provided unit_price OR fall back to company pricing OR variant cost
+   451→      const unitPrice =
+   452→        item.unit_price ??
+   453→        (variant.companyPricing[0]?.salePrice
+   454→          ? Number(variant.companyPricing[0].salePrice)
+   455→          : Number(variant.costPrice))
+   456→
+   457→      const lineTotal = item.quantity * unitPrice
+   458→      subtotal += lineTotal
+   459→
+   460→      orderItemsData.push({
+   461→        orgVariantId: item.org_variant_id,
+   462→        quantity: item.quantity,
+   463→        unitPrice,
+   464→        lineTotal,
+   465→        fulfillmentTypeSnapshot: variant.fulfillmentType,
+   466→      })
+   467→    }
+   468→
+   469→    // 5. Compute totals
+   470→    const discountAmount = d.discount_amount ?? 0
+   471→    const courierCharges = d.courier_charges ?? 0
+   472→    const estimatedDeliveryCharge = d.estimated_delivery_charge ?? 0
+   473→    const taxAmount = d.tax_amount ?? 0
+   474→    // Total = subtotal + courier charges + delivery charge + tax - discount
+   475→    // (delivery charge and tax are ADDITIVE — not absorbed into subtotal)
+   476→    const totalOrderValue = subtotal + courierCharges + estimatedDeliveryCharge + taxAmount - discountAmount
+   477→
+   478→    // 6. Determine payment status + source
+   479→    let paymentStatus: string = 'cod_pending'
+   480→    let paymentSource: string = 'cod_native'
+   481→    let advanceAmount: number | null = null
+   482→    let advancePaymentMethod: string | null = null
+   483→    let advancePaymentReference: string | null = null
+   484→    let advancePaidAt: Date | null = null
+   485→
+   486→    if (d.payment_type === 'partial_advance') {
+   487→      paymentStatus = 'advance_paid'
+   488→      paymentSource = 'manual_conversion'
+   489→      advanceAmount = d.advance_amount ?? 0
+   490→      advancePaymentMethod = d.advance_payment_method || null
+   491→      advancePaymentReference = d.advance_payment_reference || null
+   492→      advancePaidAt = new Date()
+   493→    } else if (d.payment_type === 'fully_prepaid') {
+   494→      paymentStatus = 'fully_prepaid'
+   495→      paymentSource = 'manual_conversion'
+   496→      advanceAmount = totalOrderValue
+   497→      advancePaymentMethod = d.advance_payment_method || null
+   498→      advancePaymentReference = d.advance_payment_reference || null
+   499→      advancePaidAt = new Date()
+   500→    }
+   501→
+   502→    // remainingCodAmount is NOT a GENERATED column in the DB — the application
+   503→    // MUST compute it as totalOrderValue - (advanceAmount ?? 0).
+   504→    const remainingCodAmount = totalOrderValue - (advanceAmount ?? 0)
+   505→
+   506→    // 7. Determine initial order status
+   507→    let orderStatus: string = 'pending'
+   508→    let confirmedAt: Date | null = null
+   509→    let skippedConfirmation = false
+   510→
+   511→    if (paymentStatus === 'advance_paid' || paymentStatus === 'fully_prepaid') {
+   512→      // Payment itself is the confirmation signal — bypasses require_order_confirmation
+   513→      orderStatus = 'confirmed'
+   514→      confirmedAt = new Date()
+   515→    } else {
+   516→      // COD order — check company_order_settings
+   517→      const settings = await db.companyOrderSetting.findUnique({
+   518→        where: { companyId: ctx.company.id },
+   519→      })
+   520→      if (!settings?.requireOrderConfirmation) {
+   521→        orderStatus = 'confirmed'
+   522→        confirmedAt = new Date()
+   523→        skippedConfirmation = true
+   524→      }
+   525→    }
+   526→
+   527→    // 8. Generate order number
+   528→    const flowopsOrderNumber = await generateOrderNumber(ctx.company.id)
+   529→
+   530→    // 9. Create the order
+   531→    const order = await db.order.create({
+   532→      data: {
+   533→        organizationId: ctx.company.organizationId,
+   534→        companyId: ctx.company.id,
+   535→        flowopsOrderNumber,
+   536→        orderSource: 'manual',
+   537→        customerId,
+   538→        // Customer Management System integration (migration 002):
+   539→        //   - recipientName: the name to deliver to (defaults to customer.name)
+   540→        //   - usedCustomerAddressId / usedCustomerPhoneId: which saved
+   541→        //     customer_addresses / customer_phones rows were used for this
+   542→        //     order, for lastUsedAt tracking and reporting. Nullable when a
+   543→        //     one-off address/phone was typed without saving.
+   544→        recipientName,
+   545→        usedCustomerAddressId,
+   546→        usedCustomerPhoneId,
+   547→        status: orderStatus,
+   548→        paymentType: d.payment_type,
+   549→        paymentStatus,
+   550→        paymentSource,
+   551→        subtotal,
+   552→        discountAmount: discountAmount || null,
+   553→        discountReason: d.discount_reason || null,
+   554→        courierCharges: courierCharges || null,
+   555→        estimatedDeliveryCharge: estimatedDeliveryCharge || null,
+   556→        taxAmount: taxAmount || null,
+   557→        taxLabel: d.tax_label?.trim() || null,
+   558→        totalOrderValue,
+   559→        advanceAmount,
+   560→        advancePaymentMethod,
+   561→        advancePaymentReference,
+   562→        advancePaidAt,
+   563→        remainingCodAmount,
+   564→        deliveryAddress: d.delivery_address,
+   565→        deliveryCity: d.delivery_city,
+   566→        courierName: d.courier_name || null,
+   567→        courierCompanyIntegrationId: d.courier_company_integration_id || null,
+   568→        recommendedCourierCompanyIntegrationId: d.courier_company_integration_id || null,
+   569→        dispatchLocationId: d.dispatch_location_id,
+   570→        notesForCourier: d.notes_for_courier || null,
+   571→        skippedConfirmation,
+   572→        confirmedAt,
+   573→        createdBy: ctx.employee.id,
+   574→      },
+   575→    })
+   576→
+   577→    // 10. Create order items (fulfillment_status = 'reserved' as PLACEHOLDER)
+   578→    const createdItems: Array<{ id: string; orgVariantId: string; quantity: number }> = []
+   579→    for (const itemData of orderItemsData) {
+   580→      const item = await db.orderItem.create({
+   581→        data: {
+   582→          orderId: order.id,
+   583→          orgVariantId: itemData.orgVariantId,
+   584→          organizationId: ctx.company.organizationId,
+   585→          quantity: itemData.quantity,
+   586→          unitPrice: itemData.unitPrice,
+   587→          lineTotal: itemData.lineTotal,
+   588→          fulfillmentStatus: 'reserved', // PLACEHOLDER — Step 3 will validate/adjust
+   589→          fulfillmentTypeSnapshot: itemData.fulfillmentTypeSnapshot,
+   590→          reservedLocationId: d.dispatch_location_id,
+   591→        },
+   592→      })
+   593→      createdItems.push({
+   594→        id: item.id,
+   595→        orgVariantId: item.orgVariantId,
+   596→        quantity: item.quantity,
+   597→      })
+   598→    }
+   599→
+   600→    // 11. Audit log
+   601→    await insertAuditLog({
+   602→      action: 'order.created',
+   603→      entityType: 'order',
+   604→      entityId: order.id,
+   605→      companyId: ctx.company.id,
+   606→      organizationId: ctx.company.organizationId,
+   607→      userId: ctx.user.id,
+   608→      employeeId: ctx.employee.id,
+   609→      newValues: {
+   610→        flowopsOrderNumber,
+   611→        status: orderStatus,
+   612→        paymentType: d.payment_type,
+   613→        paymentStatus,
+   614→        itemCount: orderItemsData.length,
+   615→        totalOrderValue,
+   616→        customerId,
+   617→      },
+   618→    })
+   619→
+   620→    // 12. Customer Management System integration:
+   621→    //   a. If a saved address was selected, bump its lastUsedAt to NOW() so
+   622→    //      the UI can sort saved addresses by recency.
+   623→    //   b. If a brand-new one-off address was typed AND the caller set
+   624→    //      save_address_for_next_time=true, persist it as a new
+   625→    //      customer_addresses row (and link it via usedCustomerAddressId
+   626→    //      for future tracking). This is the "Save this address for next
+   627→    //      time" UX from Step 3's frontend.
+   628→    //   c. Recompute cached customer stats (total_orders_count, etc.) and
+   629→    //      auto-flag if RTO threshold crossed.
+   630→    if (selectedSavedAddressId) {
+   631→      await markAddressAsUsed(selectedSavedAddressId)
+   632→    } else if (saveAddressForNextTime && d.delivery_address && d.delivery_city) {
+   633→      // One-off address typed + user opted to save it for next time.
+   634→      // Persist as a non-default customer_addresses row (default stays as-is
+   635→      // unless the user explicitly changes it via the customer profile).
+   636→      const savedAddr = await db.customerAddress.create({
+   637→        data: {
+   638→          customerId,
+   639→          organizationId: ctx.company.organizationId,
+   640→          label: null,
+   641→          address: d.delivery_address,
+   642→          city: d.delivery_city,
+   643→          isDefault: false,
+   644→          lastUsedAt: new Date(),
+   645→        },
+   646→      })
+   647→      // Link the order to the newly-saved address for future tracking.
+   648→      await db.order.update({
+   649→        where: { id: order.id },
+   650→        data: { usedCustomerAddressId: savedAddr.id },
+   651→      })
+   652→    }
+   653→
+   654→    await updateCustomerStats(customerId)
+   655→
+   656→    // 13. If the order auto-confirmed (payment-driven or company setting),
+   657→    // run the stock reservation logic immediately.
+   658→    if (orderStatus === 'confirmed') {
+   659→      await reserveOrderStock(order.id, ctx)
+   660→    }
+   661→
+   662→    await insertMetricEvent({
+   663→      companyId: ctx.company.id,
+   664→      entityType: 'order',
+   665→      entityId: order.id,
+   666→      metricKey: 'order.created',
+   667→      numericValue: Number(totalOrderValue),
+   668→      dimensions: { order_source: 'manual', payment_type: d.payment_type, company_id: ctx.company.id },
+   669→    }).catch(() => {})
+   670→
+   671→    return {
+   672→      success: true,
+   673→      data: { orderId: order.id, flowopsOrderNumber, orderItems: createdItems },
+   674→    }
+   675→  } catch (err) {
+   676→    return {
+   677→      success: false,
+   678→      error: err instanceof Error ? err.message : 'Failed to create order',
+   679→    }
+   680→  }
+   681→}
+   682→
+   683→// ──────────────────────────────────────────────────────────────
+   684→// createOrderFromShopifyWebhook — STUB (structured but not wired)
+   685→// ──────────────────────────────────────────────────────────────
+   686→
+   687→export async function createOrderFromShopifyWebhook(
+   688→  payload: ShopifyOrderWebhook,
+   689→  companyId: string,
+   690→  organizationId: string,
+   691→): Promise<ActionResult<{ orderId: string; flowopsOrderNumber: string }>> {
+   692→  try {
+   693→    const ctx = await getWorkspace()
+   694→    // This function would be called by a future webhook handler.
+   695→    // For now it's structured and unit-testable with a mock payload.
+   696→
+   697→    const parsed = shopifyOrderWebhookSchema.safeParse(payload)
+   698→    if (!parsed.success) {
+   699→      return { success: false, error: 'Invalid Shopify webhook payload' }
+   700→    }
+   701→    const d = parsed.data
+   702→
+   703→    // Map Shopify financial_status → FlowOps payment_status
+   704→    let paymentStatus: string
+   705→    let paymentSource: string = 'shopify_gateway'
+   706→    let paymentType: string
+   707→    let orderStatus: string = 'pending'
+   708→    let confirmedAt: Date | null = null
+   709→    let advanceAmount: number | null = null
+   710→    let advancePaidAt: Date | null = null
+   711→
+   712→    switch (d.financial_status) {
+   713→      case 'paid':
+   714→        paymentStatus = 'fully_prepaid'
+   715→        paymentType = 'fully_prepaid'
+   716→        orderStatus = 'confirmed'
+   717→        confirmedAt = new Date()
+   718→        advancePaidAt = new Date()
+   719→        // advanceAmount will be set to totalOrderValue below (after total_price is parsed)
+   720→        break
+   721→      case 'partially_paid':
+   722→        paymentStatus = 'advance_paid'
+   723→        paymentType = 'partial_advance'
+   724→        orderStatus = 'confirmed'
+   725→        confirmedAt = new Date()
+   726→        advancePaidAt = new Date()
+   727→        // Shopify webhook does not carry the partial amount paid — leave advanceAmount null.
+   728→        // remainingCodAmount will be computed as totalOrderValue - 0 = totalOrderValue.
+   729→        break
+   730→      default:
+   731→        paymentStatus = 'cod_pending'
+   732→        paymentType = 'full_cod'
+   733→        paymentSource = 'cod_native'
+   734→        // Check company settings for COD orders
+   735→        const settings = await db.companyOrderSetting.findUnique({ where: { companyId } })
+   736→        if (!settings?.requireOrderConfirmation) {
+   737→          orderStatus = 'confirmed'
+   738→          confirmedAt = new Date()
+   739→        }
+   740→    }
+   741→
+   742→    // Resolve customer via the cross-platform matching strategy (Step 1's
+   743→    // match_or_create_customer() SQL function, wrapped by
+   744→    // matchOrCreateExternalCustomer). This handles the layered:
+   745→    //   1. exact_identity (existing Shopify customer mapping)
+   746→    //   2. phone_match (normalized phone)
+   747→    //   3. email_match
+   748→    //   4. create new customer + primary phone + external identity mapping
+   749→    //
+   750→    // The customer's name comes from Shopify's first_name + last_name.
+   751→    // Phone/email come from the Shopify payload (may be null for guest orders).
+   752→    const shopifyCustomerName =
+   753→      `${d.customer.first_name ?? ''} ${d.customer.last_name ?? ''}`.trim() ||
+   754→      'Unknown Shopify Customer'
+   755→
+   756→    const matchResult = await matchOrCreateExternalCustomer({
+   757→      platform: 'shopify',
+   758→      external_customer_id: String(d.customer.id ?? d.id),
+   759→      phone: d.customer.phone || undefined,
+   760→      email: d.customer.email || undefined,
+   761→      name: shopifyCustomerName,
+   762→      organizationId,
+   763→    })
+   764→    if (!matchResult.success || !matchResult.data) {
+   765→      return {
+   766→        success: false,
+   767→        error: matchResult.error ?? 'Could not resolve customer from Shopify payload',
+   768→      }
+   769→    }
+   770→    const customerId = matchResult.data.customerId
+   771→
+   772→    // Fetch the resolved customer (for recipient_name default + address lookup).
+   773→    const customer = await db.customer.findUnique({
+   774→      where: { id: customerId },
+   775→      include: {
+   776→        phones: { where: { isPrimary: true }, take: 1 },
+   777→        addresses: { where: { isDefault: true }, take: 1 },
+   778→      },
+   779→    })
+   780→    if (!customer) {
+   781→      return { success: false, error: 'Resolved customer not found' }
+   782→    }
+   783→
+   784→    // If Shopify sent a default_address AND the customer has no saved address
+   785→    // yet (newly created), persist it as their default customer_addresses row.
+   786→    // For existing customers, we leave their saved addresses alone — the
+   787→    // Shopify address becomes a one-off delivery snapshot on this order only.
+   788→    let usedCustomerAddressId: string | null = null
+   789→    let usedCustomerPhoneId: string | null = customer.phones[0]?.id ?? null
+   790→    const shopifyAddress1 = d.customer.default_address?.address1 || null
+   791→    const shopifyCity = d.customer.default_address?.city || null
+   792→
+   793→    if (shopifyAddress1 && shopifyCity && customer.addresses.length === 0) {
+   794→      const newAddr = await db.customerAddress.create({
+   795→        data: {
+   796→          customerId: customer.id,
+   797→          organizationId,
+   798→          label: 'Shopify Default',
+   799→          address: shopifyAddress1,
+   800→          city: shopifyCity,
+   801→          isDefault: true,
+   802→          lastUsedAt: new Date(),
+   803→        },
+   804→      })
+   805→      usedCustomerAddressId = newAddr.id
+   806→    } else if (customer.addresses.length > 0) {
+   807→      // Existing customer with a saved default address — use it for this order.
+   808→      usedCustomerAddressId = customer.addresses[0].id
+   809→      await markAddressAsUsed(usedCustomerAddressId)
+   810→    }
+   811→
+   812→    const recipientName = shopifyCustomerName
+   813→
+   814→    // Resolve variants by SKU
+   815→    const skus = d.line_items.map((li) => li.sku).filter(Boolean) as string[]
+   816→    const variants = await db.orgProductVariant.findMany({
+   817→      where: { sku: { in: skus }, organizationId },
+   818→    })
+   819→
+   820→    // Compute subtotal
+   821→    let subtotal = 0
+   822→    const orderItemsData: Array<{
+   823→      orgVariantId: string
+   824→      quantity: number
+   825→      unitPrice: number
+   826→      fulfillmentTypeSnapshot: string
+   827→    }> = []
+   828→
+   829→    for (const li of d.line_items) {
+   830→      const variant = variants.find((v) => v.sku === li.sku)
+   831→      if (!variant) continue // skip unmatched items for now
+   832→      const unitPrice = parseFloat(li.price)
+   833→      subtotal += unitPrice * li.quantity
+   834→      orderItemsData.push({
+   835→        orgVariantId: variant.id,
+   836→        quantity: li.quantity,
+   837→        unitPrice,
+   838→        fulfillmentTypeSnapshot: variant.fulfillmentType,
+   839→      })
+   840→    }
+   841→
+   842→    if (orderItemsData.length === 0) {
+   843→      return { success: false, error: 'No matching variants found for Shopify line items' }
+   844→    }
+   845→
+   846→    const totalOrderValue = parseFloat(d.total_price)
+   847→
+   848→    // For fully_prepaid Shopify orders, advanceAmount = totalOrderValue.
+   849→    if (paymentStatus === 'fully_prepaid') {
+   850→      advanceAmount = totalOrderValue
+   851→    }
+   852→
+   853→    // remainingCodAmount is NOT a GENERATED column in the DB — the application
+   854→    // MUST compute it as totalOrderValue - (advanceAmount ?? 0).
+   855→    const remainingCodAmount = totalOrderValue - (advanceAmount ?? 0)
+   856→
+   857→    const flowopsOrderNumber = await generateOrderNumber(companyId)
+   858→
+   859→    const order = await db.order.create({
+   860→      data: {
+   861→        organizationId,
+   862→        companyId,
+   863→        flowopsOrderNumber,
+   864→        orderSource: 'shopify',
+   865→        externalOrderReference: d.name,
+   866→        externalOrderId: String(d.id),
+   867→        customerId,
+   868→        // Customer Management System integration (migration 002):
+   869→        recipientName,
+   870→        usedCustomerAddressId,
+   871→        usedCustomerPhoneId,
+   872→        status: orderStatus,
+   873→        paymentType,
+   874→        paymentStatus,
+   875→        paymentSource,
+   876→        subtotal,
+   877→        totalOrderValue,
+   878→        advanceAmount,
+   879→        advancePaidAt,
+   880→        remainingCodAmount,
+   881→        confirmedAt,
+   882→        // delivery_address is the order's own editable snapshot. Use the
+   883→        // Shopify address if provided; otherwise fall back to the saved
+   884→        // default address's text (if any).
+   885→        deliveryAddress: shopifyAddress1 || customer.addresses[0]?.address || null,
+   886→        deliveryCity: shopifyCity || customer.addresses[0]?.city || null,
+   887→      },
+   888→    })
+   889→
+   890→    for (const itemData of orderItemsData) {
+   891→      await db.orderItem.create({
+   892→        data: {
+   893→          orderId: order.id,
+   894→          orgVariantId: itemData.orgVariantId,
+   895→          organizationId,
+   896→          quantity: itemData.quantity,
+   897→          unitPrice: itemData.unitPrice,
+   898→          lineTotal: itemData.quantity * itemData.unitPrice,
+   899→          fulfillmentStatus: 'reserved',
+   900→          fulfillmentTypeSnapshot: itemData.fulfillmentTypeSnapshot,
+   901→        },
+   902→      })
+   903→    }
+   904→
+   905→    await insertAuditLog({
+   906→      action: 'order.created_from_shopify',
+   907→      entityType: 'order',
+   908→      entityId: order.id,
+   909→      companyId,
+   910→      organizationId,
+   911→      userId: ctx.user.id,
+   912→      employeeId: ctx.employee.id,
+   913→      newValues: {
+   914→        flowopsOrderNumber,
+   915→        externalOrderReference: d.name,
+   916→        financialStatus: d.financial_status,
+   917→        totalOrderValue,
+   918→      },
+   919→    })
+   920→
+   921→    await updateCustomerStats(customerId)
+   922→
+   923→    await insertMetricEvent({
+   924→      companyId,
+   925→      entityType: 'order',
+   926→      entityId: order.id,
+   927→      metricKey: 'order.created',
+   928→      numericValue: Number(totalOrderValue),
+   929→      dimensions: { order_source: 'shopify', payment_type: paymentType, company_id: companyId },
+   930→    }).catch(() => {})
+   931→
+   932→    return { success: true, data: { orderId: order.id, flowopsOrderNumber } }
+   933→  } catch (err) {
+   934→    return {
+   935→      success: false,
+   936→      error: err instanceof Error ? err.message : 'Failed to create order from Shopify webhook',
+   937→    }
+   938→  }
+   939→}
+   940→
+   941→// ──────────────────────────────────────────────────────────────
+   942→// confirmOrder
+   943→// ──────────────────────────────────────────────────────────────
+   944→
+   945→export async function confirmOrder(orderId: string): Promise<ActionResult> {
+   946→  try {
+   947→    const ctx = await getWorkspace()
+   948→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   949→
+   950→    const order = await db.order.findFirst({
+   951→      where: { id: orderId, companyId: ctx.company.id },
+   952→    })
+   953→    if (!order) return { success: false, error: 'Order not found' }
+   954→    if (order.status !== 'pending') {
+   955→      return { success: false, error: `Order is already ${order.status} (cannot confirm)` }
+   956→    }
+   957→
+   958→    await db.order.update({
+   959→      where: { id: orderId },
+   960→      data: { status: 'confirmed', confirmedAt: new Date() },
+   961→    })
+   962→
+   963→    await insertAuditLog({
+   964→      action: 'order.confirmed',
+   965→      entityType: 'order',
+   966→      entityId: orderId,
+   967→      companyId: ctx.company.id,
+   968→      organizationId: ctx.company.organizationId,
+   969→      userId: ctx.user.id,
+   970→      employeeId: ctx.employee.id,
+   971→      oldValues: { status: 'pending' },
+   972→      newValues: { status: 'confirmed' },
+   973→    })
+   974→
+   975→    // Step 3: Run stock reservation for all items.
+   976→    // This may flip the order to 'partially_backordered' if some items
+   977→    // can't be fulfilled immediately.
+   978→    const reserveResult = await reserveOrderStock(orderId, ctx)
+   979→    if (!reserveResult.success) {
+   980→      // Non-fatal — the order is confirmed, but reservation had issues.
+   981→      // The results array has per-item details.
+   982→    }
+   983→
+   984→    await insertMetricEvent({
+   985→      companyId: ctx.company.id,
+   986→      entityType: 'order',
+   987→      entityId: orderId,
+   988→      metricKey: 'order.confirmed',
+   989→      numericValue: Number(order.totalOrderValue),
+   990→      dimensions: { confirmation_method: 'manual' },
+   991→    }).catch(() => {})
+   992→
+   993→    // Recompute cached customer stats (order count may change if this was a
+   994→    // re-confirmation, and the status transition affects value/rto calcs).
+   995→    // Non-fatal — never break the confirm action on a stats failure.
+   996→    await updateCustomerStats(order.customerId).catch(() => {})
+   997→
+   998→    return { success: true }
+   999→  } catch (err) {
+  1000→    return {
+  1001→      success: false,
+  1002→      error: err instanceof Error ? err.message : 'Failed to confirm order',
+  1003→    }
+  1004→  }
+  1005→}
+  1006→
+  1007→// ──────────────────────────────────────────────────────────────
+  1008→// convertPaymentStatus
+  1009→// ──────────────────────────────────────────────────────────────
+  1010→
+  1011→export async function convertPaymentStatus(
+  1012→  input: ConvertPaymentInput,
+  1013→): Promise<ActionResult> {
+  1014→  try {
+  1015→    const ctx = await getWorkspace()
+  1016→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+  1017→
+  1018→    const parsed = convertPaymentSchema.safeParse(input)
+  1019→    if (!parsed.success) {
+  1020→      return { success: false, error: parsed.error.issues[0]?.message ?? 'Invalid input' }
+  1021→    }
+  1022→    const d = parsed.data
+  1023→
+  1024→    const order = await db.order.findFirst({
+  1025→      where: { id: d.order_id, companyId: ctx.company.id },
+  1026→    })
+  1027→    if (!order) return { success: false, error: 'Order not found' }
+  1028→    if (order.paymentStatus !== 'cod_pending') {
+  1029→      return { success: false, error: 'Order payment is already converted' }
+  1030→    }
+  1031→
+  1032→    const oldValues = {
+  1033→      paymentType: order.paymentType,
+  1034→      paymentStatus: order.paymentStatus,
+  1035→      paymentSource: order.paymentSource,
+  1036→      status: order.status,
+  1037→    }
+  1038→
+  1039→    const newPaymentStatus = d.new_payment_type === 'fully_prepaid' ? 'fully_prepaid' : 'advance_paid'
+  1040→
+  1041→    // remainingCodAmount is NOT a GENERATED column in the DB — recompute it
+  1042→    // whenever the advance amount changes: totalOrderValue - (advanceAmount ?? 0).
+  1043→    const newRemainingCod = Number(order.totalOrderValue) - (d.advance_amount ?? 0)
+  1044→
+  1045→    const updateData: Prisma.OrderUncheckedUpdateInput = {
+  1046→      paymentType: d.new_payment_type,
+  1047→      paymentStatus: newPaymentStatus,
+  1048→      paymentSource: 'manual_conversion',
+  1049→      advanceAmount: d.advance_amount ?? null,
+  1050→      advancePaymentMethod: d.advance_payment_method || null,
+  1051→      advancePaymentReference: d.advance_payment_reference || null,
+  1052→      advancePaymentScreenshotUrl: d.advance_payment_screenshot_url || null,
+  1053→      advancePaidAt: new Date(),
+  1054→      remainingCodAmount: newRemainingCod,
+  1055→      convertedBy: ctx.employee.id,
+  1056→      convertedAt: new Date(),
+  1057→    }
+  1058→
+  1059→    // If order was pending (awaiting confirmation), payment conversion is
+  1060→    // itself a confirmation signal
+  1061→    if (order.status === 'pending') {
+  1062→      updateData.status = 'confirmed'
+  1063→      updateData.confirmedAt = new Date()
+  1064→    }
+  1065→
+  1066→    await db.order.update({ where: { id: d.order_id }, data: updateData })
+  1067→
+  1068→    await insertAuditLog({
+  1069→      action: 'order.payment_converted',
+  1070→      entityType: 'order',
+  1071→      entityId: d.order_id,
+  1072→      companyId: ctx.company.id,
+  1073→      organizationId: ctx.company.organizationId,
+  1074→      userId: ctx.user.id,
+  1075→      employeeId: ctx.employee.id,
+  1076→      oldValues,
+  1077→      newValues: {
+  1078→        paymentType: d.new_payment_type,
+  1079→        paymentStatus: newPaymentStatus,
+  1080→        paymentSource: 'manual_conversion',
+  1081→        advanceAmount: d.advance_amount,
+  1082→        remainingCodAmount: newRemainingCod,
+  1083→        status: updateData.status ?? order.status,
+  1084→      },
+  1085→    })
+  1086→
+  1087→    await insertMetricEvent({
+  1088→      companyId: ctx.company.id,
+  1089→      entityType: 'order',
+  1090→      entityId: d.order_id,
+  1091→      metricKey: 'order.payment_converted',
+  1092→      numericValue: d.advance_amount ?? 0,
+  1093→      dimensions: { converted_by: ctx.employee.id, method: d.advance_payment_method || 'unknown' },
+  1094→    }).catch(() => {})
+  1095→
+  1096→    return { success: true }
+  1097→  } catch (err) {
+  1098→    return {
+  1099→      success: false,
+  1100→      error: err instanceof Error ? err.message : 'Failed to convert payment status',
+  1101→    }
+  1102→  }
+  1103→}
+  1104→
+  1105→// ──────────────────────────────────────────────────────────────
+  1106→// updatePaymentScreenshot
+  1107→// ──────────────────────────────────────────────────────────────
+  1108→//
+  1109→// Lightweight endpoint used to attach (or clear) a payment proof
+  1110→// screenshot URL on an EXISTING order. Used in two scenarios:
+  1111→//
+  1112→// 1. Order creation flow: file is held in browser memory during the
+  1113→//    single-page form (no order_id yet), uploaded to /api/upload
+  1114→//    immediately after createManualOrder() returns the new order_id,
+  1115→//    then this action is called to persist the resulting URL.
+  1116→//
+  1117→// 2. Order detail page: "Add payment proof" affordance when the order
+  1118→//    was created without a screenshot or the original upload failed.
+  1119→//
+  1120→// Does NOT change payment_type / payment_status / advance_amount —
+  1121→// only the screenshot URL field. If the order's payment_status is
+  1122→// 'cod_pending' (no advance yet), the convert-payment endpoint should
+  1123→// be used instead.
+  1124→//
+  1125→// Audit logged with old/new URL. No metric event (no $ change).
+  1126→
+  1127→export async function updatePaymentScreenshot(
+  1128→  input: UpdatePaymentScreenshotInput,
+  1129→): Promise<ActionResult> {
+  1130→  try {
+  1131→    const ctx = await getWorkspace()
+  1132→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+  1133→
+  1134→    const parsed = updatePaymentScreenshotSchema.safeParse(input)
+  1135→    if (!parsed.success) {
+  1136→      return { success: false, error: parsed.error.issues[0]?.message ?? 'Invalid input' }
+  1137→    }
+  1138→    const d = parsed.data
+  1139→
+  1140→    const order = await db.order.findFirst({
+  1141→      where: { id: d.order_id, companyId: ctx.company.id },
+  1142→      select: { id: true, advancePaymentScreenshotUrl: true, paymentType: true },
+  1143→    })
+  1144→    if (!order) return { success: false, error: 'Order not found' }
+  1145→
+  1146→    const oldUrl = order.advancePaymentScreenshotUrl
+  1147→    const newUrl = d.advance_payment_screenshot_url || null
+  1148→
+  1149→    // No-op if nothing changed — saves an audit entry + DB write.
+  1150→    if (oldUrl === newUrl) return { success: true }
+  1151→
+  1152→    await db.order.update({
+  1153→      where: { id: d.order_id },
+  1154→      data: { advancePaymentScreenshotUrl: newUrl },
+  1155→    })
+  1156→
+  1157→    await insertAuditLog({
+  1158→      action: 'order.payment_screenshot_updated',
+  1159→      entityType: 'order',
+  1160→      entityId: d.order_id,
+  1161→      companyId: ctx.company.id,
+  1162→      organizationId: ctx.company.organizationId,
+  1163→      userId: ctx.user.id,
+  1164→      employeeId: ctx.employee.id,
+  1165→      oldValues: oldUrl ? { advance_payment_screenshot_url: oldUrl } : null,
+  1166→      newValues: newUrl ? { advance_payment_screenshot_url: newUrl } : null,
+  1167→    })
+  1168→
+  1169→    return { success: true }
+  1170→  } catch (err) {
+  1171→    return {
+  1172→      success: false,
+  1173→      error: err instanceof Error ? err.message : 'Failed to update payment screenshot',
+  1174→    }
+  1175→  }
+  1176→}
+  1177→
+  1178→// ──────────────────────────────────────────────────────────────
+  1179→// markCodCollected
+  1180→// ──────────────────────────────────────────────────────────────
+  1181→
+  1182→export async function markCodCollected(
+  1183→  input: MarkCodCollectedInput,
+  1184→): Promise<ActionResult> {
+  1185→  try {
+  1186→    const ctx = await getWorkspace()
+  1187→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+  1188→
+  1189→    const parsed = markCodCollectedSchema.safeParse(input)
+  1190→    if (!parsed.success) {
+  1191→      return { success: false, error: parsed.error.issues[0]?.message ?? 'Invalid input' }
+  1192→    }
+  1193→    const d = parsed.data
+  1194→
+  1195→    const order = await db.order.findFirst({
+  1196→      where: { id: d.order_id, companyId: ctx.company.id },
+  1197→    })
+  1198→    if (!order) return { success: false, error: 'Order not found' }
+  1199→    if (order.status !== 'dispatched' && order.status !== 'delivered') {
+  1200→      return { success: false, error: 'COD can only be collected for dispatched or delivered orders' }
+  1201→    }
+  1202→
+  1203→    await db.order.update({
+  1204→      where: { id: d.order_id },
+  1205→      data: {
+  1206→        codCollected: true,
+  1207→        codCollectedAmount: d.collected_amount,
+  1208→        codCollectedAt: new Date(),
+  1209→      },
+  1210→    })
+  1211→
+  1212→    await insertAuditLog({
+  1213→      action: 'order.cod_collected',
+  1214→      entityType: 'order',
+  1215→      entityId: d.order_id,
+  1216→      companyId: ctx.company.id,
+  1217→      organizationId: ctx.company.organizationId,
+  1218→      userId: ctx.user.id,
+  1219→      employeeId: ctx.employee.id,
+  1220→      newValues: { collectedAmount: d.collected_amount },
+  1221→    })
+  1222→
+  1223→    await insertMetricEvent({
+  1224→      companyId: ctx.company.id,
+  1225→      entityType: 'order',
+  1226→      entityId: d.order_id,
+  1227→      metricKey: 'order.cod_collected',
+  1228→      numericValue: d.collected_amount,
+  1229→    }).catch(() => {})
+  1230→
+  1231→    // Recompute cached customer stats (COD collection is a financial event
+  1232→    // that may affect the value calculations). Non-fatal.
+  1233→    await updateCustomerStats(order.customerId).catch(() => {})
+  1234→
+  1235→    return { success: true }
+  1236→  } catch (err) {
+  1237→    return {
+  1238→      success: false,
+  1239→      error: err instanceof Error ? err.message : 'Failed to mark COD collected',
+  1240→    }
+  1241→  }
+  1242→}
+  1243→
+  1244→// ──────────────────────────────────────────────────────────────
+  1245→// cancelOrder
+  1246→// ──────────────────────────────────────────────────────────────
+  1247→
+  1248→export async function cancelOrder(input: CancelOrderInput): Promise<ActionResult> {
+  1249→  try {
+  1250→    const ctx = await getWorkspace()
+  1251→    await requirePermission(ctx, PERMISSIONS.ORDERS_CANCEL)
+  1252→
+  1253→    const parsed = cancelOrderSchema.safeParse(input)
+  1254→    if (!parsed.success) {
+  1255→      return { success: false, error: parsed.error.issues[0]?.message ?? 'Invalid input' }
+  1256→    }
+  1257→    const d = parsed.data
+  1258→
+  1259→    const order = await db.order.findFirst({
+  1260→      where: { id: d.order_id, companyId: ctx.company.id },
+  1261→    })
+  1262→    if (!order) return { success: false, error: 'Order not found' }
+  1263→
+  1264→    const nonCancellableStatuses = ['dispatched', 'delivered', 'rto', 'cancelled', 'refunded']
+  1265→    if (nonCancellableStatuses.includes(order.status)) {
+  1266→      return {
+  1267→        success: false,
+  1268→        error: `Cannot cancel an order that is already ${order.status} (use the returns flow instead)`,
+  1269→      }
+  1270→    }
+  1271→
+  1272→    await db.order.update({
+  1273→      where: { id: d.order_id },
+  1274→      data: {
+  1275→        status: 'cancelled',
+  1276→        cancelledAt: new Date(),
+  1277→        cancellationReason: d.cancellation_reason,
+  1278→      },
+  1279→    })
+  1280→
+  1281→    // Step 3: Unreserve stock for any items with fulfillment_status='reserved'.
+  1282→    // Items with fulfillment_status='backordered' need no inventory action
+  1283→    // (no reservation ever existed for them) — they'll be orphaned since
+  1284→    // the order is now cancelled and won't be picked up by future
+  1285→    // checkAndFulfillBackorders() runs (which skip cancelled orders).
+  1286→    const reservedItems = await db.orderItem.findMany({
+  1287→      where: { orderId: d.order_id, fulfillmentStatus: 'reserved' },
+  1288→    })
+  1289→
+  1290→    for (const item of reservedItems) {
+  1291→      const locationId = item.reservedLocationId ?? order.dispatchLocationId
+  1292→      if (!locationId) continue
+  1293→
+  1294→      await unreserveStockForOrder({
+  1295→        orgVariantId: item.orgVariantId,
+  1296→        locationId,
+  1297→        organizationId: order.organizationId,
+  1298→        companyId: ctx.company.id,
+  1299→        employeeId: ctx.employee.id,
+  1300→        quantity: item.quantity,
+  1301→        orderId: d.order_id,
+  1302→      })
+  1303→    }
+  1304→
+  1305→    await insertAuditLog({
+  1306→      action: 'order.cancelled',
+  1307→      entityType: 'order',
+  1308→      entityId: d.order_id,
+  1309→      companyId: ctx.company.id,
+  1310→      organizationId: ctx.company.organizationId,
+  1311→      userId: ctx.user.id,
+  1312→      employeeId: ctx.employee.id,
+  1313→      oldValues: { status: order.status },
+  1314→      newValues: { status: 'cancelled', reason: d.cancellation_reason, unreservedItems: reservedItems.length },
+  1315→    })
+  1316→
+  1317→    await insertMetricEvent({
+  1318→      companyId: ctx.company.id,
+  1319→      entityType: 'order',
+  1320→      entityId: d.order_id,
+  1321→      metricKey: 'order.cancelled',
+  1322→      numericValue: Number(order.totalOrderValue),
+  1323→      dimensions: { cancellation_reason: d.cancellation_reason, had_reserved_items: reservedItems.length > 0 },
+  1324→    }).catch(() => {})
+  1325→
+  1326→    // Recompute cached customer stats (cancelled orders are excluded from
+  1327→    // total_orders_count, so this count drops). Non-fatal.
+  1328→    await updateCustomerStats(order.customerId).catch(() => {})
+  1329→
+  1330→    return { success: true }
+  1331→  } catch (err) {
+  1332→    return {
+  1333→      success: false,
+  1334→      error: err instanceof Error ? err.message : 'Failed to cancel order',
+  1335→    }
+  1336→  }
+  1337→}
+  1338→
+  1339→// ──────────────────────────────────────────────────────────────
+  1340→// listOrders
+  1341→// ──────────────────────────────────────────────────────────────
+  1342→
+  1343→export async function listOrders(
+  1344→  filters: OrderFilters = {},
+  1345→): Promise<ActionResult<{
+  1346→  orders: Array<{
+  1347→    id: string
+  1348→    flowopsOrderNumber: string
+  1349→    externalOrderReference: string | null
+  1350→    externalOrderId: string | null
+  1351→    orderSource: string
+  1352→    status: string
+  1353→    paymentType: string
+  1354→    paymentStatus: string
+  1355→    paymentSource: string
+  1356→    subtotal: number
+  1357→    discountAmount: number | null
+  1358→    courierCharges: number | null
+  1359→    totalOrderValue: number
+  1360→    advanceAmount: number | null
+  1361→    remainingCodAmount: number | null
+  1362→    codCollected: boolean
+  1363→    courierName: string | null
+  1364→    trackingNumber: string | null
+  1365→    dispatchLocationId: string | null
+  1366→    customerId: string
+  1367→    deliveryAddress: string | null
+  1368→    deliveryCity: string | null
+  1369→    confirmedAt: Date | null
+  1370→    dispatchedAt: Date | null
+  1371→    deliveredAt: Date | null
+  1372→    createdAt: Date
+  1373→    customerName: string
+  1374→    customerPhone: string
+  1375→    itemCount: number
+  1376→  }>
+  1377→  total: number
+  1378→}>> {
+  1379→  try {
+  1380→    const ctx = await getWorkspace()
+  1381→    const limit = Math.min(filters.limit ?? 50, 100)
+  1382→    const offset = filters.offset ?? 0
+  1383→
+  1384→    const where: Prisma.OrderWhereInput = {
+  1385→      companyId: ctx.company.id,
+  1386→    }
+  1387→
+  1388→    // Status filter — prefer multi-select `statuses`, fall back to single `status`
+  1389→    if (filters.statuses && filters.statuses.length > 0) {
+  1390→      where.status = { in: filters.statuses }
+  1391→    } else if (filters.status) {
+  1392→      where.status = filters.status
+  1393→    }
+  1394→
+  1395→    // Payment type filter — prefer multi-select `paymentTypes`, fall back to single `paymentType`
+  1396→    if (filters.paymentTypes && filters.paymentTypes.length > 0) {
+  1397→      where.paymentType = { in: filters.paymentTypes }
+  1398→    } else if (filters.paymentType) {
+  1399→      where.paymentType = filters.paymentType
+  1400→    }
+  1401→
+  1402→    // Payment status filter (multi-select preferred)
+  1403→    if (filters.paymentStatuses && filters.paymentStatuses.length > 0) {
+  1404→      where.paymentStatus = { in: filters.paymentStatuses }
+  1405→    } else if (filters.paymentStatus) {
+  1406→      where.paymentStatus = filters.paymentStatus
+  1407→    }
+  1408→
+  1409→    // Order source filter — prefer multi-select `orderSources`, fall back to single `orderSource`
+  1410→    if (filters.orderSources && filters.orderSources.length > 0) {
+  1411→      where.orderSource = { in: filters.orderSources }
+  1412→    } else if (filters.orderSource) {
+  1413→      where.orderSource = filters.orderSource
+  1414→    }
+  1415→
+  1416→    // Courier filter — prefer multi-select `courierNames`, fall back to single `courierName`
+  1417→    if (filters.courierNames && filters.courierNames.length > 0) {
+  1418→      where.courierName = { in: filters.courierNames }
+  1419→    } else if (filters.courierName) {
+  1420→      where.courierName = filters.courierName
+  1421→    }
+  1422→
+  1423→    if (filters.customerId) where.customerId = filters.customerId
+  1424→
+  1425→    // Delivery city filter — case-insensitive contains on delivery_city
+  1426→    if (filters.deliveryCity) {
+  1427→      where.deliveryCity = { contains: filters.deliveryCity, mode: 'insensitive' }
+  1428→    }
+  1429→
+  1430→    if (filters.dateFrom || filters.dateTo) {
+  1431→      where.createdAt = {}
+  1432→      if (filters.dateFrom) where.createdAt.gte = new Date(filters.dateFrom)
+  1433→      if (filters.dateTo) {
+  1434→        // date_to is inclusive of the whole day
+  1435→        const end = new Date(filters.dateTo)
+  1436→        end.setHours(23, 59, 59, 999)
+  1437→        where.createdAt.lte = end
+  1438→      }
+  1439→    }
+  1440→
+  1441→    // Amount range filter on total_order_value
+  1442→    if (filters.amountMin !== undefined || filters.amountMax !== undefined) {
+  1443→      where.totalOrderValue = {}
+  1444→      if (filters.amountMin !== undefined) where.totalOrderValue.gte = filters.amountMin
+  1445→      if (filters.amountMax !== undefined) where.totalOrderValue.lte = filters.amountMax
+  1446→    }
+  1447→
+  1448→    // Filter to orders containing a specific variant — uses Prisma's `some`
+  1449→    // relation filter which compiles to an EXISTS subquery (avoids duplicate
+  1450→    // rows that a join-based filter would introduce).
+  1451→    if (filters.orgVariantId) {
+  1452→      where.items = { some: { orgVariantId: filters.orgVariantId } }
+  1453→    }
+  1454→
+  1455→    if (filters.search) {
+  1456→      where.OR = [
+  1457→        { flowopsOrderNumber: { contains: filters.search, mode: 'insensitive' } },
+  1458→        { externalOrderReference: { contains: filters.search, mode: 'insensitive' } },
+  1459→        // Customer Management System: phones live in customer_phones now.
+  1460→        // Search across the customer's name + any of their phone numbers.
+  1461→        { customer: { name: { contains: filters.search, mode: 'insensitive' } } },
+  1462→        { customer: { phones: { some: { phoneRaw: { contains: filters.search, mode: 'insensitive' } } } } },
+  1463→      ]
+  1464→    }
+  1465→
+  1466→    const [orders, total] = await Promise.all([
+  1467→      db.order.findMany({
+  1468→        where,
+  1469→        include: {
+  1470→          customer: {
+  1471→            select: {
+  1472→              name: true,
+  1473→              phones: {
+  1474→                where: { isPrimary: true },
+  1475→                take: 1,
+  1476→                select: { phoneRaw: true },
+  1477→              },
+  1478→            },
+  1479→          },
+  1480→          _count: { select: { items: true } },
+  1481→        },
+  1482→        orderBy: { createdAt: 'desc' },
+  1483→        take: limit,
+  1484→        skip: offset,
+  1485→      }),
+  1486→      db.order.count({ where }),
+  1487→    ])
+  1488→
+  1489→    return {
+  1490→      success: true,
+  1491→      data: {
+  1492→        orders: orders.map((o) => ({
+  1493→          id: o.id,
+  1494→          flowopsOrderNumber: o.flowopsOrderNumber,
+  1495→          externalOrderReference: o.externalOrderReference,
+  1496→          externalOrderId: o.externalOrderId,
+  1497→          orderSource: o.orderSource,
+  1498→          status: o.status,
+  1499→          paymentType: o.paymentType,
+  1500→          paymentStatus: o.paymentStatus,
+  1501→          paymentSource: o.paymentSource,
+  1502→          subtotal: Number(o.subtotal),
+  1503→          discountAmount: o.discountAmount ? Number(o.discountAmount) : null,
+  1504→          courierCharges: o.courierCharges ? Number(o.courierCharges) : null,
+  1505→          estimatedDeliveryCharge: o.estimatedDeliveryCharge ? Number(o.estimatedDeliveryCharge) : null,
+  1506→          actualDeliveryCharge: o.actualDeliveryCharge ? Number(o.actualDeliveryCharge) : null,
+  1507→          taxAmount: o.taxAmount ? Number(o.taxAmount) : null,
+  1508→          taxLabel: o.taxLabel ?? null,
+  1509→          totalOrderValue: Number(o.totalOrderValue),
+  1510→          advanceAmount: o.advanceAmount ? Number(o.advanceAmount) : null,
+  1511→          remainingCodAmount: o.remainingCodAmount
+  1512→            ? Number(o.remainingCodAmount)
+  1513→            : Math.max(
+  1514→                0,
+  1515→                Number(o.totalOrderValue) - (o.advanceAmount ? Number(o.advanceAmount) : 0),
+  1516→              ),
+  1517→          codCollected: o.codCollected,
+  1518→          courierName: o.courierName,
+  1519→          trackingNumber: o.trackingNumber,
+  1520→          courierCompanyIntegrationId: o.courierCompanyIntegrationId,
+  1521→          courierCityStatus: o.courierCityStatus,
+  1522→          courierSubStatus: o.courierSubStatus,
+  1523→          needsShipperAdvice: o.needsShipperAdvice,
+  1524→          dispatchLocationId: o.dispatchLocationId,
+  1525→          customerId: o.customerId,
+  1526→          deliveryAddress: o.deliveryAddress,
+  1527→          deliveryCity: o.deliveryCity,
+  1528→          confirmedAt: o.confirmedAt,
+  1529→          dispatchedAt: o.dispatchedAt,
+  1530→          deliveredAt: o.deliveredAt,
+  1531→          createdAt: o.createdAt,
+  1532→          customerName: o.customer.name,
+  1533→          customerPhone: o.customer.phones[0]?.phoneRaw ?? null,
+  1534→          itemCount: o._count.items,
+  1535→        })),
+  1536→        total,
+  1537→      },
+  1538→    }
+  1539→  } catch (err) {
+  1540→    return {
+  1541→      success: false,
+  1542→      error: err instanceof Error ? err.message : 'Failed to list orders',
+  1543→    }
+  1544→  }
+  1545→}
+  1546→
+  1547→// ──────────────────────────────────────────────────────────────
+  1548→// getOrderDetail
+  1549→// ──────────────────────────────────────────────────────────────
+  1550→
+  1551→export async function getOrderDetail(
+  1552→  orderId: string,
+  1553→): Promise<ActionResult<{
+  1554→  order: {
+  1555→    id: string
+  1556→    flowopsOrderNumber: string
+  1557→    externalOrderReference: string | null
+  1558→    externalOrderId: string | null
+  1559→    orderSource: string
+  1560→    status: string
+  1561→    paymentType: string
+  1562→    paymentStatus: string
+  1563→    paymentSource: string
+  1564→    subtotal: number
+  1565→    discountAmount: number | null
+  1566→    discountReason: string | null
+  1567→    courierCharges: number | null
+  1568→    totalOrderValue: number
+  1569→    advanceAmount: number | null
+  1570→    advancePaymentMethod: string | null
+  1571→    advancePaymentReference: string | null
+  1572→    advancePaymentScreenshotUrl: string | null
+  1573→    advancePaidAt: Date | null
+  1574→    remainingCodAmount: number | null
+  1575→    codCollected: boolean
+  1576→    codCollectedAmount: number | null
+  1577→    codCollectedAt: Date | null
+  1578→    convertedBy: string | null
+  1579→    convertedAt: Date | null
+  1580→    deliveryAddress: string | null
+  1581→    deliveryCity: string | null
+  1582→    courierName: string | null
+  1583→    trackingNumber: string | null
+  1584→    dispatchLocationId: string | null
+  1585→    notesForCourier: string | null
+  1586→    skippedConfirmation: boolean
+  1587→    skippedPacking: boolean
+  1588→    confirmedAt: Date | null
+  1589→    packedAt: Date | null
+  1590→    dispatchedAt: Date | null
+  1591→    deliveredAt: Date | null
+  1592→    cancelledAt: Date | null
+  1593→    cancellationReason: string | null
+  1594→    returnedAt: Date | null
+  1595→    createdAt: Date
+  1596→  }
+  1597→  customer: {
+  1598→    id: string
+  1599→    name: string
+  1600→    primaryPhone: string | null
+  1601→    primaryPhoneNormalized: string | null
+  1602→    email: string | null
+  1603→    isFlagged: boolean
+  1604→  }
+  1605→  items: Array<{
+  1606→    id: string
+  1607→    orgVariantId: string
+  1608→    quantity: number
+  1609→    unitPrice: number
+  1610→    lineTotal: number
+  1611→    fulfillmentStatus: string
+  1612→    fulfillmentTypeSnapshot: string
+  1613→    variant: {
+  1614→      sku: string
+  1615→      productTitle: string
+  1616→      attributeValues: Record<string, string>
+  1617→    }
+  1618→  }>
+  1619→}>> {
+  1620→  try {
+  1621→    const ctx = await getWorkspace()
+  1622→
+  1623→    const order = await db.order.findFirst({
+  1624→      where: { id: orderId, companyId: ctx.company.id },
+  1625→      include: {
+  1626→        customer: {
+  1627→          select: {
+  1628→            id: true,
+  1629→            name: true,
+  1630→            email: true,
+  1631→            isFlagged: true,
+  1632→            // Customer Management System: phones live in customer_phones now.
+  1633→            phones: {
+  1634→              where: { isPrimary: true },
+  1635→              take: 1,
+  1636→              select: { phoneRaw: true, phoneNormalized: true },
+  1637→            },
+  1638→          },
+  1639→        },
+  1640→        items: {
+  1641→          include: {
+  1642→            orgVariant: {
+  1643→              select: {
+  1644→                sku: true,
+  1645→                attributeValues: true,
+  1646→                product: { select: { title: true } },
+  1647→              },
+  1648→            },
+  1649→          },
+  1650→        },
+  1651→      },
+  1652→    })
+  1653→
+  1654→    if (!order) return { success: false, error: 'Order not found' }
+  1655→
+  1656→    return {
+  1657→      success: true,
+  1658→      data: {
+  1659→        order: {
+  1660→          ...order,
+  1661→          subtotal: Number(order.subtotal),
+  1662→          discountAmount: order.discountAmount ? Number(order.discountAmount) : null,
+  1663→          courierCharges: order.courierCharges ? Number(order.courierCharges) : null,
+  1664→          totalOrderValue: Number(order.totalOrderValue),
+  1665→          advanceAmount: order.advanceAmount ? Number(order.advanceAmount) : null,
+  1666→          remainingCodAmount: order.remainingCodAmount ? Number(order.remainingCodAmount) : null,
+  1667→          codCollectedAmount: order.codCollectedAmount ? Number(order.codCollectedAmount) : null,
+  1668→          deliveryAddress: order.deliveryAddress,
+  1669→        },
+  1670→        customer: {
+  1671→          id: order.customer.id,
+  1672→          name: order.customer.name,
+  1673→          email: order.customer.email,
+  1674→          isFlagged: order.customer.isFlagged,
+  1675→          // Convenience: flatten the primary phone for backwards-compatible
+  1676→          // frontend consumption.
+  1677→          primaryPhone: order.customer.phones[0]?.phoneRaw ?? null,
+  1678→          primaryPhoneNormalized: order.customer.phones[0]?.phoneNormalized ?? null,
+  1679→        },
+  1680→        items: order.items.map((item) => ({
+  1681→          id: item.id,
+  1682→          orgVariantId: item.orgVariantId,
+  1683→          quantity: item.quantity,
+  1684→          unitPrice: Number(item.unitPrice),
+  1685→          lineTotal: Number(item.lineTotal),
+  1686→          fulfillmentStatus: item.fulfillmentStatus,
+  1687→          fulfillmentTypeSnapshot: item.fulfillmentTypeSnapshot,
+  1688→          variant: {
+  1689→            sku: item.orgVariant.sku,
+  1690→            productTitle: item.orgVariant.product.title,
+  1691→            attributeValues: JSON.parse(item.orgVariant.attributeValues),
+  1692→          },
+  1693→        })),
+  1694→      },
+  1695→    }
+  1696→  } catch (err) {
+  1697→    return {
+  1698→      success: false,
+  1699→      error: err instanceof Error ? err.message : 'Failed to get order detail',
+  1700→    }
+  1701→  }
+  1702→}
+  1703→
+  1704→// ──────────────────────────────────────────────────────────────
+  1705→// Step 3: Dispatch + Processing/Packing actions
+  1706→// ──────────────────────────────────────────────────────────────
+  1707→
+  1708→/**
+  1709→ * Dispatch an order — deducts stock from inventory, sets tracking info.
+  1710→ *
+  1711→ * Business rules:
+  1712→ *   - If order.status = 'pending' (confirmation was skipped): run the
+  1713→ *     full confirmation/reservation logic inline first, then proceed.
+  1714→ *   - If any item is still 'backordered' after reservation: BLOCK dispatch
+  1715→ *     with a clear error (hard rule — no split shipments).
+  1716→ *   - For each reserved item: call dispatchOrder() (inventory) which
+  1717→ *     deducts on_hand, releases the reservation, and locks COGS.
+  1718→ *   - The backfill_order_timestamps() trigger auto-sets confirmed_at/
+  1719→ *     packed_at if they were still NULL.
+  1720→ *   - If company_order_settings.require_packing_step = TRUE, verify
+  1721→ *     order.packed_at IS NOT NULL before proceeding.
+  1722→ */
+  1723→export async function dispatchOrderAction(
+  1724→  orderId: string,
+  1725→  trackingNumber: string,
+  1726→  courierName?: string,
+  1727→): Promise<ActionResult> {
+  1728→  try {
+  1729→    const ctx = await getWorkspace()
+  1730→    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+  1731→
+  1732→    const order = await db.order.findFirst({
+  1733→      where: { id: orderId, companyId: ctx.company.id },
+  1734→    })
+  1735→    if (!order) return { success: false, error: 'Order not found' }
+  1736→
+  1737→    // Cannot dispatch already-dispatched/delivered/cancelled orders
+  1738→    if (['dispatched', 'delivered', 'rto', 'cancelled', 'refunded'].includes(order.status)) {
+  1739→      return { success: false, error: `Cannot dispatch an order that is already ${order.status}` }
+  1740→    }
+  1741→
+  1742→    // Check packing requirement
+  1743→    const settings = await db.companyOrderSetting.findUnique({
+  1744→      where: { companyId: ctx.company.id },
+  1745→    })
+  1746→    if (settings?.requirePackingStep && !order.packedAt) {
+  1747→      return {
+  1748→        success: false,
+  1749→        error: 'This order must be marked as packed before dispatching. Use markOrderPacked() first.',
+  1750→      }
+  1751→    }
+  1752→
+  1753→    // If order is still 'pending' (confirmation was skipped), run the
+  1754→    // full confirmation + reservation logic inline first.
+  1755→    if (order.status === 'pending') {
+  1756→      await db.order.update({
+  1757→        where: { id: orderId },
+  1758→        data: { status: 'confirmed', confirmedAt: new Date() },
+  1759→      })
+  1760→      await reserveOrderStock(orderId, ctx)
+  1761→    }
+  1762→
+  1763→    // Re-fetch the order to get the updated status after reservation
+  1764→    const updatedOrder = await db.order.findFirst({
+  1765→      where: { id: orderId },
+  1766→      select: { status: true, dispatchLocationId: true, organizationId: true },
+  1767→    })
+  1768→    if (!updatedOrder) return { success: false, error: 'Order not found after reservation' }
+  1769→
+  1770→    // Check for backordered items — BLOCK dispatch if any exist
+  1771→    const backorderedItems = await db.orderItem.findMany({
+  1772→      where: { orderId, fulfillmentStatus: 'backordered' },
+  1773→      include: {
+  1774→        orgVariant: { select: { sku: true } },
+  1775→      },
+  1776→    })
+  1777→
+  1778→    if (backorderedItems.length > 0) {
+  1779→      const itemList = backorderedItems
+  1780→        .map((i) => `${i.orgVariant.sku} (qty: ${i.quantity})`)
+  1781→        .join(', ')
+  1782→      return {
+  1783→        success: false,
+  1784→        error: `Cannot dispatch: ${backorderedItems.length} item(s) are still backordered: ${itemList}. Receive stock or cancel those items first.`,
+  1785→      }
+  1786→    }
+  1787→
+  1788→    // Dispatch each reserved item
+  1789→    const itemsToDispatch = await db.orderItem.findMany({
+  1790→      where: { orderId, fulfillmentStatus: 'reserved' },
+  1791→    })
+  1792→
+  1793→    for (const item of itemsToDispatch) {
+  1794→      const locationId = item.reservedLocationId ?? updatedOrder.dispatchLocationId
+  1795→      if (!locationId) {
+  1796→        return { success: false, error: `Order item ${item.id} has no dispatch location` }
+  1797→      }
+  1798→
+  1799→      const dispatchResult = await dispatchInventory({
+  1800→        orgVariantId: item.orgVariantId,
+  1801→        locationId,
+  1802→        organizationId: updatedOrder.organizationId,
+  1803→        companyId: ctx.company.id,
+  1804→        employeeId: ctx.employee.id,
+  1805→        quantity: item.quantity,
+  1806→        orderId,
+  1807→      })
+  1808→
+  1809→      if (!dispatchResult.success) {
+  1810→        return {
+  1811→          success: false,
+  1812→          error: `Failed to dispatch item: ${dispatchResult.error}`,
+  1813→        }
+  1814→      }
+  1815→
+  1816→      // Mark item as dispatched
+  1817→      await db.orderItem.update({
+  1818→        where: { id: item.id },
+  1819→        data: { fulfillmentStatus: 'dispatched', fulfilledAt: new Date() },
+  1820→      })
+  1821→    }
+  1822→
+  1823→    // Update order status — the backfill_order_timestamps() trigger
+  1824→    // will auto-set confirmedAt/packedAt if they were still NULL.
+  1825→    await db.order.update({
+  1826→      where: { id: orderId },
+  1827→      data: {
+  1828→        status: 'dispatched',
+  1829→        dispatchedAt: new Date(),
+  1830→        trackingNumber: trackingNumber || null,
+  1831→        courierName: courierName || order.courierName,
+  1832→      },
+  1833→    })
+  1834→
+  1835→    await insertAuditLog({
+  1836→      action: 'order.dispatched',
+  1837→      entityType: 'order',
+  1838→      entityId: orderId,
+  1839→      companyId: ctx.company.id,
+  1840→      organizationId: ctx.company.organizationId,
+  1841→      userId: ctx.user.id,
+  1842→      employeeId: ctx.employee.id,
+  1843→      oldValues: { status: updatedOrder.status },
+  1844→      newValues: {
+  1845→        status: 'dispatched',
+  1846→        trackingNumber,
+  1847→        courierName,
+  1848→        itemsDispatched: itemsToDispatch.length,
+  1849→      },
+  1850→    })
+  1851→
+  1852→    const timeToDispatchHours = order.createdAt
+  1853→      ? Math.round((new Date().getTime() - new Date(order.createdAt).getTime()) / (1000 * 60 * 60))
+  1854→      : 0
+  1855→    await insertMetricEvent({
+  1856→      companyId: ctx.company.id,
+  1857→      entityType: 'order',
+  1858→      entityId: orderId,
+  1859→      metricKey: 'order.dispatched',
+  1860→      numericValue: Number(order.totalOrderValue),
+  1861→      dimensions: {
+  1862→        courier_name: courierName || order.courierName,
+  1863→        employee_id: ctx.employee.id,
+  1864→        skipped_confirmation: updatedOrder.status === 'pending',
+  1865→        skipped_packing: !order.packedAt,
+  1866→        time_to_dispatch_hours: timeToDispatchHours,
+  1867→      },
+  1868→    }).catch(() => {})
+  1869→
+  1870→    // Update customer stats
+  1871→    const orderWithCustomer = await db.order.findUnique({
+  1872→      where: { id: orderId },
+  1873→      select: { customerId: true },
+  1874→    })
+  1875→    if (orderWithCustomer) {
+  1876→      await updateCustomerStats(orderWithCustomer.customerId)
+  1877→    }
+  1878→
+  1879→    return { success: true }
+  1880→  } catch (err) {
+  1881→    return {
+  1882→      success: false,
+  1883→      error: err instanceof Error ? err.message : 'Failed to dispatch order',
+  1884→    }
+  1885→  }
+  1886→}
+  1887→
+  1888→/**
+  1889→ * Mark an order as "processing" (being packed). Only meaningful when
+  1890→ * company_order_settings.require_packing_step = TRUE.
+  1891→ */
+  1892→export async function markOrderProcessing(orderId: string): Promise<ActionResult> {
+  1893→  try {
+  1894→    const ctx = await getWorkspace()
+  1895→    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+  1896→
+  1897→    const order = await db.order.findFirst({
+  1898→      where: { id: orderId, companyId: ctx.company.id },
+  1899→    })
+  1900→    if (!order) return { success: false, error: 'Order not found' }
+  1901→
+  1902→    if (!['confirmed', 'partially_backordered'].includes(order.status)) {
+  1903→      return { success: false, error: `Order must be confirmed to start processing (current: ${order.status})` }
+  1904→    }
+  1905→
+  1906→    await db.order.update({
+  1907→      where: { id: orderId },
+  1908→      data: { status: 'processing' },
+  1909→    })
+  1910→
+  1911→    await insertAuditLog({
+  1912→      action: 'order.processing_started',
+  1913→      entityType: 'order',
+  1914→      entityId: orderId,
+  1915→      companyId: ctx.company.id,
+  1916→      organizationId: ctx.company.organizationId,
+  1917→      userId: ctx.user.id,
+  1918→      employeeId: ctx.employee.id,
+  1919→      oldValues: { status: order.status },
+  1920→      newValues: { status: 'processing' },
+  1921→    })
+  1922→
+  1923→    await insertMetricEvent({
+  1924→      companyId: ctx.company.id,
+  1925→      entityType: 'order',
+  1926→      entityId: orderId,
+  1927→      metricKey: 'order.processing_started',
+  1928→      numericValue: 1,
+  1929→    }).catch(() => {})
+  1930→
+  1931→    return { success: true }
+  1932→  } catch (err) {
+  1933→    return {
+  1934→      success: false,
+  1935→      error: err instanceof Error ? err.message : 'Failed to mark order as processing',
+  1936→    }
+  1937→  }
+  1938→}
+  1939→
+  1940→/**
+  1941→ * Mark an order as packed. Only enforced when
+  1942→ * company_order_settings.require_packing_step = TRUE — when FALSE,
+  1943→ * the backfill trigger sets packedAt automatically at dispatch time.
+  1944→ */
+  1945→export async function markOrderPacked(orderId: string): Promise<ActionResult> {
+  1946→  try {
+  1947→    const ctx = await getWorkspace()
+  1948→    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+  1949→
+  1950→    const order = await db.order.findFirst({
+  1951→      where: { id: orderId, companyId: ctx.company.id },
+  1952→    })
+  1953→    if (!order) return { success: false, error: 'Order not found' }
+  1954→
+  1955→    if (!['confirmed', 'partially_backordered', 'processing'].includes(order.status)) {
+  1956→      return { success: false, error: `Order must be confirmed or processing to pack (current: ${order.status})` }
+  1957→    }
+  1958→
+  1959→    await db.order.update({
+  1960→      where: { id: orderId },
+  1961→      data: { packedAt: new Date() },
+  1962→    })
+  1963→
+  1964→    await insertAuditLog({
+  1965→      action: 'order.packed',
+  1966→      entityType: 'order',
+  1967→      entityId: orderId,
+  1968→      companyId: ctx.company.id,
+  1969→      organizationId: ctx.company.organizationId,
+  1970→      userId: ctx.user.id,
+  1971→      employeeId: ctx.employee.id,
+  1972→      newValues: { packedAt: new Date() },
+  1973→    })
+  1974→
+  1975→    await insertMetricEvent({
+  1976→      companyId: ctx.company.id,
+  1977→      entityType: 'order',
+  1978→      entityId: orderId,
+  1979→      metricKey: 'order.packed',
+  1980→      numericValue: 1,
+  1981→    }).catch(() => {})
+  1982→
+  1983→    return { success: true }
+  1984→  } catch (err) {
+  1985→    return {
+  1986→      success: false,
+  1987→      error: err instanceof Error ? err.message : 'Failed to mark order as packed',
+  1988→    }
+  1989→  }
+  1990→}
+  1991→
+  1992→// ──────────────────────────────────────────────────────────────
+  1993→// Step 4: markOrderDelivered
+  1994→// ──────────────────────────────────────────────────────────────
+  1995→
+  1996→/**
+  1997→ * Mark a dispatched order as delivered.
+  1998→ */
+  1999→export async function markOrderDelivered(orderId: string): Promise<ActionResult> {
+  2000→  try {
+
+[showing lines 1-2000 of 2055; use offset=2001 with limit to continue reading]

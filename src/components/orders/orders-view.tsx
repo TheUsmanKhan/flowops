@@ -564,6 +564,9 @@ export function OrdersView() {
     enabled: canView,
   })
 
+  // Phase F1: revenue is computed client-side from the loaded orders list
+  // (sum of non-cancelled totalOrderValue). All orders are aggregated in
+  // their raw totalOrderValue.
   const statsOrders = statsData?.orders ?? []
 
   // ── Stat-card values (4 activity-based, 2 current-state) ─────────────────
@@ -571,6 +574,7 @@ export function OrdersView() {
     const list = statsOrders
     const total = list.length
 
+    // Revenue = sum of non-cancelled orders' totalOrderValue.
     const revenue = list
       .filter((o) => o.status !== 'cancelled')
       .reduce((sum, o) => sum + o.totalOrderValue, 0)
@@ -1385,6 +1389,7 @@ const StatCard = memo(function StatCard({
   loading,
   active,
   onClick,
+  title,
 }: {
   label: string
   sublabel?: string
@@ -1394,11 +1399,13 @@ const StatCard = memo(function StatCard({
   loading?: boolean
   active?: boolean
   onClick?: () => void
+  title?: string
 }) {
   return (
     <Card
       role={onClick ? 'button' : undefined}
       tabIndex={onClick ? 0 : undefined}
+      title={title}
       onClick={onClick}
       onKeyDown={(e) => {
         if (!onClick) return

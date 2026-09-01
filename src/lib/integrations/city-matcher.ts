@@ -120,7 +120,7 @@ export async function matchCity(
   // ── Country guard: skip matching for non-Pakistan addresses ──
   // courier_operational_cities only contains Pakistani cities; a fuzzy
   // match against it for a foreign city (e.g. "London") would be noise.
-  if (country && country !== 'Pakistan') {
+  if (country && country !== 'PK') {
     return { status: 'unresolved', suggestions: [] }
   }
 
@@ -400,7 +400,7 @@ export async function revalidateCityAtBookingTime(
   country?: string,
 ): Promise<boolean> {
   // ── Country guard: skip Pakistan-courier-city validation for non-Pakistan ──
-  if (country && country !== 'Pakistan') {
+  if (country && country !== 'PK') {
     return true
   }
   // 3-hour staleness threshold — matches the intended cron sync interval.

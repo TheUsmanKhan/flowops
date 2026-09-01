@@ -52,18 +52,6 @@ export interface BookOrderOptions {
   itemDescription?: string
   orderRefNumber?: string
   pickupAddressCode?: string
-  /**
-   * Optional return address override (Leopard-specific — per-booking return
-   * address different from the shipper's default). If provided, the adapter
-   * passes return_address + return_city to the courier API. If omitted, the
-   * courier uses the shipper's registered address as the return address.
-   */
-  returnAddressOverride?: {
-    address: string
-    cityName: string
-    contactPersonName: string
-    phone: string
-  }
 }
 
 /**
@@ -133,14 +121,12 @@ export async function bookOrderWithCourier(
     }
 
     const providerKey = integration.provider.providerKey
-    // NOTE: A hardcoded `providerKey !== 'postex'` guard previously lived here
-    // and blocked ALL non-PostEx couriers from booking. It was removed so the
-    // adapter's own bookShipment() runs for every registered provider. Stub
-    // adapters (e.g. tcs) already throw "not implemented" from their own
-    // bookShipment() — no booking-action-level allowlist is needed. The
-    // provider-specific branches below (Leopard city resolution at ~L281,
-    // PostEx/Leopard sub-status mapping at ~L387-390, slip download at
-    // ~L396) are now reachable for their respective providers.
+    if (providerKey !== 'postex') {
+      return {
+        success: false,
+        error: `Booking not yet implemented for provider '${providerKey}'.`,
+      }
+    }
 
     // ── Fetch the order with items + variant weights + customer ──
     mark('orderLoadStart')
@@ -334,45 +320,6 @@ export async function bookOrderWithCourier(
       orderType,
       quantity: order.items.reduce((sum, i) => sum + i.quantity, 0),
       transactionNotes,
-      // Return address override (Leopard-specific — per-booking return
-      // address different from the shipper's default). Pass through as-is;
-      // the return city is resolved to a numeric cityId for Leopard BELOW
-      // (same lookup as deliveryCity, but filtered by isPickupCity since
-      // return cities must be pickup-served). For PostEx this field is
-      // ignored by the adapter.
-      returnAddressOverride: options.returnAddressOverride
-        ? {
-            address: options.returnAddressOverride.address,
-            cityName: options.returnAddressOverride.cityName,
-            contactPersonName: options.returnAddressOverride.contactPersonName,
-            phone: options.returnAddressOverride.phone,
-          }
-        : undefined,
-    }
-
-    // ── Resolve return city for Leopard (if returnAddressOverride is set) ──
-    // Leopard requires a numeric city_id for return_city. If the caller passed
-    // a city NAME (from the UI autocomplete), resolve it to the numeric ID.
-    // If we can't resolve it, leave the name as-is — the adapter will omit
-    // return_city and Leopard will use the shipper's origin city as fallback.
-    if (options.returnAddressOverride && providerKey === 'leopard' && bookInput.returnAddressOverride) {
-      const returnCityName = options.returnAddressOverride.cityName
-      if (!/^\d+$/.test(returnCityName)) {
-        const returnCityRecord = await db.courierOperationalCity.findFirst({
-          where: {
-            providerKey: 'leopard',
-            cityName: { equals: returnCityName, mode: 'insensitive' },
-            isPickupCity: true, // return cities must be pickup-served
-          },
-          select: { cityId: true },
-        })
-        if (returnCityRecord?.cityId) {
-          bookInput.returnAddressOverride = {
-            ...bookInput.returnAddressOverride,
-            cityName: returnCityRecord.cityId, // numeric ID as string
-          }
-        }
-      }
     }
 
     // ── Call the courier adapter ──
@@ -694,5 +641,300 @@ export async function maybeAutoBookOrder(
       success: false,
       error: err instanceof Error ? err.message : 'Auto-booking failed',
     }
+  }
+}
+
+export interface BookExchangeShipmentOptions {
+  shipmentId: string
+  companyIntegrationId: string
+  customerName?: string
+  customerPhone?: string
+  deliveryAddress?: string
+  deliveryCity?: string
+  codAmount?: number
+  orderType?: string
+  transactionNotes?: string
+  itemDescription?: string
+  orderRefNumber?: string
+  pickupAddressCode?: string
+}
+
+/**
+ * Book an exchange shipment with the selected courier.
+ */
+export async function bookExchangeShipmentWithCourier(
+  options: BookExchangeShipmentOptions,
+): Promise<ActionResult<BookOrderResult>> {
+  const { shipmentId, companyIntegrationId } = options
+  if (!shipmentId || !companyIntegrationId) {
+    return { success: false, error: 'shipmentId and companyIntegrationId are required' }
+  }
+
+  try {
+    const ctx = await getWorkspace()
+    const integration = await db.companyIntegration.findFirst({
+      where: { id: companyIntegrationId, companyId: ctx.company.id, isActive: true },
+      include: { provider: true },
+    })
+    if (!integration) {
+      return { success: false, error: 'Courier integration not found or inactive.' }
+    }
+
+    const providerKey = integration.provider.providerKey
+    const shipment = await db.exchangeShipment.findFirst({
+      where: { id: shipmentId, companyId: ctx.company.id },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            name: true,
+            phones: { select: { id: true, phoneRaw: true, isPrimary: true }, orderBy: { isPrimary: 'desc' } },
+          },
+        },
+        shippingAddress: { select: { address: true, city: true, country: true } },
+        shippingPhone: { select: { phoneRaw: true } },
+        newOrgVariant: {
+          select: { id: true, sku: true, weightKg: true, product: { select: { title: true } } },
+        },
+        orderExchange: {
+          select: { id: true, exchangeMethod: true, originalOrder: { select: { flowopsOrderNumber: true } } },
+        },
+      },
+    })
+    if (!shipment) {
+      return { success: false, error: 'Exchange shipment not found.' }
+    }
+
+    const customerName = options.customerName?.trim() || shipment.customer?.name || 'Customer'
+    const customerPhone =
+      options.customerPhone?.trim() ||
+      shipment.shippingPhone?.phoneRaw ||
+      shipment.customer?.phones.find((p) => p.isPrimary)?.phoneRaw ||
+      shipment.customer?.phones[0]?.phoneRaw || ''
+    const deliveryAddress = options.deliveryAddress?.trim() || shipment.shippingAddress?.address || ''
+    const deliveryCity = options.deliveryCity?.trim() || shipment.shippingAddress?.city || shipment.shippingCityOverride || ''
+    const codAmount = options.codAmount ?? Number(shipment.invoiceAmount)
+    const orderRefNumber =
+      options.orderRefNumber?.trim() ||
+      (shipment.orderRefNumber && shipment.orderRefNumber.trim()) ||
+      shipment.exchangeShipmentNumber
+    const itemDescription =
+      options.itemDescription?.trim() ||
+      (shipment.orderDetail && shipment.orderDetail.trim()) ||
+      `${shipment.newOrgVariant.product.title} (${shipment.newOrgVariant.sku}) ×${shipment.quantity}`
+    const transactionNotes = options.transactionNotes?.trim() || ''
+    const isExchangeReplacement = shipment.orderExchange.exchangeMethod === 'courier_replacement'
+
+    if (!deliveryCity) {
+      return { success: false, error: 'Delivery city is required.' }
+    }
+    if (!customerPhone) {
+      return { success: false, error: 'Customer phone is required.' }
+    }
+
+    const cityValid = await revalidateCityAtBookingTime(providerKey, deliveryCity, integration.id, shipment.shippingAddress?.country ?? undefined)
+    if (!cityValid) {
+      await db.exchangeShipment.update({
+        where: { id: shipment.id },
+        data: { courierCityStatus: 'unresolved' },
+      })
+      return {
+        success: false,
+        error: `City "${deliveryCity}" is not available for delivery with ${integration.provider.providerName}.`,
+      }
+    }
+
+    const weightResult = calculateOrderWeightKg([
+      {
+        quantity: shipment.quantity,
+        variant: { weightKg: shipment.newOrgVariant.weightKg ? Number(shipment.newOrgVariant.weightKg) : null },
+      },
+    ])
+
+    const orderType = options.orderType || determinePostExOrderType(
+      weightResult.totalWeightKg,
+      weightResult.hasMissingWeight,
+      isExchangeReplacement,
+    )
+
+    let pickupAddressCode = options.pickupAddressCode
+    if (!pickupAddressCode) {
+      const defaultAddr = await db.courierPickupAddress.findFirst({
+        where: { companyIntegrationId: integration.id, isDefault: true },
+        select: { providerAddressCode: true },
+      })
+      pickupAddressCode = defaultAddr?.providerAddressCode
+    }
+
+    const bookInput: BookShipmentInput = {
+      orderNumber: orderRefNumber,
+      recipientName: customerName,
+      recipientPhone: customerPhone,
+      deliveryAddress,
+      deliveryCity,
+      pickupLocationAddress: '',
+      pickupLocationCity: '',
+      weightGrams: Math.round(weightResult.totalWeightKg * 1000),
+      codAmount,
+      itemDescription,
+      pickupAddressCode,
+      orderType,
+      quantity: shipment.quantity,
+      transactionNotes,
+    }
+
+    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+    const adapter = getCourierAdapter(providerKey, credentials)
+
+    const bookResult = await executeLoggedIntegrationAction<BookShipmentResult>({
+      companyIntegrationId: integration.id,
+      organizationId: ctx.company.organizationId,
+      actionType: 'book_shipment',
+      direction: 'outbound',
+      relatedEntityType: 'exchange_shipment',
+      relatedEntityId: shipment.id,
+      fn: async () => adapter.bookShipment(bookInput),
+    })
+
+    if (!bookResult.success || !bookResult.trackingNumber) {
+      return {
+        success: false,
+        error: bookResult.error || 'Booking failed — no tracking number returned.',
+      }
+    }
+
+    const { mapPostExStatus } = await import('@/lib/integrations/couriers/postex.status-map')
+    const mappedBookingStatus = bookResult.providerStatus
+      ? mapPostExStatus(bookResult.providerStatus)
+      : null
+
+    await db.exchangeShipment.update({
+      where: { id: shipment.id },
+      data: {
+        courierCompanyIntegrationId: integration.id,
+        trackingNumber: bookResult.trackingNumber,
+        courierCityStatus: 'matched',
+        courierSubStatus: mappedBookingStatus?.courierSubStatus ?? null,
+        courierBookingStatus: 'booked',
+      },
+    })
+
+    return {
+      success: true,
+      data: {
+        trackingNumber: bookResult.trackingNumber,
+        orderType,
+        providerStatus: bookResult.providerStatus ?? null,
+        courierBookingStatus: 'booked',
+      },
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Exchange shipment booking failed',
+    }
+  }
+}
+
+export interface BatchBookingItem {
+  entityType: 'order' | 'exchange_shipment'
+  entityId: string
+  customerName?: string
+  customerPhone?: string
+  deliveryAddress?: string
+  deliveryCity?: string
+  codAmount?: number
+  orderType?: string
+  transactionNotes?: string
+  itemDescription?: string
+  orderRefNumber?: string
+  pickupAddressCode?: string
+}
+
+export interface BatchBookingResultItem {
+  entityType: 'order' | 'exchange_shipment'
+  entityId: string
+  success: boolean
+  trackingNumber?: string
+  error?: string
+}
+
+/**
+ * Batch booking action: processes multiple orders/exchange shipments sequentially
+ * and returns per-item success/failure statuses.
+ */
+export async function bookOrdersBatch(
+  companyIntegrationId: string,
+  items: BatchBookingItem[],
+): Promise<ActionResult<{ results: BatchBookingResultItem[] }>> {
+  const results: BatchBookingResultItem[] = []
+
+  for (const item of items) {
+    if (item.entityType === 'order') {
+      const res = await bookOrderWithCourier({
+        orderId: item.entityId,
+        companyIntegrationId,
+        customerName: item.customerName,
+        customerPhone: item.customerPhone,
+        deliveryAddress: item.deliveryAddress,
+        deliveryCity: item.deliveryCity,
+        codAmount: item.codAmount,
+        orderType: item.orderType,
+        transactionNotes: item.transactionNotes,
+        itemDescription: item.itemDescription,
+        orderRefNumber: item.orderRefNumber,
+        pickupAddressCode: item.pickupAddressCode,
+      })
+      if (res.success && res.data) {
+        results.push({
+          entityType: 'order',
+          entityId: item.entityId,
+          success: true,
+          trackingNumber: res.data.trackingNumber,
+        })
+      } else {
+        results.push({
+          entityType: 'order',
+          entityId: item.entityId,
+          success: false,
+          error: res.error ?? 'Booking failed',
+        })
+      }
+    } else {
+      const res = await bookExchangeShipmentWithCourier({
+        shipmentId: item.entityId,
+        companyIntegrationId,
+        customerName: item.customerName,
+        customerPhone: item.customerPhone,
+        deliveryAddress: item.deliveryAddress,
+        deliveryCity: item.deliveryCity,
+        codAmount: item.codAmount,
+        orderType: item.orderType,
+        transactionNotes: item.transactionNotes,
+        itemDescription: item.itemDescription,
+        orderRefNumber: item.orderRefNumber,
+        pickupAddressCode: item.pickupAddressCode,
+      })
+      if (res.success && res.data) {
+        results.push({
+          entityType: 'exchange_shipment',
+          entityId: item.entityId,
+          success: true,
+          trackingNumber: res.data.trackingNumber,
+        })
+      } else {
+        results.push({
+          entityType: 'exchange_shipment',
+          entityId: item.entityId,
+          success: false,
+          error: res.error ?? 'Booking failed',
+        })
+      }
+    }
+  }
+
+  return {
+    success: true,
+    data: { results },
   }
 }

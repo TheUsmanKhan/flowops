@@ -10278,207 +10278,864 @@ Stage Summary:
 - Note: Shopify's total_discounts is parsed by the Zod schema but DISCARDED in ingestion — webhook-imported orders lose their discount. Separate gap (not part of this question but worth flagging).
 
 ---
-Task ID: REVERT-MARKETS-COUNTRY-2026-08-30
-Agent: main (Z.ai Code)
-Task: User rolled back the Markets + Country systems (and everything built after them — Shopify, discount rework, currency rollup, order-create-view fixes) because the markets system introduced many bugs. Preserve ONLY the Leopard Fix 1 (PostEx guard removal) from this session — Shopify work + everything else post-markets is OK to lose (will be rebuilt later). Self-decision per user: Option B (backup branch + hard reset + cherry-pick Fix 1).
+Task ID: MARKET-PRICING
+Agent: main
+Task: Build MarketVariantPricing with group-cascade + per-market isolation; redesign Pricing tab with market tabs; remove dead PricingTab code
 
 Work Log:
-- Investigated git history. Earliest markets-related commit was a6c19c5 (2026-08-24 11:41 — Market + MarketVariantPricing models added). Pre-markets state = 5d566c9 (2026-08-24 11:02).
-- 35 commits since pre-markets (a6c19c5..355e613). Categorized: 7 MARKETS, 2 CURRENCY, 3 DISCOUNT, 2 SHOPIFY, 2 BOOKING/Fix1, ~10 ORDER-UI (mixed), ~10 other. The Shopify work (Parts 1-3) + Fix 1 were both in the post-markets era.
-- User decision: Shopify work not important (will redo), Leopard Fix 1 important (preserve), everything else post-markets not important.
-- Verified Fix 1 commit (355e613) was self-contained: touched only src/lib/actions/booking.actions.ts + src/app/api/booking-workbench/book/route.ts + worklog.md + dev.pid. The 2 booking files were identical between pre-markets base (5d566c9) and Fix 1's parent (005fb78) — confirmed via `git diff 5d566c9 005fb78 -- <booking files>` returning 0 lines. So cherry-picking Fix 1 onto the pre-markets base would drag in ZERO markets-era code.
-- STEP 1-2: Created safety tag 'pre-revert-snapshot-2026-08-30' (→ 355e613) + backup branch 'backup-pre-revert-2026-08-30' (→ 355e613). All 35 post-markets commits preserved in the backup branch. Nothing truly lost.
-- STEP 3: Hard reset main to 5d566c9 (pre-markets state). main now at 2026-08-24 11:02 base.
-- STEP 4: Re-applied Fix 1 via `git checkout backup-pre-revert-2026-08-30 -- src/lib/actions/booking.actions.ts src/app/api/booking-workbench/book/route.ts` — pulled ONLY the 2 booking files (no worklog/dev.pid noise), staged them.
-- STEP 5: Committed as 97df62d "Fix 1 — Remove PostEx-only guard from booking paths (cherry-picked onto pre-markets base)". main now: 97df62d (Fix 1) → 5d566c9 (pre-markets) → earlier history.
-- Verification (post-reset, post-cherry-pick):
-  * Markets code GONE: src/lib/markets.ts, src/components/markets/, src/lib/exchange-rates.ts, src/lib/analytics/revenue.ts all deleted.
-  * Market + MarketCountry + MarketProduct + MarketVariantPricing + ExchangeRateSnapshot models GONE from prisma/schema.prisma.
-  * Shopify work GONE: src/lib/integrations/ecommerce/shopify.adapter.ts back to 33-line STUB (no real HMAC); src/lib/integrations/webhook-context.ts doesn't exist; connectedByEmployeeId gone from schema + integration.actions.ts; injectedContext refactor gone from order.actions.ts; shopifyOrderWebhookSchema doesn't have country_code/country; webhook route has no X-Shopify-Topic routing.
-  * Core OMS intact: Order, Customer, CompanyIntegration, Employee, InventoryLocation, ExchangeShipment all still in schema. Leopard adapter (29KB real implementation) still present.
-  * Fix 1 preserved: postex guard removed from both booking files (line 124 has NOTE comment, no "Booking not yet implemented" string in either file).
-  * Sidebar Markets tab GONE. /api/markets/ routes GONE.
-- .env: was already correct (Supabase Mumbai URL) after the reset — verified, no restore needed.
-- prisma generate: succeeded (rebuilt client for pre-markets schema).
-- prisma db push --accept-data-loss: succeeded ("Your database is now in sync with your Prisma schema. Done in 11.64s"). Dropped from live Supabase: Market (14 rows), MarketCountry (14), MarketProduct (26), MarketVariantPricing (82), ExchangeRateSnapshot (4), OrderItem.originalUnitPrice column (150 non-null values from discount rework). All data loss expected + desired per user instruction.
-- Live DB verification: markets tables gone, core OMS tables intact, connectedByEmployeeId column gone, 150 orders preserved.
-- Lint: 0 errors, 12 pre-existing warnings (unchanged set — React Hook Form watch() memoization in unrelated product components, all pre-existing).
-- Dev server: started cleanly on port 3000 (killed leftover process from earlier session first). Instrumentation started PostEx poller (but NOT exchange-rate refresh, which was post-markets work — correct).
-- Agent-browser smoke test: http://localhost:3000 renders cleanly. Title "FlowOps — Multi-tenant ERP for Pakistani e-commerce". Login page shows correctly (Welcome back, email/password, Sign in, tagline). Zero page errors. Zero runtime errors in dev.log.
-- Booking route smoke test: GET /api/booking-workbench/book → HTTP 405 (Method Not Allowed — expected for GET on POST-only route; proves the route file compiles + Fix 1 changes load without errors). Compile time 233ms — clean.
+- Read worklog for context (COUNTRY-PHASE1/2/3, 12-item investigation, discount investigation). Confirmed CompanyVariantPricing schema + 4 endpoints + dead PricingTab + /pricing route from prior investigation.
+- CRITICAL FINDING: Market model did NOT exist — had to create it (MarketVariantPricing's `market Market @relation(...)` requires it). Created Market model: id, companyId, name, isDefault, createdAt, updatedAt, @@unique([companyId, name]). Added `markets Market[]` back-relation on Company + `marketPricing MarketVariantPricing[]` on OrgProductVariant.
+- Schema: added MarketVariantPricing exactly per the user's spec (id, marketId, market, variantId, variant, salePrice, comparePrice, salePriceSyncedWithParent, comparePriceSyncedWithParent, updatedAt, @@unique([marketId, variantId])). Omitted isActive/createdAt/organizationId per the explicit spec (user's choice — differs from CompanyVariantPricing).
+- db:push succeeded. Prisma client regenerated.
+- One-time seed (node script): iterated all 13 companies, created a Default market (isDefault=true) for each via upsert (idempotent on @@unique([companyId, name])), then bulk-copied all CompanyVariantPricing rows into MarketVariantPricing via createMany + skipDuplicates (preserving salePrice, comparePrice, BOTH sync flags). Result: 13 Default markets, 82 pricing rows copied.
+- Wired Default-market creation into onboarding/create-company/route.ts (step 5b) so future companies get a Default market automatically at creation.
+- Made 4 endpoints market-aware (marketId query/body param, fallback to company's Default market if absent — backwards-compatible):
+  * variant-groups GET: reads MarketVariantPricing via ?marketId= query param
+  * override-price: UPSERTs MarketVariantPricing (create-if-missing with synced=false — better than the old 404)
+  * sale-price cascade: preserves exact cascade logic (findMany synced → update; detached stay independent; sale/compare independent). UPSERTs missing rows with synced=true so cascade works on fresh markets.
+  * resync-price: reads MarketVariantPricing for the market; 404 if no row (can't resync non-existent)
+- Added 2 new API routes: GET /api/markets (lists markets + pricedVariantCount for completion badges) + POST /api/markets/[id]/copy-pricing-from-default (bulk-copy from Default, skipDuplicates for idempotency).
+- ParentChildVariantTable: added `marketId?: string` prop; passes it to all pricing API calls (variant-groups GET as ?marketId=, override-price/sale-price/resync-price as market_id body field); queryKey includes marketId for per-market cache isolation; all 10 invalidateQueries calls updated.
+- Pricing tab redesign: replaced `<ParentChildVariantTable mode="pricing" />` with new `PricingTabWithMarkets` component that fetches markets, renders market sub-tabs (Default first) with completion badges ("N priced" / "No prices"), shows a "Copy from Default" bulk action for non-Default markets with 0 prices, and renders the ParentChildVariantTable scoped to the selected marketId.
+- Dead code removal: deleted the orphaned /api/products/[id]/pricing route (the whole file + directory) + the dead PricingTab function (product-detail-view.tsx:479-633) + the orphaned setCompanyPricingSchema + SetCompanyPricingInput in product.ts (only consumer was the deleted route).
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION:
+1. Seed correctly copies prices + sync flags into Default market: ✅ DB-script-verified. Company "dhhdh": 43 CompanyVariantPricing rows → 43 MarketVariantPricing rows, all fields (salePrice, comparePrice, salePriceSyncedWithParent, comparePriceSyncedWithParent) match exactly across first 3 rows checked.
+2. Cascade isolation between markets: ✅ DB-script-verified. Created "UAE Test" market, copied 43 rows from Default, overrode one variant in UAE Test (salePrice=9999.99, synced=false). Default market's row for the same variant UNCHANGED (salePrice=1200, synced=true). Override in one market does NOT affect any other market's pricing for the same product. (Test market cleaned up after verification.)
+3. Dead code removal doesn't break anything: ✅ Browser-verified. Logged in (usman@flowops.pk / Test1234!), navigated to Products → "Maroon" product → Pricing tab. Rendered cleanly: market sub-tab "Default" with "Default" + "6 priced" completion badges, no errors. The deleted /pricing route + PricingTab function caused no breakage (they were confirmed unreachable in the prior investigation).
+- Browser screenshot of Pricing tab confirmed: tab selected, market tab with "Default 6 priced" badges visible, pricing table renders below.
 
 Stage Summary:
-- main is now at pre-markets state (2026-08-24 11:02 base) + ONE additional commit: Fix 1 (97df62d, PostEx guard removal for Leopard booking).
-- Markets + Country systems + Currency rollup + Discount rework + Shopify adapter (Parts 1-3) + webhook-context.ts + connectedByEmployeeId + injectedContext refactor + shopifyOrderWebhookSchema country_code/country fix + order-create-view scope-leak fixes — ALL reverted. Preserved in backup-pre-revert-2026-08-30 branch + pre-revert-snapshot-2026-08-30 tag if ever needed.
-- Live Supabase DB synced: markets tables DROPPED (14+14+26+82+4 rows + 150 originalUnitPrice values lost — expected, user wanted markets gone).
-- Core OMS fully functional: 150 orders preserved, all core models intact, Leopard real adapter intact, PostEx real adapter intact, booking workbench intact + now works for Leopard (Fix 1).
-- Dev server runs cleanly, home page + login render without errors, booking route compiles.
-- How to restore anything from backup if ever needed:
-  * View backup: `git log backup-pre-revert-2026-08-30`
-  * Cherry-pick a specific commit: `git cherry-pick <sha>`
-  * Restore everything: `git reset --hard backup-pre-revert-2026-08-30`
-  * View the lost Shopify adapter: `git show backup-pre-revert-2026-08-30:src/lib/integrations/ecommerce/shopify.adapter.ts`
-  * View the lost webhook-context helper: `git show backup-pre-revert-2026-08-30:src/lib/integrations/webhook-context.ts`
-- User can now build Shopify etc. fresh on this clean pre-markets base. Future markets system can be re-built later (the backup branch is the reference for what was tried).
+- MarketVariantPricing feature COMPLETE. Schema applied, seeded, 4 endpoints market-aware, Pricing tab redesigned with market tabs + completion badges + copy-from-Default, dead code removed.
+- Market model created from scratch (didn't exist before). Each company gets a Default market at creation (seeded for existing 13 companies + wired into onboarding for future ones).
+- Cascade logic preserved EXACTLY: parent group sets synced children only; detached children stay independent; sale/compare sync independently. Per-market isolation confirmed.
+- CompanyVariantPricing is no longer read by the 4 pricing endpoints — MarketVariantPricing is now the authoritative source. (CompanyVariantPricing table remains in the schema as the seed source; not deleted.)
+- Files changed: prisma/schema.prisma, src/app/api/onboarding/create-company/route.ts, src/app/api/products/[id]/variant-groups/route.ts, src/app/api/products/[id]/variants/[variantId]/override-price/route.ts, src/app/api/products/[id]/variant-groups/[parentValueId]/sale-price/route.ts, src/app/api/products/[id]/variants/[variantId]/resync-price/route.ts, src/app/api/markets/route.ts (new), src/app/api/markets/[id]/copy-pricing-from-default/route.ts (new), src/components/products/parent-child-variant-table.tsx, src/components/products/product-detail-view.tsx, src/lib/validations/product.ts. Deleted: src/app/api/products/[id]/pricing/route.ts.
 
 ---
-Task ID: LEOPARD-ISPROD-BADGES-RETURN-2026-08-30
-Agent: main (Z.ai Code)
-Task: Apply Parts A (isProduction toggle) + B (courier-name city badges, revised from Pickup/Delivery) + C (return address override). Confirmed Parts D (multiple addresses + set default) + E (merchant address creation from PDF / createShipper) already implemented.
+Task ID: VARIANT-GATE1
+Agent: main
+Task: Remove isActive hard-filter from variant-level query in GET /api/products; render toggled-off variants as disabled in order-create picker (gate 1 of 3-gate system)
 
 Work Log:
-- Investigated existing pickup-addresses UI: PickupAddressesSection already lists all addresses with Default badge + Set-as-default star button + Sync + Add buttons. Multiple addresses + default selection FULLY WORKING.
-- Investigated addPickupAddress action: already calls adapter.createPickupAddress via executeLoggedIntegrationAction. For Leopard, createPickupAddress calls createShipper API (per PDF page 56-61). Merchant address creation FULLY WORKING.
-- Investigated transactionNotes -> special_instructions: already wired at leopard.adapter.ts:333. UI labels it 'Transaction Notes (courier instructions)'. No change needed.
-- PART A applied:
-  * integrations-view.tsx: ConfigField.type extended to 'text' | 'password' | 'boolean', added description?: string. Field renderer now renders a Switch (from @/components/ui/switch) for boolean fields with label + description, vs Input for text/password. Existing text/password rendering preserved.
-  * DB: leopard provider (id 068a49e6-a9b1-408a-a9fb-9b5d070fc30c) configSchema updated to 3 fields: api_key, api_password, isProduction (type=boolean, label='Use Production API', required=false, description='OFF=staging, ON=production').
-  * DB: existing Leopard integration (cmtgd1r520002lq8gtf7yktm5) credentials decrypted (api_key 42 chars + api_password 25 chars confirmed non-empty), isProduction='true' added, re-encrypted with fresh IV, saved. connectionStatus reset to 'pending', lastError cleared. The adapter will now use the PRODUCTION domain (https://merchantapi.leopardscourier.com/api/) which we verified returns 200 OK.
-- PART B applied (revised per user — courier-name badges, not Pickup/Delivery):
-  * /api/couriers/[providerKey]/cities route: rewrote to enrich every city with a servedBy[] array of {providerKey, isPickupCity, isDeliveryCity}. Per-provider mode: includes the selected provider + ALL other providers that serve the same cityName (1 extra DB query via cityName IN [...]). 'all' mode: groups by cityName (case-insensitive Map), each city appears once with servedBy listing ALL providers; isPickupCity/isDeliveryCity OR'd across providers. Backward compatible (existing fields preserved + servedBy added).
-  * city-autocomplete.tsx: removed the Pickup (sky) + Delivery (emerald) badges. Added courier-name badges from servedBy[] — each badge shows the providerKey (leopard/postex/tcs/etc.) with a distinct color (leopard=amber, postex=violet, tcs=rose, shopify=emerald, daraz=orange). Capitalize class. Title attribute shows pickup/delivery capability per provider. pickupOnly filter updated to check if primary OR any servedBy provider has isPickupCity=true.
-  * Result: when searching for a city in any form (order create, booking, address book), user sees courier badges — e.g. "Karachi [leopard] [postex]" means both couriers serve it; "Peshawar [postex]" means only PostEx.
-  * Did NOT build a separate cities-management view — user only asked for the badge replacement, which is done.
-- PART C applied (return address override):
-  * booking-workbench-view.tsx: BookRequest interface + RowState interface extended with returnAddressOverride + 4 fields (returnAddress, returnCity, returnContactName, returnPhone) + showReturnOverride toggle. defaultRowState seeds all empty + showReturnOverride=false. handleUploadBooking builds body.returnAddressOverride only if BOTH returnAddress + returnCity are filled. UI: added a collapsed 'Return Address Override (optional)' section under Transaction Notes in the advanced fields, with address input, CityAutocomplete (pickupOnly, uses the row's providerKey), contact name, phone. Imported RotateCcw from lucide-react (ChevronDown/Right/CityAutocomplete already imported).
-  * book/route.ts: BookRequest interface extended with returnAddressOverride. Passes it through to bookOrderWithCourier.
-  * booking.actions.ts: BookOrderOptions extended with returnAddressOverride. bookInput.returnAddressOverride populated from options. After bookInput built, if providerKey='leopard' + returnAddressOverride set + returnCity is non-numeric, resolves the return city name to Leopard's numeric cityId via courier_operational_cities (filtered by isPickupCity since return cities must be pickup-served). If unresolvable, leaves as-is — adapter will omit return_city, Leopard uses shipper's origin city as fallback.
-  * leopard.adapter.ts: ALREADY handles returnAddressOverride (lines 339-347) — sets body.return_address + body.return_city (if numeric). No adapter change needed.
-- Lint: 0 errors, 12 pre-existing warnings (unchanged — all React Hook Form watch() memoization in unrelated product components).
-- tsc: 1 error at booking.actions.ts:552 (orderType: string|undefined not assignable to string). Verified pre-existing via git stash (was at line 501 before my changes, shifted to 552 by my added code). Zero new errors.
-- Dev server: restarted cleanly on port 3000. Home page renders (title 'FlowOps — Multi-tenant ERP for Pakistani e-commerce'), zero page errors, zero runtime errors.
-- Route smoke tests: GET /api/couriers/all/cities?q=kar -> HTTP 401 (auth required, expected — route compiles with new servedBy grouping). GET /api/booking-workbench/book -> HTTP 405 (Method Not Allowed for GET, expected — route compiles with returnAddressOverride field).
-- Committed as bbba4db (7 files changed, 341 insertions, 40 deletions).
+- Read worklog for context (12-item investigation confirmed: variant toggle sets OrgProductVariant.isActive; GET /api/products hard-filters variant-level with `where: { isActive: true }`).
+- Investigated the 3 consumers of /api/products:
+  * order-create-view.tsx: uses the variants ARRAY (needs inactive ones visible for gate-1 disabled rendering).
+  * products-view.tsx (catalog list): uses only variantCount (the _count with isActive:true) — does NOT iterate the variants array for display. Would be affected if I removed the filter entirely (variantCount would include inactive).
+  * product-detail-view.tsx: uses a DIFFERENT endpoint (/api/products/[id]) which has NO isActive filter on variants (already shows all variants with their isActive flag + the VariantActiveSwitch toggle). Unaffected.
+- DECISION: used a surgical query param `?include_inactive_variants=true` rather than removing the filter entirely. This keeps the catalog list's variantCount unchanged (still counts active-only) while letting the order-create picker opt into seeing inactive variants. Backwards-compatible (default false = existing behavior).
+- GET /api/products (src/app/api/products/route.ts): added `include_inactive_variants` query param. When true: variant-level `where` becomes `undefined` (all variants), `isActive` is added to the select + the response mapping. When false (default): existing behavior (where: { isActive: true }, no isActive in response). Product-level isActive filter + variantCount _count are NOT affected.
+- order-create-view.tsx: (a) productsQuery now calls `/api/products?pageSize=100&include_inactive_variants=true`; (b) VariantOption + ProductsResponse interfaces add `isActive?: boolean`; (c) variantOptions mapping carries `isActive: v.isActive`; (d) picker row rendering: when `v.isActive === false`, the row renders with `opacity-60 cursor-not-allowed bg-muted/30 border-muted` classes, shows a "Not enabled for your company" badge (muted) instead of the stock badge, and the add-to-cart plus-button is hidden (not clickable). Active variants render unchanged.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION:
+1. Toggle a variant off → appears disabled with correct reason in order creation: ✅ Browser-verified. DB-toggled F-18A-MAROON (Maroon product, Muzammal Collection company) to isActive=false. Logged in as usman@flowops.pk, opened Create Order, searched "Maroon". The toggled-off variant appeared in results (NOT hidden) with: product title "Maroon", SKU "F-18A-MAROON", the disabled badge "Not enabled for your company", price "Rs. 5,500", and NO plus-button (not clickable). dev.log confirmed `GET /api/products?pageSize=100&include_inactive_variants=true 200`.
+2. General product catalog view's behavior unchanged: ✅ Code-verified. products-view.tsx calls `/api/products` WITHOUT include_inactive_variants (default false), so its variant-level filter stays `{ isActive: true }` + variantCount stays active-only. product-detail-view.tsx uses /api/products/[id] (different route, no isActive filter, unaffected). The surgical query-param approach means zero behavioral change for any consumer that doesn't opt in.
+- Restored F-18A-MAROON to isActive=true after verification (cleanup).
 
 Stage Summary:
-- Leopard integration now points at PRODUCTION (isProduction='true'). Staging 504 issue bypassed. User can click 'Test Connection' in the UI -> pingConnection calls getAllCities on production -> 200 OK -> connectionStatus becomes 'connected'.
-- City autocomplete shows courier-name badges (leopard/postex/tcs with distinct colors) instead of Pickup/Delivery badges. User can instantly see which couriers serve each city. In 'all' mode: grouped by cityName with all serving couriers per row.
-- Return address override available in Booking Workbench (collapsed under advanced fields, optional). Leopard-specific — resolves return city to numeric cityId, adapter sends return_address + return_city to bookPacket API. If omitted, shipper's default address used.
-- Parts D (multiple addresses + set default) + E (createShipper merchant address creation) confirmed already implemented — no changes needed. Both will work once Part A's isProduction flag takes effect (production server is live).
-- transactionNotes -> special_instructions confirmed already wired (adapter line 333).
+- Gate 1 (variant toggle visibility) COMPLETE. Toggled-off variants now appear in the order-create picker as disabled (grayed out, "Not enabled for your company", not clickable) instead of being hidden. Active variants render unchanged. Catalog + product-detail views unaffected (surgical query-param approach, backwards-compatible).
+- The 3-gate system: gate 1 = variant isActive (this task), gates 2-3 = market enablement + market pricing (built separately, per the task description).
+- Files changed: src/app/api/products/route.ts, src/components/orders/order-create-view.tsx.
 
 ---
-Task ID: LEOPARD-SYNC-ADDRESSES-2026-08-30
-Agent: main (Z.ai Code)
-Task: User asked to see all Leopard addresses. Found 0 in FlowOps DB but 65 unique on Leopard production API. Leopard's getShipperDetails API doesn't support "list all" — only fetch by shipment_id. Fixed the adapter + synced all 65 addresses into FlowOps.
+Task ID: PHONE-INTL-FIX
+Agent: main
+Task: Fix normalize_phone() mangling international numbers in matchOrCreateExternalCustomer
 
 Work Log:
-- Investigated syncPickupAddresses action (courier-address-book.actions.ts:417): upserts by providerAddressCode (shipment_id), auto-defaults first address on initial sync, resolves city name from courier_operational_cities.
-- Found TWO bugs in leopard.adapter.ts fetchExistingPickupAddresses:
-  1. Called getShipperDetails WITHOUT request_param/request_value. Leopard rejects with "Request Param is required". The adapter assumed these were optional based on PDF docs, but live testing confirmed they're mandatory.
-  2. Assumed resp.data was an array (if (!shippers || !Array.isArray(shippers)) return []). Leopard returns a SINGLE shipper object per ID, not an array. So even if the call had worked, it would have returned empty.
-- Fixed fetchExistingPickupAddresses:
-  * Scans shipment_ids 1-200 in parallel batches of 20 (BATCH_SIZE=20, MAX_ID=200).
-  * For each ID: calls getShipperDetails with request_param='shipment_id' + request_value=<id>. Leopard returns "Shipper Not Found" (status=0) for non-existent IDs — silently skipped.
-  * Handles single-object resp.data (not array).
-  * Dedupes by (name|phone|address).toLowerCase() — keeps LOWEST shipment_id (first-seen wins). Leopard accounts have many duplicate shippers (e.g. TECHCITY had 34 duplicate entries with same address but different shipment_ids).
-  * Performance: ~5 seconds for 200 IDs in batches of 20 on production server.
-- Standalone test: adapter.fetchExistingPickupAddresses() returns 65 unique addresses in 5082ms. Matches the 65 unique shippers found in manual scan.
-- Synced 774 Leopard cities into courier_operational_cities (was 0 — needed for city_id -> city name resolution). Used createMany for new + sequential updateMany for existing (sequential because Prisma doesn't support batch upsert with case-insensitive where).
-- Imported all 65 Leopard addresses into courier_pickup_addresses via the (now-fixed) adapter + syncPickupAddresses logic (replicated in a standalone script to bypass HTTP auth). First address auto-set as default.
-- Resolved city names: 65 addresses had numeric city_ids (e.g. 592, 789, 322) — resolved to proper names (Karachi, Lahore, Gujrat, Faisalabad, etc.) via courier_operational_cities lookup. All 65 resolved successfully (0 unresolved).
-- Lint: 0 errors, 12 pre-existing warnings (unchanged set).
-- tsc: 1 pre-existing error (booking.actions.ts:552 orderType string|undefined) — verified pre-existing, zero new errors from my adapter fix.
-- Committed as 88ad339 (1 file changed, 84 insertions, 24 deletions).
+- Read worklog for context (12-item investigation confirmed normalize_phone() silently mangles international numbers — +447911123456 → +92447911123456). Read matchOrCreateExternalCustomer (customer.actions.ts:1067) + the match_or_create_customer SQL function (live Postgres pg_get_functiondef).
+- Found the SQL function uses normalize_phone() in TWO places: Layer 2 (phone match — normalizes input then looks up customer_phones.phoneNormalized) + Layer 4 (create — stores the mangled normalized value). So pre-normalizing in TS alone wouldn't help — the SQL function re-mangles whatever it receives.
+- ROOT-CAUSE FIX: updated normalize_phone() SQL function (supabase/functions-only.sql + applied live via $executeRawUnsafe) to add an international pass-through at the top: if the input starts with '+' and is NOT '+92...', return it unchanged (it's already E.164 from the TS layer's validateAndNormalizePhone). Pakistani +92 numbers fall through to the existing digit-based logic (unchanged). Verified: +447911123456 → +447911123456 (was +92447911123456); +971501234567 → +971501234567 (was +92971501234567); +923001234567 → +923001234567 (unchanged); 03001234567 → +923001234567 (unchanged).
+- TS LAYER FIX: matchOrCreateExternalCustomer now pre-normalizes international phones via validateAndNormalizePhone(phone, 'GB') BEFORE passing to the SQL function. The 'GB' default country is a hint for libphonenumber-js to parse no-+-prefix numbers — but since we only pre-normalize when looksInternational (starts with +, not +92), the + prefix means libphonenumber validates internationally regardless of the hint. Pakistani-shaped numbers (+92..., 0300..., 10-11 digit local) are passed through to the SQL function unchanged — zero behavior change for the working case. If validateAndNormalizePhone returns null (truly invalid), falls back to the raw trimmed input (SQL pass-through stores it as-is; the isValidFormat flagging marks it for correction).
+- Updated the isValidFormat flagging (lines 1167-1184) to use phoneForSql (the pre-normalized value the SQL function stored as phoneRaw) instead of d.phone — so the phoneRaw match + validity check use the canonical value.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres):
+1. UK number (+447911123456): pre-normalized to +447911123456 → SQL normalize_phone passes through → stored phoneNormalized = +447911123456 (NOT mangled). PASS.
+2. UK dedup: re-submitted same number with different raw format ("+44 7911 123456") → pre-normalized to the same +447911123456 → SQL Layer 2 phone match found the EXISTING customer (not a duplicate). PASS.
+3. UAE number (+971501234567): stored as +971501234567 (not mangled). PASS.
+4. UAE dedup: re-submitted with "+971 50 123 4567" → matched the existing UAE customer. PASS.
+5. Pakistani regression: +923001234567 → +923001234567 (unchanged); 03001234567 → +923001234567 (unchanged). PASS.
+- OVERALL: ALL PASS.
+
+PRE-EXISTING BUG NOTED (not fixed — out of scope): match_or_create_customer()'s Layer 4 INSERT INTO "Customer" omits the id column, expecting a DB-level default. But Prisma's @default(cuid()) is an application-level default (no DB-level default exists). So the SQL function's CREATE path fails for ALL nationalities (not just international) with a NOT NULL constraint violation on id. This is a pre-existing bug unrelated to my phone-normalization fix — it means the SQL function can't create new customers at all today (only Layers 1-3 work: external identity match, phone match, email match). Flagged for a separate fix (add a DB-level id default, or have the SQL function generate a cuid via an extension). My verification worked around it by creating the customer via Prisma (which generates the cuid in JS) + testing Layer 2 (phone match) directly.
 
 Stage Summary:
-- FlowOps DB now has 65 Leopard pickup addresses (was 0).
-- First address auto-defaulted (BBRAND, Karachi, shipment_id=12).
-- All city names resolved (Karachi, Lahore, Gujrat, Faisalabad, Rawalpindi, Gilgit, etc.) — no more numeric city_ids in the UI.
-- 774 Leopard cities cached in courier_operational_cities (was 0) — city autocomplete will now show Leopard-served cities with the leopard badge.
-- The "Sync" button in the pickup-addresses UI will now work (calls fetchExistingPickupAddresses -> scans 1-200 -> returns 65 unique -> upserts into FlowOps).
-- The "Sync Cities" button also now works (fetchOperationalCities -> 774 cities -> cached).
-- All 65 addresses are visible in the Integrations page -> Leopard card -> Pickup & Return Addresses section.
+- International phone normalization FIXED at both layers: (a) normalize_phone() SQL function now passes through + prefixed non-Pakistani numbers unchanged (root cause), (b) matchOrCreateExternalCustomer TS layer pre-normalizes international phones via validateAndNormalizePhone (libphonenumber-js) to canonical E.164 before the SQL call. Pakistani numbers completely unchanged.
+- Phone-based customer dedup now works correctly for international numbers: two submissions of the same UK/UAE number (even with different raw spacing) normalize to the same E.164 + match the existing customer_phones row.
+- Files changed: supabase/functions-only.sql (normalize_phone pass-through), src/lib/actions/customer.actions.ts (matchOrCreateExternalCustomer pre-normalization + isValidFormat flagging).
 
 ---
-Task ID: BRIEFING-UPDATE-2026-08-30
-Agent: main (Z.ai Code)
-Task: Update FLOWOPS_BRIEFING.md to reflect all recent work (Leopard fixes, markets revert, courier badges, return address override).
+Task ID: COUNTRY-A2
+Agent: main
+Task: Country system — schema + form wiring (alpha-2 code convention per spec)
 
 Work Log:
-- Read current briefing structure (1843 lines, 19 sections).
-- Section 12 (Third-Party Services): rewrote Leopard entry with staging+production URLs, isProduction flag, scan-by-ID getShipperDetails fix, return_address/return_city override, credentials form 3 fields, city IDs note. Rewrote Shopify entry as reverted (working implementation in backup-pre-revert-2026-08-30 branch).
-- Section 16 (What's Built): updated Leopard entry, added Booking Workbench return override, added courier-name city badges, added Pickup Address Book. Added 6 new 'Recently Fixed' entries (28-33): Leopard booking unblocked (PostEx guard removal), isProduction toggle, getShipperDetails scan, courier badges, return address override, markets+country revert. Updated Shopify 'Not Built' entry (reverted). Added Markets System to 'Not Built' (reverted, may rebuild later from backup branch). Updated multi-currency note.
-- Section 18 (Known Issues): added .env fix reference (Mumbai Supabase URL from DOCKER.md + start.sh canonical). Added 3 new Leopard issues: staging server down (504), stored credentials may belong to wrong account (TECHCITY test data, not user's real account), getShipperDetails no list-all mode (scan 1-200, MAX_ID adjustable).
-- Section 5 (Database): updated model count 60 -> 66 (after markets revert removed 5 models).
-- Section 19 (Prompt Generation Guide): updated context block with Leopard fixes (production endpoint, isProduction toggle, scan-by-ID), courier-name badges via servedBy[], return address override, booking guard removed, markets+country revert note (backup branch reference), Shopify revert note, Leopard staging down note. Added 3 new 'What NOT to Suggest' entries: don't rebuild markets from scratch (use backup branch), don't use Leopard staging (504), don't suggest list-all shippers for Leopard (API doesn't support it).
-- Committed as 6c0f0e8 (1 file changed, 43 insertions, 17 deletions).
+- Read worklog for context. Found a PRIOR Phase 2 implementation existed (COUNTRY-PHASE2) using country NAMES ("Pakistan"). This task requires alpha-2 CODES ("PK") — a different convention. Decided to MIGRATE the entire convention from name→code (simpler: CountrySelector returns codes directly, Shopify country_code is already alpha-2, no translation at the form boundary).
+- Schema: changed CustomerAddress.country default from "Pakistan" → "PK" + updated comment. db:push succeeded. Migrated 16 existing rows from "Pakistan" → "PK" via script. Updated Order.deliveryCountry comment to reflect alpha-2 convention.
+- customer.schemas.ts: addressInputSchema.country default "Pakistan" → "PK", max(100) → max(2). matchExternalCustomerSchema: added `country: z.string().max(2).optional().or(z.literal(''))` param.
+- order.schemas.ts: delivery_country max(100) → max(2) + updated comment.
+- AddressSelector.tsx: removed countryCodeToName/countryNameToCode imports (no longer needed — direct code storage). CountrySelector now binds `value={deliveryCountry}` directly + `onChange={(code) => deliveryCountry: code}`. All `'Pakistan'` defaults → `'PK'`. City-mode guard `=== 'Pakistan'` → `=== 'PK'`.
+- CreateCustomerForm.tsx: same — removed translation imports, direct code storage, `'Pakistan'` → `'PK'` everywhere (initial state, addAddress, payload, city-mode guard).
+- order-create-view.tsx: all `'Pakistan'` defaults/guards → `'PK'` (deliveryCountry state, handleSelectCustomer, handleDeselectCustomer, Self-Fulfilled auto-default effect, company-default-courier effect, hint rendering).
+- customer.actions.ts: removed countryNameToCode import; phone-hint derivation simplified to `phoneHintAddress?.country || 'PK'` (no translation). All `'Pakistan'` defaults → `'PK'` (addressesData, addCustomerAddress, updateCustomerAddress). validateCustomerAddressCity guard `=== 'Pakistan'` → `=== 'PK'`.
+- order.actions.ts (createManualOrder): `deliveryCountry: d.delivery_country?.trim() || 'PK'` (was 'Pakistan'). save-one-off-address branch `country: d.delivery_country?.trim() || 'PK'`.
+- order.actions.ts (createOrderFromShopifyWebhook): rewrote the Shopify country fallback chain — `shopifyCountryCode = default_address.country_code` (preferred, already alpha-2) → `shopifyCountryName = default_address.country` → `shopifyCountry = shopifyCountryCode || (shopifyCountryName ? countryNameToCode(shopifyCountryName) ?? null : null)`. Order.deliveryCountry fallback: `shopifyCountry || customer.addresses[0]?.country || ctx.company.countryCode || 'PK'`. Added countryNameToCode import.
+- workspace.ts: added `countryCode` to the `activeCompany` Prisma select + the `WorkspaceContext.company` type + the return object (needed for the Shopify fallback's final tier).
+- city-matcher.ts: matchCity + revalidateCityAtBookingTime guards `=== 'Pakistan'` → `=== 'PK'`.
+- customer-detail-view.tsx: CityMatchInfo guard `=== 'Pakistan'` → `=== 'PK'`.
+- order-detail-view.tsx: city-mismatch guard `!== 'Pakistan'` → `!== 'PK'`.
+- matchOrCreateExternalCustomer: added `countryForSql = d.country?.trim() || 'PK'` + passes it as the 7th param to match_or_create_customer().
+- SQL function match_or_create_customer: DROPPED the old 6-param version + CREATED a new 7-param version with `p_country TEXT DEFAULT 'PK'`. Documented in supabase/functions-only.sql. The SQL function does NOT create a customer_addresses row (it lacks address/city which are NOT NULL) — the caller (Shopify ingestion) persists p_country onto the customer_addresses row it creates separately (already does this correctly via shopifyCountry).
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres):
+1. Customer + order with saved PK address: customer_addresses.country='PK', Order.deliveryCountry='PK' (pulled from CustomerAddress). PASS.
+2. Customer + order with saved GB address: customer_addresses.country='GB', Order.deliveryCountry='GB'. PASS.
+3. Shopify country_code present (preferred): default_address.country_code='AE' → shopifyCountry='AE' (no translation needed). PASS.
+4. Shopify country_code absent, country name present: default_address.country='United Arab Emirates' → countryNameToCode → 'AE'. PASS.
+5. Shopify neither sent → Company.countryCode: final fallback = ctx.company.countryCode ('PK'). PASS.
+- All test data cleaned up after verification.
 
 Stage Summary:
-- FLOWOPS_BRIEFING.md now reflects the current state of the codebase post-markets-revert + post-Leopard-fixes.
-- All 6 new fixes (Leopard booking unblock, isProduction toggle, getShipperDetails scan, courier badges, return override, markets revert) are documented.
-- Known issues section captures the 3 Leopard gotchas (staging down, wrong credentials, no list-all).
-- Prompt generation guide updated so future AI assistants know: markets/country/Shopify were reverted (backup branch reference), Leopard staging is down, Leopard doesn't support list-all shippers.
-- Briefing is now the authoritative reference for the current pre-markets base + Leopard fixes state.
+- Country system A2 COMPLETE. Alpha-2 code convention applied throughout (schema, schemas, forms, actions, city-matcher guards, SQL function). CountrySelector binds directly (no translation). Shopify country_code preferred with name→code + Company.countryCode fallbacks.
+- Migrated 16 existing rows from "Pakistan" → "PK". No propagation-correction mechanism built (per task: country is a clean dropdown, no typos to fix).
+- match_or_create_customer SQL function extended to 7 params (p_country). TS layer passes it through. The SQL function doesn't create customer_addresses (lacks address/city) — the Shopify caller persists country separately (already correct).
+- Files changed: prisma/schema.prisma, src/lib/validations/customer.schemas.ts, src/lib/validations/order.schemas.ts, src/components/customers/AddressSelector.tsx, src/components/customers/CreateCustomerForm.tsx, src/components/orders/order-create-view.tsx, src/lib/actions/order.actions.ts, src/lib/actions/customer.actions.ts, src/lib/integrations/city-matcher.ts, src/lib/workspace.ts, src/components/orders/customer-detail-view.tsx, src/components/orders/order-detail-view.tsx, supabase/functions-only.sql.
 
 ---
-Task ID: FIX-ORDER-CREATE-SCOPE-LEAK-2026-08-30
-Agent: main (Z.ai Code)
-Task: Fix 'deliveryCountry is not defined' ReferenceError in order-create-view.tsx CustomerSection (recurrence of the markets-era scope-leak bug class after the markets revert restored the pre-markets file). Also check product selection + country selection field.
+Task ID: COUNTRY-A3
+Agent: main
+Task: Country-driven behavior — skip city-matching for non-PK, phone country hint
 
 Work Log:
-- Investigated order-create-view.tsx (2487 lines). Found 6 module-level child components: CustomerSection, CrmStatsWidget, ItemsSection, PaymentSection, ProofFileInput, SummarySection.
-- Wrote a Python scope-leak analyzer to find ALL parent-scope variables used in each child component without being passed as props. Scanned against 47 known parent state variables + setter functions.
-- Findings:
-  * CustomerSection: 2 leaks — deliveryCountry (line 1525, crash) + setUserPickedCourier (line 1492). Both in the courier-selection block (Self-Fulfilled auto-default UI for non-Pakistan countries).
-  * ItemsSection: 1 false positive — 'variants' matched inside a Label string 'Search products / variants' (not a real leak).
-  * CrmStatsWidget, PaymentSection, ProofFileInput, SummarySection: CLEAN (no leaks).
-- Confirmed markets-era variables (enabledProductIdsSet, pricedVariantIdsSet, resolvedMarketName, isMultiMarket, isCountryBlocked, countryBlockReason, fulfillmentChannel) do NOT exist in the pre-markets file (revert removed them all).
-- Country selection field: confirmed it IS in the form via AddressSelector's CountrySelector component (src/components/customers/AddressSelector.tsx:251). Always visible (not gated on manual-entry mode), defaults to Pakistan, translates between alpha-2 codes + country names. No change needed — the user's concern was the crash preventing them from seeing it.
-- Fix: added deliveryCountry + setUserPickedCourier to CustomerSection's props destructure + type signature (with explanatory comments about why they're required), and passed them from the parent call site (lines 1021-1022).
-- Lint: 0 errors, 12 pre-existing warnings (unchanged set).
-- tsc: 0 errors in order-create-view.tsx.
-- Dev server: order-create page compiles + renders without the crash (HTTP 200, no 'deliveryCountry is not defined' or 'CustomerSection' errors in dev log). The earlier 'Fast Refresh had to perform a full reload' warning was from the pre-fix crash — Turbopack recovered after the fix.
-- Committed as c1e7df8 (1 file changed, 16 insertions).
+- Read worklog for A2 context (country system migrated to alpha-2 codes). Investigated the 3 areas: city-matcher guards, validateCustomerAddressCity, CityAutocomplete UI, phone-hint in createCustomerInternal/CreateCustomerForm.
+- Found ALL A3 behavior already implemented from prior Phase 3 work (COUNTRY-PHASE3) + correctly migrated to 'PK' convention in A2, EXCEPT one stale 'Pakistan' guard in validateCustomerAddressCity (customer.actions.ts:758) that the A2 migration missed.
+- FIXED: validateCustomerAddressCity guard `country && country !== 'Pakistan'` → `country && country !== 'PK'` (line 758). This was the only remaining stale name-based guard.
+- Verified all other A3 behavior is correct:
+  * matchCity() guard: `country && country !== 'PK'` → returns unresolved (city-matcher.ts:123)
+  * revalidateCityAtBookingTime() guard: `country && country !== 'PK'` → returns true (city-matcher.ts:403)
+  * booking.actions.ts:200 passes `order.deliveryCountry ?? undefined` to revalidateCityAtBookingTime
+  * AddressSelector city mode: `deliveryCountry === 'PK'` → CityAutocomplete, else plain Input (AddressSelector.tsx:221)
+  * CreateCustomerForm city mode: `entry.country === 'PK'` → CityAutocomplete, else Input (CreateCustomerForm.tsx:297)
+  * Phone hint: `phoneCountryCode = phoneHintAddress?.country || 'PK'` passed to validateAndNormalizePhone + isValidPhoneFormat (customer.actions.ts:384,396; CreateCustomerForm.tsx:77,127,191,193)
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (script-based, all pass):
+1. UK phone (no + prefix) validates against UK rules: isValidPhoneFormat("02079461234", "GB") → true; normalized → "+44 20 7946 1234". PASS.
+2. Pakistani +92 phone validates on UK-delivery order: isValidPhoneFormat("+923001234567", "GB") → true; normalized → "+92 300 1234567". PASS (+ prefix = international validation regardless of hint).
+3. Pakistani local phone with PK hint (regression): isValidPhoneFormat("03001234567", "PK") → true; normalized → "+92 300 1234567". PASS.
+4. matchCity skips for non-PK country: matchCity('postex', 'London', undefined, 'GB') → {status:'unresolved', suggestions:[]} immediately (no DB query against Pakistan-sourced courier_operational_cities). PASS.
+5. matchCity works for PK country (regression): matchCity('postex', 'Lahore', undefined, 'PK') → {status:'matched', cityName:'Lahore'} (full matching logic ran). PASS.
 
 Stage Summary:
-- 'deliveryCountry is not defined' crash FIXED — CustomerSection now receives deliveryCountry + setUserPickedCourier as props.
-- 'setUserPickedCourier is not defined' (would have crashed next) FIXED in the same change.
-- Product selection (ItemsSection): verified CLEAN — no leaks. The 'variants' false positive was a string match inside a Label, not a real variable reference.
-- Country selection: confirmed already present in the form via AddressSelector's CountrySelector. The crash was preventing the user from seeing it.
-- This is the SAME bug class that was fixed in the markets era (passing props to module-level child functions) — the markets revert restored the pre-fix file, so the fix had to be re-applied. The Python analyzer confirms no other leaks exist in the current file.
+- A3 COMPLETE. Country now drives: (1) city matching (skipped for non-PK — matchCity + revalidate + validateCustomerAddressCity all early-return; UI shows plain text Input instead of CityAutocomplete), (2) phone validation (address country is the defaultCountry hint for ambiguous no-+-prefix numbers; + prefix always works internationally — a Pakistani +92 on a UK order validates fine).
+- Pakistan behavior UNCHANGED across both areas (every guard checks `country && country !== 'PK'` — PK is the default/omitted path).
+- Only fix needed: one stale 'Pakistan' guard in validateCustomerAddressCity (missed in the A2 name→code migration). All other A3 logic was already correct from the prior Phase 3 + A2 work.
+- Files changed: src/lib/actions/customer.actions.ts (1-line guard fix).
 
 ---
-Task ID: FIX-CITY-BADGE-SCOPING-2026-08-31
-Agent: main (Z.ai Code)
-Task: Fix the courier-badge scoping gap in GET /api/couriers/[providerKey]/cities — servedBy[] was returning ALL providers globally, not filtered to the calling company's connected integrations. Pure display-filter fix in the route handler; do NOT change the underlying CourierOperationalCity model or sync logic.
+Task ID: SELFFULFILLED-B1
+Agent: main
+Task: Self-fulfilled channel — schema + per-company SF reference generator + order creation
 
 Work Log:
-- Read the current route implementation (223 lines). Found 3 places where servedBy[] was built without per-company filtering: the 'all' mode query, the per-provider mode (no guard), and the per-provider servedBy enrichment lookup.
-- Confirmed the auth pattern used by sibling courier routes (sync-cities, match-city): getCurrentUser() → db.userSetting.findUnique({ where: { userId } }) → settings.activeCompanyId. Matched this pattern.
-- Applied the fix in 3 parts:
-  1. Added company resolution at the top of the handler: fetch userSetting → companyId → fetch CompanyIntegration rows (where: companyId, isActive=true, connectionStatus='connected') → build connectedProviderKeys Set.
-  2. 'all' mode: short-circuit to empty list if connectedProviderKeys.size === 0; otherwise filter the CourierOperationalCity query with providerKey: { in: connectedProviderKeys } so only connected providers' cities are grouped + shown.
-  3. Per-provider mode: added a guard at the top (after the 'all' branch) — if connectedProviderKeys.has(providerKey) is false, return empty list immediately. This prevents a company from querying a specific courier's cities they haven't connected (e.g. company with no Leopard integration can't fetch Leopard's city cache).
-  4. Per-provider servedBy enrichment: filtered the allProviders lookup with providerKey: { in: connectedProviderKeys } so badges only show connected providers on each city.
-- Updated comments throughout to document the scoping behavior. Did NOT touch the CourierOperationalCity model, the sync logic (city-sync.actions.ts), or the city-matcher. Pure route-handler display-filter change.
-- Lint: 0 errors, 12 pre-existing warnings (unchanged set).
-- tsc: 0 errors in the cities route.
-- Dev server: both /api/couriers/leopard/cities + /api/couriers/all/cities compile cleanly (HTTP 401 unauthenticated — expected without a session; proves the route file loads without syntax/type errors).
-- Committed as a14efc2 (1 file changed, 50 insertions, 2 deletions).
+- Read worklog for context (generate_order_number is per-company MAX-based; generate_exchange_shipment_number is global sequence). Investigated maybeAutoBookOrder call site (order.actions.ts:786), order.create data block (588), existing Phase 3 Self-Fulfilled auto-default logic in order-create-view.
+- Schema: added to Order model — `fulfillmentChannel String @default("courier")` (courier | self_fulfilled) + `selfFulfilledReferenceNumber String? @unique`. db:push with --accept-data-loss (safe: all existing rows are NULL, no conflict). Prisma client regenerated.
+- SQL function generate_self_fulfilled_reference(p_company_id TEXT): created PER-COMPANY, mirroring generate_order_number()'s MAX-based structure (NOT the global exchange-shipment sequence pattern). Format: SF-{year}-{seq}, zero-padded 5 digits. MAX query on Order.selfFulfilledReferenceNumber WHERE companyId + LIKE 'SF-YYYY-%'. Applied to live DB. Documented in supabase/functions-only.sql. Verified: SF-2026-00001 for first call, SF-2026-00002 after an order is inserted (per-company increment works).
+- order.schemas.ts: added `fulfillment_channel: z.enum(['courier', 'self_fulfilled']).default('courier')` to createManualOrderSchema.
+- order.actions.ts createManualOrder: (a) added generateSelfFulfilledReference() helper (mirrors generateOrderNumber, calls the SQL function); (b) before order.create, generates `selfFulfilledReferenceNumber` when `d.fulfillment_channel === 'self_fulfilled'`; (c) order.create data includes `fulfillmentChannel: d.fulfillment_channel` + `selfFulfilledReferenceNumber`; (d) auto-booking block guarded with `&& !isSelfFulfilled` — explicitly skips maybeAutoBookOrder for self-fulfilled orders (no courier to book, no city-courier-matching to run). Also fixed a stale deliveryCountry comment (still said "Pakistan"/"NAME").
+- order-create-view.tsx: (a) added `fulfillmentChannel` state (default 'courier'); (b) added to buildPayload as `fulfillment_channel`; (c) reset in handleDeselectCustomer; (d) replaced the Phase 3 Self-Fulfilled auto-default effects with B1 logic: when deliveryCountry !== 'PK' && !userPickedCourier → set fulfillmentChannel='self_fulfilled' + clear courier; when deliveryCountry returns to 'PK' → reset to 'courier'; (e) added a fulfillment channel TOGGLE UI (two buttons: "Courier Delivery" / "Self-Fulfilled") above the courier dropdown — always visible + overridable; when 'self_fulfilled' is selected, the entire courier/pickup/dispatch/orderRef/orderDetail grid is hidden (no courier needed) + an info message shows "A self-fulfilled reference number (SF-YYYY-NNNNN) will be generated on order creation. No courier booking or city-matching will run."; (f) company-default-courier effect now also checks `fulfillmentChannel === 'courier'`.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres):
+1. Self-fulfilled order with GB address: fulfillmentChannel='self_fulfilled', selfFulfilledReferenceNumber='SF-2026-00001', deliveryCountry='GB', courierBookingStatus='not_booked', courierCityStatus='not_applicable' (no city-matching ran). SF ref format matches SF-YYYY-NNNNN. PASS.
+2. Second self-fulfilled order → SF ref increments: SF-2026-00002 (per-company MAX-based sequence works). PASS.
+3. Normal courier order (regression): fulfillmentChannel='courier', selfFulfilledReferenceNumber=null. PASS.
+4. Per-company isolation: each company starts at 00001 independently (correct — per-company sequence). PASS.
 
 Stage Summary:
-- A company with no Leopard integration (or a still-pending one) will no longer see 'leopard' badges in the city autocomplete — servedBy[] is now scoped to the calling company's active+connected CompanyIntegration rows.
-- 'all' mode: returns empty list if the company has 0 connected courier integrations (no point showing cities they can't book with).
-- Per-provider mode: returns empty list if the company has no connected integration for the requested provider (prevents querying a specific courier's cities they haven't connected).
-- The underlying CourierOperationalCity rows remain global reference data — the model + sync logic are unchanged. This is purely a display filter, scoped to what's shown to the calling company.
-- The auth pattern matches the sibling courier routes (sync-cities, match-city) — getCurrentUser() → userSetting → companyId. No new auth pattern introduced.
+- B1 COMPLETE. Self-fulfilled channel fully wired: schema (fulfillmentChannel + selfFulfilledReferenceNumber), per-company SF-YYYY-NNNNN reference generator (mirrors generate_order_number), order-create toggle (defaults to self_fulfilled for non-PK, always overridable), createManualOrder generates the SF ref + skips auto-booking/city-matching for self_fulfilled orders.
+- Normal courier orders completely unaffected (fulfillmentChannel defaults to 'courier', selfFulfilledReferenceNumber stays null, auto-booking + city-matching run as before).
+- Files changed: prisma/schema.prisma, supabase/functions-only.sql, src/lib/validations/order.schemas.ts, src/lib/actions/order.actions.ts, src/components/orders/order-create-view.tsx.
 
 ---
-Task ID: FIX-ENV-ENCRYPTION-KEY-2026-08-31
-Agent: main (Z.ai Code)
-Task: User reported 'INTEGRATION_ENCRYPTION_KEY must be set to a 32-byte hex string (64 hex characters)' error when saving Leopard API key. Investigate + fix.
+Task ID: SELFFULFILLED-B2
+Agent: main
+Task: Self-fulfilled channel — internal slip PDF with CODE128 barcode
 
 Work Log:
-- Checked .env: only had DATABASE_URL + DIRECT_URL. INTEGRATION_ENCRYPTION_KEY was MISSING entirely.
-- Verified the existing Leopard integration's credentials were encrypted with the key documented in FLOWOPS_BRIEFING.md line 214 (1fbf4fd279d9476183566c878e38907764feac7e7843d16ac60065720a451951) — decrypt succeeded with that key, confirming it's the correct value.
-- Root cause: .env was missing all 4 required env vars beyond DATABASE_URL/DIRECT_URL (INTEGRATION_ENCRYPTION_KEY, SESSION_SECRET, CRON_SECRET, APP_URL per FLOWOPS_BRIEFING.md §5). The dev server couldn't decrypt any credentials.
-- Fix: added all 4 missing env vars to .env using the values from FLOWOPS_BRIEFING.md §5. The INTEGRATION_ENCRYPTION_KEY matches the existing encrypted credentials (so nothing breaks — existing integrations still decrypt).
-- Restarted dev server (pkill + setsid) to pick up the new env vars. Verified: no INTEGRATION_ENCRYPTION_KEY errors in dev.log.
-- Committed the .env update.
+- Read worklog for B1 context (self-fulfilled channel schema + SF reference generator + order creation). Read scan-pdf.ts + payslip-pdf.ts for the exact @react-pdf/renderer pattern (React.createElement, renderToBuffer, fs.writeFile to public/uploads/<bucket>/<companyId>/).
+- Installed jsbarcode via `bun add jsbarcode` (v3.12.3). Confirmed sharp already a dependency (v0.34.3).
+- Investigated jsbarcode server-side rendering: it needs a DOM-like element with tagName/nodeName/setAttribute/hasAttribute/createElementNS + a global `document` stub. Built a minimal fake DOM element that captures the SVG output as a serializable string. Verified: jsbarcode renders a valid CODE128 SVG (2477 chars, <rect> elements for bars) with displayValue:false, width:2, height:60.
+- Created src/lib/utils/internal-slip-pdf.ts following the EXACT scan-pdf.ts pattern:
+  * `generateBarcodeSvg(value)`: uses jsbarcode + a fake DOM element + global document stub to render CODE128 → SVG string. Restores the previous global document in a finally block.
+  * `svgToPngBuffer(svg)`: uses sharp to convert SVG → PNG buffer.
+  * `InternalSlipPdf({ data, barcodeDataUri })`: React function component via React.createElement (NOT JSX, .ts file). Layout: company name, "Self-Fulfilled Delivery Slip" title, SF reference (text + barcode Image), order number, customer name, recipient, phone, delivery address/city/country, COD/prepaid amount box (red Rs. amount), items table (product/SKU/qty/price), footer with generated timestamp.
+  * `generateInternalSlipPdf(data, companyId)`: generates barcode SVG → PNG buffer → base64 data URI → renders PDF via renderToBuffer → stores at public/uploads/self-fulfilled-slips/<companyId>/slip-<SF-ref>.pdf → returns the public URL path.
+- Created API route POST /api/orders/[id]/self-fulfilled-slip: fetches the order (with customer + items), guards fulfillmentChannel==='self_fulfilled', builds the InternalSlipPdfData, calls generateInternalSlipPdf, returns { success, url }. Returns 400 for courier orders.
+- Added fulfillmentChannel + selfFulfilledReferenceNumber + deliveryCountry to the GET /api/orders/[id] response (were missing).
+- Added the same fields to the order-detail-view TypeScript type.
+- Created SlipButton component in order-detail-view.tsx: calls POST /api/orders/[id]/self-fulfilled-slip, opens the returned URL in a new tab (browser handles print/download). Shows a Printer icon + "Print Slip" label, with a "Generating…" spinner state.
+- Added the SlipButton to the PageHeader actions area, visible ONLY when `order.fulfillmentChannel === 'self_fulfilled'`. Courier orders don't see the button.
+- Added Printer icon to the lucide-react imports.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E):
+- Created a test self-fulfilled order (GB address, SF-2026-00001, COD Rs. 5000, 2 items).
+- Called generateInternalSlipPdf with the order data.
+- PDF generated successfully: stored at public/uploads/self-fulfilled-slips/<companyId>/slip-SF-2026-00001.pdf, 7263 bytes.
+- Verified PDF is valid: %PDF- header, contains embedded image (/Subtype /Image + /ImageB /ImageC /ImageI in ProcSet — the barcode PNG).
+- The barcode encodes ONLY the reference number (SF-2026-00001) as CODE128.
+- All fields accurate: company name, flowopsOrderNumber, SF ref, customer name, recipient, phone, delivery address/city/country, COD amount, items.
+- Cleaned up test data + test PDF after verification.
 
 Stage Summary:
-- 'INTEGRATION_ENCRYPTION_KEY must be set...' error FIXED.
-- .env now has all 6 required env vars (DATABASE_URL, DIRECT_URL, INTEGRATION_ENCRYPTION_KEY, SESSION_SECRET, CRON_SECRET, APP_URL).
-- The key value matches existing encrypted credentials — no re-encryption needed, no data loss.
-- User can now save/update Leopard credentials without the encryption error. The remaining 'Invalid API Key' error from Leopard's API (separate issue) is a credentials-value problem, not an encryption problem.
+- B2 COMPLETE. Internal slip PDF generator follows the exact scan-pdf.ts pattern. CODE128 barcode generated via jsbarcode (Bun-compatible) → SVG → sharp → PNG → embedded as <Image> in the @react-pdf/renderer document. Stored at public/uploads/self-fulfilled-slips/<companyId>/. "Print Slip" button on order-detail-view visible only for self_fulfilled orders.
+- Files changed: package.json (jsbarcode dep), src/lib/utils/internal-slip-pdf.ts (new), src/app/api/orders/[id]/self-fulfilled-slip/route.ts (new), src/app/api/orders/[id]/route.ts (added fulfillmentChannel/selfFulfilledReferenceNumber/deliveryCountry to response), src/components/orders/order-detail-view.tsx (SlipButton + type + icon import).
+
+---
+Task ID: SELFFULFILLED-B3
+Agent: main
+Task: Self-fulfilled channel — scan module wiring (processScan resolves SF ref)
+
+Work Log:
+- Read worklog for B1/B2 context (self-fulfilled channel: schema, SF ref generator, slip PDF). Read processScan() (scan.actions.ts:46-145) — confirmed the order-resolution is a parallel Promise.all of two findFirst: Order by trackingNumber + ExchangeShipment by trackingNumber. No OR, no other fields. 6 scan modes branch AFTER the lookup, using lookup.entityId + lookup.status.
+- Updated the Order findFirst query (scan.actions.ts:78-94): changed `where: { trackingNumber: trimmedTracking, companyId }` to `where: { companyId, OR: [{ trackingNumber: trimmedTracking }, { selfFulfilledReferenceNumber: trimmedTracking }] }`. This lets a scanned SF-YYYY-NNNNN reference resolve to the self-fulfilled order exactly like a courier tracking number resolves to a courier order. The ExchangeShipment query stays trackingNumber-only (exchange shipments are always courier-shipped — no self-fulfilled exchange shipments exist).
+- Added `selfFulfilledReferenceNumber: true` to the Order query's select + to the ScanLookupResult interface + the order lookup object. For orders matched by SF ref, `trackingNumber` will be null (self-fulfilled orders have no courier tracking number) — the `selfFulfilledReferenceNumber` field carries the SF ref so the scan station can display the correct identifier. For exchange shipments, `selfFulfilledReferenceNumber` is null (they don't have one).
+- All 6 scan modes (mark_processing, mark_packed, warehouse_handover, receive_return, locate_cancelled, cancel_via_scan) work identically — they branch on scanMode AFTER the lookup, using lookup.entityId + lookup.status, which are populated the same way regardless of which field matched. Only the lookup step changed.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres):
+1. Lookup by selfFulfilledReferenceNumber: created a self-fulfilled order with SF-2026-00001, queried with OR: [trackingNumber: 'SF-2026-00001', selfFulfilledReferenceNumber: 'SF-2026-00001'] → found the order. PASS.
+2. Lookup by trackingNumber (regression): created a courier order with trackingNumber 'TRACK-XYZ-123', queried with the same OR → found by trackingNumber. PASS.
+3. Non-existent value → null (not_found): queried for 'DOES-NOT-EXIST' → null → not_found path. PASS.
+4. Company isolation: queried company2 for company1's SF ref → null (no cross-company match). PASS.
+
+Stage Summary:
+- B3 COMPLETE. processScan() now resolves self-fulfilled orders by their SF-YYYY-NNNNN reference number (via OR on the Order query) in addition to courier tracking numbers. All 6 scan modes work identically once the order is found — only the lookup step changed. The ScanLookupResult carries selfFulfilledReferenceNumber so the scan station displays the correct identifier.
+- Files changed: src/lib/actions/scan.actions.ts.
+
+---
+Task ID: MARKETS-C1
+Agent: main
+Task: Markets — schema + auto-Default + management UI
+
+Work Log:
+- Read worklog for prior Market model state (from MarketVariantPricing work — had only id, companyId, name, isDefault, createdAt, updatedAt, variantPricing). Investigated partial unique index precedent (invitation_pending_email_unique, customer_phones_one_primary_idx).
+- Schema: EXTENDED the existing Market model with: currency (String @default("PKR")), allowedPaymentTypes (String[] @default(["full_cod","partial_advance","fully_prepaid"])), isActive (Boolean @default(true)), countries (MarketCountry[]), products (MarketProduct[]). Renamed variantPricing → pricing (per task spec). Kept @@unique([companyId, name]) + @@index([companyId]).
+- ADDED MarketCountry model: id, marketId, market, companyId, countryCode. @@unique([companyId, countryCode]) — a country belongs to at most one market per company.
+- ADDED MarketProduct model (minimal, to satisfy the Market.products relation): id, marketId, market, companyId, orgProductId, orgProduct, isActive, timestamps. @@unique([marketId, orgProductId]). Forward-looking for market-level product visibility (extended in a later task). Added marketProducts MarketProduct[] back-relation on OrgProduct.
+- ADDED partial unique index market_one_default_per_company on Market(companyId) WHERE isDefault=TRUE — enforces "exactly one Default per company" at the DB level. Documented in supabase/functions-only.sql + applied to live DB. Follows the invitation_pending_email_unique precedent.
+- db:push succeeded (--accept-data-loss for the required currency column on existing 13 rows — defaults handled the backfill).
+- Backfill script: iterated all 13 existing companies. Each already had a Default market (from prior MarketVariantPricing work) but MISSING: MarketCountry entries for the company's countryCode. Backfill created a MarketCountry (PK) for each company's Default market. Report: 13 fixes applied (13 MarketCountry rows created). Currency was already correct (PKR default from schema).
+- Auto-creation: updated onboarding/create-company/route.ts step 5b to create the Default market with: name=company.countryCode (e.g. "PK"), currency=company.baseCurrency, allowedPaymentTypes=all three, isDefault=true, isActive=true, + one MarketCountry for the company's countryCode. New companies get this automatically.
+- API routes:
+  * GET /api/markets — list (now includes currency, allowedPaymentTypes, isActive, countries, pricedVariantCount via _count.pricing)
+  * POST /api/markets — create (checks country conflicts BEFORE creating — clear 400 error, not raw P2002)
+  * PATCH /api/markets/[id] — update (name, currency, allowedPaymentTypes, isActive, countries replacement with conflict checking)
+  * DELETE /api/markets/[id] — delete (GUARD: cannot delete Default market — returns 400 "Promote another market to Default first")
+  * POST /api/markets/[id] — promote to Default (atomically: unset current Default, set this one — sequential to avoid two-Default race)
+- Markets management UI (src/components/markets/markets-view.tsx): list (card grid with name, currency, Default badge, countries, payment types, priced count), create/edit dialog (name input, CurrencySelector, payment-type checkboxes, country multi-select via CountrySelector + Add/remove with conflict blocking), promote-to-Default button, delete with confirmation (disabled for Default). Follows existing settings CRUD patterns (PageHeader, Card, Dialog, Badge, Button).
+- Added 'markets' route to sidebar.tsx (Globe2 icon, elevatedOnly) + app-store.ts view type + page.tsx dynamic import + render case.
+- Updated /api/markets GET to use `pricing` (renamed from `variantPricing`) for the _count.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres):
+1. Default market backfill: currency=PKR (matches company baseCurrency) PASS, allowedPaymentTypes=all 3 PASS, countries=[PK] PASS.
+2. Create UAE market (AED, AE, fully_prepaid only) + UK market (GBP, GB, fully_prepaid+partial_advance): both created successfully.
+3. Uniqueness blocks country overlap: tried to add PK (already in Default) to UAE market → blocked by @@unique([companyId, countryCode]) PASS.
+4. Delete Default blocked: isDefault=true → API returns 400 PASS.
+5. Promote UAE to Default: old Default demoted, UAE promoted PASS.
+6. Old Default now deletable (after demotion) PASS.
+7. Exactly one Default per company (count=1) PASS.
+8. Partial unique index prevents two Defaults: tried to set UK as Default while UAE is Default → blocked by market_one_default_per_company index PASS.
+
+Stage Summary:
+- C1 COMPLETE. Markets schema (Market + MarketCountry + MarketProduct) applied. Partial unique index enforces one-Default-per-company. Auto-creation at company onboarding. Backfill completed for 13 existing companies (each got a MarketCountry for PK). Full management UI (list/create/edit/archive/promote/delete) with country-conflict blocking + Default-delete guard. No domestic/international special-casing — every market is structurally identical.
+- Files changed: prisma/schema.prisma, supabase/functions-only.sql, src/app/api/onboarding/create-company/route.ts, src/app/api/markets/route.ts, src/app/api/markets/[id]/route.ts (new), src/components/markets/markets-view.tsx (new), src/components/layout/sidebar.tsx, src/stores/app-store.ts, src/app/page.tsx.
+
+---
+Task ID: MARKETS-C2
+Agent: main
+Task: Markets — pricing with full cascade/sync, one-time seed, repurposed tab
+
+Work Log:
+- Read worklog for prior MARKET-PRICING work (Task ID MARKET-PRICING) which implemented this exact feature earlier in the session. Verified the current state:
+  * MarketVariantPricing schema: EXISTS with exact spec fields (id, marketId, market, variantId, variant, salePrice, comparePrice, salePriceSyncedWithParent, comparePriceSyncedWithParent, updatedAt, @@unique([marketId, variantId])). schema.prisma:891-904.
+  * 4 endpoints market-aware: ALL 4 (variant-groups GET, override-price, sale-price cascade, resync-price) read/write MarketVariantPricing + accept marketId param. Confirmed via grep: all reference MarketVariantPricing/marketPricing + marketId/market_id.
+  * Pricing tab redesigned: PricingTabWithMarkets component renders market sub-tabs (Default first) with completion badges ("N priced" / "No prices") + "Copy from Default" bulk action for empty markets. ParentChildVariantTable passes marketId to all pricing API calls + queryKey.
+  * Dead PricingTab function: REMOVED (only PricingTabWithMarkets exists).
+  * Orphaned /api/products/[id]/pricing route: DELETED.
+  * One-time seed: DONE (82 pricing rows copied from CompanyVariantPricing → MarketVariantPricing across 6 companies with pricing data, preserving sync flags).
+  * ParentChildVariantTable marketId plumbing: all 3 pricing POST calls (override-price, sale-price cascade, resync-price) pass market_id body field; all 10 invalidateQueries calls include marketId in queryKey.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres):
+1. One-time seed: 6 companies with CVP rows → all have matching MVP counts in their Default market (Usman Commerce 8/8, test company 2 9/9, Company b 4/4, dhhdh 43/43, Muzammal Collection 6/6, Test Company Renamed 12/12). PASS.
+2. Sync flags copied: spot-checked first 3 rows of dhhdh — salePriceSyncedWithParent + comparePriceSyncedWithParent match exactly between CVP and MVP. PASS.
+3. Cross-market isolation: created a second market (C2-ISO-Test) for dhhdh, copied a variant's pricing, overrode it in market2 (salePrice=9999.99, synced=false). Default market's row for the same variant UNCHANGED (salePrice=1200, synced=true). PASS.
+4. Endpoints market-aware: all 4 route files reference MarketVariantPricing + accept marketId. PASS.
+5. Dead code removed: /api/products/[id]/pricing route deleted + dead PricingTab function removed. PASS.
+
+Stage Summary:
+- C2 COMPLETE. All 5 sub-tasks verified as already in place from the prior MARKET-PRICING work (this task was a re-confirmation of the same requirements). MarketVariantPricing schema applied, one-time seed done (82 rows), 4 endpoints market-aware, Pricing tab redesigned with market tabs + completion badges + Copy from Default, dead code removed. Cross-market isolation confirmed.
+- No code changes needed — everything was already correct from the prior implementation.
+
+---
+Task ID: MARKETS-C3
+Agent: main
+Task: Markets — product enablement gate
+
+Work Log:
+- Read worklog for C1/C2 context. Found the C1 MarketProduct model had a different shape (orgProductId, isActive, companyId, createdAt, updatedAt) than the C3 spec (productId, enabledAt, no isActive/companyId). Updated the model to the C3 spec: id, marketId, market, productId, product (OrgProduct), enabledAt, @@unique([marketId, productId]). db:push succeeded (--accept-data-loss, safe: no rows existed). Renamed the OrgProduct back-relation from marketProducts (field already existed from C1, updated to match the new productId field name).
+- Created src/lib/markets.ts with 4 helpers:
+  * isMultiMarketCompany(companyId): returns true if the company has >1 market (the single-vs-multi threshold).
+  * isProductEnabledForMarket(marketId, productId): single-market → always true; multi-market → explicit MarketProduct row required.
+  * getEnabledProductIdsForMarket(marketId): single-market → null (meaning "all products"); multi-market → Set of enabled product IDs.
+  * backfillDefaultMarketProducts(companyId): creates MarketProduct rows for ALL subscribed products in the Default market (used at the single→multi transition). skipDuplicates for idempotency.
+- Wired the backfill into POST /api/markets (market creation): when existingMarketCount === 1 (creating the second market = the transition), calls backfillDefaultMarketProducts before creating the new market. Logs the count. This ensures existing products stay available in Default when the company transitions to multi-market mode.
+- Created API route GET/PUT /api/products/[id]/market-enablement:
+  * GET: returns { multiMarket, markets: [{ id, name, isDefault, currency, enabled }] }. enabled = true for all markets in single-market mode; in multi-market mode, enabled = explicit row exists.
+  * PUT { marketId, enabled }: toggles the MarketProduct row. enabled=true → create (idempotent); enabled=false → delete. Returns 400 in single-market mode (not configurable). Audit-logs both actions.
+- Added "Markets" tab to product-detail-view.tsx (visible when product.subscription exists). The MarketsEnablementSection component:
+  * Fetches market-enablement data.
+  * Single-market mode: shows an info card ("Your company currently has only the Default market. All products are automatically available. Create additional markets to control per-market availability.") — no checkboxes.
+  * Multi-market mode: shows a card with one row per active market (checkbox + name + Default badge + currency badge + Enabled/Not enabled badge). Toggling the checkbox calls PUT /api/products/[id]/market-enablement.
+  * Added Globe2 + Checkbox imports + useMutation (already imported).
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres, dhhdh company with 18 subscribed products):
+1. Single-market → all products auto-enabled: market count=1, MarketProduct rows=0 (no explicit rows needed). PASS.
+2. Second-market transition → backfill: created C3-Test-Market, backfilled 18 products into Default market. Default market: ENABLED (explicit row). C3-Test-Market: NOT enabled (no auto-enable in new market). PASS.
+3. Enable product for new market: created MarketProduct row → ENABLED. PASS.
+4. Disable product: deleted MarketProduct row → NOT enabled. PASS.
+
+Stage Summary:
+- C3 COMPLETE. MarketProduct schema (C3 spec) applied. Single-market auto-enable rule implemented (via isMultiMarketCompany helper — all callers check this first). Second-market transition backfill wired into market creation (auto-creates explicit Default rows for all existing products). Markets tab on product-detail-view with per-market checkboxes (only shown in multi-market mode; single-market shows an info message). Enablement toggle API + audit logging.
+- Files changed: prisma/schema.prisma (MarketProduct updated to C3 spec), src/lib/markets.ts (new — 4 helpers), src/app/api/markets/route.ts (backfill on transition), src/app/api/products/[id]/market-enablement/route.ts (new — GET/PUT), src/components/products/product-detail-view.tsx (Markets tab + MarketsEnablementSection + imports).
+
+---
+Task ID: VARIANT-GATE-D1
+Agent: main
+Task: Fix the variant toggle — disable-with-reason instead of hide (gate 1 of 3-gate system)
+
+Work Log:
+- Read worklog for prior VARIANT-GATE1 work (same task, completed earlier in the session). Verified the current state:
+  * GET /api/products (src/app/api/products/route.ts:48): `include_inactive_variants` query param EXISTS. When true: variant-level where=undefined (all variants) + isActive added to select + response. When false (default): existing behavior (where: { isActive: true }).
+  * order-create-view.tsx (line 506): productsQuery calls `/api/products?pageSize=100&include_inactive_variants=true`. Picker (line 1932): `variantDisabled = v.isActive === false` → grayed out (opacity-60 cursor-not-allowed bg-muted/30), "Not enabled for your company" badge, no add-to-cart button.
+  * products-view.tsx (line 114): calls `/api/products` WITHOUT the param → default behavior → variant-level filter stays { isActive: true } → catalog deliberately unaffected (surgical query-param approach, backwards-compatible).
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (code-verified, already browser-verified in VARIANT-GATE1):
+1. Toggle a variant off → appears disabled with "Not enabled for your company" in order-create picker (NOT hidden). Browser-verified in VARIANT-GATE1 (toggled F-18A-MAROON off, confirmed disabled rendering + no plus-button).
+2. General catalog view unchanged — products-view.tsx calls /api/products without include_inactive_variants → variant-level filter stays { isActive: true } + variantCount stays active-only. Deliberately unaffected.
+3. product-detail-view.tsx uses /api/products/[id] (different route, no isActive filter, already shows all variants with VariantActiveSwitch toggle). Unaffected.
+
+Stage Summary:
+- D1 COMPLETE (already in place from VARIANT-GATE1). No code changes needed — everything was correct. Gate 1 of the 3-gate variant visibility system: variant isActive toggle now renders as disabled-with-reason in the order-create picker instead of hiding the variant entirely. Catalog + product-detail views deliberately unaffected.
+
+---
+Task ID: D2-INV
+Agent: Explore
+Task: Investigate order-create flow for D2 (3-gate enforcement + market resolution + payment types)
+
+Work Log:
+- Read /home/z/my-project/worklog.md (focused on MARKETS-C1, MARKETS-C2, MARKETS-C3, VARIANT-GATE-D1) for context on Markets + variant gate system.
+- Located prior task IDs at worklog.md:10522 (C1), 10561 (C2), 10588 (C3), 10621 (D1).
+- Confirmed src/lib/markets.ts (124 lines) has 4 helpers: isMultiMarketCompany, isProductEnabledForMarket, getEnabledProductIdsForMarket, backfillDefaultMarketProducts. NO resolveMarketByCountry helper exists.
+- Searched whole src/ tree for resolveMarketByCountry | resolveMarket | getMarketByCountry | findMarketByCountry → zero matches. Confirmed absence.
+- Read prisma/schema.prisma:827-903 — confirmed Market, MarketCountry (@@unique([companyId, countryCode])), MarketProduct (@@unique([marketId, productId])), MarketVariantPricing (@@unique([marketId, variantId])) models + their fields.
+- Read order-create-view.tsx:91-104 (VariantOption interface), :220-289 (paymentType + deliveryCountry state), :501-575 (productsQuery + variantOptions useMemo + variantSearchResults useMemo), :988-1001 (addressSelectorValue + handleAddressSelectorChange), :1086-1111 (PaymentSection render site), :1861-1978 (ItemsSection + variant row rendering + gate-1 disabled rendering), :2092-2252 (PaymentSection component + 3 PaymentTypeCard buttons), :2338-2389 (PaymentTypeCard component).
+- Read order.schemas.ts:59-129 (createManualOrderSchema) — payment_type enum at :72, delivery_country at :85, fulfillment_channel at :110, refine at :116-128 only checks advance_amount when payment_type='partial_advance'. No market / allowedPaymentTypes validation.
+- Read order.actions.ts:318-699 (createManualOrder): :338 schema parse, :360-474 Promise.all batch (customer/variants/settings/orderNumber — NO market query), :558-572 payment status mapping, :609-659 order.create data block (fulfillmentChannel at :615, paymentType at :622, deliveryCountry at :640). Grep for "market"/"Market" in order.actions.ts → NO matches. Confirmed: NO market resolution + NO payment-type-vs-market validation anywhere in createManualOrder.
+- Verified Order schema fields at prisma/schema.prisma:1960-2069 (paymentType at :2000, fulfillmentChannel at :1980, deliveryCountry at :2042).
+
+Stage Summary:
+- D2-INV COMPLETE. Investigation only — no files modified.
+- Frontend (order-create-view.tsx): variantOptions useMemo at :511-529 builds from productsQuery.data.products (which uses include_inactive_variants=true for gate-1 visibility). variantSearchResults useMemo at :567-575 filters+caps at 8. Gate-1 disabled rendering at :1926-1978 (variantDisabled = v.isActive === false → grayed-out card + "Not enabled for your company" badge + no plus-button). PaymentSection rendered at :1086-1111; the PaymentSection component itself lives at :2092-2252 with 3 PaymentTypeCard buttons at :2155 (Full COD, amber), :2163 (Partial Advance, sky), :2171 (Fully Prepaid, emerald). paymentType state at :232 ('full_cod' default). deliveryCountry state at :253 ('PK' default); threaded through AddressSelector via addressSelectorValue at :988-994 + handleAddressSelectorChange at :995-1001. NO market-awareness / allowedPaymentTypes filtering in the picker — all 3 payment types are always clickable regardless of deliveryCountry.
+- Backend (createManualOrder): schema accepts payment_type (enum-validated only — never checked against Market.allowedPaymentTypes) + delivery_country (free 2-char string). order.create block sets fulfillmentChannel (from input) + deliveryCountry (input or 'PK' default) but NEVER resolves or persists a marketId. Variants are fetched via orgProductVariant.findMany with `include: { companyPricing }` (line 460) — uses CompanyVariantPricing, NOT MarketVariantPricing. NO market resolution, NO pricing-existence check, NO payment-type gate.
+- Markets lib (src/lib/markets.ts): 4 helpers exist (isMultiMarketCompany, isProductEnabledForMarket, getEnabledProductIdsForMarket, backfillDefaultMarketProducts). NO resolveMarketByCountry helper — needs to be added for D2.
+- Schemas confirmed: MarketCountry (@@unique([companyId, countryCode]) — country→market is 1:1 per company), MarketVariantPricing (id, marketId, variantId, salePrice Decimal(12,2), comparePrice Decimal?(12,2), sync flags, @@unique([marketId, variantId])). NO existing "does pricing exist for variant+market" helper.
+- Gaps for D2 implementation: (1) need resolveMarketByCountry(companyId, countryCode) helper in markets.ts; (2) need pricing-existence helper (e.g. hasVariantPricingForMarket(marketId, variantId)); (3) need to wire market resolution into createManualOrder between schema parse + order.create; (4) need payment_type-vs-Market.allowedPaymentTypes validation (schema refine or runtime check); (5) need frontend PaymentSection to filter/disable buttons based on resolved market's allowedPaymentTypes (currently all 3 always clickable); (6) need variant picker gate-2 (market enablement) + gate-3 (pricing existence) — currently only gate-1 (isActive) is implemented.
+
+---
+Task ID: MARKETS-D2
+Agent: main
+Task: Three-gate enforcement + strict country blocking + payment-type restriction
+
+Work Log:
+- Read worklog for C1-C3 + D1 context. Launched Explore subagent (D2-INV) to investigate the full order-create flow: variant picker, PaymentSection, createManualOrder, market helpers. Confirmed: no existing resolveMarketByCountry, no gate-2/gate-3 checks, no payment-type validation against market, no strict country blocking.
+- Added 3 helpers to src/lib/markets.ts:
+  * resolveMarketByCountry(companyId, countryCode) — STRICT (no Default fallback). Returns { market | null, isMultiMarket }. Uses MarketCountry.findFirst to find the market claiming this country.
+  * hasVariantPricingForMarket(marketId, variantId) — gate-3 primitive (single check).
+  * getPricedVariantIdsForMarket(marketId, variantIds) — gate-3 batch version (returns Set).
+- Created API route GET /api/orders/market-for-country?countryCode=XX — returns ALL gate data in one call: market (or null if blocked), isMultiMarket, allowedPaymentTypes, enabledProductIds (null=all for single-market), pricedVariantIds, blocked + blockReason. This lets the picker do all 3 gate checks client-side without N separate API calls.
+- order-create-view.tsx:
+  * Added marketContextQuery (useQuery keyed by deliveryCountry) that fetches /api/orders/market-for-country.
+  * Added productId to VariantOption interface + variantOptions useMemo (needed for gate-2 check).
+  * 3-gate check in the picker: gateReason computed in priority order — gate 1 (isActive=false → "Not enabled for your company") → gate 2 (MarketProduct missing → "Not enabled for the [Market] market") → gate 3 (no MarketVariantPricing → "No price set for [Market]"). Only the FIRST failing reason is shown. Disabled variants are grayed out + not clickable.
+  * Strict country blocking: if isCountryBlocked (marketContext.blocked===true), handleSubmit returns early with a toast error + scrolls to the customer section. A visible warning banner (destructive styling) appears below the AddressSelector.
+  * Payment type selector: PaymentSection now accepts allowedPaymentTypes; the 3 PaymentTypeCard buttons are wrapped in conditional renders — only allowed types are shown. An effect auto-switches the payment type if the currently-selected one is no longer allowed (e.g. country changed).
+- createManualOrder (order.actions.ts): added server-side enforcement after schema parse — resolveMarketByCountry(ctx.company.id, deliveryCountry); if null → return error "This country isn't assigned to any market."; if payment_type not in resolvedMarket.allowedPaymentTypes → return error with the allowed list. This is the authoritative server-side guard (client-side is UX, server-side is security).
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres — dhhdh company, 18 subscribed products):
+1. Gate 1 (isActive=false): variant toggled off → "Not enabled for your company" fires first (even though gates 2+3 would pass). PASS.
+2. Gate 2 (MarketProduct missing for market2): variant active, has Default pricing, but no MarketProduct for D2-Test-Market → "Not enabled for the D2-Test-Market market". PASS.
+3. Gate 3 (no pricing for market2): variant active, MarketProduct enabled for market2, but no MarketVariantPricing → "No price set for D2-Test-Market". PASS.
+4. All gates pass (Default market): variant active + MarketProduct exists + MVP exists → no gate fires, variant is selectable. PASS.
+5. Strict country blocking (country=US, not in any market): no MarketCountry for US → order creation blocked with "This country isn't assigned to any market." PASS.
+6. Payment type restriction: Default market allows all 3; D2-Test-Market allows only fully_prepaid → for AE country, only "Fully Prepaid" is shown in the selector. PASS.
+
+Stage Summary:
+- D2 COMPLETE. 3-gate enforcement (isActive → MarketProduct → MarketVariantPricing) with first-failing-reason in priority order. Strict country blocking (no Default fallback — unmatched country blocks order creation). Payment-type selector filtered to resolved market's allowedPaymentTypes + server-side enforcement. Fully-configured Default-market order works exactly as before (all gates pass, all payment types available).
+- Files changed: src/lib/markets.ts (3 new helpers), src/app/api/orders/market-for-country/route.ts (new), src/components/orders/order-create-view.tsx (market context query + 3-gate picker + country-block warning + payment filter + auto-switch effect + productId on VariantOption), src/lib/actions/order.actions.ts (server-side market resolution + payment-type validation).
+
+---
+Task ID: MARKETS-D3
+Agent: main
+Task: External orders — never block, always flag (3-gate soft enforcement)
+
+Work Log:
+- Read worklog for D2 context (3-gate strict enforcement for manual orders). Investigated the existing needsReview pattern (OrderItem.needsReview Boolean + amber "Needs Review" badge on order-detail-view). Investigated the Shopify ingestion path (createOrderFromShopifyWebhook — uses parseFloat(li.price) for unitPrice, no market resolution, no gate checks).
+- Schema: added `needsReviewReason String?` to OrderItem (extends the existing needsReview pattern with a reason — consistent visual treatment, not a new pattern). Added `marketResolutionIssue String?` to Order (order-level flag for the country-not-in-market case). db:push succeeded.
+- Shopify ingestion (createOrderFromShopifyWebhook in order.actions.ts): rewrote the variant loop to apply the 3-gate logic SOFTLY (flag, don't block):
+  * Resolves market by delivery country via resolveMarketByCountry (STRICT — no Default fallback, but NEVER blocks).
+  * If no market resolved: sets marketResolutionIssue on the order + ALL items get needsReview=true, needsReviewReason="Country not in any market", unitPrice=0 (no price silently guessed).
+  * If market resolved: checks 3 gates per item (isActive → MarketProduct → MarketVariantPricing). Failing items get needsReview=true + the specific D2 reason + unitPrice=0. Passing items use the Shopify-sent price (existing behavior).
+  * The order is ALWAYS created — no blocking for external orders.
+  * marketResolutionIssue + needsReview/needsReviewReason persisted on order.create + orderItem.create.
+- order-detail API (GET /api/orders/[id]): added marketResolutionIssue to the order response + needsReviewReason to each item response.
+- order-detail-view.tsx:
+  * Added marketResolutionIssue + needsReviewReason to the TypeScript types.
+  * Market resolution issue banner: amber callout below the status badge row showing the issue message + "This order was created from an external source. Items may have no price applied — resolve the market issue + review flagged items below."
+  * Per-item needsReview badge: now shows the reason — "Needs Review: [reason]" (e.g. "Needs Review: Not enabled for the D3-Test-Market market"). Amber styling matches the existing pattern (not a new visual treatment).
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres — dhhdh company, multi-market):
+1. Shopify order, country=US (not in any market): marketResolutionIssue set on order, ALL items flagged needsReview=true with reason="Country not in any market", unitPrice=0. Order CREATED (not blocked). PASS.
+2. Shopify order, country=AE (D3-Test-Market), product NOT enabled for it: item flagged needsReview=true with reason="Not enabled for the D3-Test-Market market", unitPrice=0. Order CREATED. PASS.
+3. Shopify order, country=PK (Default), all gates pass: needsReview=false, unitPrice=Shopify price (NOT 0). No flags. PASS.
+
+Stage Summary:
+- D3 COMPLETE. External orders (Shopify) apply the same 3-gate logic as D2 but NEVER block — they flag instead. Country-not-in-market → order-level banner + all items flagged. Individual gate failures → per-item needsReview + specific reason. No price silently guessed (failing items get unitPrice=0). Consistent with the existing needsReview pattern (amber badge, not a new visual treatment).
+- Files changed: prisma/schema.prisma (needsReviewReason on OrderItem + marketResolutionIssue on Order), src/lib/actions/order.actions.ts (Shopify ingestion 3-gate soft enforcement), src/app/api/orders/[id]/route.ts (response fields), src/components/orders/order-detail-view.tsx (types + banner + per-item reason rendering).
+
+---
+Task ID: F1-INV
+Agent: Explore
+Task: Investigate 3 revenue sites + cron conventions for F1
+
+Work Log:
+- Read worklog.md D2/D3/3B entries (lines ~10165-10260) for prior context on cron conventions + currency-blind revenue finding (item 5 from the 12-item investigation).
+- Read /home/z/my-project/src/components/orders/orders-view.tsx lines 560-619 (stats useMemo) and lines 740-779 (Revenue StatCard render). Also read lines 341-345 (formatCompactPKR helper).
+- Read /home/z/my-project/src/lib/actions/order.actions.ts listOrders (lines 1884-1980) — confirmed no currency field in the select/projected response.
+- Read /home/z/my-project/src/lib/analytics/order-funnel.ts in full (1-178) — computeOrderFunnelStats at 63-153, revenue sum at 119-121, order query select at 88-94.
+- Read /home/z/my-project/src/lib/actions/customer.actions.ts updateCustomerStats (lines 1256-1330).
+- Read /home/z/my-project/src/app/api/cron/sync-cities/route.ts in full (1-84).
+- Read /home/z/my-project/vercel.json in full (1-21).
+- Read /home/z/my-project/instrumentation.ts in full (1-92).
+- Grep'd prisma/schema.prisma for `ExchangeRate|exchange_rate|exchangeRate` — ZERO matches. Grep'd entire repo for `ExchangeRateSnapshot` — ZERO matches.
+- Grep'd prisma/schema.prisma for `currency` — 6 matches: Company.baseCurrency (130), MetricEvent.currency (446), Market.currency (835), EmployeeSalaryProfile.currency (2568), and 2 doc comments (832-834, 2603-2604, 2616). NO Order.currency column exists.
+- Read prisma/schema.prisma Order model lines 1960-2079 — confirmed no currency column. totalOrderValue is `Decimal @default(0) @db.Decimal(14, 2)` at line 2016.
+- Read prisma/schema.prisma Market model lines 827-839 — confirmed `currency String @default("PKR")` at line 835.
+- Read prisma/schema.prisma Company model lines 122-139 — confirmed `baseCurrency String @default("PKR")` at line 130. (NOTE: Organization model has NO baseCurrency — only Company does. Prior worklog text mentioning "Organization.baseCurrency" was imprecise.)
+- Read prisma/schema.prisma Customer model lines 1542-1578 — confirmed `totalOrderValue Decimal @default(0) @db.Decimal(14, 2)` at line 1553 (the cached column updateCustomerStats writes to).
+- Grep'd src/ for `baseCurrency` — 30+ usages. Key ones: workspace.ts:43 (WorkspaceContext type), workspace.ts:94 (selected from activeCompany), workspace.ts:178 (returned in ctx), onboarding/create-company/route.ts:125 (Default market's currency = company.baseCurrency), company-settings-view.tsx:316 (warning that changing baseCurrency does NOT convert existing totals), payslips/own/[payslipId]/route.ts:82 (defaults payslip currency to company.baseCurrency).
+- Grep'd src/ for `market.currency|markets.*currency` — Market.currency is the source-of-truth for per-market currency. Surfaced in markets-view.tsx (badge + edit form), markets API GET/POST, market-for-country API (returns resolved market's currency), product-detail-view (market enablement list shows currency per market).
+
+Stage Summary:
+- ALL THREE REVENUE SITES ARE CURRENCY-BLIND. None filter by currency, none convert via FX rates, none group by market currency. They all sum raw Decimal totalOrderValue across all orders assuming a single base currency.
+
+  1) orders-view.tsx REVENUE (frontend, scoped to whatever the stats query returns):
+     - File: /home/z/my-project/src/components/orders/orders-view.tsx
+     - stats useMemo at lines 570-599:
+         const revenue = list
+           .filter((o) => o.status !== 'cancelled')
+           .reduce((sum, o) => sum + o.totalOrderValue, 0)
+     - StatCard render at lines 754-763:
+         <StatCard label="Revenue" sublabel="Non-cancelled orders"
+           value={statsLoading ? undefined : formatCompactPKR(stats.revenue)}
+           icon={<Banknote className="h-5 w-5" />} tone="sky" ... />
+     - formatCompactPKR (lines 341-345) HARDCODES the "Rs." prefix:
+         function formatCompactPKR(n: number): string {
+           if (Math.abs(n) >= 1_000_000) return `Rs. ${(n / 1_000_000).toFixed(1)}M`
+           if (Math.abs(n) >= 1_000) return `Rs. ${(n / 1_000).toFixed(1)}k`
+           return formatPKR(n)
+         }
+     - orders query response (order.actions.ts listOrders lines 1917-1970) returns NO currency field. Projects: subtotal, discountAmount, courierCharges, totalOrderValue, advanceAmount, etc. — all as Number(decimal). No `currency` key.
+     - SCHEMA: Order model (prisma/schema.prisma:1960-2079) has NO currency column. totalOrderValue is `Decimal @default(0) @db.Decimal(14, 2)` (line 2016).
+     - IMPLICATION FOR F1: this card displays "Rs. X" regardless of whether any of the summed orders are in AED/GBP markets. Needs to either (a) convert all non-base currencies to base via ExchangeRateSnapshot before summing, or (b) display per-currency breakdown.
+
+  2) order-funnel.ts computeOrderFunnelStats (backend reusable, used by Employee Performance + Customer detail + future company KPIs):
+     - File: /home/z/my-project/src/lib/analytics/order-funnel.ts (full file 1-178)
+     - Function signature at line 63: export async function computeOrderFunnelStats(filter: OrderFunnelFilter): Promise<OrderFunnelStats>
+     - Order query at lines 87-94 (selects ONLY status + totalOrderValue — no currency):
+         const [orders, itemsAgg] = await Promise.all([
+           db.order.findMany({
+             where,
+             select: { status: true, totalOrderValue: true },
+           }),
+           db.orderItem.aggregate({ _sum: { quantity: true }, where: { order: where } }),
+         ])
+     - Revenue computation at lines 119-121:
+         const revenueGenerated = orders
+           .filter((o) => o.status === 'delivered' || o.status === 'dispatched')
+           .reduce((sum, o) => sum + Number(o.totalOrderValue), 0)
+     - NOTE: uses delivered||dispatched filter (different from orders-view.tsx which uses !== 'cancelled'). Both are currency-blind.
+     - IMPLICATION FOR F1: this is the SINGLE source of truth for funnel metrics. Fixing revenue here fixes Employee Performance + Customer detail + future company KPIs in one place. Needs to join Order → Market (via deliveryCountry → MarketCountry → Market) to get order currency, then convert via ExchangeRateSnapshot to ctx.company.baseCurrency.
+
+  3) customer.actions.ts updateCustomerStats (backend, persists cached column on Customer):
+     - File: /home/z/my-project/src/lib/actions/customer.actions.ts
+     - Function at line 1271: export async function updateCustomerStats(customerId: string): Promise<ActionResult>
+     - Order query at lines 1288-1291:
+         const orders = await db.order.findMany({
+           where: { customerId, status: { not: 'cancelled' } },
+           select: { totalOrderValue: true, status: true },
+         })
+     - Revenue computation at lines 1297-1299:
+         const totalOrderValue = orders
+           .filter((o) => o.status === 'delivered' || o.status === 'dispatched')
+           .reduce((sum, o) => sum + Number(o.totalOrderValue), 0)
+     - Persisted to Customer row at lines 1302-1305:
+         await db.customer.update({
+           where: { id: customerId },
+           data: { totalOrdersCount, totalOrderValue, totalRtoCount },
+         })
+     - SCHEMA: Customer.totalOrderValue is `Decimal @default(0) @db.Decimal(14, 2)` (prisma/schema.prisma:1553). Cached/denormalized column — kept in sync by this function after every order create + every status change.
+     - IMPLICATION FOR F1: this cached column mixes all currencies. Fixing requires converting each order's totalOrderValue to base currency before summing. The cached column will then represent "total order value in company base currency" — consistent with the F1 design goal of "converted to base".
+
+- CRON CONVENTIONS (for adding the new exchange-rates cron):
+  - Auth pattern (src/app/api/cron/sync-cities/route.ts:32-47):
+      export const runtime = 'nodejs'
+      export const dynamic = 'force-dynamic'
+      export async function POST(req: NextRequest) {
+        try {
+          const cronSecret = process.env.CRON_SECRET
+          if (!cronSecret) {
+            console.error('[cron/sync-cities] CRON_SECRET env var is not set — refusing to run.')
+            return Response.json({ error: 'Server misconfiguration: CRON_SECRET is not set.' }, { status: 500 })
+          }
+          const providedSecret = req.headers.get('x-cron-secret') || req.headers.get('authorization')?.replace(/^Bearer\s+/i, '')
+          if (providedSecret !== cronSecret) {
+            return Response.json({ error: 'Unauthorized' }, { status: 401 })
+          }
+          // ... job body ...
+        } catch (err) {
+          return Response.json({ error: err instanceof Error ? err.message : 'Sync failed' }, { status: 500 })
+        }
+      }
+      export async function GET(req: NextRequest) { return POST(req) }
+    — Header name: `x-cron-secret` (with `authorization` Bearer fallback).
+    — Secret comparison: strict `!==` (NOT timingSafeEqual — existing convention).
+    — 500 if CRON_SECRET env unset (misconfiguration guard).
+    — 401 on secret mismatch.
+    — Both POST and GET exported (GET delegates to POST for manual/health-check triggers).
+
+  - vercel.json (4 existing cron entries):
+      { "path": "/api/cron/sync-cities",              "schedule": "0 */3 * * *" }   // every 3h
+      { "path": "/api/cron/poll-postex",              "schedule": "*/30 * * * *" }  // every 30m
+      { "path": "/api/cron/poll-leopard-safety-net",  "schedule": "0 */12 * * *" }  // every 12h
+      { "path": "/api/cron/generate-scan-reports",    "schedule": "0 1 * * *" }     // daily 1am UTC
+    — F1 will add a 5th entry: /api/cron/sync-exchange-rates (daily frequency is typical for FX; openexchangerates free tier refreshes hourly but daily snapshot is sufficient for the F1 use case).
+
+  - instrumentation.ts (in-process poller fallback, lines 32-91):
+      let pollerStarted = false
+      export async function register() {
+        if (process.env.NEXT_RUNTIME !== 'nodejs') return  // skip build/edge
+        if (pollerStarted) return                            // singleton guard
+        pollerStarted = true
+        const enablePoller = process.env.ENABLE_IN_PROCESS_POLLER !== 'false'  // default true
+        if (!enablePoller) {
+          console.log('[instrumentation] PostEx poller DISABLED (ENABLE_IN_PROCESS_POLLER=false)')
+          return
+        }
+        const POLL_INTERVAL_MS = 30 * 60 * 1000  // 30 min
+        const INITIAL_DELAY_MS  = 60 * 1000      // 1 min
+        const startPoller = async () => {
+          try {
+            const { pollPostExOrderStatuses } = await import('@/lib/actions/postex-status-poll.actions')  // DYNAMIC import
+            setTimeout(async () => { /* initial poll */ }, INITIAL_DELAY_MS)
+            setInterval(async () => { /* recurring poll */ }, POLL_INTERVAL_MS)
+          } catch (err) { console.error(...) }
+        }
+        startPoller()
+      }
+    — Env flag: ENABLE_IN_PROCESS_POLLER (default 'true'; set 'false' to disable for multi-replica).
+    — Pattern: dynamic import inside an async closure (avoids loading the polling code during build).
+    — Currently ONLY pollPostExOrderStatuses is wired in (the other 3 crons have NO in-process fallback).
+    — For F1: the exchange-rates cron does NOT strictly need an in-process poller (FX rates change slowly; daily vercel.json cron is fine). But if F1 wants one, the pattern is: add a second setInterval inside register() gated by the same ENABLE_IN_PROCESS_POLLER flag (or a separate ENABLE_IN_PROCESS_FX_POLLER), with dynamic import of the sync function. The 1-minute initial delay + try/catch wrapping is the convention.
+
+- ExchangeRateSnapshot: CONFIRMED ABSENT. Zero matches in prisma/schema.prisma (grep for `ExchangeRate|exchange_rate|exchangeRate` → no matches). Zero matches in entire /home/z/my-project/src tree (grep for `ExchangeRateSnapshot` → no matches). F1 must create this model from scratch — likely shape: { id, baseCurrency, quoteCurrency, rate Decimal, source (e.g. "openexchangerates" | "manual"), fetchedAt DateTime, createdAt DateTime, @@unique([baseCurrency, quoteCurrency, fetchedAt]) }.
+
+- Market.currency: CONFIRMED EXISTS (prisma/schema.prisma:835, `currency String @default("PKR")`). This is the per-market currency label. Source-of-truth for "which currencies are in use across markets". Surfaced via markets-view.tsx badge (line 187), markets API GET/POST, market-for-country API (line 84 — returns resolved market's currency), product-detail-view (line 623). For F1: the set of distinct Market.currency values for a company (joined via Market.companyId) = the set of source currencies that need to be converted to Company.baseCurrency. The Default market's currency always equals the company's baseCurrency (set at onboarding, line 125 of create-company/route.ts).
+
+- Company.baseCurrency: CONFIRMED EXISTS (prisma/schema.prisma:130, `baseCurrency String @default("PKR")`). NOTE: only on Company — Organization has NO baseCurrency field (despite earlier worklog text). It is the "converted to base" target currency for F1. Already passed through WorkspaceContext (workspace.ts:43 type, workspace.ts:94 select, workspace.ts:178 ctx return) so all server actions / API routes have access via getWorkspace(). Already used as the default for: Default market currency at onboarding (create-company/route.ts:125), payslip currency (payslips/own/[payslipId]/route.ts:82). company-settings-view.tsx:316 explicitly warns: "Changing base currency does NOT convert existing monetary values — only the display label changes going forward." — F1 does NOT change this behavior; F1 adds a SEPARATE per-order conversion using the Order's resolved market currency → Company.baseCurrency via ExchangeRateSnapshot.
+
+- Files for F1 to touch (NOT changed in this investigation — F1-INV is investigation-only):
+  - prisma/schema.prisma — ADD ExchangeRateSnapshot model.
+  - src/lib/exchange-rates.ts (NEW) — getRate(base, quote, asOf?), convertAmount(amount, fromCurrency, toCurrency, companyId), syncExchangeRates(companyId) action.
+  - src/app/api/cron/sync-exchange-rates/route.ts (NEW) — copy sync-cities auth pattern.
+  - vercel.json — add 5th cron entry.
+  - src/lib/analytics/order-funnel.ts — modify the order query (line 88-94) to include Market.currency via Order.deliveryCountry → MarketCountry → Market join; convert before summing into revenueGenerated.
+  - src/lib/actions/customer.actions.ts — modify updateCustomerStats (lines 1288-1299) similarly; persist converted total to Customer.totalOrderValue.
+  - src/components/orders/orders-view.tsx — modify stats useMemo (lines 570-599) + StatCard (lines 754-763) + formatCompactPKR (lines 341-345) to use company base currency dynamically. (Optionally: also display per-currency breakdown if multi-currency company.)
+  - src/lib/actions/order.actions.ts listOrders — add `currency` to the response projection (lines 1917-1970) so the frontend can group/convert.
+  - instrumentation.ts — OPTIONAL: add a second setInterval for in-process FX sync (only if daily cron is deemed insufficient).
+
+- F1-INV COMPLETE. Investigation only — no files modified.
+
+---
+Task ID: DASHBOARD-F1
+Agent: main
+Task: Dashboard/reports currency rollup (consolidated) — ExchangeRateSnapshot + cron + shared revenue function + 3-site refactor
+
+Work Log:
+- Read worklog for F1-INV investigation (3 revenue sites all currency-blind, no FX library, cron conventions confirmed). Launched Explore subagent (F1-INV) to verify the exact code at each site.
+- Schema: added ExchangeRateSnapshot model (id, currency, rateToBaseCurrency Decimal(12,6), fetchedAt, @@index([currency, fetchedAt])). Rates stored relative to USD (1 USD = rate units of the currency). db:push succeeded.
+- Created src/lib/exchange-rates.ts with 4 helpers:
+  * getLatestRates(currencies) — fetches the latest snapshot per currency, returns Map<currency, rate>.
+  * convertAmount(amount, fromCurrency, toCurrency, rates) — converts via USD intermediary: amount/rateFrom*rateTo. Returns null if either rate missing.
+  * syncExchangeRates(currencies) — fetches from open.er-api.com (free, no API key) + stores snapshots. 10s timeout. Returns { stored, errors }.
+  * getActiveCurrencies(companyId) — returns distinct currencies across the company's active markets.
+- Created cron route src/app/api/cron/refresh-exchange-rates/route.ts: exact same auth pattern as the other 4 crons (x-cron-secret header, Authorization Bearer fallback, 401/500 responses, POST+GET delegate, runtime='nodejs', dynamic='force-dynamic'). Collects all distinct currencies across ALL companies' active markets, calls syncExchangeRates. Added vercel.json entry (daily at 0 2 * * *).
+- Added in-process fallback to instrumentation.ts: ENABLE_IN_PROCESS_FX_REFRESH env flag (default 'true'), 24h interval, 5min initial delay, dynamic import of syncExchangeRates. Same pattern as the PostEx poller.
+- Created src/lib/analytics/revenue.ts with computeRevenueWithCurrencies(companyId, orders, baseCurrency): returns { perCurrency: Map<currency, total>, estimatedTotalBase: number|null, baseCurrency, estimateComplete }. Resolves each order's currency via deliveryCountry → MarketCountry → Market.currency. Falls back to baseCurrency for unknown countries. Converts to baseCurrency using latest ExchangeRateSnapshot via convertAmount. If rates missing, estimateComplete=false + per-currency breakdown still accurate.
+- Refactored order-funnel.ts computeOrderFunnelStats: added deliveryCountry to the order query select + baseCurrency to the filter interface. Replaced the raw reduce with computeRevenueWithCurrencies. Updated both callers (employee-stats.actions.ts + employees/[id]/performance/route.ts) to pass baseCurrency.
+- Refactored customer.actions.ts updateCustomerStats: added deliveryCountry to the order query. Resolves the customer's company + baseCurrency, then calls computeRevenueWithCurrencies for the totalOrderValue cached column.
+- Refactored orders-view.tsx: added a useQuery for GET /api/orders/revenue-summary (returns perCurrency + estimatedTotalBase + estimateComplete). The stats useMemo uses revenueData.estimatedTotalBase as the revenue value (fallback to the old client-side reduce while the API loads). The Revenue StatCard sublabel shows "Estimated (currency-converted)" or "Estimated (some rates missing)". The per-currency breakdown is available as a hover tooltip (title attribute) on the StatCard. Added `title` prop to StatCard component.
+- Created API route GET /api/orders/revenue-summary: fetches orders with totalOrderValue + status + deliveryCountry, filters non-cancelled, calls computeRevenueWithCurrencies, returns { perCurrency, estimatedTotalBase, baseCurrency, estimateComplete }.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings). Fixed a React Compiler dependency-array error (stats useMemo needed revenueData + orders in deps).
+
+VERIFICATION (E2E, live Postgres — dhhdh company with 3 currencies):
+- Created 3 test orders: PK (10000 PKR), AE (500 AED), GB (100 GBP) — all dispatched.
+- Country→Currency map correctly resolved: PK→PKR, AE→AED, GB→GBP.
+- Per-currency breakdown: PKR: 10000, AED: 500, GBP: 100 — all accurate, no conversion needed.
+- ExchangeRateSnapshot has 0 rows (no FX API fetch yet) → per-currency breakdown still displays correctly; estimated total would be partial (estimateComplete=false).
+- Cleanup: test orders + markets deleted.
+
+Stage Summary:
+- F1 COMPLETE. ExchangeRateSnapshot schema + cron route + in-process fallback. Shared computeRevenueWithCurrencies function refactored into all 3 revenue sites (orders-view, order-funnel, customer stats). Per-currency breakdown always accurate; estimated total in baseCurrency using latest rates (clearly labeled "(estimated)"). If rates missing/stale, breakdown still displays on its own. Conversion is DISPLAY ONLY — never touches stored order prices.
+- FX API: open.er-api.com (free, no API key, returns rates relative to USD). If network access is restricted in the sandbox, the cron/in-process fallback will log errors gracefully — existing snapshots remain usable, per-currency breakdown is unaffected.
+- Files changed: prisma/schema.prisma, vercel.json, instrumentation.ts, src/lib/exchange-rates.ts (new), src/lib/analytics/revenue.ts (new), src/app/api/cron/refresh-exchange-rates/route.ts (new), src/app/api/orders/revenue-summary/route.ts (new), src/lib/analytics/order-funnel.ts, src/lib/actions/employee-stats.actions.ts, src/app/api/employees/[id]/performance/route.ts, src/lib/actions/customer.actions.ts, src/components/orders/orders-view.tsx.
+
+---
+Task ID: INDEPENDENCE-G1
+Agent: main
+Task: Final independence check — fulfillment channel (B1-B3) vs Markets system (C1-D2)
+
+Work Log:
+- Audited all fulfillment-channel touchpoints for accidental coupling to Market/MarketCountry data:
+  1. order-create-view.tsx Self-Fulfilled auto-default: reads ONLY deliveryCountry (=== 'PK' / !== 'PK'). Does NOT reference marketContextQuery, resolvedMarket, enabledProductIdsSet, or any Market data. The effect depends on [deliveryCountry, userPickedCourier] — no market dependency. ✅ Independent.
+  2. createManualOrder fulfillment_channel: reads from d.fulfillment_channel (request payload). isSelfFulfilled = d.fulfillment_channel === 'self_fulfilled'. selfFulfilledReferenceNumber generated via generateSelfFulfilledReference(ctx.company.id). Auto-booking skip checks !isSelfFulfilled. NONE of these reference resolvedMarket or any Market data. ✅ Independent.
+  3. createManualOrder market resolution (D2): resolves market via resolveMarketByCountry(ctx.company.id, deliveryCountry). Blocks if no market. Validates payment_type against market.allowedPaymentTypes. Does NOT check fulfillment_channel. ✅ Independent (separate code block, separate concern).
+  4. scan.actions.ts processScan: resolves via OR: [trackingNumber, selfFulfilledReferenceNumber]. Zero references to Market/MarketCountry. ✅ Independent.
+  5. booking.actions.ts: passes order.deliveryCountry directly to revalidateCityAtBookingTime. Zero Market/MarketCountry references. ✅ Independent.
+  6. internal-slip-pdf.ts: zero Market/MarketCountry references. ✅ Independent.
+  7. self-fulfilled-slip API route: zero Market/MarketCountry references. ✅ Independent.
+  8. Shopify ingestion (createOrderFromShopifyWebhook): D3 market resolution + 3-gate flagging don't reference fulfillmentChannel. Shopify orders default to fulfillmentChannel='courier' via schema default. ✅ Independent.
+- NO accidental coupling found. Both systems key off deliveryCountry but answer different questions (logistics vs pricing) via completely separate code paths.
+
+VERIFICATION (E2E, live Postgres):
+- Created a GB market (GBP, properly priced variant at £50).
+- Created a SELF-FULFILLED order for GB: fulfillmentChannel='self_fulfilled', selfFulfilledReferenceNumber='SF-2026-00001', courierBookingStatus='not_booked'. The GB market's pricing exists independently. Scan resolves the SF ref independently. ✅
+- Created a COURIER order for the same GB market: fulfillmentChannel='courier', selfFulfilledReferenceNumber=null. Different channel, same market. ✅
+- Both orders share deliveryCountry=GB + the same market, but have completely independent fulfillment channels. ✅
+
+Stage Summary:
+- G1 COMPLETE. Fulfillment channel (B1-B3) and Markets system (C1-D2, D3) are fully independent. Both key off deliveryCountry but via separate code paths answering different questions (logistics vs pricing). No accidental coupling found anywhere. No fixes needed.
+
+---
+Task ID: FIX1-MARKETS-TAB
+Agent: main
+Task: Build the actual Markets tab on the product page (was blank/empty)
+
+Work Log:
+- Read the existing MarketsEnablementSection component (product-detail-view.tsx:617-727). Found it was ALREADY fully built: checkboxes per market, single-market info message, toggle mutation, API query. The component logic was correct.
+- Root cause: the Markets tab trigger + content were gated on `product.subscription` (the CompanyProductSetting subscription status). If the product isn't "subscribed" (no active CompanyProductSetting), `product.subscription` is null → the Markets tab doesn't render at all → appears as "blank/empty."
+- Fix: removed the `product.subscription` gate from the Markets tab trigger + content. Product enablement is a company-level concern (MarketProduct), not a subscription concern — the company should be able to see + control which markets a product is enabled in regardless of subscription status. The Pricing tab KEEPS the `product.subscription` gate (pricing requires subscription — that's a separate concern).
+- Added live count/summary: "Enabled in 2 of 3 markets" at the top of the multi-market view (computed from data.markets.filter(enabled).length / data.markets.length).
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres):
+1. Current enablement state: Default market enabled (backfilled), FIX1-Test-Market not enabled. Summary: "Enabled in 1 of 2 markets." ✅
+2. Toggle on (enable for FIX1-Test-Market): MarketProduct row created. Summary: "Enabled in 2 of 2 markets." ✅
+3. Toggle off (disable): MarketProduct row deleted. ✅
+4. Gate 2 effect: product enabled for Default → variant IS selectable for PK orders. Product NOT enabled for FIX1-Test-Market → variant NOT selectable for AE orders (gate 2 fails with reason "Not enabled for the FIX1-Test-Market market"). ✅
+5. Single-market behavior: with 1 market → info message "automatically available in your only market (Default)." With 2+ markets → checkboxes shown. ✅
+
+Stage Summary:
+- FIX1 COMPLETE. The Markets tab was already built but was hidden by the `product.subscription` gate. Removed the gate so the tab always shows. Added the "Enabled in N of M markets" live summary. The tab now correctly displays per-market checkboxes (multi-market) or the single-market info message, and toggling creates/deletes MarketProduct rows that directly affect gate 2 in order creation.
+- File changed: src/components/products/product-detail-view.tsx (removed product.subscription gate on Markets tab trigger + content; added live count summary).
+
+---
+Task ID: FIX2-BULK-PRODUCT
+Agent: main
+Task: Bulk product assignment from the Market's own page
+
+Work Log:
+- Created API route GET/PUT /api/markets/[id]/products:
+  * GET: returns ALL company products with their enabled status for this market + enabledCount/totalCount.
+  * PUT { productIds, action }: batch enable (createMany skipDuplicates) or disable (deleteMany) in a SINGLE operation. Audit-logged. Same MarketProduct table as Fix 1's per-product toggle.
+- Created market-detail-view.tsx component with:
+  * PageHeader showing market name, currency, Default badge, "N of M products enabled" summary.
+  * Searchable product list (text search filter, same pattern as order-create-view product picker).
+  * Per-product checkbox reflecting enabled status (reads from the same MarketProduct table).
+  * Select-all checkbox for the filtered set.
+  * "Enable selected (N)" / "Disable selected (N)" bulk action buttons that call PUT /api/markets/[id]/products with the selected product IDs in one batch.
+  * Running count: "N of M products enabled in this market" (computed from data.enabledCount/totalCount).
+  * Infinite-invalidates both ['market-products', marketId] and ['market-enablement'] queryKeys → both surfaces stay in sync.
+- Added "Products" button to each market card in markets-view.tsx → navigates to market-detail-view.
+- Added 'market-detail' route type to app-store.ts + page.tsx routing + dynamic import.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres):
+1. Bulk enable 5 products: 5 MarketProduct rows created in a single createMany batch (not 5 separate calls). ✅
+2. All 5 products have rows. ✅
+3. Sync with product-side Markets tab (Fix 1): checked 3 of the 5 products' enabled status via the same MarketProduct table → all show enabled=true. ✅ (both surfaces read/write the same table)
+4. Running count: "5 of 18 products enabled in FIX2-Bulk-Test". ✅
+5. Bulk disable 3 products: 3 rows deleted in a single deleteMany batch. Remaining 2 still enabled. The disabled product shows enabled=false on the product-side view. ✅ (synced)
+
+Stage Summary:
+- FIX2 COMPLETE. Bulk product assignment from the Market's own page works — searchable list, select-all, batch enable/disable in a single API call. Both surfaces (product-side single toggle from Fix 1, market-side bulk selection from Fix 2) read/write the SAME MarketProduct table and stay perfectly in sync (both queryKeys invalidated on every mutation).
+- Files changed: src/app/api/markets/[id]/products/route.ts (new — GET/PUT), src/components/markets/market-detail-view.tsx (new), src/components/markets/markets-view.tsx (added Products button + navigate import), src/stores/app-store.ts (market-detail route), src/app/page.tsx (dynamic import + render case).
+
+---
+Task ID: DISCOUNT-FIX
+Agent: main
+Task: Discount rework — server-side gate 3, remove unit_price, originalUnitPrice, per-item discount, Shopify total_discounts
+
+Work Log:
+- Schema: added 3 fields to OrderItem: `originalUnitPrice Decimal @db.Decimal(12,2)` (system-resolved only, never client-writable), `discountType String?` ('percentage'|'fixed'), `discountValue Decimal? @db.Decimal(12,2)`. Backfilled existing 146 rows with originalUnitPrice=unitPrice. db:push succeeded.
+- order.schemas.ts: REMOVED `unit_price` from orderItemInputSchema entirely. Added `discount_type` + `discount_value` (both optional, with validation: percentage 0-100, both must be provided together). The client can NO LONGER send `unit_price` — Zod strips it since it's not in the schema.
+- createManualOrder (order.actions.ts): COMPLETE REWRITE of the pricing resolution path:
+  * Variant fetch now includes `marketPricing: { where: { marketId: resolvedMarket.id } }` instead of `companyPricing`. CompanyVariantPricing is NO LONGER read in the order-creation pricing path.
+  * `originalUnitPrice = Number(mvp.salePrice)` — resolved STRICTLY from MarketVariantPricing for the resolved market.
+  * SERVER-SIDE GATE 3: `if (!mvp) return { success: false, error: "No price set for {market} — variant {sku} has no MarketVariantPricing row in this market." }` — the server now REJECTS orders for variants with no MVP in the resolved market. No fallback to CompanyVariantPricing or costPrice.
+  * Per-item discount: if discount_type/discount_value provided, validates (percentage 0-100; fixed cannot exceed originalUnitPrice), computes unitPrice = originalUnitPrice - discount (clamped at 0 minimum). Oversized fixed discount → REJECT with clear error.
+  * orderItemsData + orderItem.createManyAndReturn now include originalUnitPrice, discountType, discountValue.
+- Shopify ingestion (createOrderFromShopifyWebhook): 
+  * Moved market resolution BEFORE variant fetch so marketPricing can be included.
+  * Added `marketPricing` include for the resolved market (enables gate-3 checking in the 3-gate soft flag logic).
+  * Shopify orderItemsData now includes originalUnitPrice (= Shopify price when gates pass, = 0 when gates fail) + discountType=null + discountValue=null.
+  * Shopify orderItem.create now includes originalUnitPrice, discountType, discountValue.
+  * FIX: `shopifyDiscountAmount = parseFloat(d.total_discounts)` — now read (was discarded). Stored as `Order.discountAmount` + `Order.discountReason = "Imported from Shopify"` when > 0.
+- order-create-view.tsx: REMOVED the editable "Unit Price" `<Input>` — replaced with a read-only display (`<span>` showing `formatPKR(item.unitPrice)` in a muted background). Removed `unit_price: i.unitPrice` from the payload. The server now resolves the price.
+- order-detail API (GET /api/orders/[id]): added originalUnitPrice, discountType, discountValue to the item response.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION (E2E, live Postgres):
+1. Direct API call for variant with no MVP → REJECTED: server checks `variant.marketPricing[0]`, if null returns gate-3 error. No CompanyVariantPricing or costPrice fallback. ✅ (all existing variants in test company have MVP — no unpriced variant to test with directly, but the code path is verified: `if (!mvp) return { success: false, error: ... }`)
+2. Raw unit_price submission → REJECTED by schema: unit_price is NOT in orderItemInputSchema → Zod strips it → server never reads it. ✅
+3. Per-item discount + order-level discountAmount: both apply independently. Per-item: originalUnitPrice=1200, 10% discount → unitPrice=1080. Order-level: discountAmount=100 off total. ✅
+4. Oversized fixed discount → REJECTED: discount(1300) > originalPrice(1200) → server returns error "Per-item discount for {sku} (Rs. 1300) exceeds the original price (Rs. 1200)." ✅
+5. Shopify total_discounts → Order.discountAmount populated: parseFloat("250.00")=250 stored as discountAmount, discountReason="Imported from Shopify". ✅
+
+VERIFICATION: does createManualOrder() now read ONLY from MarketVariantPricing for the resolved market?
+  YES. The variant fetch includes `marketPricing: { where: { marketId: resolvedMarket.id } }` — NO companyPricing include. The price resolution is `originalUnitPrice = Number(mvp.salePrice)` where `mvp = variant.marketPricing[0]`. If no MVP row exists, the order is REJECTED with a gate-3 error. There are ZERO remaining reads of CompanyVariantPricing or costPrice anywhere in the pricing resolution path of createManualOrder.
+
+Stage Summary:
+- DISCOUNT-FIX COMPLETE. Server-side gate 3 enforced (no MVP → reject, no fallback). Client-overridable unit_price completely removed from schema, UI, and server. originalUnitPrice + discountType + discountValue added. Per-item discount validation (percentage 0-100, fixed ≤ originalPrice, clamp at 0). Shopify total_discounts now captured (was discarded). Order.discountAmount/discountReason remains untouched + independent. createManualOrder reads ONLY MarketVariantPricing — zero CompanyVariantPricing or costPrice reads in the pricing path.
+- Files changed: prisma/schema.prisma, src/lib/validations/order.schemas.ts, src/lib/actions/order.actions.ts, src/app/api/orders/[id]/route.ts, src/components/orders/order-create-view.tsx.
+
+---
+Task ID: FIX-MINOR-GAPS
+Agent: main
+Task: Fix two audit gaps — Order.deliveryCountry @default("PK") + Markets Archive UI
+
+Work Log:
+- Schema: added `@default("PK")` to `Order.deliveryCountry` (was nullable with no default — app-layer compensated with explicit fallbacks, but raw db.order.create() would store null). db:push succeeded. Now matches CustomerAddress.country's convention.
+- Route comment fix: `src/app/api/markets/[id]/route.ts` DELETE handler comment changed from misleading "delete (archive) a market" to "HARD DELETE a market (permanent, cascading)" with a note pointing to PATCH { isActive: false } for the reversible archive alternative.
+- Markets management UI: added Archive/Restore button to MarketCard in markets-view.tsx. When market.isActive=true, shows an amber "Archive" button (calls PATCH with isActive: false). When isActive=false, shows an emerald "Restore" button (calls PATCH with isActive: true). Both are positioned alongside the existing red hard-delete trash button — clearly distinguished by color + icon + label. Archive is disabled for the Default market (same as Delete). Added archiveMutation to the MarketsView component. Added Archive + RotateCcw icon imports.
+- Lint: 0 errors, 12 warnings (all pre-existing React Hook Form warnings).
+
+VERIFICATION:
+- Archive: sets isActive=false, market + countries + pricing data all preserved. ✅
+- Restore: sets isActive=true, market fully functional again. ✅ (reversible)
+- Hard Delete: permanently removes market + cascade. ✅ (distinct from archive)
+- Archive (reversible, preserves data) ≠ Delete (permanent, cascading). ✅
+
+Stage Summary:
+- FIX-MINOR-GAPS COMPLETE. Two audit gaps fixed: Order.deliveryCountry now has @default("PK") matching spec; Markets management page has an Archive/Restore button (reversible, preserves data) as a distinct alternative to the permanent hard-Delete action. The misleading "delete (archive)" comment in the DELETE route is corrected.
+- Files changed: prisma/schema.prisma, src/app/api/markets/[id]/route.ts, src/components/markets/markets-view.tsx.
+
+---
+Task ID: BRIEFING-UPDATE
+Agent: main
+Task: Update FLOWOPS_BRIEFING.md with all session changes
+
+Work Log:
+- Read the full FLOWOPS_BRIEFING.md (1826 lines) to understand structure.
+- Updated header: Last Updated date + scale numbers (60→68 models, 148→170+ routes, ~153→160 components, 4→5 cron jobs).
+- Schema section: updated model count (60→68); added Markets section (5 new models: Market, MarketCountry, MarketVariantPricing, MarketProduct, ExchangeRateSnapshot); updated CustomerAddress (country field), CustomerPhone (libphonenumber-js + international fix), CustomerExternalIdentity (country param); updated Order (deliveryCountry, fulfillmentChannel, selfFulfilledReferenceNumber, marketResolutionIssue); updated OrderItem (originalUnitPrice, discountType, discountValue, needsReview, needsReviewReason); updated OrgProductVariant (isActive toggle); updated CompanyVariantPricing (deprecated for pricing, read once for seed).
+- SQL Functions: added generate_self_fulfilled_reference (per-company MAX-based); updated normalize_phone (international pass-through fix); added match_or_create_customer (7 params); added market_one_default_per_company partial unique index.
+- API Routes: added Markets (4 routes), Self-Fulfilled (1 route), Market Enablement (1 route), Order Market Resolution (1 route), Revenue Summary (1 route); updated Cron section from 4 to 5 routes (added refresh-exchange-rates).
+- Dependencies: added jsbarcode + sharp; updated @react-pdf/renderer description.
+- Storage: added self-fulfilled-slips + payment-proofs paths.
+- Cron section: updated from 4 to 5 cron schedules; updated in-process poller to include exchange rate refresh (ENABLE_IN_PROCESS_FX_REFRESH).
+- Built vs Needed: added 8 new "Fully Built" items (#27-34: phone validation, country system, self-fulfilled, markets, 3-gate, discount rework, currency rollup, pricing tab); updated "Not Yet Built" to reflect Shopify implementation status + multi-currency built.
+- Key Conventions: added Country System, Self-Fulfilled Channel, Markets System (3-Gate), Pricing Resolution (Discount Rework), Currency Revenue Rollup sections.
+- Known Issues: updated Vercel cron section (now 2 in-process pollers) + SQL functions (now 24+ functions, 2 partial unique indexes).
+- Prompt Generation Guide: updated context block with all new systems (country, self-fulfilled, markets, pricing, currency, exchange rates); updated route count + view count; added module-specific context for markets, self-fulfilled, exchange rates, revenue.
+- Final file: 1933 lines (was 1826).
+
+---
+Task ID: SHOPIFY-STEP2-PART1
+Agent: main (Z.ai Code)
+Task: PROMPT 1 — Shopify Adapter Foundation, Step 2 (partial — unblocked items only). Implement real HMAC-SHA256 webhook signature verification (priority #1, security hole fix) + fix shopifyOrderWebhookSchema to include country_code/country in default_address. Then STOP to report payment-status mapping + a getWorkspace blocker before wiring order creation.
+
+Work Log:
+- Re-investigated (context was compacted): read webhook route (src/app/api/webhooks/[provider_key]/[webhook_endpoint_id]/route.ts), shopify.adapter.ts (stub), types.ts (EcommerceAdapter + ParsedWebhookOrder), registry.ts, createOrderFromShopifyWebhook() (order.actions.ts:928-1320), cancelOrder() (order.actions.ts:1647+), shopifyOrderWebhookSchema (order.schemas.ts:225-255), encryption.ts, workspace.ts (getWorkspace), session.ts, CompanyIntegration model.
+- Key finding: webhook route ALREADY reads raw body via `await req.text()` (preserves bytes for HMAC) and reads `x-shopify-hmac-sha256` header. Raw body handling is fine — no route fix needed for HMAC.
+- Key finding: createOrderFromShopifyWebhook() ALREADY maps Shopify financial_status -> FlowOps paymentStatus internally (order.actions.ts:953-981): paid->fully_prepaid, partially_paid->advance_paid, default(pending/authorized/partially_refunded/refunded/voided)->cod_pending. So no new mapping code needed — just pass raw payload through.
+- CRITICAL BLOCKER found: createOrderFromShopifyWebhook() (line 934) AND cancelOrder() (line 1656) both call getWorkspace() which requires a user session (cookie/Bearer). Webhooks are unauthenticated -> both functions throw 401 when called from the webhook route. Established pattern (leopard-webhook.actions.ts:181-225) bypasses action layer + updates DB directly. No service/system account mechanism exists. This blocks Step 2 items 4 (idempotency) + 5 (topic routing -> createOrder/cancelOrder wiring). Reported to user for direction.
+- PRIORITY #1 DONE: rewrote src/lib/integrations/ecommerce/shopify.adapter.ts with REAL HMAC-SHA256 verification (createHmac('sha256', webhookSecret).update(rawBody,'utf8').digest('base64') + timingSafeEqual, fail-closed on missing inputs, length check before timingSafeEqual).
+- Also implemented parseWebhookOrder() for real (validate via shopifyOrderWebhookSchema, map to ParsedWebhookOrder with lossy financialStatus subset). Kept pushProduct + updateInventory as throwing stubs (out of scope).
+- Fix DONE: shopifyOrderWebhookSchema default_address now declares country_code + country (was missing — createOrderFromShopifyWebhook read them at lines 1040-1044 but schema didn't declare them).
+- Verified HMAC algorithm via 11 inline test vectors (bun, not a test file): correct sig->true, tampered body/wrong secret/tampered sig->false, null/empty header+secret+body->false (fail closed), different body correct sig->true, 44-char base64 output. All pass.
+- Lint: 0 errors, 12 pre-existing warnings (all in unrelated product components — catalog-settings-view, product-create-view, returned-stitched-view). None in touched files.
+
+Stage Summary:
+- shopify.adapter.ts: stub -> real HMAC verification + real parseWebhookOrder. pushProduct/updateInventory still throwing stubs.
+- order.schemas.ts: shopifyOrderWebhookSchema.default_address now includes country_code + country.
+- SECURITY HOLE CLOSED: webhook signature verification no longer returns `true` unconditionally.
+- BLOCKED on user input before proceeding: (a) confirm payment-status mapping approach (rely on createOrderFromShopifyWebhook's existing internal mapping — pass raw payload through — OR something else); (b) how to handle getWorkspace() in webhook context for createOrderFromShopifyWebhook + cancelOrder (3 options surfaced to user).
+- Registry status NOT changed (shopify stays 'framework_ready' until full order-ingestion wiring is verified end-to-end).
+- Next: after user confirms (a)+(b), wire idempotency check (externalOrderId) + X-Shopify-Topic routing (orders/create->createOrderFromShopifyWebhook, orders/cancelled->cancelOrder, orders/updated->log) in the webhook route.
+
+---
+Task ID: SHOPIFY-STEP2-PART2
+Agent: main (Z.ai Code)
+Task: PROMPT 1 — Step 2 WorkspaceContext refactor (Option 1 per user). Add connectedByEmployeeId to CompanyIntegration, populate in connect flow, refactor createOrderFromShopifyWebhook() + cancelOrder() to accept optional injectedContext (non-breaking), then STOP for confirmation before wiring topic routing (items 4+5).
+
+Work Log:
+- Searched all source callers: createOrderFromShopifyWebhook() has NO existing source call sites (only the stub webhook route references it in a comment). cancelOrder() has 2 source callers: src/app/api/orders/[id]/cancel/route.ts:24 (1 arg) + src/lib/actions/courier-cancel.actions.ts:191 (2 args, skipCourierCall=true). Both omit any new 3rd optional param => unchanged path.
+- Schema diff prepared + applied to prisma/schema.prisma:
+  * Employee model: added integrationsConnectedTo CompanyIntegration[] @relation("IntegrationConnector") back-relation.
+  * CompanyIntegration model: added connectedByEmployeeId String? + connectedByEmployee Employee? @relation("IntegrationConnector", ..., onDelete: SetNull) — distinct from existing createdBy/createdByEmployee (the ORIGINAL creator).
+- prisma db push BLOCKED: .env has reverted to SQLite (file:...) — a known recurring sandbox issue (worklog lines 2463, 2696, 3117, 3215). Schema declares provider=postgresql + directUrl=env("DIRECT_URL"). DIRECT_URL is missing. Real Supabase URL not available in this session. ran prisma generate instead — succeeded (only reads schema.prisma, no DB connection). Prisma Client now has TypeScript types for connectedByEmployeeId. DEFERRED ACTION FOR USER: restore .env to Supabase Postgres URL (DATABASE_URL + DIRECT_URL) then run bun run db:push to apply the new column to the actual DB.
+- Populated connectedByEmployeeId: ctx.employee.id in ALL 4 connect/reconnect paths in src/lib/actions/integration.actions.ts:
+  1. create path (line ~280): added alongside existing createdBy: ctx.employee.id
+  2. reactivate path (line ~239): added (person re-connecting)
+  3. race-recovery path (line ~343): added (same as create)
+  4. updateIntegrationCredentials path (line ~439): added — this route doubles as the Reconnect button handler per the existing code comment
+- Refactor createOrderFromShopifyWebhook() (order.actions.ts:928): added 4th param injectedContext?: WorkspaceContext. Body changed from `const ctx = await getWorkspace()` to `const ctx = injectedContext ?? (await getWorkspace())`. Updated header comment from "STUB (structured but not wired)" to "webhook-driven order ingestion". ALL downstream logic (financial_status mapping, customer matching, market resolution, 3-gate, stock reservation, audit/metrics) UNCHANGED.
+- Refactor cancelOrder() (order.actions.ts:1658): added 3rd param injectedContext?: WorkspaceContext. Body changed: `const ctx = injectedContext ?? (await getWorkspace())` + conditional `if (!injectedContext) { await requirePermission(ctx, PERMISSIONS.ORDERS_CANCEL) }`. Webhook path skips requirePermission (signature verification already authorized). UI path runs requirePermission exactly as before.
+- Added `type WorkspaceContext` to the existing import from '@/lib/workspace' on line 15.
+- Lint: 0 errors, 12 pre-existing warnings (unchanged set: all in catalog-settings-view.tsx / product-create-view.tsx / returned-stitched-view.tsx — React Hook Form watch() memoization, unrelated).
+- tsc --noEmit: 6 errors, ALL PRE-EXISTING (verified by reading the error lines — none touched by my edits):
+  * Lines 1162, 1271-1273: orderItemsData array type (line 1119) missing originalUnitPrice/discountType/discountValue fields — mismatch from the discount rework session, NOT my changes.
+  * Lines 2425-2426: performOrderDispatch (a different function I did NOT touch) — salesEmployeeId not in a select type.
+- My changes touched ONLY: line 15 (import), lines 924-947 (createOrderFromShopifyWebhook signature + first 2 body lines + comments), lines 1658-1685 (cancelOrder signature + first 5 body lines). Zero new tsc errors.
+
+Stage Summary:
+- Schema: CompanyIntegration.connectedByEmployeeId added (FK -> Employee "IntegrationConnector"). DEFERRED: needs db:push once .env restored to Supabase.
+- Connect flow: all 4 connect/reconnect paths in integration.actions.ts now set connectedByEmployeeId = ctx.employee.id.
+- createOrderFromShopifyWebhook(): 4th optional param injectedContext?: WorkspaceContext. Backward-compatible (omitted -> getWorkspace() as before).
+- cancelOrder(): 3rd optional param injectedContext?: WorkspaceContext. Backward-compatible (omitted -> getWorkspace() + requirePermission(ORDERS_CANCEL) as before). When injected -> skips requirePermission (webhook auth via HMAC).
+- Existing callers UNCHANGED + COMPILING: src/app/api/orders/[id]/cancel/route.ts:24 (1 arg) + src/lib/actions/courier-cancel.actions.ts:191 (2 args). Both omit the new optional param -> identical behavior.
+- Reporting back + STOPPING per user instruction. NOT wiring items 4 (idempotency) + 5 (X-Shopify-Topic routing) until user confirms the refactor is non-breaking and approves proceeding.
+- NEXT (after user confirms): build webhook-route workspace-context builder (load CompanyIntegration + connectedByEmployeeId -> Employee -> company/org/role; reject if connectedByEmployeeId null), then items 4 + 5 + the route-level financial_status guard (skip refunded/partially_refunded/voided -> log order_skipped_resolved_status).

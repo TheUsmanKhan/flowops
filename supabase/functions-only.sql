@@ -294,9 +294,25 @@ AS $$
 DECLARE
   v_digits TEXT;
   v_len    INT;
+  v_trimmed TEXT;
 BEGIN
   IF p_raw_phone IS NULL OR BTRIM(p_raw_phone) = '' THEN
     RETURN NULL;
+  END IF;
+
+  v_trimmed := BTRIM(p_raw_phone);
+
+  -- ── International pass-through (Phase: Country System) ──
+  -- If the number starts with '+' and is NOT a Pakistani number (+92...),
+  -- assume it's already in E.164 format (the TS layer's
+  -- validateAndNormalizePhone() normalizes international numbers correctly
+  -- via libphonenumber-js before calling this function). Pass it through
+  -- unchanged — do NOT blindly prepend +92 (which silently mangles foreign
+  -- numbers, e.g. +447911123456 → +92447911123456).
+  -- Pakistani +92 numbers fall through to the digit-based logic below
+  -- (which handles them correctly: 12 digits starting with 92 → +92...).
+  IF v_trimmed LIKE '+%' AND v_trimmed NOT LIKE '+92%' THEN
+    RETURN v_trimmed;
   END IF;
 
   v_digits := REGEXP_REPLACE(p_raw_phone, '[^0-9]', '', 'g');
@@ -337,7 +353,15 @@ CREATE OR REPLACE FUNCTION match_or_create_customer(
   p_external_customer_id TEXT,
   p_phone                TEXT DEFAULT NULL,
   p_email                TEXT DEFAULT NULL,
-  p_name                 TEXT DEFAULT NULL
+  p_name                 TEXT DEFAULT NULL,
+  -- p_country (Phase: Country System): optional ISO 3166-1 alpha-2 code
+  -- (e.g. "PK", "GB"). The SQL function does NOT create a customer_addresses
+  -- row (it lacks address/city, which are NOT NULL). The caller (e.g.
+  -- createOrderFromShopifyWebhook) persists p_country onto the
+  -- customer_addresses row it creates separately for newly-created customers.
+  -- Accepted here so the param flows through the match API cleanly + is
+  -- available for future SQL-level use (e.g. logging, defaulting).
+  p_country              TEXT DEFAULT 'PK'
 ) RETURNS TEXT
 LANGUAGE plpgsql
 SECURITY DEFINER
@@ -439,6 +463,41 @@ $$;
 
 -- ─── FUNCTIONS: number generators (depend on sequences) ────────────
 
+-- generate_self_fulfilled_reference: PER-COMPANY sequence for self-fulfilled
+-- orders. Mirrors generate_order_number()'s MAX-based structure (NOT the
+-- global exchange-shipment sequence pattern). Format: SF-{year}-{seq},
+-- zero-padded 5 digits (e.g. SF-2026-00001). Scoped per-company via the
+-- companyId filter on the MAX query.
+CREATE OR REPLACE FUNCTION generate_self_fulfilled_reference(p_company_id TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql
+STABLE
+AS $$
+DECLARE
+  v_year           INT := EXTRACT(YEAR FROM NOW());
+  v_prefix         TEXT := 'SF-' || v_year || '-';
+  v_max_seq        INT;
+  v_next_seq       INT;
+  v_result         TEXT;
+BEGIN
+  -- Find the highest existing sequence number for this company + year
+  SELECT COALESCE(MAX(
+    CAST(
+      SUBSTRING("selfFulfilledReferenceNumber" FROM LENGTH(v_prefix) + 1) AS INT
+    )
+  ), 0)
+  INTO v_max_seq
+  FROM "Order"
+  WHERE "companyId" = p_company_id
+    AND "selfFulfilledReferenceNumber" LIKE v_prefix || '%';
+
+  v_next_seq := v_max_seq + 1;
+  v_result := v_prefix || LPAD(v_next_seq::TEXT, 5, '0');
+
+  RETURN v_result;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION generate_draft_number()
 RETURNS TEXT
 LANGUAGE sql
@@ -532,3 +591,14 @@ CREATE TRIGGER trg_exchange_shipments_updatedAt
 CREATE UNIQUE INDEX IF NOT EXISTS invitation_pending_email_unique
   ON "Invitation" ("companyId", "invitedEmail")
   WHERE status = 'pending';
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Partial unique index: exactly one isDefault=true Market per company.
+-- Enforces the "one Default market per company" invariant at the DB level
+-- (Prisma can't express conditional unique constraints in schema.prisma).
+-- Follows the same precedent as invitation_pending_email_unique +
+-- customer_phones_one_primary_idx + customer_addresses_one_default_idx.
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE UNIQUE INDEX IF NOT EXISTS market_one_default_per_company
+  ON "Market" ("companyId")
+  WHERE "isDefault" = TRUE;

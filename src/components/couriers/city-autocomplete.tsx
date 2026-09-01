@@ -45,8 +45,6 @@ interface CityOption {
   cityId: string | null
   isPickupCity: boolean
   isDeliveryCity: boolean
-  /** Which couriers serve this city (for courier-name badges). */
-  servedBy?: Array<{ providerKey: string; isPickupCity: boolean; isDeliveryCity: boolean }>
 }
 
 interface CitySearchResponse {
@@ -140,11 +138,7 @@ export function CityAutocomplete({
   const liveCities = liveQuery.data?.cities ?? []
   const suggestions = cacheCities.length > 0 ? cacheCities : liveCities
   const filteredSuggestions = pickupOnly
-    ? suggestions.filter((s) =>
-        // For pickupOnly: city qualifies if the primary provider OR any
-        // provider in servedBy has isPickupCity=true
-        s.isPickupCity || (s.servedBy ?? []).some((p) => p.isPickupCity),
-      )
+    ? suggestions.filter((s) => s.isPickupCity)
     : suggestions
 
   const isLoading = cacheQuery.isFetching || (cacheEmpty && liveQuery.isFetching)
@@ -217,15 +211,16 @@ export function CityAutocomplete({
               >
                 <span className="font-medium">{city.cityName}</span>
                 <div className="flex items-center gap-1">
-                  {(city.servedBy ?? []).map((s) => (
-                    <span
-                      key={s.providerKey}
-                      className={courierBadgeClass(s.providerKey)}
-                      title={`${s.providerKey}: ${s.isPickupCity ? 'pickup' : ''}${s.isPickupCity && s.isDeliveryCity ? ' + ' : ''}${s.isDeliveryCity ? 'delivery' : ''}`}
-                    >
-                      {s.providerKey}
+                  {city.isPickupCity && (
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200">
+                      Pickup
                     </span>
-                  ))}
+                  )}
+                  {city.isDeliveryCity && (
+                    <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+                      Delivery
+                    </span>
+                  )}
                 </div>
               </button>
             ))
@@ -234,23 +229,4 @@ export function CityAutocomplete({
       )}
     </div>
   )
-}
-
-// ──────────────────────────────────────────────────────────────
-// Courier badge styling — each provider gets a distinct color so the
-// user can instantly see which couriers serve each city at a glance.
-// ──────────────────────────────────────────────────────────────
-
-function courierBadgeClass(providerKey: string): string {
-  const base = 'text-[9px] px-1 py-0.5 rounded border font-medium capitalize'
-  // Distinct color per provider — chosen to be visually distinguishable
-  // + not conflicting with existing UI palettes.
-  const styles: Record<string, string> = {
-    leopard: 'bg-amber-50 text-amber-800 border-amber-300',
-    postex: 'bg-violet-50 text-violet-800 border-violet-300',
-    tcs: 'bg-rose-50 text-rose-800 border-rose-300',
-    shopify: 'bg-emerald-50 text-emerald-800 border-emerald-300',
-    daraz: 'bg-orange-50 text-orange-800 border-orange-300',
-  }
-  return `${base} ${styles[providerKey] ?? 'bg-slate-50 text-slate-700 border-slate-300'}`
 }

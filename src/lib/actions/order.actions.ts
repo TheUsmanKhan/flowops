@@ -12,7 +12,8 @@
 
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { getWorkspace, requirePermission, isElevated, ApiError, getOrdersDataScope } from '@/lib/workspace'
+import { getWorkspace, requirePermission, isElevated, ApiError, getOrdersDataScope, type WorkspaceContext } from '@/lib/workspace'
+import { countryNameToCode } from '@/lib/data/countries'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -85,6 +86,19 @@ async function generateOrderNumber(companyId: string): Promise<string> {
     SELECT generate_order_number(${companyId}::TEXT)
   `
   return result[0].generate_order_number
+}
+
+/**
+ * Generate a per-company self-fulfilled reference number (SF-YYYY-NNNNN)
+ * via the SQL function. Used when fulfillmentChannel = 'self_fulfilled'.
+ * Mirrors generateOrderNumber() — calls the SQL function which does a
+ * MAX-based per-company sequence.
+ */
+async function generateSelfFulfilledReference(companyId: string): Promise<string> {
+  const result = await db.$queryRaw<{ generate_self_fulfilled_reference: string }[]>`
+    SELECT generate_self_fulfilled_reference(${companyId}::TEXT)
+  `
+  return result[0].generate_self_fulfilled_reference
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -330,6 +344,8 @@ export async function createManualOrder(
     }
     const d = parsed.data
 
+    const deliveryCountry = d.delivery_country?.trim() || 'PK'
+
     // ──────────────────────────────────────────────────────────────
     // 2. PARALLEL GROUP 1 — all independent pre-create reads.
     //    Previously these ran SEQUENTIALLY (customer → variants → settings →
@@ -438,7 +454,10 @@ export async function createManualOrder(
           selectedSavedAddressId,
         }
       })(),
-      // ── Variant fetch (already batched via `in` clause) ──
+      // ── Variant fetch — price resolved from CompanyVariantPricing ──
+      // Phase: Discount Rework. originalUnitPrice is resolved STRICTLY from
+      // CompanyVariantPricing for this company. If no CVP row exists, the
+      // order is rejected with a pricing error — no fallback to costPrice.
       db.orgProductVariant.findMany({
         where: { id: { in: variantIds }, organizationId: ctx.company.organizationId },
         include: {
@@ -479,11 +498,18 @@ export async function createManualOrder(
     const recipientName = (d.recipient_name && d.recipient_name.trim()) || customerName
 
     // 4. Compute subtotal + build order items data (CPU-only, no DB)
+    // Phase: Discount Rework. originalUnitPrice is resolved STRICTLY from
+    // CompanyVariantPricing for this company. No client-supplied
+    // unit_price is accepted. Per-item discount (percentage/fixed) is applied
+    // on top of originalUnitPrice to compute the final unitPrice.
     let subtotal = 0
     const orderItemsData: Array<{
       orgVariantId: string
       quantity: number
       unitPrice: number
+      originalUnitPrice: number
+      discountType: string | null
+      discountValue: number | null
       lineTotal: number
       fulfillmentTypeSnapshot: string
     }> = []
@@ -494,11 +520,44 @@ export async function createManualOrder(
       const variant = variants.find((v) => v.id === item.org_variant_id)
       if (!variant) continue
 
-      const unitPrice =
-        item.unit_price ??
-        (variant.companyPricing[0]?.salePrice
-          ? Number(variant.companyPricing[0].salePrice)
-          : Number(variant.costPrice))
+      // ── Gate 3 (server-side): CompanyVariantPricing must exist for this variant ──
+      const cvp = variant.companyPricing[0]
+      if (!cvp) {
+        return {
+          success: false,
+          error: `No price set for variant ${variant.sku} — set a sale price in the product's Pricing tab before creating this order.`,
+        }
+      }
+
+      const originalUnitPrice = Number(cvp.salePrice)
+
+      // ── Per-item discount computation ──
+      let discountType: string | null = null
+      let discountValue: number | null = null
+      let unitPrice = originalUnitPrice
+
+      if (item.discount_type && item.discount_value !== undefined) {
+        discountType = item.discount_type
+        discountValue = item.discount_value
+
+        if (discountType === 'percentage') {
+          // percentage 0-100 (validated by schema, but double-check)
+          const pct = Math.max(0, Math.min(100, discountValue))
+          unitPrice = originalUnitPrice * (1 - pct / 100)
+        } else if (discountType === 'fixed') {
+          // fixed amount — cannot exceed originalUnitPrice, clamp at 0
+          if (discountValue > originalUnitPrice) {
+            return {
+              success: false,
+              error: `Per-item discount for ${variant.sku} (Rs. ${discountValue}) exceeds the original price (Rs. ${originalUnitPrice}).`,
+            }
+          }
+          unitPrice = originalUnitPrice - discountValue
+        }
+
+        // Clamp at 0 minimum
+        unitPrice = Math.max(0, unitPrice)
+      }
 
       const lineTotal = item.quantity * unitPrice
       subtotal += lineTotal
@@ -507,6 +566,9 @@ export async function createManualOrder(
         orgVariantId: item.org_variant_id,
         quantity: item.quantity,
         unitPrice,
+        originalUnitPrice,
+        discountType,
+        discountValue,
         lineTotal,
         fulfillmentTypeSnapshot: variant.fulfillmentType,
       })
@@ -583,6 +645,14 @@ export async function createManualOrder(
     const orderDetail =
       (d.order_detail && d.order_detail.trim()) || orderDetailParts.join(', ')
 
+    // 8b. Self-fulfilled reference number (Phase B1). When fulfillmentChannel
+    //     is 'self_fulfilled', generate the per-company SF-YYYY-NNNNN reference
+    //     via the SQL function. For 'courier' orders, this stays null.
+    const isSelfFulfilled = d.fulfillment_channel === 'self_fulfilled'
+    const selfFulfilledReferenceNumber = isSelfFulfilled
+      ? await generateSelfFulfilledReference(ctx.company.id)
+      : null
+
     // 9. Create the order (sequential — needs all above)
     const order = await db.order.create({
       data: {
@@ -590,6 +660,8 @@ export async function createManualOrder(
         companyId: ctx.company.id,
         flowopsOrderNumber,
         orderSource: 'manual',
+        fulfillmentChannel: d.fulfillment_channel,
+        selfFulfilledReferenceNumber,
         customerId,
         recipientName,
         usedCustomerAddressId,
@@ -613,10 +685,7 @@ export async function createManualOrder(
         remainingCodAmount,
         deliveryAddress: d.delivery_address,
         deliveryCity: d.delivery_city,
-        // Country (Phase: Country System). Defaults to "Pakistan" when the
-        // caller didn't send one (additive — existing callers that don't
-        // send delivery_country still work). Stored as a NAME, not a code.
-        deliveryCountry: d.delivery_country?.trim() || 'Pakistan',
+        deliveryCountry: d.delivery_country?.trim() || 'PK',
         courierName: d.courier_name || null,
         courierCompanyIntegrationId: d.courier_company_integration_id || null,
         recommendedCourierCompanyIntegrationId: d.courier_company_integration_id || null,
@@ -647,8 +716,11 @@ export async function createManualOrder(
         organizationId: ctx.company.organizationId,
         quantity: itemData.quantity,
         unitPrice: itemData.unitPrice,
+        originalUnitPrice: itemData.originalUnitPrice,
+        discountType: itemData.discountType,
+        discountValue: itemData.discountValue,
         lineTotal: itemData.lineTotal,
-        fulfillmentStatus: 'pending', // 'pending' = not yet reserved. reserveOrderStock() flips to 'reserved'/'backordered' on confirmation.
+        fulfillmentStatus: 'pending',
         fulfillmentTypeSnapshot: itemData.fulfillmentTypeSnapshot,
         reservedLocationId: d.dispatch_location_id,
       })),
@@ -736,9 +808,9 @@ export async function createManualOrder(
           label: null,
           address: d.delivery_address,
           city: d.delivery_city,
-          // Country (Phase: Country System). Defaults to "Pakistan" when
+          // Country (Phase: Country System). Defaults to "PK" when
           // absent — mirrors the order's own deliveryCountry default.
-          country: d.delivery_country?.trim() || 'Pakistan',
+          country: d.delivery_country?.trim() || 'PK',
           isDefault: false,
           lastUsedAt: new Date(),
         },
@@ -768,12 +840,16 @@ export async function createManualOrder(
 
     // 14. AUTO-BOOKING — uses the ALREADY-FETCHED orderSettings (no 2nd
     //     findUnique). Fires in the background (PostEx can take 50-100s).
+    //     SKIP entirely for self-fulfilled orders (Phase B1) — no courier
+    //     to book, no city-courier-matching to run. The order is created
+    //     with courierBookingStatus='not_booked' + fulfillmentChannel=
+    //     'self_fulfilled' + a selfFulfilledReferenceNumber already set.
     let bookingAttempted = false
     let bookingSucceeded = false
     let bookingError: string | undefined
     let bookingTrackingNumber: string | undefined
 
-    if (orderStatus === 'confirmed') {
+    if (orderStatus === 'confirmed' && !isSelfFulfilled) {
       const shouldAutoBook =
         orderSettings?.courierBookingMode === 'automatic' &&
         (d.courier_company_integration_id || orderSettings?.defaultCourierCompanyIntegrationId)
@@ -826,18 +902,29 @@ export async function createManualOrder(
 }
 
 // ──────────────────────────────────────────────────────────────
-// createOrderFromShopifyWebhook — STUB (structured but not wired)
+// createOrderFromShopifyWebhook — webhook-driven order ingestion
 // ──────────────────────────────────────────────────────────────
 
 export async function createOrderFromShopifyWebhook(
   payload: ShopifyOrderWebhook,
   companyId: string,
   organizationId: string,
+  /**
+   * Optional injected workspace context. When provided (by the webhook
+   * route), the function uses it instead of calling getWorkspace() — which
+   * requires a logged-in user session that webhooks don't have. The
+   * injected context is built by the webhook route from the
+   * CompanyIntegration's connectedByEmployeeId (the employee who connected
+   * Shopify). When omitted (e.g. unit-test / future admin-tool callers),
+   * getWorkspace() is called as before — 100% backward-compatible.
+   */
+  injectedContext?: WorkspaceContext,
 ): Promise<ActionResult<{ orderId: string; flowopsOrderNumber: string }>> {
   try {
-    const ctx = await getWorkspace()
-    // This function would be called by a future webhook handler.
-    // For now it's structured and unit-testable with a mock payload.
+    const ctx = injectedContext ?? (await getWorkspace())
+    // This function is called by the Shopify webhook route (with an injected
+    // context built from the integration's connectedByEmployeeId). It is also
+    // unit-testable with a mock payload + mock context.
 
     const parsed = shopifyOrderWebhookSchema.safeParse(payload)
     if (!parsed.success) {
@@ -934,12 +1021,18 @@ export async function createOrderFromShopifyWebhook(
     let usedCustomerPhoneId: string | null = customer.phones[0]?.id ?? null
     const shopifyAddress1 = d.customer.default_address?.address1 || null
     const shopifyCity = d.customer.default_address?.city || null
-    // Country (Phase: Country System). Shopify's default_address.country is a
-    // NAME (e.g. "Pakistan") — maps directly onto CustomerAddress.country /
-    // Order.deliveryCountry with no translation. Default to "Pakistan" when
-    // absent (current assumption for orders without explicit country data,
-    // per the country-system spec — non-blocking either way).
-    const shopifyCountry = d.customer.default_address?.country || null
+    // Country (Phase: Country System). Shopify's default_address.country_code
+    // is an alpha-2 code (e.g. "PK", "GB") — maps directly onto
+    // CustomerAddress.country / Order.deliveryCountry with no translation.
+    // Fallback chain: country_code (preferred) → country (name, normalized
+    // to alpha-2 via countryNameToCode) → null (handled by caller). The
+    // caller (createOrderFromShopify) falls back to Company.countryCode if
+    // Shopify sends neither.
+    const shopifyCountryCode = d.customer.default_address?.country_code || null
+    const shopifyCountryName = d.customer.default_address?.country || null
+    // Normalize: prefer country_code; if absent, convert the country NAME
+    // to an alpha-2 code via the lookup table. If both are absent, null.
+    const shopifyCountry = shopifyCountryCode || (shopifyCountryName ? (countryNameToCode(shopifyCountryName) ?? null) : null)
 
     if (shopifyAddress1 && shopifyCity && customer.addresses.length === 0) {
       const newAddr = await db.customerAddress.create({
@@ -950,9 +1043,9 @@ export async function createOrderFromShopifyWebhook(
           address: shopifyAddress1,
           city: shopifyCity,
           // Capture the country Shopify sent instead of discarding it
-          // (Phase 1 finding #4 fix). Falls back to "Pakistan" if Shopify
+          // (Phase 1 finding #4 fix). Falls back to "PK" if Shopify
           // didn't include one — non-blocking, the address is still saved.
-          country: shopifyCountry || 'Pakistan',
+          country: shopifyCountry || 'PK',
           isDefault: true,
           lastUsedAt: new Date(),
         },
@@ -966,31 +1059,58 @@ export async function createOrderFromShopifyWebhook(
 
     const recipientName = shopifyCustomerName
 
-    // Resolve variants by SKU
+    // Resolve variants by SKU (price validation happens via companyPricing).
     const skus = d.line_items.map((li) => li.sku).filter(Boolean) as string[]
     const variants = await db.orgProductVariant.findMany({
       where: { sku: { in: skus }, organizationId },
+      include: {
+        product: { select: { id: true } },
+        companyPricing: { where: { companyId } },
+      },
     })
 
-    // Compute subtotal
+    // Compute subtotal + build order items with review flagging
     let subtotal = 0
     const orderItemsData: Array<{
       orgVariantId: string
       quantity: number
       unitPrice: number
       fulfillmentTypeSnapshot: string
+      needsReview: boolean
+      needsReviewReason: string | null
     }> = []
 
     for (const li of d.line_items) {
       const variant = variants.find((v) => v.sku === li.sku)
       if (!variant) continue // skip unmatched items for now
-      const unitPrice = parseFloat(li.price)
+
+      // ── Review-flag check (SOFT — flag, don't block) ──
+      let gateReason: string | null = null
+      // Gate 1: variant isActive
+      if (!variant.isActive) {
+        gateReason = 'Not enabled for your company'
+      }
+      // Gate 2: CompanyVariantPricing must exist (no price set)
+      else if (!variant.companyPricing[0]) {
+        gateReason = 'No price set for this variant'
+      }
+
+      const needsReview = gateReason !== null
+      // When a gate fails, use unitPrice=0 (don't silently guess the Shopify price).
+      // When all gates pass, use the Shopify-sent price (existing behavior).
+      const unitPrice = needsReview ? 0 : parseFloat(li.price)
+
       subtotal += unitPrice * li.quantity
       orderItemsData.push({
         orgVariantId: variant.id,
         quantity: li.quantity,
         unitPrice,
+        originalUnitPrice: unitPrice, // Shopify price IS the original (no per-item discount on Shopify import)
+        discountType: null,
+        discountValue: null,
         fulfillmentTypeSnapshot: variant.fulfillmentType,
+        needsReview,
+        needsReviewReason: gateReason,
       })
     }
 
@@ -999,6 +1119,10 @@ export async function createOrderFromShopifyWebhook(
     }
 
     const totalOrderValue = parseFloat(d.total_price)
+
+    // Phase: Discount Rework — read Shopify's total_discounts (was discarded).
+    // Set Order.discountAmount + a clear discountReason.
+    const shopifyDiscountAmount = d.total_discounts ? parseFloat(d.total_discounts) : 0
 
     // For fully_prepaid Shopify orders, advanceAmount = totalOrderValue.
     if (paymentStatus === 'fully_prepaid') {
@@ -1051,6 +1175,9 @@ export async function createOrderFromShopifyWebhook(
         paymentSource,
         subtotal,
         totalOrderValue,
+        // Phase: Discount Rework — Shopify's total_discounts now captured (was discarded)
+        discountAmount: shopifyDiscountAmount > 0 ? shopifyDiscountAmount : null,
+        discountReason: shopifyDiscountAmount > 0 ? 'Imported from Shopify' : null,
         advanceAmount,
         advancePaidAt,
         remainingCodAmount,
@@ -1066,8 +1193,8 @@ export async function createOrderFromShopifyWebhook(
         deliveryCity: shopifyCity || customer.addresses[0]?.city || null,
         // Country (Phase: Country System). Snapshot the Shopify-sent country
         // onto the order; fall back to the saved address's country, then to
-        // "Pakistan" (current default for orders without explicit data).
-        deliveryCountry: shopifyCountry || customer.addresses[0]?.country || 'Pakistan',
+        // the company's countryCode (Shopify-sent nothing + no saved address).
+        deliveryCountry: shopifyCountry || customer.addresses[0]?.country || ctx.company.countryCode || 'PK',
         // Universal courier reference fields (migration 015):
         // orderRefNumber defaults to the Shopify order name (e.g. "#1001")
         // — staff can override post-creation if needed. orderDetail is the
@@ -1085,12 +1212,16 @@ export async function createOrderFromShopifyWebhook(
           organizationId,
           quantity: itemData.quantity,
           unitPrice: itemData.unitPrice,
+          originalUnitPrice: itemData.originalUnitPrice,
+          discountType: itemData.discountType,
+          discountValue: itemData.discountValue,
           lineTotal: itemData.quantity * itemData.unitPrice,
-          // 'pending' = not yet reserved. reserveOrderStock() (called below
-          // if the order is confirmed) flips to 'reserved'/'backordered'.
           fulfillmentStatus: 'pending',
           fulfillmentTypeSnapshot: itemData.fulfillmentTypeSnapshot,
           reservedLocationId: shopifyDispatchLocationId,
+          // Phase D3: 3-gate flagging (needsReview + needsReviewReason)
+          needsReview: itemData.needsReview,
+          needsReviewReason: itemData.needsReviewReason,
         },
       })
     }
@@ -1475,10 +1606,25 @@ export async function cancelOrder(
    *  courier adapter itself, then calls this function with skipCourierCall=true
    *  to handle only the internal stock-unreserve + status update. */
   skipCourierCall = false,
+  /**
+   * Optional injected workspace context. When provided (by the Shopify
+   * webhook route's orders/cancelled handler), the function uses it instead
+   * of calling getWorkspace() AND SKIPS the requirePermission(ORDERS_CANCEL)
+   * check — the webhook is already authorized by the verified HMAC
+   * signature, not by a logged-in user's role. When omitted (the normal UI
+   * cancel path via /api/orders/[id]/cancel), getWorkspace() +
+   * requirePermission(ORDERS_CANCEL) run exactly as before — 100%
+   * backward-compatible for existing callers. */
+  injectedContext?: WorkspaceContext,
 ): Promise<ActionResult> {
   try {
-    const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_CANCEL)
+    // Webhook path (injectedContext provided): use it directly, skip
+    // requirePermission (signature verification already authorized the call).
+    // UI path (no injectedContext): resolve the session + enforce permission.
+    const ctx = injectedContext ?? (await getWorkspace())
+    if (!injectedContext) {
+      await requirePermission(ctx, PERMISSIONS.ORDERS_CANCEL)
+    }
 
     const parsed = cancelOrderSchema.safeParse(input)
     if (!parsed.success) {

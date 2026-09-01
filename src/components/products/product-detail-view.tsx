@@ -375,7 +375,7 @@ export function ProductDetailView({ productId }: { productId: string }) {
         {/* Pricing (parent-child grouped pricing table) */}
         {product.subscription && (
           <TabsContent value="pricing">
-            <ParentChildVariantTable productId={productId} mode="pricing" />
+            <PricingTab productId={productId} />
           </TabsContent>
         )}
       </Tabs>
@@ -476,159 +476,16 @@ function PromoteDialog({
   )
 }
 
-function PricingTab({
-  productId,
-  variants,
-  onUpdate,
-}: {
-  productId: string
-  variants: ProductVariant[]
-  onUpdate: () => void
-}) {
-  const [drafts, setDrafts] = useState<Record<string, { salePrice: number | null; comparePrice: number | null }>>(
-    () =>
-      Object.fromEntries(
-        variants.map((v) => [
-          v.id,
-          { salePrice: v.salePrice, comparePrice: v.comparePrice },
-        ]),
-      ),
-  )
-  const [saving, setSaving] = useState<string | null>(null)
-
-  function setDraft(
-    variantId: string,
-    field: 'salePrice' | 'comparePrice',
-    value: number | null,
-  ) {
-    setDrafts((d) => ({
-      ...d,
-      [variantId]: { ...d[variantId], [field]: value },
-    }))
-  }
-
-  async function save(variantId: string) {
-    const draft = drafts[variantId]
-    if (!draft) return
-    if (draft.salePrice == null || draft.salePrice <= 0) {
-      toast.error('Sale price must be a positive number.')
-      return
-    }
-    setSaving(variantId)
-    try {
-      // POST /api/products/[id]/pricing expects { pricing: [{ org_variant_id, sale_price, compare_price? }] }
-      await api.post(`/api/products/${productId}/pricing`, {
-        pricing: [
-          {
-            org_variant_id: variantId,
-            sale_price: draft.salePrice,
-            ...(draft.comparePrice != null ? { compare_price: draft.comparePrice } : {}),
-          },
-        ],
-      })
-      toast.success('Pricing updated.')
-      onUpdate()
-    } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to update pricing.')
-    } finally {
-      setSaving(null)
-    }
-  }
-
+// ----------------------------------------------------------------------------
+// PricingTab — pricing tab.
+// Renders the ParentChildVariantTable in pricing mode. CompanyVariantPricing
+// is the single source of truth for per-variant sale/compare prices.
+// ----------------------------------------------------------------------------
+function PricingTab({ productId }: { productId: string }) {
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2">
-          <Tag className="h-4 w-4 text-primary" /> Your company pricing
-        </CardTitle>
-        <CardDescription>
-          Set the sale and compare-at prices for your storefront.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="p-0">
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>SKU</TableHead>
-                <TableHead className="text-right">Cost</TableHead>
-                <TableHead>Sale price</TableHead>
-                <TableHead>Compare price</TableHead>
-                <TableHead className="text-right">Action</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {variants.map((v) => {
-                const draft = drafts[v.id] ?? { salePrice: v.salePrice, comparePrice: v.comparePrice }
-                const dirty =
-                  draft.salePrice !== v.salePrice ||
-                  draft.comparePrice !== v.comparePrice
-                const canSave =
-                  dirty &&
-                  draft.salePrice != null &&
-                  draft.salePrice > 0 &&
-                  (draft.comparePrice == null || draft.comparePrice > draft.salePrice)
-                return (
-                  <TableRow key={v.id}>
-                    <TableCell className="font-mono text-xs">{v.sku}</TableCell>
-                    <TableCell className="text-right text-xs text-muted-foreground">
-                      {formatMoney(v.costPrice)}
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={draft.salePrice ?? ''}
-                        onChange={(e) =>
-                          setDraft(
-                            v.id,
-                            'salePrice',
-                            e.target.value ? Number(e.target.value) : null,
-                          )
-                        }
-                        className="h-8 w-32 text-xs"
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={draft.comparePrice ?? ''}
-                        onChange={(e) =>
-                          setDraft(
-                            v.id,
-                            'comparePrice',
-                            e.target.value ? Number(e.target.value) : null,
-                          )
-                        }
-                        className="h-8 w-32 text-xs"
-                      />
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button
-                        size="sm"
-                        variant={dirty ? 'default' : 'outline'}
-                        disabled={!canSave || saving === v.id}
-                        onClick={() => save(v.id)}
-                      >
-                        {saving === v.id ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Save className="h-3.5 w-3.5" />
-                        )}
-                        Save
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                )
-              })}
-            </TableBody>
-          </Table>
-        </div>
-      </CardContent>
-    </Card>
+    <div className="space-y-3">
+      <ParentChildVariantTable productId={productId} mode="pricing" />
+    </div>
   )
 }
 

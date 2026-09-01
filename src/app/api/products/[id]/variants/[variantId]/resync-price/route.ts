@@ -64,7 +64,7 @@ export async function POST(
     if (!parentAttr) throw new ApiError(400, 'Cannot determine parent attribute.')
     const parentValue = attrs[parentAttr.name]
 
-    // Find a synced sibling's pricing
+    // Find a synced sibling's pricing (for this company)
     const siblings = await db.orgProductVariant.findMany({
       where: { productId, id: { not: variantId } },
       select: { id: true, attributeValues: true, companyPricing: { where: { companyId: company.id } } },
@@ -85,7 +85,7 @@ export async function POST(
     const siblingPricing = syncedSibling.companyPricing[0]
     const newValue = field === 'sale_price' ? Number(siblingPricing.salePrice) : (siblingPricing.comparePrice ? Number(siblingPricing.comparePrice) : null)
 
-    // Fetch this variant's pricing
+    // Fetch this variant's pricing (for this company)
     const pricing = await db.companyVariantPricing.findUnique({
       where: { companyId_orgVariantId: { companyId: company.id, orgVariantId: variantId } },
     })

@@ -11,7 +11,9 @@ import { MapPin, Star, Plus } from 'lucide-react'
 import { formatLastUsed, type AddressDTO } from './types'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 import { CountrySelector } from '@/components/ui/country-selector'
-import { countryCodeToName, countryNameToCode } from '@/lib/data/countries'
+// No countryCodeToName/countryNameToCode needed — CountrySelector returns
+// alpha-2 codes directly, and we store alpha-2 codes on the DB. No
+// translation at the form boundary.
 
 export interface AddressSelectorValue {
   /** The selected saved address ID, or null if "new address" mode. */
@@ -20,10 +22,11 @@ export interface AddressSelectorValue {
   deliveryAddress: string
   /** The editable delivery city text. */
   deliveryCity: string
-  /** The editable delivery country NAME (e.g. "Pakistan") — the order's own
-   *  snapshot, same editable-per-order semantics as deliveryAddress/deliveryCity.
-   *  Defaults to "Pakistan" (current majority use case). Stored as a NAME
-   *  (not an alpha-2 code) to match CustomerAddress.country + Shopify. */
+  /** The editable delivery country (ISO 3166-1 alpha-2 code, e.g. "PK",
+   *  "GB") — the order's own snapshot, same editable-per-order semantics
+   *  as deliveryAddress/deliveryCity. Defaults to "PK" (current majority
+   *  use case). Stored as a CODE (not a name) — matches CustomerAddress.country
+   *  + Shopify's default_address.country_code + CountrySelector's output. */
   deliveryCountry: string
   /** Whether to persist a new one-off address as a permanent customer_addresses row. */
   saveAddressForNextTime: boolean
@@ -88,9 +91,9 @@ export function AddressSelector({
             ...value,
             deliveryAddress: selected.address,
             deliveryCity: selected.city,
-            // Fall back to "Pakistan" if the saved address has no country yet
+            // Fall back to "PK" if the saved address has no country yet
             // (rows created before the country-system phase have null).
-            deliveryCountry: selected.country ?? 'Pakistan',
+            deliveryCountry: selected.country ?? 'PK',
           })
         }
       }
@@ -104,7 +107,7 @@ export function AddressSelector({
       usedCustomerAddressId: addr.id,
       deliveryAddress: addr.address,
       deliveryCity: addr.city,
-      deliveryCountry: addr.country ?? 'Pakistan',
+      deliveryCountry: addr.country ?? 'PK',
       saveAddressForNextTime: false,
     })
   }
@@ -115,7 +118,7 @@ export function AddressSelector({
       usedCustomerAddressId: null,
       deliveryAddress: '',
       deliveryCity: '',
-      deliveryCountry: 'Pakistan',
+      deliveryCountry: 'PK',
       saveAddressForNextTime: false,
     })
   }
@@ -209,13 +212,13 @@ export function AddressSelector({
         <div className="space-y-1">
           <Label className="text-xs">City *</Label>
           {/* City input mode depends on the address's country:
-              - Pakistan: use CityAutocomplete (courier_operational_cities
+              - Pakistan (PK): use CityAutocomplete (courier_operational_cities
                 cache + live fallback) to suggest valid courier cities.
-              - Non-Pakistan: courier_operational_cities is 100% Pakistan-
-                sourced, so autocomplete suggestions would be meaningless for
-                a foreign city. Fall back to a plain text Input — the city is
-                treated as free text with no matching/suggestion UI. */}
-          {deliveryCountry === 'Pakistan' ? (
+              - Non-PK: courier_operational_cities is 100% Pakistan-sourced,
+                so autocomplete suggestions would be meaningless for a foreign
+                city. Fall back to a plain text Input — the city is treated as
+                free text with no matching/suggestion UI. */}
+          {deliveryCountry === 'PK' ? (
             courierProviderKey ? (
               <CityAutocomplete
                 providerKey={courierProviderKey}
@@ -242,18 +245,17 @@ export function AddressSelector({
           )}
           {cityError && <p className="text-xs text-destructive">{cityError}</p>}
         </div>
-        {/* Country — required, visible. Defaults to Pakistan (current
-            majority use case) but the user can change it. The selector
-            works on alpha-2 codes; we translate to/from the NAME stored
-            on the order/customer address. */}
+        {/* Country — required, visible. Defaults to PK (current majority
+            use case) but the user can change it. CountrySelector returns
+            alpha-2 codes directly; we store them as-is (no translation). */}
         <div className="space-y-1">
           <Label className="text-xs">Country *</Label>
           <CountrySelector
-            value={countryNameToCode(deliveryCountry) ?? 'PK'}
+            value={deliveryCountry}
             onChange={(code) =>
               onChange({
                 ...value,
-                deliveryCountry: countryCodeToName(code) ?? 'Pakistan',
+                deliveryCountry: code,
               })
             }
             placeholder="Select country"

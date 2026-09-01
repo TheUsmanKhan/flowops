@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/label'
 import { Card, CardContent } from '@/components/ui/card'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 import { CountrySelector } from '@/components/ui/country-selector'
-import { countryCodeToName, countryNameToCode } from '@/lib/data/countries'
+// No countryCodeToName/countryNameToCode needed — direct alpha-2 code storage.
 import { Badge } from '@/components/ui/badge'
 import { Plus, Trash2, Star, Phone, MapPin, Loader2, User, Mail } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -63,7 +63,7 @@ export function CreateCustomerForm({
     { _key: nextKey(), phone: defaultPhone, is_primary: true, label: '' },
   ])
   const [addresses, setAddresses] = useState<AddressEntry[]>([
-    { _key: nextKey(), address: '', city: '', country: 'Pakistan', is_default: true, label: '' },
+    { _key: nextKey(), address: '', city: '', country: 'PK', is_default: true, label: '' },
   ])
 
   // Phone validation country hint (Phase 3 — Country System): derive the
@@ -71,10 +71,10 @@ export function CreateCustomerForm({
   // This is a HINT for ambiguous numbers (no + prefix) only — numbers with
   // a + prefix are validated internationally regardless (so a Pakistani
   // +92 number on a UK-delivery order still passes). Falls back to 'PK'.
+  // NOTE: country is now stored as an alpha-2 code directly (no name→code
+  // translation needed).
   const phoneHintAddress = addresses.find((a) => a.is_default) ?? addresses[0]
-  const phoneCountryCode = phoneHintAddress?.country
-    ? (countryNameToCode(phoneHintAddress.country) ?? 'PK')
-    : 'PK'
+  const phoneCountryCode = phoneHintAddress?.country || 'PK'
 
   const createMutation = useIdempotentMutation<{ customerId: string }, CreateCustomerInput>({
     url: '/api/customers',
@@ -104,7 +104,7 @@ export function CreateCustomerForm({
   }
 
   const addAddress = () => {
-    setAddresses((p) => [...p, { _key: nextKey(), address: '', city: '', country: 'Pakistan', is_default: false, label: '' }])
+    setAddresses((p) => [...p, { _key: nextKey(), address: '', city: '', country: 'PK', is_default: false, label: '' }])
   }
   const removeAddress = (key: string) => {
     setAddresses((p) => p.filter((e) => e._key !== key))
@@ -144,7 +144,7 @@ export function CreateCustomerForm({
         label: a.label?.trim() || undefined,
         address: a.address.trim(),
         city: a.city.trim(),
-        country: a.country?.trim() || 'Pakistan',
+        country: a.country?.trim() || 'PK',
         is_default: a.is_default,
       })),
     }
@@ -291,10 +291,10 @@ export function CreateCustomerForm({
               </div>
               <div className="space-y-1">
                 {idx === 0 && <Label className="text-[10px]">City *</Label>}
-                {/* Pakistan: courier-city autocomplete suggestions.
-                    Non-Pakistan: plain text Input — courier_operational_cities
+                {/* Pakistan (PK): courier-city autocomplete suggestions.
+                    Non-PK: plain text Input — courier_operational_cities
                     is Pakistan-sourced only, so suggestions would be noise. */}
-                {entry.country === 'Pakistan' ? (
+                {entry.country === 'PK' ? (
                   <CityAutocomplete
                     providerKey="all"
                     value={entry.city}
@@ -311,16 +311,13 @@ export function CreateCustomerForm({
                   />
                 )}
               </div>
-              {/* Country — required, visible, defaults to Pakistan. The
-                  selector returns alpha-2 codes; we store the NAME on the
-                  address (matches CustomerAddress.country + Shopify). */}
+              {/* Country — required, visible, defaults to PK. CountrySelector
+                  returns alpha-2 codes directly; we store them as-is. */}
               <div className="space-y-1">
                 {idx === 0 && <Label className="text-[10px]">Country *</Label>}
                 <CountrySelector
-                  value={countryNameToCode(entry.country) ?? 'PK'}
-                  onChange={(code) =>
-                    updateAddress(entry._key, 'country', countryCodeToName(code) ?? 'Pakistan')
-                  }
+                  value={entry.country}
+                  onChange={(code) => updateAddress(entry._key, 'country', code)}
                 />
               </div>
               <div className="space-y-1">

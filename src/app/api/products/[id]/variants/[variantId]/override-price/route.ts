@@ -40,12 +40,9 @@ export async function POST(
 
     const body = await readBody<{ sale_price?: number; compare_price?: number | null }>(req)
 
-    // Find existing pricing row
-    const pricing = await db.companyVariantPricing.findUnique({
-      where: { companyId_orgVariantId: { companyId: company.id, orgVariantId: variantId } },
-    })
-    if (!pricing) throw new ApiError(404, 'Pricing record not found for this variant.')
-
+    // UPSERT: if a CompanyVariantPricing row exists for this (company, variant),
+    // update it and detach (set synced=false). If no row exists yet (e.g. a new
+    // variant), create one with the override values + synced=false.
     const updateData: Record<string, unknown> = {}
     if (body.sale_price !== undefined) {
       updateData.salePrice = body.sale_price
@@ -56,7 +53,19 @@ export async function POST(
       updateData.comparePriceSyncedWithParent = false
     }
 
-    await db.companyVariantPricing.update({ where: { id: pricing.id }, data: updateData })
+    await db.companyVariantPricing.upsert({
+      where: { companyId_orgVariantId: { companyId: company.id, orgVariantId: variantId } },
+      update: updateData,
+      create: {
+        companyId: company.id,
+        organizationId: orgId,
+        orgVariantId: variantId,
+        salePrice: body.sale_price ?? 0,
+        comparePrice: body.compare_price ?? null,
+        salePriceSyncedWithParent: false,
+        comparePriceSyncedWithParent: false,
+      },
+    })
 
     insertAuditLog({
       action: 'variant.price_overridden',

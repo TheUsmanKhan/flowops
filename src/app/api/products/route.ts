@@ -38,6 +38,14 @@ export async function GET(req: Request) {
     const productType = url.searchParams.get('product_type') ?? ''
     const productScope = url.searchParams.get('product_scope') ?? ''
     const isActiveParam = url.searchParams.get('is_active')
+    // include_inactive_variants: when true, the variant-level query returns ALL
+    // variants (active + inactive) with their isActive flag in the response.
+    // Used by the order-create picker so toggled-off variants render as disabled
+    // (grayed out, "Not enabled for your company") instead of being hidden —
+    // gate 1 of the 3-gate visibility system. The product-level isActive filter
+    // + the variantCount _count are NOT affected by this flag (catalog list
+    // behavior stays unchanged). Default (false) preserves existing behavior.
+    const includeInactiveVariants = url.searchParams.get('include_inactive_variants') === 'true'
     const page = Math.max(1, Number(url.searchParams.get('page') ?? '1'))
     const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get('pageSize') ?? '20')))
 
@@ -64,7 +72,7 @@ export async function GET(req: Request) {
           category: { select: { id: true, name: true } },
           brand: { select: { id: true, name: true } },
           variants: {
-            where: { isActive: true },
+            where: includeInactiveVariants ? undefined : { isActive: true },
             select: {
               id: true,
               sku: true,
@@ -73,6 +81,9 @@ export async function GET(req: Request) {
               stitchingType: true,
               isDefault: true,
               attributeValues: true,
+              // Include isActive when include_inactive_variants is set so the
+              // order-create picker can gray out + disable inactive variants.
+              ...(includeInactiveVariants ? { isActive: true } : {}),
               companyPricing: {
                 where: { companyId },
                 select: { salePrice: true, comparePrice: true },
@@ -114,6 +125,10 @@ export async function GET(req: Request) {
           fulfillmentType: v.fulfillmentType,
           stitchingType: v.stitchingType,
           isDefault: v.isDefault,
+          // Include isActive when include_inactive_variants is set (for the
+          // order-create picker's gate-1 disabled rendering). Omitted otherwise
+          // to keep the response shape backwards-compatible.
+          ...(includeInactiveVariants ? { isActive: (v as { isActive?: boolean }).isActive } : {}),
           // Parse attributeValues JSONB (e.g. {"Size":"M","Color":"Blue"}) —
           // used by the order-create form to auto-build the orderDetail
           // preview string with variant attributes.

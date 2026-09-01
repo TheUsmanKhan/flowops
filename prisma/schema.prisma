@@ -116,6 +116,9 @@ model Organization {
   scanDailyReports        ScanDailyReport[]
   // Load Sheets back-relation (migration 020)
   loadSheets              LoadSheet[]
+
+  // Courier Status History back-relation (migration 023)
+  courierStatusHistories  CourierStatusHistory[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -202,6 +205,9 @@ model Company {
 
   // HR / Payroll back-relation
   payrollRuns            PayrollRun[]
+
+  // Courier Status History back-relation (migration 023)
+  courierStatusHistories CourierStatusHistory[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -333,6 +339,13 @@ model Employee {
 
   // Universal Integration Framework back-relations (migration 004)
   integrationsCreated             CompanyIntegration[] @relation("IntegrationCreator")
+  // Shopify Adapter Foundation: the employee who most recently connected OR
+  // reconnected this integration. Used by the webhook route to build an
+  // injected WorkspaceContext for unauthenticated webhook-triggered actions
+  // (createOrderFromShopifyWebhook / cancelOrder). Distinct from
+  // integrationsCreated (the ORIGINAL creator) because the original creator
+  // may no longer have an active employee record.
+  integrationsConnectedTo         CompanyIntegration[] @relation("IntegrationConnector")
 
   // Form Drafts back-relation (migration 005)
   formDraftsCreated               FormDraft[] @relation("FormDraftCreator")
@@ -1536,14 +1549,13 @@ model CustomerAddress {
   label             String?
   address           String
   city              String
-  // Country (Phase: Country System). Stores the country NAME (e.g.
-  // "Pakistan", "United Arab Emirates") — matches Shopify's
-  // default_address.country field directly (no translation at ingestion).
-  // Defaults to "Pakistan" (current majority use case) so existing rows
-  // backfill cleanly. Set via CountrySelector (alpha-2 code → name
-  // translation at the form boundary). NOT a code ("PK") — the name form
-  // is deliberately chosen for human-readability + Shopify compatibility.
-  country           String  @default("Pakistan")
+  // Country (Phase: Country System). Stores the ISO 3166-1 alpha-2 CODE
+  // (e.g. "PK", "GB", "AE") — NOT the country name. This matches
+  // CountrySelector's output (returns alpha-2 codes) + Shopify's
+  // default_address.country_code (already alpha-2) directly, with no
+  // translation at the form boundary. Defaults to "PK" (current majority
+  // use case) so existing rows backfill cleanly.
+  country           String  @default("PK")
   isDefault         Boolean  @default(false)
   lastUsedAt        DateTime?
 
@@ -1771,6 +1783,15 @@ model CompanyIntegration {
 
   createdBy                 String?
   createdByEmployee         Employee? @relation("IntegrationCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  // Shopify Adapter Foundation: the employee who most recently connected OR
+  // reconnected this integration. Populated in the connect flow from
+  // ctx.employee.id. Used by the webhook route to build an injected
+  // WorkspaceContext (for audit attribution of webhook-triggered order
+  // creation/cancellation). Nullable so older integrations connected before
+  // this field existed remain valid — the webhook route rejects webhooks for
+  // integrations where this is null and instructs the seller to reconnect.
+  connectedByEmployeeId     String?
+  connectedByEmployee       Employee? @relation("IntegrationConnector", fields: [connectedByEmployeeId], references: [id], onDelete: SetNull)
   createdAt                 DateTime @default(now())
   updatedAt                 DateTime @updatedAt
 
@@ -1885,6 +1906,16 @@ model Order {
   externalOrderReference      String?
   externalOrderId             String?
 
+  // Fulfillment channel (Phase B1 — Self-Fulfilled Channel). 'courier' =
+  // booked via a connected courier (PostEx/TCS/Leopard). 'self_fulfilled' =
+  // the merchant handles delivery themselves (e.g. international orders, own
+  // fleet, hand-delivery). When 'self_fulfilled', a selfFulfilledReferenceNumber
+  // is generated (SF-YYYY-NNNNN, per-company sequence) + auto-booking +
+  // city-courier-matching are explicitly skipped. Defaults to 'courier' so
+  // existing orders + flows are unaffected.
+  fulfillmentChannel          String   @default("courier") // courier | self_fulfilled
+  selfFulfilledReferenceNumber String? @unique
+
   customerId                  String
   customer                    Customer @relation(fields: [customerId], references: [id])
 
@@ -1939,14 +1970,12 @@ model Order {
   deliveryCity                String?
   // Country (Phase: Country System). Denormalized snapshot of the delivery
   // country at order creation time — mirrors the existing deliveryCity
-  // pattern (populated from the selected CustomerAddress.country OR a
-  // typed one-off address's country; propagated the same fire-and-forget
-  // way on correction). Stores the country NAME (e.g. "Pakistan"), NOT an
-  // alpha-2 code — consistent with CustomerAddress.country + Shopify's
-  // default_address.country. Nullable so historical orders (pre-country-
-  // system) don't break; new orders always populate it (defaulting to
-  // "Pakistan" when no explicit country is provided).
-  deliveryCountry              String?
+  // pattern. Stores the ISO 3166-1 alpha-2 CODE (e.g. "PK", "GB"), NOT the
+  // country name — consistent with CustomerAddress.country + Shopify's
+  // default_address.country_code. Nullable so historical orders (pre-country-
+  // system) don't break; new orders always populate it (defaulting to "PK"
+  // when no explicit country is provided).
+  deliveryCountry              String?  @default("PK")
   courierName                 String?
   trackingNumber              String?
   // Universal Integration Framework (migration 004): links to the specific
@@ -2062,6 +2091,18 @@ model Order {
   // from the courier's slip_link). NULL for couriers that don't provide a slip
   // or if the download failed (non-fatal — booking still succeeded).
   courierSlipStoragePath        String?
+
+  // ─── Leopard-specific fields (migration 022) ─────────────────────
+  returnAddressOverrideId       String?
+  returnAddressOverride         CourierPickupAddress? @relation("OrderReturnAddressOverride", fields: [returnAddressOverrideId], references: [id], onDelete: SetNull)
+  shipmentType                  String?
+
+  // ─── Proof of Delivery (migration 023) ────────────────────────────
+  proofOfDeliveryData           String?
+
+  // ─── Shipper Advice (migration 024) ──────────────────────────────
+  lastShipperAdviceSubmittedAt  DateTime?
+  lastShipperAdviceType         String?
 }
 
 /// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
@@ -2078,8 +2119,20 @@ model OrderItem {
   organization                Organization @relation(fields: [organizationId], references: [id])
 
   quantity                    Int
+  // The final charged price per unit (after per-item discount if any).
+  // lineTotal is GENERATED ALWAYS AS (quantity * unitPrice) STORED in the DB.
   unitPrice                   Decimal  @db.Decimal(12, 2)
-  // lineTotal is GENERATED ALWAYS AS (quantity * unitPrice) STORED in the DB
+  // The system-resolved original price from CompanyVariantPricing. NEVER
+  // client-writable — resolved server-side only. If a per-item discount was
+  // applied, originalUnitPrice > unitPrice. Nullable because existing rows
+  // don't have it (added post-deployment).
+  originalUnitPrice           Decimal? @db.Decimal(12, 2)
+  // Per-item discount (Phase: Discount Rework). discountType: 'percentage' |
+  // 'fixed' | null. discountValue: the percentage (0-100) or fixed amount.
+  // Both null when no per-item discount. unitPrice = originalUnitPrice minus
+  // the discount (clamped at 0 minimum).
+  discountType                String?  // percentage | fixed
+  discountValue               Decimal? @db.Decimal(12, 2)
   lineTotal                   Decimal  @db.Decimal(14, 2)
 
   fulfillmentStatus           String   @default("reserved") // reserved | backordered | dispatched
@@ -2094,6 +2147,11 @@ model OrderItem {
 
   autoProcessedAsPerfect      Boolean  @default(false)
   needsReview                 Boolean  @default(false)
+  // When needsReview=true, the reason (e.g. "Not enabled for your company",
+  // "No price set for this variant"). Null when needsReview=false. Used by
+  // external order ingestion (Shopify) to flag items that fail the gate
+  // check without blocking order creation.
+  needsReviewReason           String?
 
   reservedLocationId          String?
   reservedLocation            InventoryLocation? @relation("OrderItemReservedLocation", fields: [reservedLocationId], references: [id])
@@ -2183,6 +2241,10 @@ model CourierPickupAddress {
   ordersUsedIn          Order[] @relation("OrderPickupAddress")
   // Back-relation: load sheets generated for this pickup address
   loadSheets            LoadSheet[]
+  // Back-relation: orders that use this address as a return address override
+  ordersReturnOverrideIn        Order[] @relation("OrderReturnAddressOverride")
+  // Back-relation: exchange shipments that use this address as a return address override
+  exchangeShipmentsReturnOverrideIn ExchangeShipment[] @relation("ExchangeShipmentReturnAddressOverride")
 
   @@index([companyIntegrationId])
   @@map("courier_pickup_addresses")
@@ -2293,6 +2355,18 @@ model ExchangeShipment {
   // ─── Courier Slip (migration 021) ────────────────────────────────
   // Path to our own stored copy of the courier's booking slip PDF.
   courierSlipStoragePath        String?
+
+  // ─── Leopard-specific fields (migration 022) ─────────────────────
+  returnAddressOverrideId       String?
+  returnAddressOverride         CourierPickupAddress? @relation("ExchangeShipmentReturnAddressOverride", fields: [returnAddressOverrideId], references: [id], onDelete: SetNull)
+  shipmentType                  String?
+
+  // ─── Proof of Delivery (migration 023) ────────────────────────────
+  proofOfDeliveryData           String?
+
+  // ─── Shipper Advice (migration 024) ──────────────────────────────
+  lastShipperAdviceSubmittedAt  DateTime?
+  lastShipperAdviceType         String?
 
   @@map("exchange_shipments")
 }
@@ -2625,3 +2699,31 @@ model IdempotencyKey {
   @@index([companyId, actionType])
   @@index([createdAt])
 }
+
+// ============================================================================
+// Courier Status History (migration 023)
+// ============================================================================
+
+/// Append-only audit trail of every courier status update received
+model CourierStatusHistory {
+  id                  String    @id @default(cuid())
+  organizationId      String
+  organization        Organization @relation(fields: [organizationId], references: [id])
+  companyId           String
+  company             Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  entityType          String    // 'order' | 'exchange_shipment'
+  entityId            String
+  providerKey         String    // 'postex' | 'leopard' | 'tcs'
+  rawStatus           String?
+  courierSubStatus    String?
+  courierActivityDate DateTime?
+  receivedAt          DateTime  @default(now())
+  source              String    @default("poll") // 'webhook' | 'poll' | 'manual'
+  metadata            String?   @default("{}") // JSON string
+  createdAt           DateTime  @default(now())
+
+  @@index([entityType, entityId, receivedAt(sort: Desc)])
+  @@index([companyId, receivedAt(sort: Desc)])
+  @@map("courier_status_history")
+}
+

@@ -1,0 +1,250 @@
+     1→     1→- Delivery section auto-fills from selected customer's saved shipping address.
+     2→     2→
+     3→     3→ISSUE 4 — Time-Span Metrics + Drill-Down Charts (ALREADY DONE):
+     4→     4→- orders-view.tsx has a time-span selector (Today, Yesterday, Last 7 Days, Last 30 Days, This Month, Last Month, This Year, Custom Range).
+     5→     5→- Stat cards: Total Orders, Revenue, RTO Rate, Cancellation Rate (activity-based, respect time span) + Pending Confirmation, Backordered (current-state, labeled "(current)").
+     6→     6→- Click-to-chart drill-down using recharts (BarChart/LineChart) — renders below stat cards, toggles on/off, only one chart at a time.
+     7→     7→- Chart granularity: daily for spans ≤ 30 days, monthly for longer spans.
+     8→     8→- Computed client-side from the orders list via useMemo.
+     9→     9→
+    10→    10→ISSUE 5 — Structured Search (ALREADY DONE):
+    11→    11→- Search type selector dropdown: Order Number | Customer | Product/Variant | City
+    12→    12→- Customer autocomplete: debounced query to /api/customers?search=, dropdown with name+phone+order count, keyboard navigation, selecting applies as filter chip.
+    13→    13→- Product/Variant autocomplete: debounced query to /api/products?search=, dropdown with title+SKU+stock badge, selecting applies as filter chip.
+    14→    14→- City search: text input with datalist of distinct delivery_city values.
+    15→    15→- Order Number search: searches flowops_order_number + external_order_reference (existing behavior).
+    16→    16→- Active filter chips above table with individual × removal + "Clear All" button.
+    17→    17→
+    18→    18→VERIFICATION:
+    19→    19→- bun run lint: 0 errors, 17 pre-existing warnings (0 new)
+    20→    20→- npx tsc --noEmit: 0 errors in any OMS file
+    21→    21→- API smoke test:
+    22→    22→  * Upload endpoint → ✅ correctly rejects non-image files with 400
+    23→    23→  * Orders list → ✅ returns remainingCodAmount, itemCount, externalOrderReference on every row
+    24→    24→  * Order detail → ✅ all 9 payment fields returned
+    25→    25→  * Multi-filter → ✅ statuses=confirmed,dispatched&paymentTypes=full_cod returns 24 matching orders
+    26→    26→
+    27→    27→Stage Summary:
+    28→    28→- All 5 issues verified as implemented and working. The prior subagent work (from the OMS-FIXES-FRONTEND task) already addressed all 5 issues. This task confirmed correctness, created the missing /api/upload route (which was the only actually missing piece), and verified everything end-to-end via API tests.
+    29→    29→
+    30→    30→---
+    31→    31→Task ID: OMS-ADDRESS-REDESIGN-FRONTEND
+    32→    32→Agent: oms-frontend-redesign
+    33→    33→Task: Update frontend for new customer address schema (flat shipping/billing, no province, CRM insights, inline creation)
+    34→    34→
+    35→    35→Work Log:
+    36→    36→- src/app/api/customers/route.ts: Added a POST handler that distinguishes between two payload shapes — (1) legacy flag/unflag (`{customer_id, action, reason}`) which delegates to flagCustomer/unflagCustomer, and (2) inline customer creation (`{name, phone, shipping_address:{address,city}, billing_address?...}`) which delegates to findOrCreateCustomer (idempotent on phone). Returns 201 for newly-created, 200 for matched-existing.
+    37→    37→- src/components/orders/customer-detail-view.tsx: Replaced CustomerAddress interface + `addresses[]` field with flat `shippingAddress` and `billingAddress: { address, city }` fields. Added CrmStats type. Removed the legacy `addresses` map loop and replaced it with two side-by-side address cards (Shipping Address / Billing Address) via a new `AddressCard` component. Added a new CRM Insights card showing Total Orders / Delivered count+% / Returned count+% / Delivery Rate, plus the address-history list. Added `cn` import for the new CrmStatCell component.
+    38→    38→- src/components/orders/order-create-view.tsx (full rewrite — 2273→2253 lines): Removed ALL province state, fields, types, and helpers (`pickShippingAddress`, `buildNewCustomerAddresses`, `shipping_province`, `billing_province`, `deliveryProvince`). CustomerAddress type is now `{address, city}` only. CustomerDetailResponse now has flat `shippingAddress` + `billingAddress` + a `crmStats` block. Removed the separate DeliverySection component and merged its fields (delivery address, city, courier, dispatch location, notes, discount) into the Customer section. New Shopify-like inline creation flow: typing a new phone + filling the new-customer form + clicking "Create New Customer" calls `POST /api/customers` IMMEDIATELY via a useMutation; on success the form switches to selected-customer mode using a synthetic CustomerRow built from the returned customerId. "Change" button restores search mode. Added a CrmStatsWidget that renders Total Orders / Delivered (count+%) / Returned (count+%) / Delivery Rate, plus an address-history list ("N× delivered to this address previously"). The "Same as shipping" checkbox now mirrors just address + city. buildPayload() now sends only `customer_id` (no inline `customer` object) since the customer is always created/selected before order submission. Removed the `effectiveBillingAddress/City/Province` hidden-values hack.
+    39→    39→- src/components/orders/customers-view.tsx: No changes required — the customer-row type never referenced `addresses` or `province`.
+    40→    40→- src/components/orders/order-detail-view.tsx: No changes required — `deliveryAddress` is rendered as a plain string (InfoRow), no `province` references existed.
+    41→    41→
+    42→    42→Verification:
+    43→    43→- `bun run lint` → 0 errors, 17 pre-existing warnings (0 new).
+    44→    44→- `npx tsc --noEmit` → 0 errors in order-create-view.tsx, customer-detail-view.tsx, customers-view.tsx, order-detail-view.tsx, or customers/route.ts. (Pre-existing errors in unrelated files remain untouched.)
+    45→    45→- grep for `province` / `addresses` / `pickShippingAddress` across the orders components directory → only matches are the "Saved addresses" UI label and a comment, no actual field references.
+    46→    46→
+    47→    47→Stage Summary:
+    48→    48→- Frontend fully aligned with the new flat customer address schema. All `province` references removed from every touched file. Inline customer creation is now Shopify-like (immediate POST + switch to selected mode). Delivery section is folded into the Customer section so the shipping address entered/picked for the customer IS the delivery address. CRM insights (delivery %, return %, address history) are surfaced both in the customer detail page and inline in the order-create form once a customer is selected. Order submission logic (createManualOrder) and the order validation schema were left untouched as instructed.
+    49→    49→
+    50→    50→---
+    51→    51→Task ID: OMS-ADDRESS-REDESIGN
+    52→    52→Agent: main
+    53→    53→Task: Address system redesign — remove province, flatten customer addresses, CRM stats, Shopify-like inline customer creation.
+    54→    54→
+    55→    55→Work Log:
+    56→    56→
+    57→    57→PHASE 1 — Schema Changes:
+    58→    58→- Updated Customer model: removed `addresses` (JSONB array), added `shippingAddress` (JSONB `{ address, city }`) and `billingAddress` (JSONB `{ address, city }`) with `"{}"` defaults
+    59→    59→- Ran `prisma db push --accept-data-loss` — old `addresses` column dropped, new columns created
+    60→    60→- Old address data (2 customers) was lost in the column drop — acceptable for test environment
+    61→    61→- Order model: `deliveryAddress` stays as JSONB snapshot, no province field
+    62→    62→
+    63→    63→PHASE 2 — Backend:
+    64→    64→- Updated `customerInputSchema` in order.schemas.ts: replaced `addresses` array with flat `shipping_address: { address, city }` and `billing_address: { address, city }` (optional, defaults to shipping)
+    65→    65→- Updated `findOrCreateCustomer()` in customer.actions.ts: stores `shippingAddress` and `billingAddress` as JSON.stringify of the flat objects
+    66→    66→- Updated `getCustomerDetail()` in customer.actions.ts: returns flat `shippingAddress`, `billingAddress`, plus `crmStats` (totalOrders, totalDelivered, totalReturned, deliveryRatio, returnRatio, addressHistory)
+    67→    67→- Updated `/api/customers/[id]/route.ts`: returns flat address fields + CRM stats computed from all orders
+    68→    68→- Updated `/api/customers/route.ts`: added POST handler for inline customer creation (Shopify-like) that calls findOrCreateCustomer immediately
+    69→    69→
+    70→    70→PHASE 3 — Frontend:
+    71→    71→- Updated `order-create-view.tsx`:
+    72→    72→  * Removed ALL province fields (shipping_province, billing_province, deliveryProvince)
+    73→    73→  * Removed pickShippingAddress() and old addresses array logic
+    74→    74→  * Customer section now uses flat shipping/billing address fields ({ address, city })
+    75→    75→  * Inline customer creation: clicking "Create New Customer" calls POST /api/customers immediately, switches to selected state on success
+    76→    76→  * "Change Customer" button to deselect and return to search mode
+    77→    77→  * CRM Insights widget: Total Orders, Delivered (count+%), Returned (count+%), address history
+    78→    78→  * Merged Delivery section into Customer section — shipping address IS the delivery address
+    79→    79→  * "Same as shipping" checkbox mirrors address + city only (no province)
+    80→    80→- Updated `customer-detail-view.tsx`:
+    81→    81→  * Replaced addresses array display with two flat address cards (Shipping + Billing)
+    82→    82→  * Added CRM Insights card with stats
+    83→    83→  * Added address history display
+    84→    84→- No changes needed to `customers-view.tsx` or `order-detail-view.tsx` (no province/addresses references)
+    85→    85→
+    86→    86→VERIFICATION:
+    87→    87→- bun run lint: 0 errors, 17 pre-existing warnings (0 new)
+    88→    88→- npx tsc --noEmit: 0 errors in any OMS file
+    89→    89→- API smoke test:
+    90→    90→  * Create customer with flat address → ✅ 201, customer created with shippingAddress + billingAddress
+    91→    91→  * Get customer detail with CRM stats → ✅ returns shippingAddress, billingAddress, crmStats (totalOrders, totalDelivered, totalReturned, deliveryRatio, returnRatio, addressHistory)
+    92→    92→  * List customers → ✅ no old `addresses` field on any record
+    93→    93→
+    94→    94→Stage Summary:
+    95→    95→- Customer address schema redesigned: flat shipping/billing JSONB fields, no province anywhere
+    96→    96→- CRM stats integrated: total orders, delivered/returned counts + ratios, address history
+    97→    97→- Shopify-like inline customer creation: customer saved to DB immediately on "Create Customer" click, can be deselected/changed
+    98→    98→- Delivery section merged into Customer section — shipping address IS the delivery address
+    99→    99→- Order's delivery_address is a snapshot of the customer's shipping address at order creation time
+   100→   100→
+   101→   101→---
+   102→   102→Task ID: CMS-STEP-1-SCHEMA
+   103→   103→Agent: main
+   104→   104→Task: Build standalone Customer Management System schema (Step 1 of multi-step rebuild) — schema + RLS only, no server actions or frontend. Replaces the simplified flat-address customer design from the OMS sprint with a proper multi-phone/multi-address/cross-platform-identity system.
+   105→   105→
+   106→   106→Work Log:
+   107→   107→
+   108→   108→INVESTIGATION (live Supabase instance):
+   109→   109→- Read /home/z/my-project/worklog.md to understand prior OMS work (flat shippingAddress/billingAddress JSONB design, no province).
+   110→   110→- Read existing migration 001_oms_schema.sql — found RLS helper functions (get_active_org_id, get_active_company_id, has_permission, is_elevated_employee) were defined but RLS was NEVER actually enabled on "Customer" (0 policies, relrowsecurity=false).
+   111→   111→- Read prisma/schema.prisma Customer + Order models — confirmed legacy columns: phone, alternatePhone, email, shippingAddress (JSONB), billingAddress (JSONB), totalOrdersCount, totalOrderValue, totalRtoCount, isFlagged, flaggedReason. All IDs are TEXT (cuid), all columns camelCase (Prisma convention).
+   112→   112→- Investigated live DB via Prisma $queryRawUnsafe scripts: 5 customers (all test data), 3 with non-empty shippingAddress JSON, 0 with alternatePhone, 2 with email, 92 orders referencing customers. Organization.id and Employee.id are TEXT. gen_random_uuid() available. 0 triggers on Customer.
+   113→   113→
+   114→   114→ADAPTATION DECISIONS (documented in migration header):
+   115→   115→- Spec said UUID PKs + lowercase tables + snake_case columns; live schema uses TEXT/cuid PKs + PascalCase "Customer"/"Order" tables + camelCase columns. Mixed conventions would break 92 existing FK references. Adapted: kept TEXT IDs (gen_random_uuid()::text DB-side default for new tables + Customer.id), used lowercase table names for the 3 NEW child tables (customer_phones, customer_addresses, customer_external_identities) per spec, used double-quoted camelCase columns everywhere to match existing Prisma convention.
+   116→   116→- RLS uses ENABLE (not FORCE) so postgres role (app connection) bypasses RLS — app keeps working without GUC-setting middleware; Supabase anon/authenticated roles ARE subject to policies (defense-in-depth).
+   117→   117→
+   118→   118→MIGRATION FILE: /home/z/my-project/supabase/migrations/002_customer_system_schema.sql (Parts 0-12)
+   119→   119→- PART 0: normalize_phone(p_raw_phone TEXT) RETURNS TEXT — IMMUTABLE plpgsql, strips non-digits, canonicalizes PK formats to +92XXXXXXXXXX. Handles 0300-1234567, +92 300 1234567, 923001234567, 3001234567, empty→null.
+   120→   120→- PART 1: customer_phones table — phoneRaw + phoneNormalized (E.164) + isPrimary + label. UNIQUE(organizationId, phoneNormalized) prevents dupes per org. Partial unique index customer_phones_one_primary_idx enforces one primary per customer. FK customerId→"Customer"(id) ON DELETE CASCADE.
+   121→   121→- PART 2: customer_addresses table — address + city (NO province), isDefault, lastUsedAt, label. Partial unique index customer_addresses_one_default_idx enforces one default per customer.
+   122→   122→- PART 3: customer_external_identities table — platform CHECK(shopify|daraz|instagram), externalCustomerId, matchedVia CHECK(exact_identity|phone_match|email_match|manual). UNIQUE(organizationId, platform, externalCustomerId).
+   123→   123→- PART 4: Added Customer.flaggedAt, flaggedBy (→Employee ON DELETE SET NULL), createdBy (→Employee). Added DB-side defaults: Customer.id DEFAULT gen_random_uuid()::text + Customer.updatedAt DEFAULT NOW() (needed because Prisma's @default(cuid())/@updatedAt are client-side only; the SQL function inserts raw).
+   124→   124→- PART 5-6: Backfills wrapped in DO blocks with information_schema checks — safe to re-run from any state (a first buggy splitter run had dropped legacy columns before backfill; test phone/address data was lost but is test-only; customer rows + 92 orders + cached stats intact; primary phones WERE backfilled before the drop for some customers).
+   125→   125→- PART 7: Order.recipientName, Order.usedCustomerAddressId (→customer_addresses ON DELETE SET NULL), Order.usedCustomerPhoneId (→customer_phones ON DELETE SET NULL).
+   126→   126→- PART 8: Backfilled Order.recipientName from Customer.name for all 92 existing orders.
+   127→   127→- PART 9: Dropped legacy Customer.phone, alternatePhone, shippingAddress, billingAddress + UNIQUE(organizationId, phone) constraint + its index.
+   128→   128→- PART 10: match_or_create_customer(org, platform, ext_id, phone, email, name) RETURNS TEXT — SECURITY DEFINER, SET search_path=public. Layered: (1) exact external identity lookup, (2) phone match via normalize_phone + customer_phones, (3) email match, (4) create new customer + primary phone + external identity. Race-protected via pg_advisory_xact_lock(hashtextextended(...)) + Layer 1 re-check before create.
+   129→   129→- PART 11: Triggers — trg_customer_addresses_updatedAt (BEFORE UPDATE sets updatedAt=NOW()), trg_customers_updatedAt (recreated from migration 001, was never applied live).
+   130→   130→- PART 12: RLS ENABLED on all 4 tables. SELECT: organizationId = get_active_org_id(). INSERT/UPDATE: org check + (has_permission('orders.create') OR has_permission('orders.manage')). DELETE: denied for Customer + customer_external_identities; allowed for customer_phones + customer_addresses (guarded by 'orders.manage').
+   131→   131→
+   132→   132→APPLY + VERIFY:
+   133→   133→- First apply attempt used a buggy JS SQL splitter that mangled statements (comment text leaked into statements) — partially applied: dropped legacy columns, created some policies, but failed to create child tables or functions. Fixed by switching to pg.Client.multi-statement query (single query() call with the whole file).
+   134→   134→- Second apply failed: unquoted camelCase columns (organizationId) folded to lowercase by PostgreSQL. Fixed by double-quoting ALL camelCase identifiers in new-table DDL.
+   135→   135→- Third apply failed: match_or_create_customer couldn't INSERT into Customer — id column had no DB default (Prisma @default(cuid()) is client-side). Added ALTER COLUMN id SET DEFAULT gen_random_uuid()::text.
+   136→   136→- Fourth apply failed: updatedAt NOT NULL with no DB default (Prisma @updatedAt is client-side). Added ALTER COLUMN "updatedAt" SET DEFAULT NOW().
+   137→   137→- Fifth apply: SUCCESS. All 30 verification checks pass: 3 new tables exist with correct indexes/constraints, Customer legacy columns dropped + new columns added, Order new columns added + 92 recipientName backfills, normalize_phone passes all 6 unit tests, match_or_create_customer passes all 3 end-to-end tests (Layer 4 create → Layer 1 exact identity → Layer 2 phone match all return same customer_id), RLS enabled on all 4 tables with correct policy sets (Customer/external_identities have no DELETE policy; phones/addresses have DELETE), both triggers present.
+   138→   138→
+   139→   139→PRISMA SCHEMA UPDATE: /home/z/my-project/prisma/schema.prisma
+   140→   140→- Rewrote Customer model: removed phone, alternatePhone, shippingAddress, billingAddress, @@unique([organizationId, phone]), @@index([organizationId, phone]). Added flaggedAt, flaggedBy (→Employee "CustomerFlagger"), createdBy (→Employee "CustomerCreator"), phones/addresses/externalIdentities relations. Added comment: do NOT run prisma db push (would drop partial indexes/CHECK constraints/RLS that Prisma can't represent); use prisma generate only.
+   141→   141→- Added 3 new models: CustomerPhone (@@map("customer_phones")), CustomerAddress (@@map("customer_addresses")), CustomerExternalIdentity (@@map("customer_external_identities")). All with @@map to lowercase table names, relations to Customer + Organization, back-relations ordersUsedIn Order[] @relation("OrderUsedPhone"/"OrderUsedAddress").
+   142→   142→- Added Order.recipientName, usedCustomerAddressId (→CustomerAddress "OrderUsedAddress" ON DELETE SET NULL), usedCustomerPhoneId (→CustomerPhone "OrderUsedPhone" ON DELETE SET NULL), + indexes.
+   143→   143→- Added Organization back-relations: customerPhones, customerAddresses, customerExternalIdentities.
+   144→   144→- Added Employee back-relations: flaggedCustomers ("CustomerFlagger"), createdCustomers ("CustomerCreator").
+   145→   145→- npx prisma validate → valid. npx prisma generate → success. Prisma smoke test: prisma.customerPhone/customerAddress/customerExternalIdentity all accessible; Customer.findFirst({ include: { phones, addresses, externalIdentities, _count: { orders } } }) returns Fatima Ahmed with 1 migrated phone (+923009876543) + 91 orders.
+   146→   146→
+   147→   147→VERIFICATION:
+   148→   148→- bun run lint → 0 errors, 17 pre-existing warnings (0 new — all React Hook Form watch() + unused eslint-disable, none related to customer schema).
+   149→   149→- Dev server: bun run dev → Ready in 696ms, GET / 200 (no fatal errors in dev.log).
+   150→   150→- 15 existing OMS files reference removed Customer fields (phone/shippingAddress/billingAddress/alternatePhone) — these are Step 2's responsibility (user explicitly said "DO NOT build server actions or frontend in this step"). Files: src/app/api/customers/[id]/route.ts, src/app/api/orders/{backordered,pending,returns,cancelled,ready-to-dispatch}/route.ts, src/app/api/workspace/switch/route.ts, src/lib/session-payload.ts, src/lib/actions/{customer,order}.actions.ts, src/components/orders/{order-create,customer-detail,orders,order-detail,customers}-view.tsx. They will TS-error until Step 2 migrates them to customer_phones/customer_addresses.
+   151→   151→
+   152→   152→Stage Summary:
+   153→   153→- Customer Management System schema fully built and live on Supabase: 3 new child tables (customer_phones, customer_addresses, customer_external_identities) with proper indexes, partial unique constraints (one primary phone / one default address per customer), CHECK constraints (platform + matchedVia enums), and cascading FKs.
+   154→   154→- "Customer" table reshaped: legacy phone/address columns dropped; flaggedAt/flaggedBy/createdBy added; DB-side id + updatedAt defaults added so the SQL function can insert without Prisma.
+   155→   155→- "Order" table extended: recipientName (backfilled for all 92 existing orders from Customer.name), usedCustomerAddressId, usedCustomerPhoneId.
+   156→   156→- 2 SQL functions live: normalize_phone() (IMMUTABLE E.164 canonicalizer, 6/6 unit tests pass) and match_or_create_customer() (SECURITY DEFINER, layered exact-identity→phone→email→create with advisory-lock race protection, 3/3 end-to-end tests pass).
+   157→   157→- RLS enabled on all 4 customer tables (Customer + 3 children): SELECT scoped by org, INSERT/UPDATE gated by orders.create OR orders.manage, DELETE denied for Customer + external_identities / allowed for phones + addresses. Uses existing get_active_org_id/has_permission helpers. postgres role bypasses (app keeps working); anon/authenticated roles enforced (defense-in-depth).
+   158→   158→- 2 triggers live: trg_customers_updatedAt (recreated — was missing), trg_customer_addresses_updatedAt.
+   159→   159→- Prisma schema updated + client regenerated with 3 new models + @@map directives; Customer/Order models reshaped; Organization/Employee back-relations added. prisma validate + generate both clean.
+   160→   160→- KNOWN Step 2 work: 15 OMS files reference removed Customer fields and need migration to customer_phones/customer_addresses. Also: wire app.active_org_id/app.active_company_id/app.user_id GUC setting in API middleware so RLS becomes actively enforced for non-bypass roles. Then: Shopify webhook handler calls match_or_create_customer() on every order.
+   161→   161→
+   162→   162→---
+   163→   163→Task ID: CMS-STEP-2-SERVER-ACTIONS
+   164→   164→Agent: main
+   165→   165→Task: Build all server actions for the Customer Management System (Step 2) — CRUD for customers/phones/addresses, cross-platform matching wrapper, cached-stats recomputation with auto-flagging, listing/detail, and Order system integration hooks. No frontend.
+   166→   166→
+   167→   167→Work Log:
+   168→   168→
+   169→   169→INVESTIGATION:
+   170→   170→- Read prior worklog entry (CMS-STEP-1-SCHEMA) to understand the schema: customer_phones / customer_addresses / customer_external_identities tables, normalize_phone() + match_or_create_customer() SQL functions, RLS enabled on all 4 customer tables.
+   171→   171→- Read existing customer.actions.ts — found it used the OLD schema (phone, alternatePhone, shippingAddress, billingAddress columns that no longer exist). The old findOrCreateCustomer, listCustomers, getCustomerDetail, flagCustomer, unflagCustomer, updateCustomerStats all referenced removed fields.
+   172→   172→- Read existing order.actions.ts createManualOrder() + createOrderFromShopifyWebhook() — both used findOrCreateCustomer and the old customer shape.
+   173→   173→- Read existing audit.ts (insertAuditLog signature), workspace.ts (getWorkspace/requirePermission/ApiError), metrics.ts (insertMetricEvent), permissions.ts (PERMISSIONS.ORDERS_CREATE / ORDERS_MANAGE), order.schemas.ts (customerInputSchema with the old flat shape).
+   174→   174→- Read db.ts — confirmed it overrides DATABASE_URL to use the transaction pooler (port 6543) at runtime.
+   175→   175→
+   176→   176→PART 1 — Validation Schemas (src/lib/validations/customer.schemas.ts):
+   177→   177→- phoneInputSchema: phone (raw, min 7 digits), label?, is_primary (default false)
+   178→   178→- addressInputSchema: label?, address (required), city (required), is_default (default false) — NO province field
+   179→   179→- createCustomerSchema: name, email?, phones[] (min 1), addresses[] (min 1) + 2 refinements enforcing EXACTLY one is_primary phone + EXACTLY one is_default address
+   180→   180→- updateCustomerSchema: customer_id + optional name/email (at least one required)
+   181→   181→- matchExternalCustomerSchema: platform (shopify|daraz|instagram), external_customer_id, phone?, email?, name?
+   182→   182→- listCustomersFiltersSchema: search?, is_flagged?, date_from?, date_to?, limit?, offset?
+   183→   183→
+   184→   184→PART 2 — Core Customer Server Actions (src/lib/actions/customer.actions.ts — full rewrite):
+   185→   185→- normalizePhone() helper: calls the normalize_phone() SQL function via $queryRaw (single source of truth — no TS port, guarantees client/server agree)
+   186→   186→- searchCustomerByPhone(phone): normalizes input via SQL function, looks up customer_phones in active org, returns full customer + ALL phones + ALL addresses (addresses ordered is_default DESC, lastUsedAt DESC NULLS LAST). Returns { found: false } when no match.
+   187→   187→- createCustomer(input): validates via createCustomerSchema, normalizes each phone via SQL function, checks org-wide phone_normalized conflicts BEFORE inserting (returns clear error pointing to the existing customer if any phone already belongs to another customer), inserts customer + phones + addresses in a single $transaction, audit log 'customer.created'. GUARD: orders.create.
+   188→   188→- updateCustomer(input): name/email only. GUARD: orders.create. Audit log 'customer.updated'.
+   189→   189→- addCustomerPhone(customer_id, input): normalize, org-wide uniqueness check, if is_primary=true unset existing primary first (in a transaction), insert. Audit log 'customer.phone_added'.
+   190→   190→- removeCustomerPhone(phone_id): refuses to delete the LAST remaining phone (returns clear error). Audit log 'customer.phone_removed'.
+   191→   191→- addCustomerAddress(customer_id, input): if is_default=true unset existing default first (transaction), insert. Audit log 'customer.address_added'.
+   192→   192→- updateCustomerAddress(address_id, input): if promoting to default, unset existing default first. Audit log 'customer.address_updated'.
+   193→   193→- removeCustomerAddress(address_id): refuses to delete the LAST remaining address. Audit log 'customer.address_removed'.
+   194→   194→- markAddressAsUsed(address_id): internal helper, sets lastUsedAt=NOW(). Non-fatal on failure (never blocks order creation).
+   195→   195→
+   196→   196→PART 3 — Cross-Platform Matching:
+   197→   197→- matchOrCreateExternalCustomer(input + organizationId): validates via matchExternalCustomerSchema, checks for existing external identity mapping (to report wasNewlyCreated accurately), calls match_or_create_customer() SQL function via $queryRaw. Returns { customerId, wasNewlyCreated, matchedVia }. Does NOT require a workspace session (designed for webhook context — the SQL function is SECURITY DEFINER).
+   198→   198→- getCustomerExternalIdentities(customer_id): lists all platform mappings for a customer (for profile display "Linked to Shopify Customer #7891234567").
+   199→   199→
+   200→   200→PART 4 — Cached Stats + Flagging:
+   201→   201→- updateCustomerStats(customer_id): recomputes totalOrdersCount, totalOrderValue (sum of DELIVERED orders' totalOrderValue per spec), totalRtoCount from the orders table. Auto-flags at 3+ RTO with reason 'High RTO rate (3+ returns)' — idempotent (won't re-flag if already flagged for this exact reason). Internal helper (no permission check — called from order.actions.ts which already has a session).
+   202→   202→- flagCustomer(customer_id, reason): manual flagging. GUARD: orders.manage. Sets isFlagged/flaggedReason/flaggedAt/flaggedBy. Audit log 'customer.flagged' + metric event 'customer.flagged'.
+   203→   203→- unflagCustomer(customer_id): GUARD: orders.manage. Clears all flag fields. Audit log 'customer.unflagged'.
+   204→   204→- flagCustomerInternal() shared helper: the auto-flag path (from updateCustomerStats) skips the permission check (triggered by order status change, not a user action) and skips the metric event (avoids spam during bulk recomputes).
+   205→   205→
+   206→   206→PART 5 — Listing & Detail:
+   207→   207→- listCustomers(filters): paginated. search matches customer name OR any associated phone (raw OR normalized — normalizes the search term via SQL function to match phoneNormalized). Each row includes primaryPhone + defaultAddress summary joined in. Filters: search, isFlagged, dateFrom/dateTo, limit (max 100), offset.
+   208→   208→- getCustomerDetail(customer_id): full customer record + all phones (primary first) + all addresses (default first, then lastUsedAt desc) + external identities + recent 20 orders (showing flowopsOrderNumber, status, totalOrderValue, recipientName, deliveryAddress/City, usedCustomerAddressId, usedCustomerPhoneId).
+   209→   209→
+   210→   210→PART 6 — Order System Integration:
+   211→   211→- order.schemas.ts: removed legacy customerInputSchema (flat phone/shippingAddress/billingAddress). Re-exported createCustomerSchema from customer.schemas.ts for inline new-customer creation. Updated createManualOrderSchema: replaced `customer` (old) with `new_customer` (full createCustomerSchema) + added `used_customer_address_id`, `used_customer_phone_id`, `recipient_name`, `save_address_for_next_time` fields.
+   212→   212→- createManualOrder() rewrite:
+   213→   213→  * Customer resolution: existing customer_id path verifies org + resolves saved address/phone selection; new_customer path calls createCustomer() then looks up the newly-created default address + primary phone IDs.
+   214→   214→  * recipient_name defaults to customer.name if not explicitly overridden.
+   215→   215→  * Order.create now includes recipientName, usedCustomerAddressId, usedCustomerPhoneId.
+   216→   216→  * Post-creation: if selectedSavedAddressId → markAddressAsUsed(); else if saveAddressForNextTime && one-off address typed → persist as new customer_addresses row (non-default) + link via usedCustomerAddressId. Then updateCustomerStats().
+   217→   217→  * For brand-new customers, saveAddressForNextTime is forced to false (the address was already saved as part of createCustomer).
+   218→   218→- createOrderFromShopifyWebhook() rewrite:
+   219→   219→  * Replaced manual customer find/create with matchOrCreateExternalCustomer() (the SQL function wrapper) — handles layered exact_identity → phone_match → email_match → create.
+   220→   220→  * If Shopify sent a default_address AND customer has no saved address (newly created), persist it as their default customer_addresses row. For existing customers, the Shopify address becomes a one-off delivery snapshot.
+   221→   221→  * Order.create includes recipientName, usedCustomerAddressId, usedCustomerPhoneId.
+   222→   222→  * delivery_address falls back to saved default address text if Shopify didn't send one.
+   223→   223→- shopifyOrderWebhookSchema: added optional `id` field to customer object (Shopify payloads include it; needed for external_customer_id mapping).
+   224→   224→
+   225→   225→FIXED DOWNSTREAM CONSUMERS (6 API routes + order.actions.ts listing):
+   226→   226→- src/app/api/customers/route.ts: rewrote GET (added `detailed=1` mode that delegates to searchCustomerByPhone for live phone search) + POST (flag/unflag flow unchanged; create flow now delegates to createCustomer server action). Removed findOrCreateCustomer + CustomerInput imports.
+   227→   227→- src/app/api/customers/[id]/route.ts: rewrote to delegate to getCustomerDetail server action (returns the new full shape with phones[]/addresses[]/externalIdentities[]/recentOrders[]).
+   228→   228→- src/app/api/orders/[id]/route.ts: customer select changed from { phone, alternatePhone } to { phones: { where: { isPrimary: true }, take: 1, select: { phoneRaw } } }. Added primaryPhone convenience field to response for backwards-compatible frontend consumption.
+   229→   229→- src/app/api/orders/{backordered,cancelled,pending,ready-to-dispatch,returns}/route.ts: all 5 routes updated — customer select changed to include phones[primary], and `o.customer.phone` → `o.customer.phones[0]?.phoneRaw ?? null`.
+   230→   230→- src/lib/actions/order.actions.ts listOrders(): search filter changed from `customer.phone contains` to `customer.phones.some(phoneRaw contains)`; include changed to phones[primary]; mapping uses phones[0].phoneRaw. getOrderDetail() return type updated: customer.phone → customer.primaryPhone + primaryPhoneNormalized.
+   231→   231→
+   232→   232→VERIFICATION:
+   233→   233→- npx tsc --noEmit: 0 errors in any customer/order file (src/lib/actions/{customer,order}.actions.ts, src/lib/validations/{customer,order}.schemas.ts, src/app/api/customers/*, src/app/api/orders/*, src/components/orders/*). Pre-existing errors in unrelated files (company settings, onboarding, products) remain untouched.
+   234→   234→- bun run lint: 0 errors, 17 pre-existing warnings (0 new — all React Hook Form watch() + unused eslint-disable, none related to customer work).
+   235→   235→- Dev server: bun run dev → Ready in 695ms, GET / 200, no errors in dev.log.
+   236→   236→- Test suite (scripts/test-customer-actions.ts, 18 tests, all pass):
+   237→   237→  * TEST 1: normalize_phone('0300-1234567') = '+923001234567' AND normalize_phone('+923001234567') = '+923001234567' — both resolve to the SAME normalized form (the spec's critical rule).
+   238→   238→  * TEST 2: createCustomerSchema accepts valid input (1 primary phone, 1 default address); rejects 0 primary phones, 2 primary phones, empty phones array, 2 default addresses — with clear error messages.
+   239→   239→  * TEST 3: DB unique constraint customer_phones_org_phone_unique rejects duplicate (organizationId, phoneNormalized) even when the raw phone is in a different format.
+   240→   240→  * TEST 4: searchCustomerByPhone finds the SAME customer with '03009998888' AND '+923009998888' (the spec's explicit test rule — PASSED).
+   241→   241→  * TEST 5: last-phone / last-address deletion-prevention count logic verified (customer with 1 phone/1 address would be refused).
+   242→   242→  * TEST 6: markAddressAsUsed bumps lastUsedAt from NULL to NOW().
+   243→   243→  * TEST 7: updateCustomerStats auto-flag threshold — 3 RTO orders triggers the >= 3 condition (would call flagCustomer with 'High RTO rate (3+ returns)').
+   244→   244→
+   245→   245→Stage Summary:
+   246→   246→- All 6 parts of Step 2 implemented and verified. The Customer Management System now has a complete server-action layer: searchCustomerByPhone, createCustomer, updateCustomer, addCustomerPhone/removeCustomerPhone, addCustomerAddress/updateCustomerAddress/removeCustomerAddress, markAddressAsUsed, matchOrCreateExternalCustomer, getCustomerExternalIdentities, updateCustomerStats (with auto-flag at 3+ RTO), flagCustomer/unflagCustomer, listCustomers (with search/isFlagged/date filters), getCustomerDetail (with phones/addresses/external identities/recent orders).
+   247→   247→- Order system integration complete: createManualOrder() accepts either existing customer_id + saved address/phone selection OR inline new_customer; sets recipientName (defaults to customer.name), usedCustomerAddressId, usedCustomerPhoneId; calls markAddressAsUsed on saved addresses; persists one-off addresses when save_address_for_next_time=true; calls updateCustomerStats after creation. createOrderFromShopifyWebhook() uses matchOrCreateExternalCustomer (the SQL function wrapper) for layered cross-platform matching.
+   248→   248→- 6 downstream API routes + order.actions.ts listing functions migrated from the removed Customer.phone/shippingAddress/billingAddress fields to the new customer_phones/customer_addresses child tables. All return a flattened `primaryPhone` field for backwards-compatible frontend consumption until Step 3 rebuilds the frontend.
+   249→   249→- The spec's critical phone-normalization rule is verified: searching '0300-1234567' and '+923001234567' resolves to the SAME customer via the normalize_phone() SQL function (single source of truth, no TS port).
+   250→   250→- KNOWN Step 3 work: the frontend components in src/components/orders/ (order-create-view, customer-detail-view, customers-view, orders-view, order-detail-view) still reference the old customer.phone/shippingAddress/billingAddress shape in their TypeScript types and render logic. The API now returns the new shape (with phones[]/addresses[] + a flattened primaryPhone convenience field), so the frontend will need adapting in Step 3.

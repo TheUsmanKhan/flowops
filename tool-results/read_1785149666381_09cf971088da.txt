@@ -1,0 +1,2002 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useRef, useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import { api, FetchError } from '@/lib/api-client'
+     7→import { useAppStore, useCan } from '@/stores/app-store'
+     8→import { PERMISSIONS } from '@/lib/permissions'
+     9→import { PageHeader } from '@/components/layout/dashboard-shell'
+    10→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+    11→import { Button } from '@/components/ui/button'
+    12→import { Input } from '@/components/ui/input'
+    13→import { Label } from '@/components/ui/label'
+    14→import { Textarea } from '@/components/ui/textarea'
+    15→import { Badge } from '@/components/ui/badge'
+    16→import { Skeleton } from '@/components/ui/skeleton'
+    17→import { Separator } from '@/components/ui/separator'
+    18→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+    19→import { Checkbox } from '@/components/ui/checkbox'
+    20→import {
+    21→  Select,
+    22→  SelectContent,
+    23→  SelectItem,
+    24→  SelectTrigger,
+    25→  SelectValue,
+    26→} from '@/components/ui/select'
+    27→import {
+    28→  ArrowLeft,
+    29→  Plus,
+    30→  Trash2,
+    31→  Search,
+    32→  AlertCircle,
+    33→  Loader2,
+    34→  User,
+    35→  Phone,
+    36→  MapPin,
+    37→  Package,
+    38→  CreditCard,
+    39→  Truck,
+    40→  CheckCircle2,
+    41→  Check,
+    42→  Upload,
+    43→  X,
+    44→  ShoppingBag,
+    45→  History,
+    46→  PackageCheck,
+    47→  FileImage,
+    48→  Edit3,
+    49→} from 'lucide-react'
+    50→import { cn } from '@/lib/utils'
+    51→import { createManualOrderSchema } from '@/lib/validations/order.schemas'
+    52→
+    53→// ─────────────────────────────────────────────────────────────────────────────
+    54→// Types
+    55→// ─────────────────────────────────────────────────────────────────────────────
+    56→
+    57→interface InventoryLocation {
+    58→  id: string
+    59→  name: string
+    60→  locationType: string
+    61→  city: string
+    62→  isOrgLevel: boolean
+    63→  isDefault: boolean
+    64→}
+    65→
+    66→interface LocationsResponse {
+    67→  locations: InventoryLocation[]
+    68→}
+    69→
+    70→interface CustomerRow {
+    71→  id: string
+    72→  name: string
+    73→  phone: string
+    74→  email: string | null
+    75→  totalOrdersCount: number
+    76→  totalRtoCount: number
+    77→  isFlagged: boolean
+    78→}
+    79→
+    80→interface CustomersSearchResponse {
+    81→  customers: CustomerRow[]
+    82→  total: number
+    83→}
+    84→
+    85→interface CustomerAddress {
+    86→  type?: 'shipping' | 'billing'
+    87→  label?: string
+    88→  address: string
+    89→  city: string
+    90→  province?: string
+    91→  is_default?: boolean
+    92→}
+    93→
+    94→interface CustomerDetailResponse {
+    95→  customer: {
+    96→    id: string
+    97→    name: string
+    98→    phone: string
+    99→    alternatePhone: string | null
+   100→    email: string | null
+   101→    addresses: CustomerAddress[]
+   102→    totalOrdersCount: number
+   103→    totalOrderValue: number
+   104→    totalRtoCount: number
+   105→    isFlagged: boolean
+   106→    flaggedReason: string | null
+   107→  }
+   108→  recentOrders: Array<{
+   109→    id: string
+   110→    flowopsOrderNumber: string
+   111→    status: string
+   112→    totalOrderValue: number
+   113→    createdAt: string
+   114→  }>
+   115→}
+   116→
+   117→interface VariantOption {
+   118→  variantId: string
+   119→  sku: string
+   120→  productTitle: string
+   121→  costPrice: number
+   122→  salePrice: number | null
+   123→  fulfillmentType: string
+   124→  primaryImage: string | null
+   125→}
+   126→
+   127→interface ProductsResponse {
+   128→  products: Array<{
+   129→    id: string
+   130→    title: string
+   131→    primaryImage: string | null
+   132→    variants: Array<{
+   133→      id: string
+   134→      sku: string
+   135→      costPrice: number
+   136→      salePrice: number | null
+   137→      fulfillmentType: string
+   138→    }>
+   139→  }>
+   140→}
+   141→
+   142→interface CartItem {
+   143→  variantId: string
+   144→  sku: string
+   145→  productTitle: string
+   146→  primaryImage: string | null
+   147→  unitPrice: number
+   148→  quantity: number
+   149→  fulfillmentType: string
+   150→}
+   151→
+   152→interface CreateOrderResponse {
+   153→  orderId: string
+   154→  flowopsOrderNumber: string
+   155→  orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
+   156→}
+   157→
+   158→type PaymentType = 'full_cod' | 'partial_advance' | 'fully_prepaid'
+   159→
+   160→// ─────────────────────────────────────────────────────────────────────────────
+   161→// Helpers
+   162→// ─────────────────────────────────────────────────────────────────────────────
+   163→
+   164→const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
+   165→
+   166→function formatPKR(n: number): string {
+   167→  return `Rs. ${PKR.format(n)}`
+   168→}
+   169→
+   170→function getErrorMessage(err: unknown): string {
+   171→  if (err instanceof FetchError) return err.message
+   172→  if (err instanceof Error) return err.message
+   173→  return 'Something went wrong. Please try again.'
+   174→}
+   175→
+   176→function parseQty(v: string): number {
+   177→  if (v === '') return 0
+   178→  const n = Number(v)
+   179→  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
+   180→}
+   181→
+   182→function parsePrice(v: string): number {
+   183→  if (v === '') return 0
+   184→  const n = Number(v)
+   185→  return Number.isFinite(n) && n >= 0 ? n : 0
+   186→}
+   187→
+   188→const PAYMENT_METHODS = [
+   189→  { value: 'bank_transfer', label: 'Bank Transfer' },
+   190→  { value: 'easy_paisa', label: 'EasyPaisa' },
+   191→  { value: 'jazz_cash', label: 'JazzCash' },
+   192→  { value: 'cash', label: 'Cash' },
+   193→  { value: 'card', label: 'Card' },
+   194→  { value: 'other', label: 'Other' },
+   195→]
+   196→
+   197→/** Pick the shipping address from a customer's saved addresses array.
+   198→ *  Honors the legacy fallback: untyped addresses are treated as shipping. */
+   199→function pickShippingAddress(addresses: CustomerAddress[] | undefined): CustomerAddress | null {
+   200→  if (!addresses || addresses.length === 0) return null
+   201→  return (
+   202→    addresses.find((a) => a.type === 'shipping') ??
+   203→    addresses.find((a) => !a.type) ??
+   204→    addresses[0]
+   205→  )
+   206→}
+   207→
+   208→/** Stock badge for a variant based on fulfillmentType. */
+   209→function stockBadgeFor(
+   210→  fulfillmentType: string,
+   211→): { label: string; className: string } {
+   212→  if (fulfillmentType === 'made_to_order') {
+   213→    return {
+   214→      label: 'Made to Order',
+   215→      className: 'bg-purple-50 text-purple-700 border-purple-200',
+   216→    }
+   217→  }
+   218→  if (fulfillmentType === 'backorder') {
+   219→    return {
+   220→      label: 'Backorder Available',
+   221→      className: 'bg-orange-50 text-orange-700 border-orange-200',
+   222→    }
+   223→  }
+   224→  return {
+   225→    label: 'In Stock',
+   226→    className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+   227→  }
+   228→}
+   229→
+   230→// ─────────────────────────────────────────────────────────────────────────────
+   231→// Main view — single-page scrollable order creation form
+   232→// ─────────────────────────────────────────────────────────────────────────────
+   233→
+   234→export function OrderCreateView({ onBack }: { onBack: () => void }) {
+   235→  const navigate = useAppStore((s) => s.navigate)
+   236→  const can = useCan()
+   237→  const queryClient = useQueryClient()
+   238→  const canCreate = can(PERMISSIONS.ORDERS_CREATE)
+   239→
+   240→  // ── Form state ────────────────────────────────────────────────────────────
+   241→  // Customer
+   242→  const [customerMode, setCustomerMode] = useState<'existing' | 'new'>('existing')
+   243→  const [phoneSearch, setPhoneSearch] = useState('')
+   244→  const [debouncedPhone, setDebouncedPhone] = useState('')
+   245→  const [selectedCustomer, setSelectedCustomer] = useState<CustomerRow | null>(null)
+   246→
+   247→  // New customer fields (with separate shipping + billing)
+   248→  const [newCustomer, setNewCustomer] = useState({
+   249→    name: '',
+   250→    phone: '',
+   251→    alternate_phone: '',
+   252→    email: '',
+   253→    shipping_address: '',
+   254→    shipping_city: '',
+   255→    shipping_province: '',
+   256→    billing_address: '',
+   257→    billing_city: '',
+   258→    billing_province: '',
+   259→  })
+   260→  // When true: billing fields are hidden and shipping values are mirrored.
+   261→  // CHECKED BY DEFAULT per spec.
+   262→  const [billingSameAsShipping, setBillingSameAsShipping] = useState(true)
+   263→
+   264→  // Items
+   265→  const [cart, setCart] = useState<CartItem[]>([])
+   266→  const [variantSearch, setVariantSearch] = useState('')
+   267→
+   268→  // Payment
+   269→  const [paymentType, setPaymentType] = useState<PaymentType>('full_cod')
+   270→  const [advanceAmount, setAdvanceAmount] = useState('')
+   271→  const [advancePaymentMethod, setAdvancePaymentMethod] = useState('')
+   272→  const [advancePaymentReference, setAdvancePaymentReference] = useState('')
+   273→  // NEW (Issue 2): the payment proof is held in browser memory as a raw File
+   274→  // during the order creation flow. NO upload happens until the order_id exists.
+   275→  const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null)
+   276→  const [paymentProofPreview, setPaymentProofPreview] = useState<string>('')
+   277→  const [proofError, setProofError] = useState<string | null>(null)
+   278→
+   279→  // Delivery
+   280→  // When an existing customer is selected, the delivery address is auto-filled
+   281→  // from their saved shipping address. Toggling this false lets the user
+   282→  // override it.
+   283→  const [useCustomerAddress, setUseCustomerAddress] = useState(true)
+   284→  const [deliveryAddress, setDeliveryAddress] = useState('')
+   285→  const [deliveryCity, setDeliveryCity] = useState('')
+   286→  const [deliveryProvince, setDeliveryProvince] = useState('')
+   287→  const [courierName, setCourierName] = useState('')
+   288→  const [dispatchLocationId, setDispatchLocationId] = useState('')
+   289→  const [notesForCourier, setNotesForCourier] = useState('')
+   290→  const [discountAmount, setDiscountAmount] = useState('')
+   291→  const [discountReason, setDiscountReason] = useState('')
+   292→
+   293→  // Validation errors — keyed by Zod issue path (joined with '.')
+   294→  const [errors, setErrors] = useState<Record<string, string>>({})
+   295→
+   296→  // Section refs for scrolling to the first error on submit
+   297→  const customerSectionRef = useRef<HTMLDivElement | null>(null)
+   298→  const itemsSectionRef = useRef<HTMLDivElement | null>(null)
+   299→  const paymentSectionRef = useRef<HTMLDivElement | null>(null)
+   300→  const deliverySectionRef = useRef<HTMLDivElement | null>(null)
+   301→
+   302→  // Track in-flight post-creation upload so we can render a "Saving proof…"
+   303→  // state on the submit button.
+   304→  const [uploadingProof, setUploadingProof] = useState(false)
+   305→
+   306→  // ── Debounce phone search ────────────────────────────────────────────────
+   307→  useEffect(() => {
+   308→    const t = setTimeout(() => setDebouncedPhone(phoneSearch.trim()), 350)
+   309→    return () => clearTimeout(t)
+   310→  }, [phoneSearch])
+   311→
+   312→  // ── Data queries ──────────────────────────────────────────────────────────
+   313→  const locationsQuery = useQuery<LocationsResponse>({
+   314→    queryKey: ['locations'],
+   315→    queryFn: () => api.get<LocationsResponse>('/api/inventory-locations'),
+   316→    staleTime: 30_000,
+   317→  })
+   318→
+   319→  const productsQuery = useQuery<ProductsResponse>({
+   320→    queryKey: ['products', 'for-order-create'],
+   321→    queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100'),
+   322→    staleTime: 60_000,
+   323→  })
+   324→
+   325→  const trimmedPhone = debouncedPhone
+   326→  const customersQuery = useQuery<CustomersSearchResponse>({
+   327→    queryKey: ['customers', 'search', trimmedPhone],
+   328→    queryFn: () =>
+   329→      api.get<CustomersSearchResponse>(
+   330→        `/api/customers?search=${encodeURIComponent(trimmedPhone)}&limit=10`,
+   331→      ),
+   332→    enabled: trimmedPhone.length >= 4,
+   333→    staleTime: 10_000,
+   334→  })
+   335→
+   336→  // Fetch the selected customer's full detail (including saved addresses)
+   337→  // so we can auto-fill the delivery section from their shipping address.
+   338→  const customerDetailQuery = useQuery<CustomerDetailResponse>({
+   339→    queryKey: ['customer', 'detail', selectedCustomer?.id],
+   340→    queryFn: () =>
+   341→      api.get<CustomerDetailResponse>(`/api/customers/${selectedCustomer!.id}`),
+   342→    enabled: !!selectedCustomer,
+   343→    staleTime: 30_000,
+   344→  })
+   345→
+   346→  // ── Variant options (flatten products → variants) ─────────────────────────
+   347→  const variantOptions: VariantOption[] = useMemo(() => {
+   348→    const list: VariantOption[] = []
+   349→    for (const p of productsQuery.data?.products ?? []) {
+   350→      for (const v of p.variants) {
+   351→        list.push({
+   352→          variantId: v.id,
+   353→          sku: v.sku,
+   354→          productTitle: p.title,
+   355→          costPrice: v.costPrice,
+   356→          salePrice: v.salePrice,
+   357→          fulfillmentType: v.fulfillmentType,
+   358→          primaryImage: p.primaryImage,
+   359→        })
+   360→      }
+   361→    }
+   362→    return list
+   363→  }, [productsQuery.data])
+   364→
+   365→  const variantSearchResults = useMemo(() => {
+   366→    if (!variantSearch.trim()) return []
+   367→    const q = variantSearch.toLowerCase()
+   368→    return variantOptions
+   369→      .filter(
+   370→        (v) => v.sku.toLowerCase().includes(q) || v.productTitle.toLowerCase().includes(q),
+   371→      )
+   372→      .slice(0, 8)
+   373→  }, [variantOptions, variantSearch])
+   374→
+   375→  // ── Computed totals ───────────────────────────────────────────────────────
+   376→  const subtotal = useMemo(
+   377→    () => cart.reduce((s, i) => s + i.unitPrice * i.quantity, 0),
+   378→    [cart],
+   379→  )
+   380→  const discount = parsePrice(discountAmount)
+   381→  const total = Math.max(0, subtotal - discount)
+   382→
+   383→  const remainingCod =
+   384→    paymentType === 'fully_prepaid'
+   385→      ? 0
+   386→      : paymentType === 'partial_advance'
+   387→        ? Math.max(0, total - parsePrice(advanceAmount))
+   388→        : total
+   389→
+   390→  // ── Auto-fill delivery fields when an existing customer's shipping
+   391→  // address is available (or when toggling "Use different address"). ─────────
+   392→  useEffect(() => {
+   393→    if (customerMode !== 'existing' || !selectedCustomer) return
+   394→    if (!useCustomerAddress) return // user is overriding — don't clobber their input
+   395→
+   396→    const addrs = customerDetailQuery.data?.customer.addresses
+   397→    const shipping = pickShippingAddress(addrs)
+   398→    if (shipping) {
+   399→      setDeliveryAddress(shipping.address)
+   400→      setDeliveryCity(shipping.city)
+   401→      setDeliveryProvince(shipping.province ?? '')
+   402→    }
+   403→  }, [customerMode, selectedCustomer, useCustomerAddress, customerDetailQuery.data])
+   404→
+   405→  // ── Auto-select default dispatch location ─────────────────────────────────
+   406→  useEffect(() => {
+   407→    if (!dispatchLocationId && locationsQuery.data?.locations.length) {
+   408→      const def = locationsQuery.data.locations.find((l) => l.isDefault)
+   409→      setDispatchLocationId(def?.id ?? locationsQuery.data.locations[0].id)
+   410→    }
+   411→  }, [dispatchLocationId, locationsQuery.data])
+   412→
+   413→  // ── Item manipulation ─────────────────────────────────────────────────────
+   414→  const addVariant = (v: VariantOption) => {
+   415→    setCart((prev) => {
+   416→      if (prev.some((i) => i.variantId === v.variantId)) {
+   417→        toast.info('That variant is already in the cart.')
+   418→        return prev
+   419→      }
+   420→      const unitPrice = v.salePrice ?? v.costPrice
+   421→      return [
+   422→        ...prev,
+   423→        {
+   424→          variantId: v.variantId,
+   425→          sku: v.sku,
+   426→          productTitle: v.productTitle,
+   427→          primaryImage: v.primaryImage,
+   428→          unitPrice,
+   429→          quantity: 1,
+   430→          fulfillmentType: v.fulfillmentType,
+   431→        },
+   432→      ]
+   433→    })
+   434→    setVariantSearch('')
+   435→  }
+   436→
+   437→  const removeItem = (variantId: string) => {
+   438→    setCart((prev) => prev.filter((i) => i.variantId !== variantId))
+   439→  }
+   440→
+   441→  const updateItem = (variantId: string, patch: Partial<CartItem>) => {
+   442→    setCart((prev) =>
+   443→      prev.map((i) => (i.variantId === variantId ? { ...i, ...patch } : i)),
+   444→    )
+   445→  }
+   446→
+   447→  // ── Payment proof file handling ───────────────────────────────────────────
+   448→  // Issue 2: validate the picked file but DO NOT upload yet — store it
+   449→  // locally. The actual upload happens after createManualOrder() returns.
+   450→  function handleProofFile(file: File) {
+   451→    setProofError(null)
+   452→    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+   453→      setProofError('Only JPG, PNG, and WebP images are allowed.')
+   454→      return
+   455→    }
+   456→    if (file.size > 5 * 1024 * 1024) {
+   457→      setProofError('File too large. Maximum 5 MB.')
+   458→      return
+   459→    }
+   460→    // Revoke any previous preview URL to avoid leaking blob URLs.
+   461→    if (paymentProofPreview) URL.revokeObjectURL(paymentProofPreview)
+   462→    setPaymentProofFile(file)
+   463→    setPaymentProofPreview(URL.createObjectURL(file))
+   464→  }
+   465→
+   466→  function clearProofFile() {
+   467→    setProofError(null)
+   468→    if (paymentProofPreview) URL.revokeObjectURL(paymentProofPreview)
+   469→    setPaymentProofFile(null)
+   470→    setPaymentProofPreview('')
+   471→  }
+   472→
+   473→  // Cleanup object URL on unmount
+   474→  useEffect(() => {
+   475→    return () => {
+   476→      if (paymentProofPreview) URL.revokeObjectURL(paymentProofPreview)
+   477→    }
+   478→  }, [paymentProofPreview])
+   479→
+   480→  // ── Build the new customer addresses array (shipping + billing) ───────────
+   481→  function buildNewCustomerAddresses() {
+   482→    const shipAddr = newCustomer.shipping_address.trim()
+   483→    const shipCity = newCustomer.shipping_city.trim()
+   484→    const shipProvince = newCustomer.shipping_province.trim()
+   485→
+   486→    const shippingEntry = {
+   487→      type: 'shipping' as const,
+   488→      label: 'Shipping',
+   489→      address: shipAddr,
+   490→      city: shipCity,
+   491→      province: shipProvince || undefined,
+   492→      is_default: true,
+   493→    }
+   494→
+   495→    // When "same as shipping" is checked, mirror shipping values for billing.
+   496→    const billAddr = billingSameAsShipping ? shipAddr : newCustomer.billing_address.trim()
+   497→    const billCity = billingSameAsShipping ? shipCity : newCustomer.billing_city.trim()
+   498→    const billProvince = billingSameAsShipping
+   499→      ? shipProvince
+   500→      : newCustomer.billing_province.trim()
+   501→
+   502→    const billingEntry = {
+   503→      type: 'billing' as const,
+   504→      label: 'Billing',
+   505→      address: billAddr,
+   506→      city: billCity,
+   507→      province: billProvince || undefined,
+   508→      is_default: false,
+   509→    }
+   510→
+   511→    return [shippingEntry, billingEntry]
+   512→  }
+   513→
+   514→  // ── Build the create-order payload ────────────────────────────────────────
+   515→  function buildPayload(): Record<string, unknown> {
+   516→    const payload: Record<string, unknown> = {
+   517→      items: cart.map((i) => ({
+   518→        org_variant_id: i.variantId,
+   519→        quantity: i.quantity,
+   520→        unit_price: i.unitPrice,
+   521→      })),
+   522→      payment_type: paymentType,
+   523→      delivery_address: deliveryAddress.trim(),
+   524→      delivery_city: deliveryCity.trim(),
+   525→      courier_name: courierName.trim() || undefined,
+   526→      dispatch_location_id: dispatchLocationId,
+   527→      notes_for_courier: notesForCourier.trim() || undefined,
+   528→      discount_amount: discount > 0 ? discount : undefined,
+   529→      discount_reason: discountReason.trim() || undefined,
+   530→    }
+   531→
+   532→    if (paymentType === 'partial_advance' || paymentType === 'fully_prepaid') {
+   533→      payload.advance_amount =
+   534→        paymentType === 'fully_prepaid' ? total : parsePrice(advanceAmount)
+   535→      payload.advance_payment_method = advancePaymentMethod || undefined
+   536→      payload.advance_payment_reference = advancePaymentReference.trim() || undefined
+   537→      // NOTE: payment proof screenshot URL is intentionally NOT set here.
+   538→      // The file is uploaded and persisted AFTER the order is created
+   539→      // (see handleSubmit). This is the Issue 2 fix.
+   540→    }
+   541→
+   542→    if (customerMode === 'existing' && selectedCustomer) {
+   543→      payload.customer_id = selectedCustomer.id
+   544→    } else {
+   545→      payload.customer = {
+   546→        name: newCustomer.name.trim(),
+   547→        phone: newCustomer.phone.trim(),
+   548→        alternate_phone: newCustomer.alternate_phone.trim() || undefined,
+   549→        email: newCustomer.email.trim() || undefined,
+   550→        addresses: buildNewCustomerAddresses(),
+   551→      }
+   552→    }
+   553→
+   554→    return payload
+   555→  }
+   556→
+   557→  // ── Validate the full form using the Zod schema ───────────────────────────
+   558→  function validate(): Record<string, string> {
+   559→    const errs: Record<string, string> = {}
+   560→    const payload = buildPayload()
+   561→    const result = createManualOrderSchema.safeParse(payload)
+   562→    if (!result.success) {
+   563→      for (const issue of result.error.issues) {
+   564→        const key = issue.path.join('.')
+   565→        if (!errs[key]) errs[key] = issue.message
+   566→      }
+   567→    }
+   568→    return errs
+   569→  }
+   570→
+   571→  // ── Upload payment proof + persist URL to the order ───────────────────────
+   572→  // Returns true on success, false on any failure. NEVER throws.
+   573→  async function uploadPaymentProof(orderId: string): Promise<boolean> {
+   574→    if (!paymentProofFile) return true // nothing to upload — trivially "success"
+   575→
+   576→    setUploadingProof(true)
+   577→    try {
+   578→      // Step 1: upload the raw file via /api/upload
+   579→      const fd = new FormData()
+   580→      fd.append('file', paymentProofFile)
+   581→      const uploadRes = await fetch(
+   582→        `/api/upload?type=payment-proofs&id=${orderId}`,
+   583→        { method: 'POST', body: fd },
+   584→      )
+   585→      const uploadText = await uploadRes.text()
+   586→      let uploadBody: unknown = null
+   587→      if (uploadText) {
+   588→        try {
+   589→          uploadBody = JSON.parse(uploadText)
+   590→        } catch {
+   591→          uploadBody = uploadText
+   592→        }
+   593→      }
+   594→      if (!uploadRes.ok) {
+   595→        const msg =
+   596→          uploadBody && typeof uploadBody === 'object' && 'error' in uploadBody
+   597→            ? String((uploadBody as { error: unknown }).error)
+   598→            : typeof uploadBody === 'string'
+   599→              ? uploadBody
+   600→              : `Upload failed (HTTP ${uploadRes.status})`
+   601→        throw new Error(msg)
+   602→      }
+   603→      const { url } = uploadBody as { url: string }
+   604→
+   605→      // Step 2: persist the URL on the order via the dedicated endpoint
+   606→      // (NOT convert-payment — the order already has its payment type set).
+   607→      await api.post(`/api/orders/${orderId}/payment-proof`, {
+   608→        advance_payment_screenshot_url: url,
+   609→      })
+   610→      return true
+   611→    } catch {
+   612→      return false
+   613→    } finally {
+   614→      setUploadingProof(false)
+   615→    }
+   616→  }
+   617→
+   618→  // ── Permission gate (after all hooks) ─────────────────────────────────────
+   619→  if (!canCreate) {
+   620→    return (
+   621→      <div className="space-y-6">
+   622→        <PageHeader
+   623→          title="Create Order"
+   624→          description="Manually create a customer order"
+   625→          actions={
+   626→            <Button variant="outline" size="sm" onClick={onBack}>
+   627→              <ArrowLeft className="h-4 w-4" /> Back to Orders
+   628→            </Button>
+   629→          }
+   630→        />
+   631→        <Card>
+   632→          <CardContent className="p-10 text-center">
+   633→            <AlertCircle className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
+   634→            <p className="text-sm text-muted-foreground">
+   635→              You don&apos;t have permission to create orders.
+   636→            </p>
+   637→          </CardContent>
+   638→        </Card>
+   639→      </div>
+   640→    )
+   641→  }
+   642→
+   643→  // ── Submit handler ────────────────────────────────────────────────────────
+   644→  const handleSubmit = async () => {
+   645→    const errs = validate()
+   646→    setErrors(errs)
+   647→    if (Object.keys(errs).length > 0) {
+   648→      toast.error('Please complete all required fields before creating the order.')
+   649→      // Scroll to the first section that has an error
+   650→      const firstErrPath = Object.keys(errs)[0]
+   651→      const section = sectionForErrorPath(firstErrPath)
+   652→      const ref =
+   653→        section === 'customer'
+   654→          ? customerSectionRef.current
+   655→          : section === 'items'
+   656→            ? itemsSectionRef.current
+   657→            : section === 'payment'
+   658→              ? paymentSectionRef.current
+   659→              : deliverySectionRef.current
+   660→      ref?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+   661→      return
+   662→    }
+   663→
+   664→    const payload = buildPayload()
+   665→
+   666→    try {
+   667→      // Step 1: create the order (no payment proof upload yet — order_id
+   668→      // does not exist until this returns).
+   669→      const data = await api.post<CreateOrderResponse>('/api/orders', payload)
+   670→      toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
+   671→      void queryClient.invalidateQueries({ queryKey: ['orders'] })
+   672→
+   673→      // Step 2: IF a payment proof file is pending, upload + persist it now.
+   674→      // If this fails, the order is still created — we surface a dedicated
+   675→      // warning (NOT a combined error). User can add the proof later from
+   676→      // the order detail page.
+   677→      if (paymentProofFile) {
+   678→        const ok = await uploadPaymentProof(data.orderId)
+   679→        if (!ok) {
+   680→          toast.warning(
+   681→            'Order created successfully, but the payment proof image failed to upload — you can add it from the order detail page.',
+   682→          )
+   683→        }
+   684→      }
+   685→
+   686→      navigate({ name: 'order-detail', id: data.orderId })
+   687→    } catch (err) {
+   688→      toast.error(getErrorMessage(err))
+   689→    }
+   690→  }
+   691→
+   692→  // Helper: which section does an error path belong to?
+   693→  function sectionForErrorPath(path: string): 'customer' | 'items' | 'payment' | 'delivery' {
+   694→    if (path.startsWith('customer') || path === 'customer' || path === 'customer_id') return 'customer'
+   695→    if (path.startsWith('items')) return 'items'
+   696→    if (path.startsWith('payment') || path.startsWith('advance')) return 'payment'
+   697→    return 'delivery'
+   698→  }
+   699→
+   700→  // Convenience error getter
+   701→  const fieldError = (...paths: string[]) => {
+   702→    for (const p of paths) if (errors[p]) return errors[p]
+   703→    return undefined
+   704→  }
+   705→
+   706→  const isSubmitting = uploadingProof
+   707→  // For new customer, mirror billing values when "same as shipping" is checked
+   708→  const effectiveBillingAddress = billingSameAsShipping ? newCustomer.shipping_address : newCustomer.billing_address
+   709→  const effectiveBillingCity = billingSameAsShipping ? newCustomer.shipping_city : newCustomer.billing_city
+   710→  const effectiveBillingProvince = billingSameAsShipping ? newCustomer.shipping_province : newCustomer.billing_province
+   711→
+   712→  return (
+   713→    <div className="space-y-6">
+   714→      <PageHeader
+   715→        title="Create Order"
+   716→        description="Fill in customer, items, payment, and delivery — then submit"
+   717→        actions={
+   718→          <Button variant="outline" size="sm" onClick={onBack}>
+   719→            <ArrowLeft className="h-4 w-4" /> Back to Orders
+   720→          </Button>
+   721→        }
+   722→      />
+   723→
+   724→      <div className="grid gap-6 lg:grid-cols-3">
+   725→        {/* ── Left column: form sections (stacked, scrollable) ─────────────── */}
+   726→        <div className="lg:col-span-2 space-y-6">
+   727→          {/* SECTION 1: Customer */}
+   728→          <div ref={customerSectionRef}>
+   729→            <CustomerSection
+   730→              customerMode={customerMode}
+   731→              setCustomerMode={(m) => {
+   732→                setCustomerMode(m)
+   733→                setSelectedCustomer(null)
+   734→              }}
+   735→              phoneSearch={phoneSearch}
+   736→              setPhoneSearch={(v) => {
+   737→                setPhoneSearch(v)
+   738→                setSelectedCustomer(null)
+   739→              }}
+   740→              isSearching={customersQuery.isFetching && trimmedPhone.length >= 4}
+   741→              selectedCustomer={selectedCustomer}
+   742→              setSelectedCustomer={setSelectedCustomer}
+   743→              customers={customersQuery.data?.customers ?? []}
+   744→              hasSearched={trimmedPhone.length >= 4}
+   745→              customerDetail={customerDetailQuery.data}
+   746→              newCustomer={newCustomer}
+   747→              setNewCustomer={setNewCustomer}
+   748→              billingSameAsShipping={billingSameAsShipping}
+   749→              setBillingSameAsShipping={(checked) => {
+   750→                // When unchecking, copy current shipping values into the
+   751→                // billing fields so the user has a starting point.
+   752→                if (!checked) {
+   753→                  setNewCustomer((p) => ({
+   754→                    ...p,
+   755→                    billing_address: p.shipping_address,
+   756→                    billing_city: p.shipping_city,
+   757→                    billing_province: p.shipping_province,
+   758→                  }))
+   759→                }
+   760→                setBillingSameAsShipping(checked)
+   761→              }}
+   762→              fieldError={fieldError}
+   763→            />
+   764→          </div>
+   765→
+   766→          {/* SECTION 2: Items */}
+   767→          <div ref={itemsSectionRef}>
+   768→            <ItemsSection
+   769→              cart={cart}
+   770→              variantSearch={variantSearch}
+   771→              setVariantSearch={setVariantSearch}
+   772→              variantSearchResults={variantSearchResults}
+   773→              addVariant={addVariant}
+   774→              removeItem={removeItem}
+   775→              updateItem={updateItem}
+   776→              isLoadingProducts={productsQuery.isLoading}
+   777→              subtotal={subtotal}
+   778→              itemsError={fieldError('items')}
+   779→            />
+   780→          </div>
+   781→
+   782→          {/* SECTION 3: Payment */}
+   783→          <div ref={paymentSectionRef}>
+   784→            <PaymentSection
+   785→              paymentType={paymentType}
+   786→              setPaymentType={setPaymentType}
+   787→              advanceAmount={advanceAmount}
+   788→              setAdvanceAmount={setAdvanceAmount}
+   789→              advancePaymentMethod={advancePaymentMethod}
+   790→              setAdvancePaymentMethod={setAdvancePaymentMethod}
+   791→              advancePaymentReference={advancePaymentReference}
+   792→              setAdvancePaymentReference={setAdvancePaymentReference}
+   793→              subtotal={subtotal}
+   794→              total={total}
+   795→              discount={discount}
+   796→              remainingCod={remainingCod}
+   797→              // Issue 2: payment proof is stored as a raw File locally
+   798→              paymentProofFile={paymentProofFile}
+   799→              paymentProofPreview={paymentProofPreview}
+   800→              proofError={proofError}
+   801→              onProofFile={handleProofFile}
+   802→              onClearProof={clearProofFile}
+   803→              fieldError={fieldError}
+   804→            />
+   805→          </div>
+   806→
+   807→          {/* SECTION 4: Delivery & Discount */}
+   808→          <div ref={deliverySectionRef}>
+   809→            <DeliverySection
+   810→              customerMode={customerMode}
+   811→              selectedCustomer={selectedCustomer}
+   812→              customerShippingAddress={
+   813→                pickShippingAddress(customerDetailQuery.data?.customer.addresses)
+   814→              }
+   815→              useCustomerAddress={useCustomerAddress}
+   816→              setUseCustomerAddress={(v) => {
+   817→                setUseCustomerAddress(v)
+   818→                // When turning back ON, re-pull the saved shipping address.
+   819→                if (v && customerDetailQuery.data?.customer.addresses) {
+   820→                  const s = pickShippingAddress(customerDetailQuery.data.customer.addresses)
+   821→                  if (s) {
+   822→                    setDeliveryAddress(s.address)
+   823→                    setDeliveryCity(s.city)
+   824→                    setDeliveryProvince(s.province ?? '')
+   825→                  }
+   826→                }
+   827→              }}
+   828→              deliveryAddress={deliveryAddress}
+   829→              setDeliveryAddress={setDeliveryAddress}
+   830→              deliveryCity={deliveryCity}
+   831→              setDeliveryCity={setDeliveryCity}
+   832→              deliveryProvince={deliveryProvince}
+   833→              setDeliveryProvince={setDeliveryProvince}
+   834→              courierName={courierName}
+   835→              setCourierName={setCourierName}
+   836→              dispatchLocationId={dispatchLocationId}
+   837→              setDispatchLocationId={setDispatchLocationId}
+   838→              notesForCourier={notesForCourier}
+   839→              setNotesForCourier={setNotesForCourier}
+   840→              discountAmount={discountAmount}
+   841→              setDiscountAmount={setDiscountAmount}
+   842→              discountReason={discountReason}
+   843→              setDiscountReason={setDiscountReason}
+   844→              locations={locationsQuery.data?.locations ?? []}
+   845→              isLoadingLocations={locationsQuery.isLoading}
+   846→              fieldError={fieldError}
+   847→            />
+   848→          </div>
+   849→        </div>
+   850→
+   851→        {/* ── Right column: sticky summary + create button ─────────────────── */}
+   852→        <div className="lg:col-span-1">
+   853→          <div className="lg:sticky lg:top-6 space-y-4">
+   854→            <SummarySection
+   855→              cart={cart}
+   856→              subtotal={subtotal}
+   857→              discount={discount}
+   858→              discountReason={discountReason}
+   859→              total={total}
+   860→              paymentType={paymentType}
+   861→              advanceAmount={parsePrice(advanceAmount)}
+   862→              remainingCod={remainingCod}
+   863→            />
+   864→
+   865→            <Card>
+   866→              <CardContent className="p-4 space-y-3">
+   867→                <Button
+   868→                  size="lg"
+   869→                  className="w-full"
+   870→                  onClick={handleSubmit}
+   871→                  disabled={isSubmitting}
+   872→                >
+   873→                  {isSubmitting ? (
+   874→                    <>
+   875→                      <Loader2 className="h-4 w-4 animate-spin" /> Saving proof…
+   876→                    </>
+   877→                  ) : (
+   878→                    <>
+   879→                      <CheckCircle2 className="h-4 w-4" /> Create Order
+   880→                    </>
+   881→                  )}
+   882→                </Button>
+   883→                <Button
+   884→                  variant="outline"
+   885→                  className="w-full"
+   886→                  onClick={onBack}
+   887→                  disabled={isSubmitting}
+   888→                >
+   889→                  Cancel
+   890→                </Button>
+   891→                {Object.keys(errors).length > 0 && (
+   892→                  <p className="text-xs text-destructive text-center">
+   893→                    {Object.keys(errors).length} field
+   894→                    {Object.keys(errors).length === 1 ? '' : 's'} need
+   895→                    {Object.keys(errors).length === 1 ? 's' : ''} attention above.
+   896→                  </p>
+   897→                )}
+   898→              </CardContent>
+   899→            </Card>
+   900→          </div>
+   901→        </div>
+   902→      </div>
+   903→
+   904→      {/* Hidden values to satisfy "effective" reads without dead-code warnings */}
+   905→      <span className="hidden" aria-hidden>
+   906→        {effectiveBillingAddress}
+   907→        {effectiveBillingCity}
+   908→        {effectiveBillingProvince}
+   909→      </span>
+   910→    </div>
+   911→  )
+   912→}
+   913→
+   914→// ─────────────────────────────────────────────────────────────────────────────
+   915→// SECTION 1: Customer
+   916→// ─────────────────────────────────────────────────────────────────────────────
+   917→
+   918→function CustomerSection({
+   919→  customerMode,
+   920→  setCustomerMode,
+   921→  phoneSearch,
+   922→  setPhoneSearch,
+   923→  isSearching,
+   924→  selectedCustomer,
+   925→  setSelectedCustomer,
+   926→  customers,
+   927→  hasSearched,
+   928→  customerDetail,
+   929→  newCustomer,
+   930→  setNewCustomer,
+   931→  billingSameAsShipping,
+   932→  setBillingSameAsShipping,
+   933→  fieldError,
+   934→}: {
+   935→  customerMode: 'existing' | 'new'
+   936→  setCustomerMode: (m: 'existing' | 'new') => void
+   937→  phoneSearch: string
+   938→  setPhoneSearch: (v: string) => void
+   939→  isSearching: boolean
+   940→  selectedCustomer: CustomerRow | null
+   941→  setSelectedCustomer: (c: CustomerRow | null) => void
+   942→  customers: CustomerRow[]
+   943→  hasSearched: boolean
+   944→  customerDetail: CustomerDetailResponse | undefined
+   945→  newCustomer: {
+   946→    name: string
+   947→    phone: string
+   948→    alternate_phone: string
+   949→    email: string
+   950→    shipping_address: string
+   951→    shipping_city: string
+   952→    shipping_province: string
+   953→    billing_address: string
+   954→    billing_city: string
+   955→    billing_province: string
+   956→  }
+   957→  setNewCustomer: React.Dispatch<
+   958→    React.SetStateAction<{
+   959→      name: string
+   960→      phone: string
+   961→      alternate_phone: string
+   962→      email: string
+   963→      shipping_address: string
+   964→      shipping_city: string
+   965→      shipping_province: string
+   966→      billing_address: string
+   967→      billing_city: string
+   968→      billing_province: string
+   969→    }>
+   970→  >
+   971→  billingSameAsShipping: boolean
+   972→  setBillingSameAsShipping: (checked: boolean) => void
+   973→  fieldError: (...paths: string[]) => string | undefined
+   974→}) {
+   975→  return (
+   976→    <Card>
+   977→      <CardHeader>
+   978→        <CardTitle className="text-base flex items-center gap-2">
+   979→          <User className="h-4 w-4" /> 1 · Customer
+   980→        </CardTitle>
+   981→      </CardHeader>
+   982→      <CardContent className="space-y-5">
+   983→        {/* Mode toggle cards */}
+   984→        <div className="grid sm:grid-cols-2 gap-3">
+   985→          <ModeCard
+   986→            active={customerMode === 'existing'}
+   987→            onClick={() => setCustomerMode('existing')}
+   988→            title="Existing Customer"
+   989→            description="Search by phone, name, or email"
+   990→            icon={<Search className="h-4 w-4" />}
+   991→          />
+   992→          <ModeCard
+   993→            active={customerMode === 'new'}
+   994→            onClick={() => setCustomerMode('new')}
+   995→            title="Add New Customer"
+   996→            description="Create a new customer record"
+   997→            icon={<Plus className="h-4 w-4" />}
+   998→          />
+   999→        </div>
+  1000→
+  1001→        {customerMode === 'existing' ? (
+  1002→          <div className="space-y-3">
+  1003→            <div className="space-y-1.5">
+  1004→              <Label htmlFor="phone-search">
+  1005→                <span className="flex items-center gap-1.5">
+  1006→                  <Phone className="h-3.5 w-3.5" /> Search by phone, name, or email
+  1007→                </span>
+  1008→              </Label>
+  1009→              <div className="relative">
+  1010→                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+  1011→                <Input
+  1012→                  id="phone-search"
+  1013→                  placeholder="e.g. 03001234567 or Ayesha"
+  1014→                  className="pl-9"
+  1015→                  value={phoneSearch}
+  1016→                  onChange={(e) => setPhoneSearch(e.target.value)}
+  1017→                />
+  1018→                {isSearching && (
+  1019→                  <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+  1020→                )}
+  1021→              </div>
+  1022→              <p className="text-xs text-muted-foreground">
+  1023→                Type at least 4 characters to search. Search is debounced.
+  1024→              </p>
+  1025→            </div>
+  1026→
+  1027→            {/* Search results */}
+  1028→            {hasSearched && !selectedCustomer && (
+  1029→              <div className="rounded-md border bg-popover shadow-sm max-h-72 overflow-y-auto">
+  1030→                {customers.length === 0 ? (
+  1031→                  <div className="p-4 text-sm text-muted-foreground text-center">
+  1032→                    {isSearching ? (
+  1033→                      <span className="flex items-center justify-center gap-2">
+  1034→                        <Loader2 className="h-4 w-4 animate-spin" /> Searching…
+  1035→                      </span>
+  1036→                    ) : (
+  1037→                      <>
+  1038→                        No matching customers.{' '}
+  1039→                        <button
+  1040→                          type="button"
+  1041→                          className="text-primary underline underline-offset-2"
+  1042→                          onClick={() => setCustomerMode('new')}
+  1043→                        >
+  1044→                          Add a new customer
+  1045→                        </button>
+  1046→                      </>
+  1047→                    )}
+  1048→                  </div>
+  1049→                ) : (
+  1050→                  <ul className="divide-y">
+  1051→                    {customers.map((c) => (
+  1052→                      <li key={c.id}>
+  1053→                        <button
+  1054→                          type="button"
+  1055→                          onClick={() => setSelectedCustomer(c)}
+  1056→                          className="w-full text-left px-3 py-2.5 hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
+  1057→                        >
+  1058→                          <div className="min-w-0">
+  1059→                            <p className="text-sm font-medium truncate">{c.name}</p>
+  1060→                            <p className="text-xs text-muted-foreground font-mono">{c.phone}</p>
+  1061→                          </div>
+  1062→                          <div className="flex items-center gap-2 shrink-0">
+  1063→                            {c.isFlagged && (
+  1064→                              <Badge
+  1065→                                variant="outline"
+  1066→                                className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]"
+  1067→                              >
+  1068→                                Flagged
+  1069→                              </Badge>
+  1070→                            )}
+  1071→                            <span className="text-xs text-muted-foreground">
+  1072→                              {c.totalOrdersCount} order{c.totalOrdersCount === 1 ? '' : 's'}
+  1073→                            </span>
+  1074→                          </div>
+  1075→                        </button>
+  1076→                      </li>
+  1077→                    ))}
+  1078→                  </ul>
+  1079→                )}
+  1080→              </div>
+  1081→            )}
+  1082→
+  1083→            {/* Selected customer card with history summary */}
+  1084→            {selectedCustomer && (
+  1085→              <div className="rounded-lg border-2 border-primary/40 bg-primary/5 p-4 space-y-3">
+  1086→                <div className="flex items-start justify-between gap-2">
+  1087→                  <div className="flex items-start gap-3 min-w-0">
+  1088→                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
+  1089→                      <User className="h-5 w-5" />
+  1090→                    </div>
+  1091→                    <div className="min-w-0">
+  1092→                      <div className="flex items-center gap-2">
+  1093→                        <p className="text-sm font-semibold truncate">{selectedCustomer.name}</p>
+  1094→                        {selectedCustomer.isFlagged && (
+  1095→                          <Badge
+  1096→                            variant="outline"
+  1097→                            className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]"
+  1098→                          >
+  1099→                            Flagged
+  1100→                          </Badge>
+  1101→                        )}
+  1102→                      </div>
+  1103→                      <p className="text-xs text-muted-foreground font-mono">
+  1104→                        {selectedCustomer.phone}
+  1105→                      </p>
+  1106→                      {selectedCustomer.email && (
+  1107→                        <p className="text-xs text-muted-foreground">{selectedCustomer.email}</p>
+  1108→                      )}
+  1109→                    </div>
+  1110→                  </div>
+  1111→                  <Button size="sm" variant="ghost" onClick={() => setSelectedCustomer(null)}>
+  1112→                    Change
+  1113→                  </Button>
+  1114→                </div>
+  1115→                <Separator />
+  1116→                <div className="grid grid-cols-2 gap-3">
+  1117→                  <div className="rounded-md bg-background p-2.5">
+  1118→                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+  1119→                      Previous Orders
+  1120→                    </p>
+  1121→                    <p className="text-lg font-semibold">
+  1122→                      {customerDetail?.customer.totalOrdersCount ?? selectedCustomer.totalOrdersCount}
+  1123→                    </p>
+  1124→                  </div>
+  1125→                  <div className="rounded-md bg-background p-2.5">
+  1126→                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+  1127→                      Total RTOs
+  1128→                    </p>
+  1129→                    <p
+  1130→                      className={cn(
+  1131→                        'text-lg font-semibold',
+  1132→                        selectedCustomer.totalRtoCount > 0 ? 'text-rose-600' : '',
+  1133→                      )}
+  1134→                    >
+  1135→                      {selectedCustomer.totalRtoCount}
+  1136→                    </p>
+  1137→                  </div>
+  1138→                </div>
+  1139→                {selectedCustomer.totalOrdersCount > 0 && (
+  1140→                  <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+  1141→                    <History className="h-3 w-3" />
+  1142→                    Returning customer — verify address before dispatch.
+  1143→                  </p>
+  1144→                )}
+  1145→                {fieldError('customer', 'customer_id') && (
+  1146→                  <p className="text-xs text-destructive">{fieldError('customer', 'customer_id')}</p>
+  1147→                )}
+  1148→              </div>
+  1149→            )}
+  1150→          </div>
+  1151→        ) : (
+  1152→          <div className="space-y-5">
+  1153→            {/* Basic contact info */}
+  1154→            <div className="grid sm:grid-cols-2 gap-4">
+  1155→              <div className="space-y-1.5">
+  1156→                <Label htmlFor="nc-name">Full name *</Label>
+  1157→                <Input
+  1158→                  id="nc-name"
+  1159→                  placeholder="e.g. Ayesha Khan"
+  1160→                  value={newCustomer.name}
+  1161→                  onChange={(e) => setNewCustomer((p) => ({ ...p, name: e.target.value }))}
+  1162→                  aria-invalid={!!fieldError('customer.name')}
+  1163→                />
+  1164→                {fieldError('customer.name') && (
+  1165→                  <p className="text-xs text-destructive">{fieldError('customer.name')}</p>
+  1166→                )}
+  1167→              </div>
+  1168→              <div className="space-y-1.5">
+  1169→                <Label htmlFor="nc-phone">Phone *</Label>
+  1170→                <Input
+  1171→                  id="nc-phone"
+  1172→                  placeholder="e.g. 03001234567"
+  1173→                  value={newCustomer.phone}
+  1174→                  onChange={(e) => setNewCustomer((p) => ({ ...p, phone: e.target.value }))}
+  1175→                  aria-invalid={!!fieldError('customer.phone')}
+  1176→                />
+  1177→                {fieldError('customer.phone') && (
+  1178→                  <p className="text-xs text-destructive">{fieldError('customer.phone')}</p>
+  1179→                )}
+  1180→              </div>
+  1181→              <div className="space-y-1.5">
+  1182→                <Label htmlFor="nc-alt">Alternate phone</Label>
+  1183→                <Input
+  1184→                  id="nc-alt"
+  1185→                  placeholder="Optional"
+  1186→                  value={newCustomer.alternate_phone}
+  1187→                  onChange={(e) =>
+  1188→                    setNewCustomer((p) => ({ ...p, alternate_phone: e.target.value }))
+  1189→                  }
+  1190→                />
+  1191→              </div>
+  1192→              <div className="space-y-1.5">
+  1193→                <Label htmlFor="nc-email">Email</Label>
+  1194→                <Input
+  1195→                  id="nc-email"
+  1196→                  type="email"
+  1197→                  placeholder="Optional"
+  1198→                  value={newCustomer.email}
+  1199→                  onChange={(e) => setNewCustomer((p) => ({ ...p, email: e.target.value }))}
+  1200→                />
+  1201→                {fieldError('customer.email') && (
+  1202→                  <p className="text-xs text-destructive">{fieldError('customer.email')}</p>
+  1203→                )}
+  1204→              </div>
+  1205→            </div>
+  1206→
+  1207→            <Separator />
+  1208→
+  1209→            {/* Shipping Address (required) */}
+  1210→            <div className="space-y-3">
+  1211→              <div className="flex items-center gap-2">
+  1212→                <Truck className="h-4 w-4 text-muted-foreground" />
+  1213→                <p className="text-sm font-medium">Shipping Address *</p>
+  1214→              </div>
+  1215→              <div className="grid sm:grid-cols-2 gap-4">
+  1216→                <div className="space-y-1.5 sm:col-span-2">
+  1217→                  <Label htmlFor="nc-ship-addr">Address *</Label>
+  1218→                  <Textarea
+  1219→                    id="nc-ship-addr"
+  1220→                    placeholder="House #, street, area"
+  1221→                    value={newCustomer.shipping_address}
+  1222→                    onChange={(e) =>
+  1223→                      setNewCustomer((p) => ({ ...p, shipping_address: e.target.value }))
+  1224→                    }
+  1225→                    aria-invalid={!!fieldError('customer.addresses.0.address')}
+  1226→                  />
+  1227→                  {fieldError('customer.addresses.0.address') && (
+  1228→                    <p className="text-xs text-destructive">
+  1229→                      {fieldError('customer.addresses.0.address')}
+  1230→                    </p>
+  1231→                  )}
+  1232→                </div>
+  1233→                <div className="space-y-1.5">
+  1234→                  <Label htmlFor="nc-ship-city">City *</Label>
+  1235→                  <Input
+  1236→                    id="nc-ship-city"
+  1237→                    placeholder="e.g. Lahore"
+  1238→                    value={newCustomer.shipping_city}
+  1239→                    onChange={(e) =>
+  1240→                      setNewCustomer((p) => ({ ...p, shipping_city: e.target.value }))
+  1241→                    }
+  1242→                    aria-invalid={!!fieldError('customer.addresses.0.city')}
+  1243→                  />
+  1244→                  {fieldError('customer.addresses.0.city') && (
+  1245→                    <p className="text-xs text-destructive">
+  1246→                      {fieldError('customer.addresses.0.city')}
+  1247→                    </p>
+  1248→                  )}
+  1249→                </div>
+  1250→                <div className="space-y-1.5">
+  1251→                  <Label htmlFor="nc-ship-prov">Province</Label>
+  1252→                  <Input
+  1253→                    id="nc-ship-prov"
+  1254→                    placeholder="e.g. Punjab"
+  1255→                    value={newCustomer.shipping_province}
+  1256→                    onChange={(e) =>
+  1257→                      setNewCustomer((p) => ({ ...p, shipping_province: e.target.value }))
+  1258→                    }
+  1259→                  />
+  1260→                </div>
+  1261→              </div>
+  1262→            </div>
+  1263→
+  1264→            <Separator />
+  1265→
+  1266→            {/* Billing Address with "Same as shipping" checkbox (checked by default) */}
+  1267→            <div className="space-y-3">
+  1268→              <div className="flex items-center justify-between gap-2 flex-wrap">
+  1269→                <div className="flex items-center gap-2">
+  1270→                  <CreditCard className="h-4 w-4 text-muted-foreground" />
+  1271→                  <p className="text-sm font-medium">Billing Address</p>
+  1272→                </div>
+  1273→                <label
+  1274→                  htmlFor="billing-same"
+  1275→                  className="flex items-center gap-2 text-sm cursor-pointer select-none"
+  1276→                >
+  1277→                  <Checkbox
+  1278→                    id="billing-same"
+  1279→                    checked={billingSameAsShipping}
+  1280→                    onCheckedChange={(v) => setBillingSameAsShipping(v === true)}
+  1281→                  />
+  1282→                  <span>Same as shipping address</span>
+  1283→                </label>
+  1284→              </div>
+  1285→
+  1286→              {billingSameAsShipping ? (
+  1287→                <div className="rounded-md border border-dashed bg-muted/30 p-3 text-xs text-muted-foreground flex items-start gap-2">
+  1288→                  <Check className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+  1289→                  <span>
+  1290→                    Billing address will mirror the shipping address entered above.
+  1291→                    Uncheck the box to enter a separate billing address.
+  1292→                  </span>
+  1293→                </div>
+  1294→              ) : (
+  1295→                <div className="grid sm:grid-cols-2 gap-4">
+  1296→                  <div className="space-y-1.5 sm:col-span-2">
+  1297→                    <Label htmlFor="nc-bill-addr">Billing address *</Label>
+  1298→                    <Textarea
+  1299→                      id="nc-bill-addr"
+  1300→                      placeholder="House #, street, area"
+  1301→                      value={newCustomer.billing_address}
+  1302→                      onChange={(e) =>
+  1303→                        setNewCustomer((p) => ({ ...p, billing_address: e.target.value }))
+  1304→                      }
+  1305→                      aria-invalid={!!fieldError('customer.addresses.1.address')}
+  1306→                    />
+  1307→                    {fieldError('customer.addresses.1.address') && (
+  1308→                      <p className="text-xs text-destructive">
+  1309→                        {fieldError('customer.addresses.1.address')}
+  1310→                      </p>
+  1311→                    )}
+  1312→                  </div>
+  1313→                  <div className="space-y-1.5">
+  1314→                    <Label htmlFor="nc-bill-city">Billing city *</Label>
+  1315→                    <Input
+  1316→                      id="nc-bill-city"
+  1317→                      placeholder="e.g. Lahore"
+  1318→                      value={newCustomer.billing_city}
+  1319→                      onChange={(e) =>
+  1320→                        setNewCustomer((p) => ({ ...p, billing_city: e.target.value }))
+  1321→                      }
+  1322→                      aria-invalid={!!fieldError('customer.addresses.1.city')}
+  1323→                    />
+  1324→                    {fieldError('customer.addresses.1.city') && (
+  1325→                      <p className="text-xs text-destructive">
+  1326→                        {fieldError('customer.addresses.1.city')}
+  1327→                      </p>
+  1328→                    )}
+  1329→                  </div>
+  1330→                  <div className="space-y-1.5">
+  1331→                    <Label htmlFor="nc-bill-prov">Billing province</Label>
+  1332→                    <Input
+  1333→                      id="nc-bill-prov"
+  1334→                      placeholder="e.g. Punjab"
+  1335→                      value={newCustomer.billing_province}
+  1336→                      onChange={(e) =>
+  1337→                        setNewCustomer((p) => ({ ...p, billing_province: e.target.value }))
+  1338→                      }
+  1339→                    />
+  1340→                  </div>
+  1341→                </div>
+  1342→              )}
+  1343→            </div>
+  1344→
+  1345→            {fieldError('customer.addresses') && (
+  1346→              <p className="text-xs text-destructive">{fieldError('customer.addresses')}</p>
+  1347→            )}
+  1348→          </div>
+  1349→        )}
+  1350→      </CardContent>
+  1351→    </Card>
+  1352→  )
+  1353→}
+  1354→
+  1355→function ModeCard({
+  1356→  active,
+  1357→  onClick,
+  1358→  title,
+  1359→  description,
+  1360→  icon,
+  1361→}: {
+  1362→  active: boolean
+  1363→  onClick: () => void
+  1364→  title: string
+  1365→  description: string
+  1366→  icon: React.ReactNode
+  1367→}) {
+  1368→  return (
+  1369→    <button
+  1370→      type="button"
+  1371→      onClick={onClick}
+  1372→      className={cn(
+  1373→        'flex items-start gap-3 rounded-lg border p-4 text-left transition-colors',
+  1374→        active ? 'border-primary bg-primary/5 ring-1 ring-primary/30' : 'border-border hover:bg-muted/40',
+  1375→      )}
+  1376→    >
+  1377→      <div
+  1378→        className={cn(
+  1379→          'flex h-8 w-8 items-center justify-center rounded-md shrink-0',
+  1380→          active ? 'bg-primary text-primary-foreground' : 'bg-muted text-muted-foreground',
+  1381→        )}
+  1382→      >
+  1383→        {icon}
+  1384→      </div>
+  1385→      <div>
+  1386→        <p className="text-sm font-medium">{title}</p>
+  1387→        <p className="text-xs text-muted-foreground">{description}</p>
+  1388→      </div>
+  1389→    </button>
+  1390→  )
+  1391→}
+  1392→
+  1393→// ─────────────────────────────────────────────────────────────────────────────
+  1394→// SECTION 2: Items
+  1395→// ─────────────────────────────────────────────────────────────────────────────
+  1396→
+  1397→function ItemsSection({
+  1398→  cart,
+  1399→  variantSearch,
+  1400→  setVariantSearch,
+  1401→  variantSearchResults,
+  1402→  addVariant,
+  1403→  removeItem,
+  1404→  updateItem,
+  1405→  isLoadingProducts,
+  1406→  subtotal,
+  1407→  itemsError,
+  1408→}: {
+  1409→  cart: CartItem[]
+  1410→  variantSearch: string
+  1411→  setVariantSearch: (v: string) => void
+  1412→  variantSearchResults: VariantOption[]
+  1413→  addVariant: (v: VariantOption) => void
+  1414→  removeItem: (id: string) => void
+  1415→  updateItem: (id: string, patch: Partial<CartItem>) => void
+  1416→  isLoadingProducts: boolean
+  1417→  subtotal: number
+  1418→  itemsError: string | undefined
+  1419→}) {
+  1420→  return (
+  1421→    <Card>
+  1422→      <CardHeader>
+  1423→        <CardTitle className="text-base flex items-center gap-2">
+  1424→          <Package className="h-4 w-4" /> 2 · Items
+  1425→          {cart.length > 0 && (
+  1426→            <Badge variant="secondary" className="text-[10px]">
+  1427→              {cart.length} item{cart.length === 1 ? '' : 's'}
+  1428→            </Badge>
+  1429→          )}
+  1430→        </CardTitle>
+  1431→      </CardHeader>
+  1432→      <CardContent className="space-y-4">
+  1433→        {/* Variant search */}
+  1434→        <div className="space-y-1.5">
+  1435→          <Label htmlFor="variant-search">Search products / variants</Label>
+  1436→          <div className="relative">
+  1437→            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+  1438→            <Input
+  1439→              id="variant-search"
+  1440→              placeholder="Search by SKU or product title…"
+  1441→              className="pl-9"
+  1442→              value={variantSearch}
+  1443→              onChange={(e) => setVariantSearch(e.target.value)}
+  1444→              disabled={isLoadingProducts}
+  1445→            />
+  1446→            {isLoadingProducts && (
+  1447→              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+  1448→            )}
+  1449→          </div>
+  1450→        </div>
+  1451→
+  1452→        {/* Search results as cards */}
+  1453→        {variantSearch.trim() && (
+  1454→          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+  1455→            {isLoadingProducts ? (
+  1456→              Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-16" />)
+  1457→            ) : variantSearchResults.length === 0 ? (
+  1458→              <div className="rounded-md border-2 border-dashed p-6 text-center text-sm text-muted-foreground">
+  1459→                No variants match &ldquo;{variantSearch}&rdquo;.
+  1460→              </div>
+  1461→            ) : (
+  1462→              variantSearchResults.map((v) => {
+  1463→                const badge = stockBadgeFor(v.fulfillmentType)
+  1464→                return (
+  1465→                  <button
+  1466→                    key={v.variantId}
+  1467→                    type="button"
+  1468→                    onClick={() => addVariant(v)}
+  1469→                    className="w-full text-left rounded-lg border p-3 hover:border-primary/40 hover:bg-muted/40 transition-colors flex items-center justify-between gap-3"
+  1470→                  >
+  1471→                    <div className="flex items-start gap-3 min-w-0 flex-1">
+  1472→                      <VariantThumbnail url={v.primaryImage} title={v.productTitle} />
+  1473→                      <div className="min-w-0 flex-1">
+  1474→                        <p className="text-sm font-medium truncate">{v.productTitle}</p>
+  1475→                        <p className="text-xs text-muted-foreground font-mono">{v.sku}</p>
+  1476→                        <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
+  1477→                          {badge.label}
+  1478→                        </Badge>
+  1479→                      </div>
+  1480→                    </div>
+  1481→                    <div className="flex items-center gap-2 shrink-0">
+  1482→                      <span className="text-sm font-medium tabular-nums">
+  1483→                        {v.salePrice ? formatPKR(v.salePrice) : formatPKR(v.costPrice)}
+  1484→                      </span>
+  1485→                      <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
+  1486→                        <Plus className="h-4 w-4" />
+  1487→                      </div>
+  1488→                    </div>
+  1489→                  </button>
+  1490→                )
+  1491→              })
+  1492→            )}
+  1493→          </div>
+  1494→        )}
+  1495→
+  1496→        {/* Cart list with thumbnail / qty / price / line-total / remove */}
+  1497→        {cart.length === 0 ? (
+  1498→          <div className="rounded-md border-2 border-dashed p-6 text-center">
+  1499→            <ShoppingBag className="h-7 w-7 mx-auto text-muted-foreground/40 mb-2" />
+  1500→            <p className="text-sm font-medium">Cart is empty</p>
+  1501→            <p className="text-xs text-muted-foreground mt-1">
+  1502→              Search for a product above to add variants.
+  1503→            </p>
+  1504→            {itemsError && <p className="text-xs text-destructive mt-2">{itemsError}</p>}
+  1505→          </div>
+  1506→        ) : (
+  1507→          <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+  1508→            {cart.map((item) => {
+  1509→              const badge = stockBadgeFor(item.fulfillmentType)
+  1510→              return (
+  1511→                <div key={item.variantId} className="rounded-md border p-3 space-y-2">
+  1512→                  <div className="flex items-start gap-3">
+  1513→                    <VariantThumbnail url={item.primaryImage} title={item.productTitle} />
+  1514→                    <div className="min-w-0 flex-1">
+  1515→                      <p className="text-sm font-medium truncate">{item.productTitle}</p>
+  1516→                      <p className="text-xs text-muted-foreground font-mono">{item.sku}</p>
+  1517→                      <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
+  1518→                        {badge.label}
+  1519→                      </Badge>
+  1520→                    </div>
+  1521→                    <Button
+  1522→                      size="icon"
+  1523→                      variant="ghost"
+  1524→                      className="h-7 w-7 text-rose-600 hover:bg-rose-50 shrink-0"
+  1525→                      onClick={() => removeItem(item.variantId)}
+  1526→                      aria-label={`Remove ${item.sku}`}
+  1527→                    >
+  1528→                      <Trash2 className="h-3.5 w-3.5" />
+  1529→                    </Button>
+  1530→                  </div>
+  1531→                  <div className="grid grid-cols-2 gap-2">
+  1532→                    <div>
+  1533→                      <Label className="text-[10px] text-muted-foreground">Qty</Label>
+  1534→                      <Input
+  1535→                        type="number"
+  1536→                        min="1"
+  1537→                        step="1"
+  1538→                        className="h-8 text-sm tabular-nums"
+  1539→                        value={item.quantity}
+  1540→                        onChange={(e) =>
+  1541→                          updateItem(item.variantId, { quantity: parseQty(e.target.value) })
+  1542→                        }
+  1543→                      />
+  1544→                    </div>
+  1545→                    <div>
+  1546→                      <Label className="text-[10px] text-muted-foreground">Unit Price</Label>
+  1547→                      <Input
+  1548→                        type="number"
+  1549→                        min="0"
+  1550→                        step="0.01"
+  1551→                        className="h-8 text-sm tabular-nums"
+  1552→                        value={item.unitPrice}
+  1553→                        onChange={(e) =>
+  1554→                          updateItem(item.variantId, {
+  1555→                            unitPrice: parsePrice(e.target.value),
+  1556→                          })
+  1557→                        }
+  1558→                      />
+  1559→                    </div>
+  1560→                  </div>
+  1561→                  <div className="flex items-center justify-between text-xs">
+  1562→                    <span className="text-muted-foreground">Line total</span>
+  1563→                    <span className="font-medium tabular-nums">
+  1564→                      {formatPKR(item.quantity * item.unitPrice)}
+  1565→                    </span>
+  1566→                  </div>
+  1567→                </div>
+  1568→              )
+  1569→            })}
+  1570→            <Separator />
+  1571→            <div className="flex items-center justify-between pt-1">
+  1572→              <span className="text-sm font-medium">Subtotal</span>
+  1573→              <span className="text-lg font-bold tabular-nums">{formatPKR(subtotal)}</span>
+  1574→            </div>
+  1575→            {itemsError && <p className="text-xs text-destructive">{itemsError}</p>}
+  1576→          </div>
+  1577→        )}
+  1578→      </CardContent>
+  1579→    </Card>
+  1580→  )
+  1581→}
+  1582→
+  1583→function VariantThumbnail({ url, title }: { url: string | null; title: string }) {
+  1584→  if (url) {
+  1585→    return (
+  1586→      // eslint-disable-next-line @next/next/no-img-element
+  1587→      <img
+  1588→        src={url}
+  1589→        alt={title}
+  1590→        className="h-12 w-12 rounded-md border object-cover shrink-0"
+  1591→      />
+  1592→    )
+  1593→  }
+  1594→  return (
+  1595→    <div className="h-12 w-12 rounded-md border bg-muted flex items-center justify-center shrink-0">
+  1596→      <Package className="h-5 w-5 text-muted-foreground/50" />
+  1597→    </div>
+  1598→  )
+  1599→}
+  1600→
+  1601→// ─────────────────────────────────────────────────────────────────────────────
+  1602→// SECTION 3: Payment
+  1603→// ─────────────────────────────────────────────────────────────────────────────
+  1604→
+  1605→function PaymentSection({
+  1606→  paymentType,
+  1607→  setPaymentType,
+  1608→  advanceAmount,
+  1609→  setAdvanceAmount,
+  1610→  advancePaymentMethod,
+  1611→  setAdvancePaymentMethod,
+  1612→  advancePaymentReference,
+  1613→  setAdvancePaymentReference,
+  1614→  subtotal,
+  1615→  total,
+  1616→  discount,
+  1617→  remainingCod,
+  1618→  paymentProofFile,
+  1619→  paymentProofPreview,
+  1620→  proofError,
+  1621→  onProofFile,
+  1622→  onClearProof,
+  1623→  fieldError,
+  1624→}: {
+  1625→  paymentType: PaymentType
+  1626→  setPaymentType: (p: PaymentType) => void
+  1627→  advanceAmount: string
+  1628→  setAdvanceAmount: (v: string) => void
+  1629→  advancePaymentMethod: string
+  1630→  setAdvancePaymentMethod: (v: string) => void
+  1631→  advancePaymentReference: string
+  1632→  setAdvancePaymentReference: (v: string) => void
+  1633→  subtotal: number
+  1634→  total: number
+  1635→  discount: number
+  1636→  remainingCod: number
+  1637→  // Issue 2: raw File + local preview URL — NO upload yet
+  1638→  paymentProofFile: File | null
+  1639→  paymentProofPreview: string
+  1640→  proofError: string | null
+  1641→  onProofFile: (file: File) => void
+  1642→  onClearProof: () => void
+  1643→  fieldError: (...paths: string[]) => string | undefined
+  1644→}) {
+  1645→  const fileInputRef = useRef<HTMLInputElement>(null)
+  1646→
+  1647→  return (
+  1648→    <Card>
+  1649→      <CardHeader>
+  1650→        <CardTitle className="text-base flex items-center gap-2">
+  1651→          <CreditCard className="h-4 w-4" /> 3 · Payment
+  1652→        </CardTitle>
+  1653→      </CardHeader>
+  1654→      <CardContent className="space-y-5">
+  1655→        {/* Selectable payment type cards */}
+  1656→        <div className="grid gap-3">
+  1657→          <PaymentTypeCard
+  1658→            active={paymentType === 'full_cod'}
+  1659→            onClick={() => setPaymentType('full_cod')}
+  1660→            title="Full COD"
+  1661→            description="Customer pays the full amount in cash on delivery."
+  1662→            badge="Cash on Delivery"
+  1663→            tone="amber"
+  1664→          />
+  1665→          <PaymentTypeCard
+  1666→            active={paymentType === 'partial_advance'}
+  1667→            onClick={() => setPaymentType('partial_advance')}
+  1668→            title="Partial Advance"
+  1669→            description="Customer pays a portion upfront; the rest is collected on delivery."
+  1670→            badge="Advance + COD"
+  1671→            tone="sky"
+  1672→          />
+  1673→          <PaymentTypeCard
+  1674→            active={paymentType === 'fully_prepaid'}
+  1675→            onClick={() => setPaymentType('fully_prepaid')}
+  1676→            title="Fully Prepaid"
+  1677→            description="Customer has paid the full amount before dispatch."
+  1678→            badge="Prepaid"
+  1679→            tone="emerald"
+  1680→          />
+  1681→        </div>
+  1682→
+  1683→        {/* Expanded fields for advance / prepaid */}
+  1684→        {paymentType !== 'full_cod' && (
+  1685→          <div className="rounded-lg border bg-muted/30 p-4 space-y-4">
+  1686→            <div className="grid sm:grid-cols-2 gap-4">
+  1687→              <div className="space-y-1.5">
+  1688→                <Label htmlFor="advance-amount">
+  1689→                  {paymentType === 'fully_prepaid'
+  1690→                    ? 'Total paid (auto-calculated)'
+  1691→                    : 'Advance amount *'}
+  1692→                </Label>
+  1693→                <Input
+  1694→                  id="advance-amount"
+  1695→                  type="number"
+  1696→                  min="0"
+  1697→                  step="0.01"
+  1698→                  placeholder={paymentType === 'fully_prepaid' ? formatPKR(total) : 'e.g. 500'}
+  1699→                  value={paymentType === 'fully_prepaid' ? String(total) : advanceAmount}
+  1700→                  onChange={(e) => setAdvanceAmount(e.target.value)}
+  1701→                  disabled={paymentType === 'fully_prepaid'}
+  1702→                  aria-invalid={!!fieldError('advance_amount')}
+  1703→                />
+  1704→                {fieldError('advance_amount') && (
+  1705→                  <p className="text-xs text-destructive">{fieldError('advance_amount')}</p>
+  1706→                )}
+  1707→                {paymentType === 'partial_advance' && (
+  1708→                  <p className="text-xs text-muted-foreground">
+  1709→                    Remaining COD:{' '}
+  1710→                    <span className="font-medium tabular-nums">{formatPKR(remainingCod)}</span>
+  1711→                  </p>
+  1712→                )}
+  1713→              </div>
+  1714→              <div className="space-y-1.5">
+  1715→                <Label htmlFor="advance-method">Payment method</Label>
+  1716→                <Select value={advancePaymentMethod} onValueChange={setAdvancePaymentMethod}>
+  1717→                  <SelectTrigger id="advance-method">
+  1718→                    <SelectValue placeholder="Select method" />
+  1719→                  </SelectTrigger>
+  1720→                  <SelectContent>
+  1721→                    {PAYMENT_METHODS.map((m) => (
+  1722→                      <SelectItem key={m.value} value={m.value}>
+  1723→                        {m.label}
+  1724→                      </SelectItem>
+  1725→                    ))}
+  1726→                  </SelectContent>
+  1727→                </Select>
+  1728→              </div>
+  1729→              <div className="space-y-1.5 sm:col-span-2">
+  1730→                <Label htmlFor="advance-ref">Reference (transaction ID, etc.)</Label>
+  1731→                <Input
+  1732→                  id="advance-ref"
+  1733→                  placeholder="Optional"
+  1734→                  value={advancePaymentReference}
+  1735→                  onChange={(e) => setAdvancePaymentReference(e.target.value)}
+  1736→                />
+  1737→              </div>
+  1738→            </div>
+  1739→
+  1740→            {/* Issue 2: payment proof held locally — uploaded AFTER order creation */}
+  1741→            <ProofFileInput
+  1742→              file={paymentProofFile}
+  1743→              preview={paymentProofPreview}
+  1744→              error={proofError}
+  1745→              inputRef={fileInputRef}
+  1746→              onFile={onProofFile}
+  1747→              onClear={onClearProof}
+  1748→            />
+  1749→
+  1750→            <p className="text-xs text-muted-foreground">
+  1751→              The proof image is attached after the order is created — you can also add it later
+  1752→              from the order detail page.
+  1753→            </p>
+  1754→          </div>
+  1755→        )}
+  1756→
+  1757→        {/* Live total summary */}
+  1758→        <div className="rounded-md bg-muted/40 p-3 space-y-1 text-sm">
+  1759→          <div className="flex items-center justify-between">
+  1760→            <span className="text-muted-foreground">Subtotal</span>
+  1761→            <span className="tabular-nums">{formatPKR(subtotal)}</span>
+  1762→          </div>
+  1763→          {discount > 0 && (
+  1764→            <div className="flex items-center justify-between text-rose-600">
+  1765→              <span>Discount</span>
+  1766→              <span className="tabular-nums">−{formatPKR(discount)}</span>
+  1767→            </div>
+  1768→          )}
+  1769→          <div className="flex items-center justify-between font-medium pt-1 border-t">
+  1770→            <span>Total</span>
+  1771→            <span className="tabular-nums">{formatPKR(total)}</span>
+  1772→          </div>
+  1773→          {paymentType !== 'full_cod' && (
+  1774→            <div className="flex items-center justify-between pt-1 text-amber-700">
+  1775→              <span className="text-xs">Remaining COD to collect</span>
+  1776→              <span className="text-xs font-medium tabular-nums">{formatPKR(remainingCod)}</span>
+  1777→            </div>
+  1778→          )}
+  1779→        </div>
+  1780→      </CardContent>
+  1781→    </Card>
+  1782→  )
+  1783→}
+  1784→
+  1785→function PaymentTypeCard({
+  1786→  active,
+  1787→  onClick,
+  1788→  title,
+  1789→  description,
+  1790→  badge,
+  1791→  tone,
+  1792→}: {
+  1793→  active: boolean
+  1794→  onClick: () => void
+  1795→  title: string
+  1796→  description: string
+  1797→  badge: string
+  1798→  tone: 'amber' | 'sky' | 'emerald'
+  1799→}) {
+  1800→  const toneClasses = {
+  1801→    amber: 'bg-amber-50 text-amber-700 border-amber-200',
+  1802→    sky: 'bg-sky-50 text-sky-700 border-sky-200',
+  1803→    emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  1804→  } as const
+  1805→
+  1806→  return (
+  1807→    <button
+  1808→      type="button"
+  1809→      onClick={onClick}
+  1810→      className={cn(
+  1811→        'flex items-start gap-3 rounded-lg border p-4 text-left transition-all',
+  1812→        active
+  1813→          ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
+  1814→          : 'border-border hover:bg-muted/40',
+  1815→      )}
+  1816→    >
+  1817→      <div
+  1818→        className={cn(
+  1819→          'flex h-5 w-5 items-center justify-center rounded-full border-2 mt-0.5 shrink-0',
+  1820→          active ? 'border-primary bg-primary' : 'border-muted-foreground/40',
+  1821→        )}
+  1822→      >
+  1823→        {active && <Check className="h-3 w-3 text-primary-foreground" />}
+  1824→      </div>
+  1825→      <div className="flex-1 min-w-0">
+  1826→        <div className="flex items-center gap-2 flex-wrap">
+  1827→          <p className="text-sm font-medium">{title}</p>
+  1828→          <Badge variant="outline" className={cn('text-[10px]', toneClasses[tone])}>
+  1829→            {badge}
+  1830→          </Badge>
+  1831→        </div>
+  1832→        <p className="text-xs text-muted-foreground mt-0.5">{description}</p>
+  1833→      </div>
+  1834→    </button>
+  1835→  )
+  1836→}
+  1837→
+  1838→/**
+  1839→ * ProofFileInput — Issue 2 fix.
+  1840→ *
+  1841→ * Holds the picked File in browser memory ONLY (no upload). The parent
+  1842→ * component owns the file state and uploads it via /api/upload after
+  1843→ * createManualOrder() returns the new order_id.
+  1844→ *
+  1845→ * Client-side validation mirrors the server (/api/upload): image/jpeg |
+  1846→ * image/png | image/webp, max 5 MB.
+  1847→ */
+  1848→function ProofFileInput({
+  1849→  file,
+  1850→  preview,
+  1851→  error,
+  1852→  inputRef,
+  1853→  onFile,
+  1854→  onClear,
+  1855→}: {
+  1856→  file: File | null
+  1857→  preview: string
+  1858→  error: string | null
+  1859→  inputRef: React.RefObject<HTMLInputElement | null>
+  1860→  onFile: (file: File) => void
+  1861→  onClear: () => void
+  1862→}) {
+  1863→  return (
+  1864→    <div className="space-y-1.5">
+  1865→      <Label>Payment proof (optional)</Label>
+  1866→      <div className="flex items-center gap-3">
+  1867→        {preview ? (
+  1868→          <div className="relative group">
+  1869→            <button
+  1870→              type="button"
+  1871→              onClick={() => inputRef.current?.click()}
+  1872→              className="block rounded-md border overflow-hidden"
+  1873→            >
+  1874→              {/* eslint-disable-next-line @next/next/no-img-element */}
+  1875→              <img
+  1876→                src={preview}
+  1877→                alt="Payment proof preview"
+  1878→                className="h-20 w-20 object-cover"
+  1879→              />
+  1880→            </button>
+  1881→            <button
+  1882→              type="button"
+  1883→              onClick={onClear}
+  1884→              className="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-destructive text-destructive-foreground flex items-center justify-center shadow-sm hover:scale-110 transition-transform"
+  1885→              aria-label="Remove payment proof"
+  1886→            >
+  1887→              <X className="h-3 w-3" />
+  1888→            </button>
+  1889→          </div>
+  1890→        ) : (
+  1891→          <button
+  1892→            type="button"
+  1893→            onClick={() => inputRef.current?.click()}
+  1894→            className={cn(
+  1895→              'flex h-20 w-20 items-center justify-center rounded-md border-2 border-dashed text-muted-foreground hover:border-primary/50 hover:text-primary transition-colors',
+  1896→            )}
+  1897→          >
+  1898→            <Upload className="h-5 w-5" />
+  1899→          </button>
+  1900→        )}
+  1901→        <div className="text-xs text-muted-foreground flex-1">
+  1902→          {file ? (
+  1903→            <div className="space-y-0.5">
+  1904→              <p className="font-medium text-foreground flex items-center gap-1.5">
+  1905→                <FileImage className="h-3.5 w-3.5" />
+  1906→                {file.name}
+  1907→              </p>
+  1908→              <p>{(file.size / 1024 / 1024).toFixed(2)} MB · {file.type}</p>
+  1909→              <p className="text-primary">Will upload after order is created.</p>
+  1910→            </div>
+  1911→          ) : (
+  1912→            <div className="space-y-0.5">
+  1913→              <p>Click to pick a payment proof image.</p>
+  1914→              <p>JPG, PNG, WebP — max 5 MB</p>
+  1915→            </div>
+  1916→          )}
+  1917→          {error && <p className="text-destructive mt-1">{error}</p>}
+  1918→        </div>
+  1919→        <input
+  1920→          ref={inputRef}
+  1921→          type="file"
+  1922→          accept="image/jpeg,image/png,image/webp"
+  1923→          className="hidden"
+  1924→          onChange={(e) => {
+  1925→            const f = e.target.files?.[0]
+  1926→            if (f) onFile(f)
+  1927→            e.target.value = ''
+  1928→          }}
+  1929→        />
+  1930→      </div>
+  1931→    </div>
+  1932→  )
+  1933→}
+  1934→
+  1935→// ─────────────────────────────────────────────────────────────────────────────
+  1936→// SECTION 4: Delivery & Discount
+  1937→// ─────────────────────────────────────────────────────────────────────────────
+  1938→
+  1939→function DeliverySection({
+  1940→  customerMode,
+  1941→  selectedCustomer,
+  1942→  customerShippingAddress,
+  1943→  useCustomerAddress,
+  1944→  setUseCustomerAddress,
+  1945→  deliveryAddress,
+  1946→  setDeliveryAddress,
+  1947→  deliveryCity,
+  1948→  setDeliveryCity,
+  1949→  deliveryProvince,
+  1950→  setDeliveryProvince,
+  1951→  courierName,
+  1952→  setCourierName,
+  1953→  dispatchLocationId,
+  1954→  setDispatchLocationId,
+  1955→  notesForCourier,
+  1956→  setNotesForCourier,
+  1957→  discountAmount,
+  1958→  setDiscountAmount,
+  1959→  discountReason,
+  1960→  setDiscountReason,
+  1961→  locations,
+  1962→  isLoadingLocations,
+  1963→  fieldError,
+  1964→}: {
+  1965→  customerMode: 'existing' | 'new'
+  1966→  selectedCustomer: CustomerRow | null
+  1967→  customerShippingAddress: CustomerAddress | null
+  1968→  useCustomerAddress: boolean
+  1969→  setUseCustomerAddress: (v: boolean) => void
+  1970→  deliveryAddress: string
+  1971→  setDeliveryAddress: (v: string) => void
+  1972→  deliveryCity: string
+  1973→  setDeliveryCity: (v: string) => void
+  1974→  deliveryProvince: string
+  1975→  setDeliveryProvince: (v: string) => void
+  1976→  courierName: string
+  1977→  setCourierName: (v: string) => void
+  1978→  dispatchLocationId: string
+  1979→  setDispatchLocationId: (v: string) => void
+  1980→  notesForCourier: string
+  1981→  setNotesForCourier: (v: string) => void
+  1982→  discountAmount: string
+  1983→  setDiscountAmount: (v: string) => void
+  1984→  discountReason: string
+  1985→  setDiscountReason: (v: string) => void
+  1986→  locations: InventoryLocation[]
+  1987→  isLoadingLocations: boolean
+  1988→  fieldError: (...paths: string[]) => string | undefined
+  1989→}) {
+  1990→  // The "Use different address" affordance is only relevant for existing
+  1991→  // customers who have a saved shipping address on file.
+  1992→  const showUseCustomerAddressToggle =
+  1993→    customerMode === 'existing' && !!selectedCustomer && !!customerShippingAddress
+  1994→
+  1995→  return (
+  1996→    <Card>
+  1997→      <CardHeader>
+  1998→        <CardTitle className="text-base flex items-center gap-2">
+  1999→          <Truck className="h-4 w-4" /> 4 · Delivery &amp; Discount
+  2000→        </CardTitle>
+
+[showing lines 1-2000 of 2274; use offset=2001 with limit to continue reading]

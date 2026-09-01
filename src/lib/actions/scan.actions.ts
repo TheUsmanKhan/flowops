@@ -28,6 +28,11 @@ interface ScanLookupResult {
   entityType: EntityType
   entityId: string
   trackingNumber: string | null
+  // Self-fulfilled reference (Phase B3). For orders matched by
+  // selfFulfilledReferenceNumber (not trackingNumber), this carries the SF
+  // ref so the scan station can display the correct identifier. Null for
+  // courier orders + exchange shipments.
+  selfFulfilledReferenceNumber: string | null
   status: string
   flowopsOrderNumber?: string
   exchangeShipmentNumber?: string
@@ -64,11 +69,23 @@ export async function processScan(
     }
 
     // ── 1. Look up the scanned value against Order + ExchangeShipment ──
+    // The Order query checks BOTH trackingNumber (courier orders) AND
+    // selfFulfilledReferenceNumber (self-fulfilled orders, Phase B3) via OR.
+    // This lets the scan station resolve a self-fulfilled slip's SF-YYYY-NNNNN
+    // reference exactly like a courier tracking number. The ExchangeShipment
+    // query stays trackingNumber-only (exchange shipments are always courier-shipped).
     const [orderMatch, shipmentMatch] = await Promise.all([
       db.order.findFirst({
-        where: { trackingNumber: trimmedTracking, companyId: ctx.company.id },
+        where: {
+          companyId: ctx.company.id,
+          OR: [
+            { trackingNumber: trimmedTracking },
+            { selfFulfilledReferenceNumber: trimmedTracking },
+          ],
+        },
         select: {
-          id: true, trackingNumber: true, status: true, flowopsOrderNumber: true,
+          id: true, trackingNumber: true, selfFulfilledReferenceNumber: true,
+          status: true, flowopsOrderNumber: true,
           customerId: true, courierSubStatus: true,
           physicalUnpackRequired: true, physicalUnpackConfirmedAt: true,
           customer: { select: { name: true } },
@@ -95,6 +112,7 @@ export async function processScan(
         entityType: 'order' as EntityType,
         entityId: orderMatch.id,
         trackingNumber: orderMatch.trackingNumber,
+        selfFulfilledReferenceNumber: orderMatch.selfFulfilledReferenceNumber,
         status: orderMatch.status,
         flowopsOrderNumber: orderMatch.flowopsOrderNumber,
         customerId: orderMatch.customerId,
@@ -113,6 +131,7 @@ export async function processScan(
         entityType: 'exchange_shipment' as EntityType,
         entityId: shipmentMatch.id,
         trackingNumber: shipmentMatch.trackingNumber,
+        selfFulfilledReferenceNumber: null,
         status: shipmentMatch.status,
         exchangeShipmentNumber: shipmentMatch.exchangeShipmentNumber,
         customerId: shipmentMatch.customerId,

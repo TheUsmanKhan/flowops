@@ -32,7 +32,10 @@ export async function updateEmployeeStats(employeeId: string): Promise<ActionRes
     // Fetch the employee's companyId (needed for the funnel query scope)
     const employee = await db.employee.findUnique({
       where: { id: employeeId },
-      select: { companyId: true },
+      select: {
+        companyId: true,
+        company: { select: { baseCurrency: true } },
+      },
     })
     if (!employee) {
       return { success: false, error: 'Employee not found' }
@@ -42,6 +45,7 @@ export async function updateEmployeeStats(employeeId: string): Promise<ActionRes
     const stats = await computeOrderFunnelStats({
       employeeId,
       companyId: employee.companyId,
+      baseCurrency: employee.company.baseCurrency,
     })
 
     // Fetch the confirmed + pending counts for the cached row (the EmployeeStats

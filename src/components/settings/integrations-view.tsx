@@ -12,7 +12,6 @@ import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import {
   Dialog,
@@ -60,10 +59,8 @@ import { PickupAddressesSection } from '@/components/couriers/pickup-addresses-s
 interface ConfigField {
   key: string
   label: string
-  type: 'text' | 'password' | 'boolean'
+  type: 'text' | 'password'
   required: boolean
-  /** Optional helper text shown under the field (used by boolean toggles). */
-  description?: string
 }
 
 interface Provider {
@@ -662,38 +659,16 @@ function ConnectDialog({
             {/* Dynamic credential fields from config_schema */}
             {fields.map((field) => (
               <div key={field.key} className="space-y-1.5">
-                {field.type === 'boolean' ? (
-                  <div className="flex items-center justify-between rounded-md border p-3">
-                    <div className="space-y-0.5">
-                      <Label className="text-xs">
-                        {field.label}
-                        {field.required && <span className="text-rose-600 ml-0.5">*</span>}
-                      </Label>
-                      {field.description && (
-                        <p className="text-[10px] text-muted-foreground">{field.description}</p>
-                      )}
-                    </div>
-                    <Switch
-                      checked={credentials[field.key] === 'true'}
-                      onCheckedChange={(checked) =>
-                        setCredentials((p) => ({ ...p, [field.key]: checked ? 'true' : 'false' }))
-                      }
-                    />
-                  </div>
-                ) : (
-                  <>
-                    <Label className="text-xs">
-                      {field.label}
-                      {field.required && <span className="text-rose-600 ml-0.5">*</span>}
-                    </Label>
-                    <Input
-                      type={field.type === 'password' ? 'password' : 'text'}
-                      placeholder={field.type === 'password' ? '••••••••' : `Enter ${field.label}`}
-                      value={credentials[field.key] ?? ''}
-                      onChange={(e) => setCredentials((p) => ({ ...p, [field.key]: e.target.value }))}
-                    />
-                  </>
-                )}
+                <Label className="text-xs">
+                  {field.label}
+                  {field.required && <span className="text-rose-600 ml-0.5">*</span>}
+                </Label>
+                <Input
+                  type={field.type === 'password' ? 'password' : 'text'}
+                  placeholder={field.type === 'password' ? '••••••••' : `Enter ${field.label}`}
+                  value={credentials[field.key] ?? ''}
+                  onChange={(e) => setCredentials((p) => ({ ...p, [field.key]: e.target.value }))}
+                />
               </div>
             ))}
 

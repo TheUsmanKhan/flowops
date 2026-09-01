@@ -35,6 +35,7 @@ export async function GET(
     if (!orgId) throw new ApiError(403, 'No active organization')
 
     const { id: productId } = await params
+
     const product = await db.orgProduct.findFirst({ where: { id: productId, organizationId: orgId } })
     if (!product) throw new ApiError(404, 'Product not found.')
 
@@ -42,6 +43,9 @@ export async function GET(
     const variants = await db.orgProductVariant.findMany({
       where: { productId },
       include: {
+        // Read CompanyVariantPricing (scoped by companyId when available).
+        // When companyId is null (shouldn't normally happen), the where
+        // clause yields no rows and pricing shows null.
         companyPricing: { where: { companyId: companyId ?? undefined } },
       },
       orderBy: { createdAt: 'asc' },
