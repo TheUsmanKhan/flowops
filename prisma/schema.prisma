@@ -1,0 +1,2698 @@
+// FlowOps — Multi-tenant SaaS ERP schema (Sprint 1)
+// Adapted from the Supabase/PostgreSQL spec to Prisma + SQLite.
+// Multi-tenant isolation is enforced in the application layer
+// (company-scoping + permission checks) mirroring the RLS design.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/// Extends the auth identity. One row per registered user.
+model Profile {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  fullName     String
+  passwordHash String
+  avatarUrl    String?
+  phone        String?
+  isOnboarded  Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  ownedOrgs         Organization[]  @relation("OrgOwner")
+  createdCompanies  Company[]       @relation("CompanyCreator")
+  employees         Employee[]
+  settings          UserSetting?
+  invitationsSent   Invitation[]    @relation("InvitedBy")
+  invitationsAccepted Invitation[]  @relation("AcceptedBy")
+  terminationsDone  Employee[]      @relation("TerminatedBy")
+  employeeInvitedBy Employee[]      @relation("EmployeeInvitedBy")
+  auditLogs         AuditLog[]
+  rolesCreated      Role[]          @relation("RoleCreator")
+}
+
+/// Top-level tenant. A holding umbrella for one or more companies.
+model Organization {
+  id                 String   @id @default(cuid())
+  name               String
+  slug               String   @unique
+  logoUrl            String?
+  ownerId            String
+  owner              Profile  @relation("OrgOwner", fields: [ownerId], references: [id])
+  subscriptionPlan   String   @default("free") // free | starter | growth | enterprise
+  subscriptionStatus String   @default("active") // active | past_due | cancelled | trialing
+  isActive           Boolean  @default(true)
+  metadata           String   @default("{}")
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  companies   Company[]
+  invitations Invitation[]
+  auditLogs   AuditLog[]
+
+  // Sprint 3 back-relations
+  orgCategories        OrgCategory[]
+  orgBrands            OrgBrand[]
+  orgAttributes        OrgAttribute[]
+  orgAttributeValues   OrgAttributeValue[]
+  orgProducts          OrgProduct[]
+  orgProductVariants   OrgProductVariant[]
+  orgProductImages     OrgProductImage[]
+  orgProductBundles    OrgProductBundle[]
+  selectiveAccess      SelectiveProductAccess[]
+  companyProductSettings CompanyProductSetting[]
+  companyVariantPricing  CompanyVariantPricing[]
+  returnedStitchedInventory ReturnedStitchedInventory[]
+  productFulfillmentCosts  ProductFulfillmentCost[]
+
+  // Sprint 6 back-relations
+  inventoryLocations   InventoryLocation[]
+  suppliers            Supplier[]
+  inventoryPools       InventoryPool[]
+  inventoryTransactions InventoryTransaction[]
+  avgCostHistory       AvgCostHistory[]
+  stockTransfers       StockTransfer[]
+  purchaseOrders       PurchaseOrder[]
+  purchaseOrderItems   PurchaseOrderItem[]
+  purchaseOrderReceipts PurchaseOrderReceipt[]
+  supplierReturns      SupplierReturn[]
+  stockLossRecords     StockLossRecord[]
+  cycleCounts          CycleCount[]
+  cycleCountItems      CycleCountItem[]
+  productionOrders     ProductionOrder[]
+
+  // OMS back-relations
+  customers            Customer[]
+  orders               Order[]
+  orderItems           OrderItem[]
+  attributeValueRules  AttributeValueRule[]
+
+  // Customer Management System back-relations (migration 002)
+  customerPhones          CustomerPhone[]
+  customerAddresses       CustomerAddress[]
+  customerExternalIdentities CustomerExternalIdentity[]
+
+  // Item Exchange System back-relations (migration 003)
+  orderExchanges          OrderExchange[]
+
+  // Universal Integration Framework back-relations (migration 004)
+  companyIntegrations     CompanyIntegration[]
+  integrationActionLogs   IntegrationActionLog[]
+
+  // Form Drafts back-relation (migration 005)
+  formDrafts              FormDraft[]
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments       ExchangeShipment[]
+
+  // Order Scan Module back-relations (migration 017)
+  scanEvents              ScanEvent[]
+  scanDailyReports        ScanDailyReport[]
+  // Load Sheets back-relation (migration 020)
+  loadSheets              LoadSheet[]
+}
+
+/// Legal operating entity under an Organization. All business data lives here.
+model Company {
+  id                String   @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name              String
+  legalName         String?
+  slug              String   @unique
+  logoUrl           String?
+  baseCurrency      String   @default("PKR")
+  countryCode       String   @default("PK")
+  taxId             String?
+  taxIdType         String? // NTN | STRN
+  addressStreet     String?
+  addressCity       String?
+  addressProvince   String?
+  addressPostalCode String?
+  addressCountry    String?
+  phone             String?
+  email             String?
+  website           String?
+  timezone          String   @default("Asia/Karachi")
+  fiscalYearStart   Int      @default(1)
+  isActive          Boolean  @default(true)
+  metadata          String   @default("{}")
+  createdById       String
+  createdBy         Profile  @relation("CompanyCreator", fields: [createdById], references: [id])
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  roles            Role[]
+  employees        Employee[]
+  invitations      Invitation[]
+  rolePermissions  RolePermission[]
+  auditLogs        AuditLog[]
+  metricEvents     MetricEvent[]
+  activeForSettings UserSetting[]
+
+  // Sprint 3 back-relations
+  sourceProducts          OrgProduct[]
+  selectiveProductAccess  SelectiveProductAccess[]
+  companyProductSettings  CompanyProductSetting[]
+  companyVariantPricing   CompanyVariantPricing[]
+  returnedStitchedInventory ReturnedStitchedInventory[]
+  productFulfillmentCosts  ProductFulfillmentCost[]
+
+  // Sprint 6 back-relations
+  inventoryLocations      InventoryLocation[]
+  suppliers               Supplier[]
+  inventoryTxnsCompany    InventoryTransaction[]
+  purchaseOrders          PurchaseOrder[]
+  supplierReturns         SupplierReturn[]
+  stockLossRecords        StockLossRecord[]
+  cycleCounts             CycleCount[]
+  productionOrders        ProductionOrder[]
+
+  // OMS back-relations
+  orderSettings           CompanyOrderSetting?
+  orders                  Order[]
+
+  // Item Exchange System back-relations (migration 003)
+  orderExchanges          OrderExchange[]
+
+  // Universal Integration Framework back-relations (migration 004)
+  companyIntegrations    CompanyIntegration[]
+
+  // Form Drafts back-relation (migration 005)
+  formDrafts             FormDraft[]
+
+  // City & Address Book System back-relation (migration 007)
+  cityAliases            CourierCityAlias[]
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments      ExchangeShipment[]
+
+  // Order Scan Module back-relations (migration 017)
+  scanEvents             ScanEvent[]
+  scanDailyReports       ScanDailyReport[]
+
+  // Load Sheets back-relation (migration 020)
+  loadSheets             LoadSheet[]
+
+  // HR / Payroll back-relation
+  payrollRuns            PayrollRun[]
+}
+
+/// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
+/// elevated and bypass all permission checks. Custom roles use role_permissions.
+model Role {
+  id            String   @id @default(cuid())
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name          String
+  description   String?
+  roleTier      String   @default("standard") // elevated | standard
+  isSystemRole  Boolean  @default(false)
+  systemRoleKey String?  // owner | founder | co_founder | investor | null
+  // NOTE: systemRoleKey is unique PER COMPANY (not globally), so every
+  // company can seed its own owner/founder/co_founder/investor roles.
+  // ─── Data scope for the Orders module ───────────────────────────────
+  // "all"  → role sees ALL orders in the company (default, preserves
+  //          existing behavior for every row after migration)
+  // "own"  → role sees only orders where salesEmployeeId === the caller's
+  //          own Employee.id (enforced at the query layer, not in SQL)
+  ordersDataScope String  @default("all") // "own" | "all"
+  isActive      Boolean  @default(true)
+  createdById   String?
+  createdBy     Profile? @relation("RoleCreator", fields: [createdById], references: [id])
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  employees       Employee[]
+  rolePermissions RolePermission[]
+  invitations     Invitation[]
+
+  @@unique([companyId, name])
+  @@unique([companyId, systemRoleKey])
+}
+
+/// Permission keys attached to standard roles. Elevated roles bypass this.
+model RolePermission {
+  id            String   @id @default(cuid())
+  roleId        String
+  role          Role     @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  companyId     String
+  company       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  permissionKey String
+  createdAt     DateTime @default(now())
+
+  @@unique([roleId, permissionKey])
+}
+
+/// Core of the Employment System. Merges HR + system access.
+/// One user can have multiple employee records (one per company).
+model Employee {
+  id                String    @id @default(cuid())
+  companyId         String
+  company           Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  userId            String
+  user              Profile   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleId            String
+  role              Role      @relation(fields: [roleId], references: [id])
+  employeeCode      String?
+  department        String?
+  designation       String?
+  directManagerId   String?
+  directManager     Employee? @relation("EmployeeManager", fields: [directManagerId], references: [id])
+  subordinates      Employee[] @relation("EmployeeManager")
+  status            String    @default("active") // active | suspended | terminated | on_leave
+  joinedAt          DateTime  @default(now())
+  terminatedAt      DateTime?
+  terminatedById    String?
+  terminatedBy      Profile?  @relation("TerminatedBy", fields: [terminatedById], references: [id])
+  terminationReason String?
+  invitedById       String?
+  invitedBy         Profile?  @relation("EmployeeInvitedBy", fields: [invitedById], references: [id])
+  metadata          String    @default("{}")
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  auditLogs AuditLog[]
+
+  // Sprint 3 back-relations (named to avoid ambiguity)
+  createdCategories      OrgCategory[]      @relation("CategoryCreator")
+  createdBrands          OrgBrand[]         @relation("BrandCreator")
+  createdAttributes      OrgAttribute[]     @relation("AttributeCreator")
+  createdProducts        OrgProduct[]      @relation("ProductCreator")
+  promotedProducts       OrgProduct[]      @relation("ProductPromoter")
+  demotedProducts        OrgProduct[]      @relation("ProductDemoter")
+  createdVariants        OrgProductVariant[] @relation("VariantCreator")
+  uploadedProductImages  OrgProductImage[] @relation("ImageUploader")
+  grantedSelectiveAccess SelectiveProductAccess[] @relation("SelectiveAccessGranter")
+  subscribedProducts     CompanyProductSetting[] @relation("SubscriptionCreator")
+  revokedSubscriptions   CompanyProductSetting[] @relation("SubscriptionRevoker")
+  receivedReturnedItems  ReturnedStitchedInventory[] @relation("ReturnedItemReceiver")
+  writtenOffReturnedItems ReturnedStitchedInventory[] @relation("ReturnedItemWriteOff")
+  loggedFulfillmentCosts ProductFulfillmentCost[] @relation("FulfillmentCostLogger")
+
+  // Sprint 6 back-relations
+  createdLocations       InventoryLocation[] @relation("LocationCreator")
+  createdSuppliers       Supplier[] @relation("SupplierCreator")
+  inventoryTxnEmployee   InventoryTransaction[] @relation("InventoryTxnEmployee")
+  transferInitiator      StockTransfer[] @relation("TransferInitiator")
+  poCreator              PurchaseOrder[] @relation("POCreator")
+  poCanceller            PurchaseOrder[] @relation("POCanceller")
+  poReceiver             PurchaseOrderReceipt[] @relation("POReceiver")
+  supplierReturnReporter SupplierReturn[] @relation("SupplierReturnReporter")
+  supplierReturnResolver SupplierReturn[] @relation("SupplierReturnResolver")
+  stockLossReporter      StockLossRecord[] @relation("StockLossReporter")
+  stockLossApprover      StockLossRecord[] @relation("StockLossApprover")
+  stockLossResolver      StockLossRecord[] @relation("StockLossResolver")
+  cycleCountAssignee     CycleCount[] @relation("CycleCountAssignee")
+  cycleCountCreator      CycleCount[] @relation("CycleCountCreator")
+  cycleCountApprover     CycleCount[] @relation("CycleCountApprover")
+  cycleCountCounter      CycleCountItem[] @relation("CycleCountCounter")
+  productionOrderCreator ProductionOrder[] @relation("ProductionOrderCreator")
+
+  // OMS back-relations
+  orderSettingsUpdater   CompanyOrderSetting[] @relation("CompanyOrderSettingsUpdater")
+  orderCreator           Order[] @relation("OrderCreator")
+  orderConverter         Order[] @relation("OrderConverter")
+
+  // Customer Management System back-relations (migration 002)
+  flaggedCustomers       Customer[] @relation("CustomerFlagger")
+  createdCustomers       Customer[] @relation("CustomerCreator")
+
+  // Item Exchange System back-relations (migration 003)
+  exchangeRequestsRequested       OrderExchange[] @relation("ExchangeRequester")
+  exchangesOldItemVerified        OrderExchange[] @relation("ExchangeOldItemVerifier")
+  exchangesCustomerShippedConfirmed OrderExchange[] @relation("ExchangeCustomerShippedConfirmer")
+  exchangePriceDiffSettled        OrderExchange[] @relation("ExchangePriceDiffSettler")
+  exchangeRefundsProcessed        OrderExchange[] @relation("ExchangeRefundProcessor")
+
+  // Universal Integration Framework back-relations (migration 004)
+  integrationsCreated             CompanyIntegration[] @relation("IntegrationCreator")
+  // Shopify Adapter Foundation: the employee who most recently connected OR
+  // reconnected this integration. Used by the webhook route to build an
+  // injected WorkspaceContext for unauthenticated webhook-triggered actions
+  // (createOrderFromShopifyWebhook / cancelOrder). Distinct from
+  // integrationsCreated (the ORIGINAL creator) because the original creator
+  // may no longer have an active employee record.
+  integrationsConnectedTo         CompanyIntegration[] @relation("IntegrationConnector")
+
+  // Form Drafts back-relation (migration 005)
+  formDraftsCreated               FormDraft[] @relation("FormDraftCreator")
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipmentsCreated        ExchangeShipment[] @relation("ExchangeShipmentCreator")
+
+  // Order Scan Module back-relation (migration 017)
+  scanEvents                      ScanEvent[] @relation("ScanEventScannedBy")
+  loadSheetsGenerated             LoadSheet[] @relation("LoadSheetGenerator")
+
+  // ─── HR / Payroll back-relations ────────────────────────────────────
+  // Orders where this employee is the attributed salesperson (Order.salesEmployeeId).
+  salesOrders                     Order[] @relation("OrderSalesEmployee")
+  // Cached rollup of this employee's sales performance (1:1).
+  employeeStats                   EmployeeStats?
+  // Active salary profile (1:1, the current effective base salary).
+  salaryProfile                   EmployeeSalaryProfile?
+  // Append-only salary revision history (1:N — as the employee whose salary changed).
+  salaryRevisions                 SalaryRevision[] @relation("SalaryRevisionEmployee")
+  // Salary revisions this employee made for others (1:N — as the changer).
+  salaryRevisionsMade             SalaryRevision[] @relation("SalaryRevisionChangedBy")
+  // Commission rules configured for this employee (1:N).
+  commissionRules                 CommissionRule[]
+  // Payslips generated for this employee (1:N).
+  payslips                        Payslip[]
+  // Salary advances given to this employee (1:N).
+  advancesReceived                EmployeeAdvance[]
+  // Salary advances created BY this employee (1:N — the staff member who recorded it).
+  advancesCreatedBy               EmployeeAdvance[] @relation("AdvanceCreatedBy")
+  // Payroll runs this employee finalized (1:N).
+  payrollRunsFinalized            PayrollRun[] @relation("PayrollFinalizer")
+
+  @@unique([companyId, userId])
+  @@index([companyId, designation])
+}
+
+/// Token-based email invitations. Works whether user exists or not.
+model Invitation {
+  id             String    @id @default(cuid())
+  companyId      String
+  company        Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  invitedEmail   String
+  invitedById    String
+  invitedBy      Profile   @relation("InvitedBy", fields: [invitedById], references: [id])
+  roleId         String
+  role           Role      @relation(fields: [roleId], references: [id])
+  token          String    @unique @default(cuid())
+  status         String    @default("pending") // pending | accepted | expired | revoked
+  acceptedById   String?
+  acceptedBy     Profile?  @relation("AcceptedBy", fields: [acceptedById], references: [id])
+  acceptedAt     DateTime?
+  expiresAt      DateTime  @default(now())
+  message        String?
+  metadata       String    @default("{}")
+  createdAt      DateTime  @default(now())
+}
+
+/// Stores active workspace context per user.
+model UserSetting {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  user              Profile  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  activeCompanyId   String?
+  activeCompany     Company? @relation(fields: [activeCompanyId], references: [id], onDelete: SetNull)
+  activeOrgId       String?
+  theme             String   @default("system") // light | dark | system
+  language          String   @default("en")
+  notificationPrefs String   @default("{}")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+/// Immutable append-only event log. Foundation for the KPI system.
+model AuditLog {
+  id             String   @id @default(cuid())
+  companyId      String?
+  company        Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  userId         String?
+  user           Profile? @relation(fields: [userId], references: [id], onDelete: SetNull)
+  employeeId     String?
+  employee       Employee? @relation(fields: [employeeId], references: [id], onDelete: SetNull)
+  action         String
+  entityType     String
+  entityId       String?
+  ipAddress      String?
+  userAgent      String?
+  oldValues      String?
+  newValues      String?
+  metadata       String   @default("{}")
+  createdAt      DateTime @default(now())
+
+  @@index([companyId, entityType, createdAt])
+  @@index([companyId, createdAt])
+}
+
+/// Raw numeric events. Future KPI dashboards aggregate from this table.
+model MetricEvent {
+  id           String   @id @default(cuid())
+  companyId    String
+  company      Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  entityType   String
+  entityId     String
+  metricKey    String
+  numericValue Float
+  currency     String?
+  dimensions   String   @default("{}")
+  recordedAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  @@index([companyId, entityType, metricKey, recordedAt])
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SPRINT 3 — PRODUCT CATALOG SYSTEM
+// 12 models: categories, brands, attributes, products, variants,
+// images, bundles, selective access, company pricing, returned inventory.
+// Multi-tenant isolation: org-level catalog + company-level pricing.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Hierarchical categories at organization level (shared by all companies).
+model OrgCategory {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  parentId       String?
+  parent         OrgCategory? @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children       OrgCategory[] @relation("CategoryTree")
+  name           String
+  slug           String
+  imageUrl       String?
+  displayOrder   Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdById    String?
+  createdBy      Employee? @relation("CategoryCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  products       OrgProduct[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+}
+
+/// Brands at organization level. e.g. LAMHA, Muzammil Collection.
+model OrgBrand {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  slug           String
+  logoUrl        String?
+  isActive       Boolean  @default(true)
+  createdById    String?
+  createdBy      Employee? @relation("BrandCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  products       OrgProduct[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+}
+
+/// Attribute definitions used to build variants. e.g. Size, Color, Piece Type.
+model OrgAttribute {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String   // "Size"
+  displayName    String   // "Select Size"
+  attributeType  String   @default("select") // select | color
+  displayOrder   Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdById    String?
+  createdBy      Employee? @relation("AttributeCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+
+  values         OrgAttributeValue[]
+
+  // Sprint 9 — Generic attribute rules (e.g. "Unstitched" forces "One Size")
+  rulesAsForcedAttr   AttributeValueRule[] @relation("ForcedAttribute")
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+/// Values for each attribute. e.g. S, M, L / Red, Navy / Unstitched, Stitched.
+model OrgAttributeValue {
+  id             String   @id @default(cuid())
+  attributeId    String
+  attribute      OrgAttribute @relation(fields: [attributeId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  value          String   // "Medium"
+  displayValue   String   // "M"
+  colorHex       String?  // only for color type
+  skuCode        String?  // e.g. "M", "XXL", "RED" — used to build variant SKUs
+  displayOrder   Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  // Sprint 9 — back-relations for attribute value rules
+  rulesAsTrigger AttributeValueRule[] @relation("TriggerValue")
+  rulesAsForced  AttributeValueRule[] @relation("ForcedValue")
+
+  @@unique([attributeId, value])
+  @@index([organizationId])
+}
+
+/// Generic conditional rules: "when trigger value is selected, force another attribute to a specific value."
+/// e.g. Piece Type = "Unstitched" forces Size = "One Size"
+model AttributeValueRule {
+  id                      String   @id @default(cuid())
+  organizationId          String
+  organization            Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  triggerAttributeValueId String
+  triggerAttributeValue   OrgAttributeValue @relation("TriggerValue", fields: [triggerAttributeValueId], references: [id], onDelete: Cascade)
+
+  forcesAttributeId       String
+  forcesAttribute         OrgAttribute @relation("ForcedAttribute", fields: [forcesAttributeId], references: [id], onDelete: Cascade)
+
+  forcesValueId           String
+  forcesValue             OrgAttributeValue @relation("ForcedValue", fields: [forcesValueId], references: [id], onDelete: Cascade)
+
+  createdAt               DateTime @default(now())
+
+  @@unique([triggerAttributeValueId, forcesAttributeId])
+  @@index([organizationId])
+}
+
+/// Master product record. Lives at org level. Created by one company,
+/// can be promoted to org-wide or selective sharing.
+model OrgProduct {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceCompanyId String
+  sourceCompany   Company @relation(fields: [sourceCompanyId], references: [id])
+
+  categoryId     String?
+  category       OrgCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  brandId        String?
+  brand          OrgBrand? @relation(fields: [brandId], references: [id], onDelete: SetNull)
+
+  title          String
+  slug           String
+  baseSku        String?  // manually entered by user, e.g. "FSES-10A". Nullable — falls back to slug.
+  description    String?
+  shortDescription String? @db.VarChar(500)
+
+  productType    String   @default("variable") // simple | variable | bundle | service
+  productScope   String   @default("private") // private | organization | selective | archived
+
+  isStitchable   Boolean  @default(false)
+  hasSizeVariants Boolean @default(false)
+  stitchingBasePrice Decimal @default(0) @db.Decimal(12, 2)
+
+  isActive       Boolean  @default(true)
+  isFeatured     Boolean  @default(false)
+
+  promotedAt     DateTime?
+  promotedById   String?
+  promotedBy     Employee? @relation("ProductPromoter", fields: [promotedById], references: [id])
+  demotedAt      DateTime?
+  demotedById    String?
+  demotedBy      Employee? @relation("ProductDemoter", fields: [demotedById], references: [id])
+  demotionReason String?
+
+  createdById    String
+  createdBy      Employee @relation("ProductCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  variants       OrgProductVariant[]
+  images         OrgProductImage[]
+  bundles        OrgProductBundle[] @relation("BundleProduct")
+  selectiveAccess SelectiveProductAccess[]
+  companySettings CompanyProductSetting[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, productScope])
+  @@index([sourceCompanyId])
+}
+
+/// Every unique sellable combination of a product. Shopify-compatible fields.
+/// NOTE: attribute_values JSONB must never exceed 3 keys (Shopify limit).
+model OrgProductVariant {
+  id             String   @id @default(cuid())
+  productId      String
+  product        OrgProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  sku            String   @unique
+  barcode        String?  @unique
+  // JSONB: { "Piece Type": "Stitched", "Size": "M" } — max 3 keys
+  attributeValues String  @default("{}")
+
+  costPrice      Decimal  @default(0) @db.Decimal(12, 2)
+  weightGrams    Int      @default(0)
+
+  fulfillmentType String  @default("stock_based") // stock_based | made_to_order
+  stitchingType  String?  // unstitched | stitched_basic | stitched_heavy | custom_order
+  stitchingCharges Decimal @default(0) @db.Decimal(12, 2)
+  productionDays Int      @default(0)
+
+  isTaxable      Boolean  @default(true)
+  requiresShipping Boolean @default(true)
+  inventoryPolicy String  @default("deny") // deny | continue
+
+  isDefault      Boolean  @default(false)
+  isActive       Boolean  @default(true)
+
+  // Shopify sync fields
+  shopifyVariantId      String? @unique
+  shopifyInventoryItemId String?
+
+  // Dimensions for courier/international
+  dimensions      String  @default("{}") // { length_cm, width_cm, height_cm }
+
+  // Sprint 6 — Inventory system columns
+  trackInventory      Boolean @default(true) // FALSE for made_to_order until first return; one-way TRUE→never back to FALSE
+  fabricSourceVariantId String? // self-reference: the stock_based variant fabric is drawn from for made_to_order production
+  fabricSourceVariant  OrgProductVariant? @relation("FabricSource", fields: [fabricSourceVariantId], references: [id])
+  fabricSourceFor      OrgProductVariant[] @relation("FabricSource")
+
+  // Sprint 10 — Parent-child pricing sync flag
+  costPriceSyncedWithParent Boolean @default(true) // TRUE = follows parent group cost; FALSE = manually overridden
+
+  // Weight tracking (KG, 3 decimal precision). Nullable so existing variants
+  // remain NULL until manually set. Mirrors costPriceSyncedWithParent for the
+  // parent-child cascade/override/re-sync pattern. Consumed by future courier
+  // booking logic (Overland vs Normal order type).
+  weightKg                  Decimal? @db.Decimal(6,3)
+  weightSyncedWithParent    Boolean  @default(true)
+
+  createdById     String?
+  createdBy       Employee? @relation("VariantCreator", fields: [createdById], references: [id])
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  images          OrgProductImage[]
+  bundleComponents OrgProductBundle[] @relation("BundleComponent")
+  companyPricing  CompanyVariantPricing[]
+  returnedInventory ReturnedStitchedInventory[]
+  fulfillmentCosts ProductFulfillmentCost[]
+  inventoryPools  InventoryPool[]
+  inventoryTransactions InventoryTransaction[]
+  avgCostHistory  AvgCostHistory[]
+  stockTransfers  StockTransfer[]
+  stockLossRecords StockLossRecord[]
+  cycleCountItems CycleCountItem[]
+  productionOrdersStitched ProductionOrder[] @relation("StitchedVariantProduction")
+  productionOrdersFabric ProductionOrder[] @relation("FabricVariantProduction")
+  supplierReturns SupplierReturn[]
+  purchaseOrderItems PurchaseOrderItem[]
+  purchaseOrderReceiptItems PurchaseOrderReceiptItem[]
+
+  // OMS back-relations
+  orderItems       OrderItem[]
+
+  // Item Exchange System back-relations (migration 003)
+  exchangesAsNewVariant OrderExchange[] @relation("ExchangeNewVariant")
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipmentsAsNewVariant ExchangeShipment[] @relation("ExchangeShipmentNewVariant")
+
+  @@index([productId])
+  @@index([organizationId, fulfillmentType])
+}
+
+/// Images stored in Supabase Storage, shared across all subscribing companies.
+model OrgProductImage {
+  id             String   @id @default(cuid())
+  productId      String
+  product        OrgProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  variantId      String?
+  variant        OrgProductVariant? @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  storagePath    String
+  publicUrl      String
+  displayOrder   Int      @default(0)
+  isPrimary      Boolean  @default(false)
+
+  uploadedById   String?
+  uploadedBy     Employee? @relation("ImageUploader", fields: [uploadedById], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@index([productId])
+}
+
+/// For bundle-type products. Defines component variants and quantities.
+model OrgProductBundle {
+  id             String   @id @default(cuid())
+  bundleProductId String
+  bundleProduct   OrgProduct @relation("BundleProduct", fields: [bundleProductId], references: [id], onDelete: Cascade)
+  componentVariantId String
+  componentVariant  OrgProductVariant @relation("BundleComponent", fields: [componentVariantId], references: [id])
+  quantity       Int      @default(1)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@unique([bundleProductId, componentVariantId])
+}
+
+/// When product_scope = 'selective', controls which companies can access it.
+model SelectiveProductAccess {
+  id             String   @id @default(cuid())
+  orgProductId   String
+  orgProduct     OrgProduct @relation(fields: [orgProductId], references: [id], onDelete: Cascade)
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  grantedById    String?
+  grantedBy      Employee? @relation("SelectiveAccessGranter", fields: [grantedById], references: [id])
+  grantedAt      DateTime @default(now())
+
+  @@unique([orgProductId, companyId])
+}
+
+/// Per-company pricing and activation for a shared org product.
+model CompanyProductSetting {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  orgProductId   String
+  orgProduct     OrgProduct @relation(fields: [orgProductId], references: [id], onDelete: Cascade)
+
+  isActive       Boolean  @default(true)
+  subscriptionStatus String @default("active") // active | paused | revoked
+
+  subscribedAt   DateTime @default(now())
+  subscribedById String?
+  subscribedBy   Employee? @relation("SubscriptionCreator", fields: [subscribedById], references: [id])
+  revokedAt      DateTime?
+  revokedById    String?
+  revokedBy      Employee? @relation("SubscriptionRevoker", fields: [revokedById], references: [id])
+  revokeReason   String?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([companyId, orgProductId])
+  @@index([companyId])
+}
+
+/// Per-variant selling price set independently by each company.
+model CompanyVariantPricing {
+  id             String   @id @default(cuid())
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  salePrice      Decimal  @db.Decimal(12, 2)
+  comparePrice   Decimal? @db.Decimal(12, 2)
+
+  // Sprint 10 — Parent-child pricing sync flags (independent per field)
+  salePriceSyncedWithParent    Boolean @default(true)
+  comparePriceSyncedWithParent Boolean @default(true)
+
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([companyId, orgVariantId])
+  @@index([companyId])
+}
+
+/// Daily snapshot of exchange rates for currency conversion (Phase F1).
+/// Fetched by the /api/cron/refresh-exchange-rates cron job. Used ONLY for
+/// DISPLAY purposes (estimated revenue totals converted to the company's
+/// baseCurrency). Never influences stored order prices. If a rate is missing
+/// or stale, the per-currency breakdown displays correctly on its own.
+model ExchangeRateSnapshot {
+  id                 String   @id @default(cuid())
+  currency           String   // ISO 4217 code (e.g. "USD", "AED", "GBP")
+  rateToBaseCurrency Decimal  @db.Decimal(12, 6) // rate relative to a common base (USD)
+  fetchedAt          DateTime @default(now())
+
+  @@index([currency, fetchedAt])
+}
+
+/// Special pool for made-to-order items returned in sellable condition.
+/// This is the ONLY stock a made_to_order variant ever holds.
+model ReturnedStitchedInventory {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+
+  quantity       Int      @default(1)
+  condition      String   // perfect | good | open_box | damaged
+  totalCost      Decimal  @db.Decimal(12, 2)
+  suggestedResalePrice Decimal? @db.Decimal(12, 2)
+
+  originalOrderReference String?
+  returnReason   String?
+  status         String   @default("available") // available | sold | written_off
+
+  photos         String   @default("[]") // JSON array of URLs
+  notes          String?
+
+  receivedById   String?
+  receivedBy     Employee? @relation("ReturnedItemReceiver", fields: [receivedById], references: [id])
+  receivedAt     DateTime @default(now())
+
+  soldAt         DateTime?
+  soldOrderReference String?
+
+  writtenOffAt   DateTime?
+  writtenOffById String?
+  writtenOffBy   Employee? @relation("ReturnedItemWriteOff", fields: [writtenOffById], references: [id])
+  writeOffReason String?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, orgVariantId, status])
+  @@index([companyId, status])
+}
+
+/// Tracks cost components for made_to_order variants in production.
+model ProductFulfillmentCost {
+  id             String   @id @default(cuid())
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  employeeId     String?
+  employee       Employee? @relation("FulfillmentCostLogger", fields: [employeeId], references: [id])
+
+  orderReference String?
+  fabricCost     Decimal  @default(0) @db.Decimal(12, 2)
+  stitchingCost  Decimal  @default(0) @db.Decimal(12, 2)
+  embroideryCost Decimal  @default(0) @db.Decimal(12, 2)
+  otherCost      Decimal  @default(0) @db.Decimal(12, 2)
+  totalProductionCost Decimal @default(0) @db.Decimal(12, 2)
+  salePrice      Decimal? @db.Decimal(12, 2)
+
+  status         String   @default("in_production") // in_production | dispatched | delivered | returned | written_off
+  tailorName     String?
+  notes          String?
+  metadata       String   @default("{}")
+
+  dispatchedAt   DateTime?
+  deliveredAt    DateTime?
+  returnedAt     DateTime?
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([companyId, orgVariantId, status])
+  @@index([orderReference])
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SPRINT 6 — INVENTORY, WAREHOUSE, PURCHASE ORDER, SUPPLIER SYSTEM
+// 11 models: locations, suppliers, pools, transactions, avg_cost_history,
+// transfers, purchase_orders (+items+receipts), supplier_returns,
+// stock_loss, cycle_counts, production_orders.
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/// Warehouse/dispatch/retail locations. company_id NULL = org-level shared.
+model InventoryLocation {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  companyId      String?  // NULL = org-level shared location
+  company        Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name           String
+  locationType   String   @default("warehouse") // warehouse | dispatch_hub | retail_store | transit | damaged_hold
+  address        String?  // JSONB: { street, city, province, postal_code, country }
+  city           String   @default("Lahore")
+  province       String   @default("Punjab")
+  countryCode    String   @default("PK")
+  postalCode     String?
+  contactPerson  String?
+  contactPhone   String?
+  isDefault      Boolean  @default(false)
+  isActive       Boolean  @default(true)
+
+  createdById    String?
+  createdBy      Employee? @relation("LocationCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  inventoryPools       InventoryPool[]
+  inventoryTransactions InventoryTransaction[]
+  avgCostHistory       AvgCostHistory[]
+  stockTransfersFrom   StockTransfer[] @relation("TransferFromLocation")
+  stockTransfersTo     StockTransfer[] @relation("TransferToLocation")
+  purchaseOrders       PurchaseOrder[]
+  supplierReturns      SupplierReturn[]
+  stockLossRecords     StockLossRecord[]
+  cycleCounts          CycleCount[]
+  productionOrders     ProductionOrder[]
+
+  // OMS back-relations
+  companyOrderSettingsDefault CompanyOrderSetting[] @relation("CompanyOrderSettingsDefaultLocation")
+  orderDispatchLocations      Order[] @relation("OrderDispatchLocation")
+  orderItemReservedLocations  OrderItem[] @relation("OrderItemReservedLocation")
+
+  @@index([organizationId])
+  @@index([companyId])
+}
+
+/// Suppliers. company_id NULL = org-level shared supplier.
+model Supplier {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  companyId      String?  // NULL = shared across org
+  company        Company?  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  name           String
+  contactPerson  String?
+  phone          String?
+  email          String?
+  address        String?  // JSONB
+
+  paymentTerms   String   @default("immediate") // immediate | net_15 | net_30 | net_45 | net_60
+  creditBalance  Decimal  @default(0) @db.Decimal(12, 2) // running credit owed BY supplier TO us
+  isActive       Boolean  @default(true)
+
+  createdById    String?
+  createdBy      Employee? @relation("SupplierCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  purchaseOrders  PurchaseOrder[]
+  supplierReturns SupplierReturn[]
+
+  @@index([organizationId])
+  @@index([companyId])
+}
+
+/// THE single source of truth for stock levels. One row per variant per location.
+model InventoryPool {
+  id             String   @id @default(cuid())
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id], onDelete: Cascade)
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  onHand         Int      @default(0)
+  reserved       Int      @default(0)
+  // available = onHand - reserved (computed in application layer)
+  incoming       Int      @default(0) // sum of undelivered PO quantities
+
+  avgCost        Decimal  @default(0) @db.Decimal(12, 4)
+  // totalStockValue = onHand * avgCost (computed in application layer)
+
+  reorderPoint   Int      @default(0)
+  reorderQuantity Int     @default(0)
+
+  lastReceivedAt DateTime?
+  lastSoldAt     DateTime?
+  lastCountedAt  DateTime?
+
+  updatedAt      DateTime @updatedAt
+
+  @@unique([orgVariantId, locationId])
+  @@index([organizationId, orgVariantId])
+  @@index([locationId])
+}
+
+/// Append-only ledger. Never update or delete rows.
+model InventoryTransaction {
+  id             String   @id @default(cuid())
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  companyId      String?  // NULL for org-level events
+  company        Company?  @relation(fields: [companyId], references: [id])
+  employeeId     String?
+  employee       Employee? @relation("InventoryTxnEmployee", fields: [employeeId], references: [id])
+
+  transactionType String  // opening_stock | purchase_received | sale_dispatched | order_reserved | order_unreserved | return_resellable | return_damaged | return_stitched_received | transfer_out | transfer_in | cycle_count_adjust | damage_writeoff | theft_writeoff | missing_writeoff | transit_loss | supplier_return | fabric_consumed_for_stitching
+
+  quantity       Int      // positive = in, negative = out
+  costPerUnit    Decimal  @default(0) @db.Decimal(12, 4)
+  // totalCostValue = ABS(quantity) * costPerUnit (computed in app)
+
+  avgCostBefore  Decimal? @db.Decimal(12, 4)
+  avgCostAfter   Decimal? @db.Decimal(12, 4)
+
+  referenceType  String?  // order | purchase_order | transfer | cycle_count | stock_loss | manual | opening | production_order | supplier_return
+  referenceId    String?
+
+  // OMS: links to the originating order (for dispatchOrder/reserveStockForOrder calls)
+  orderId        String?
+  order          Order?   @relation(fields: [orderId], references: [id])
+
+  notes          String?
+  metadata       String   @default("{}")
+
+  recordedAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  avgCostHistory AvgCostHistory[]
+  purchaseOrderReceiptItems PurchaseOrderReceiptItem[]
+  supplierReturns SupplierReturn[]
+  stockLossRecords StockLossRecord[]
+  cycleCountItems CycleCountItem[]
+  productionOrdersFabric ProductionOrder[]
+
+  // Item Exchange System back-relations (migration 003)
+  exchangeOldItemTxns OrderExchange[] @relation("ExchangeOldItemTxn")
+
+  @@index([orgVariantId, recordedAt])
+  @@index([companyId, transactionType, recordedAt])
+  @@index([organizationId, transactionType, recordedAt])
+  @@index([referenceType, referenceId])
+}
+
+/// Audit trail of every average-cost change.
+model AvgCostHistory {
+  id             String   @id @default(cuid())
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  avgCostBefore  Decimal  @db.Decimal(12, 4)
+  avgCostAfter   Decimal  @db.Decimal(12, 4)
+  triggeredByTxnId String
+  triggeredByTxn InventoryTransaction @relation(fields: [triggeredByTxnId], references: [id])
+  triggerReason  String?
+  createdAt      DateTime @default(now())
+
+  @@index([orgVariantId])
+}
+
+/// Stock transfer between locations. Logistics cost tracked separately from WAC.
+model StockTransfer {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+
+  fromLocationId String
+  fromLocation   InventoryLocation @relation("TransferFromLocation", fields: [fromLocationId], references: [id])
+  toLocationId   String
+  toLocation     InventoryLocation @relation("TransferToLocation", fields: [toLocationId], references: [id])
+
+  quantity       Int      // CHECK > 0 enforced in app
+  costPerUnitAtTransfer Decimal @db.Decimal(12, 4) // sending location's avg_cost at transfer time
+  logisticsCost  Decimal  @default(0) @db.Decimal(12, 2) // separate expense, NEVER merged into WAC
+
+  status         String   @default("completed") // completed | in_transit | cancelled
+  notes          String?
+  initiatedById  String?
+  initiatedBy    Employee? @relation("TransferInitiator", fields: [initiatedById], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([orgVariantId])
+}
+
+/// Purchase order header.
+model PurchaseOrder {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  supplierId     String
+  supplier       Supplier @relation(fields: [supplierId], references: [id])
+
+  poNumber       String   @unique // PO-{year}-{sequence}
+  status         String   @default("draft") // draft | ordered | partially_received | received | cancelled
+
+  orderDate      DateTime @default(now())
+  expectedDeliveryDate DateTime?
+  deliveryLocationId String
+  deliveryLocation InventoryLocation @relation(fields: [deliveryLocationId], references: [id])
+
+  advancePayment Decimal  @default(0) @db.Decimal(12, 2)
+  paymentMethod  String?
+  notes          String?
+
+  createdById    String
+  createdBy      Employee @relation("POCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancelledBy    Employee? @relation("POCanceller", fields: [cancelledById], references: [id])
+  cancellationReason String?
+
+  items          PurchaseOrderItem[]
+  receipts       PurchaseOrderReceipt[]
+  supplierReturns SupplierReturn[]
+
+  @@index([companyId, status])
+  @@index([organizationId])
+}
+
+/// Line items on a purchase order.
+model PurchaseOrderItem {
+  id             String   @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  orderedQuantity Int     // CHECK > 0
+  receivedQuantity Int    @default(0)
+  costPerUnit     Decimal @db.Decimal(12, 4)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  receiptItems   PurchaseOrderReceiptItem[]
+
+  @@index([purchaseOrderId])
+}
+
+/// Each individual receiving event against a PO (supports partial deliveries).
+model PurchaseOrderReceipt {
+  id             String   @id @default(cuid())
+  purchaseOrderId String
+  purchaseOrder  PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  receivedAt     DateTime @default(now())
+  receivedById   String
+  receivedBy     Employee @relation("POReceiver", fields: [receivedById], references: [id])
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  items          PurchaseOrderReceiptItem[]
+
+  @@index([purchaseOrderId])
+}
+
+/// Line items within one receiving event — actual quantity and cost that arrived.
+model PurchaseOrderReceiptItem {
+  id             String   @id @default(cuid())
+  purchaseOrderReceiptId String
+  purchaseOrderReceipt PurchaseOrderReceipt @relation(fields: [purchaseOrderReceiptId], references: [id], onDelete: Cascade)
+  purchaseOrderItemId String
+  purchaseOrderItem PurchaseOrderItem @relation(fields: [purchaseOrderItemId], references: [id])
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+
+  receivedQuantity Int    // CHECK >= 0
+  actualCostPerUnit Decimal @db.Decimal(12, 4)
+  shortageQuantity Int    @default(0)
+  shortageReason  String?
+
+  inventoryTxnId String?
+  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+
+  createdAt      DateTime @default(now())
+}
+
+/// Supplier returns — stock sent back to supplier.
+model SupplierReturn {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  purchaseOrderId String?
+  purchaseOrder  PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  supplierId     String
+  supplier       Supplier @relation(fields: [supplierId], references: [id])
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+
+  quantity       Int      // CHECK > 0
+  costPerUnit    Decimal  @db.Decimal(12, 4)
+  // totalValue = quantity * costPerUnit (computed in app)
+
+  reason         String   // defective | wrong_item | quality_issue | excess_quantity | other
+  status         String   @default("pending") // pending | sent_to_supplier | refunded | replaced | credit_note | disputed | rejected
+  resolutionType String?  // refund | replacement | credit_note
+  resolutionAmount Decimal? @db.Decimal(12, 2)
+  replacementPoId String?
+
+  photos         String   @default("[]") // JSON array
+  notes          String?
+
+  inventoryTxnId String?
+  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+
+  // Populated when status transitions to 'rejected' — back-relation to auto-created stock_loss_records entry
+  linkedLossRecord StockLossRecord? @relation("SupplierReturnLossLink")
+
+  reportedById   String
+  reportedBy     Employee @relation("SupplierReturnReporter", fields: [reportedById], references: [id])
+  resolvedById   String?
+  resolvedBy     Employee? @relation("SupplierReturnResolver", fields: [resolvedById], references: [id])
+  createdAt      DateTime @default(now())
+  resolvedAt     DateTime?
+
+  @@index([companyId, status])
+  @@index([supplierId])
+}
+
+/// Stock loss records — 5 types: damaged, theft, missing, transit_loss, supplier_dispute.
+model StockLossRecord {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+
+  lossType       String   // damaged | theft | missing | transit_loss | supplier_dispute
+  subType        String?  // confirmed | suspected | admin_error | manufacturing
+  damageType     String?  // water_moisture | physical_impact | manufacturing_defect | transit_damage | storage_damage | other
+
+  quantity       Int
+  costPerUnit    Decimal  @db.Decimal(12, 4)
+  // totalLossValue = quantity * costPerUnit (computed in app)
+
+  investigationStatus String @default("none") // none | open | closed
+  resolution     String?  // written_off | recovered | error_corrected | claim_accepted | claim_rejected
+  responsibleParty String? // warehouse | courier | customer | employee | unknown | supplier
+  policeReportRef String?
+  insuranceClaimRef String?
+  insuranceRecovered Decimal @default(0) @db.Decimal(12, 2)
+  courierClaimRef String?
+  courierClaimStatus String? // not_filed | filed | accepted | rejected
+  courierRecovered Decimal @default(0) @db.Decimal(12, 2)
+
+  evidenceUrls   String   @default("[]") // JSON array
+  notes          String?
+
+  reportedById   String
+  reportedBy     Employee @relation("StockLossReporter", fields: [reportedById], references: [id])
+  approvedById   String?
+  approvedBy     Employee? @relation("StockLossApprover", fields: [approvedById], references: [id])
+  resolvedById   String?
+  resolvedBy     Employee? @relation("StockLossResolver", fields: [resolvedById], references: [id])
+
+  inventoryTxnId String?
+  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+  orderReferenceId String? // for transit_loss: references the dispatched order (future)
+
+  // OMS: proper FK to order_items (replaces the generic orderReferenceId above;
+  // keep the old field for backward compatibility)
+  orderItemId    String?
+  orderItem      OrderItem? @relation(fields: [orderItemId], references: [id])
+
+  // ONLY set when loss_type = 'supplier_dispute' — links to originating rejected return
+  supplierReturnId String? @unique
+  supplierReturn   SupplierReturn? @relation("SupplierReturnLossLink", fields: [supplierReturnId], references: [id])
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  resolvedAt     DateTime?
+
+  // Item Exchange System back-relations (migration 003)
+  exchangeOldItemLosses OrderExchange[] @relation("ExchangeOldItemLoss")
+
+  @@index([companyId, lossType, investigationStatus])
+  @@index([companyId, createdAt])
+  @@index([orgVariantId])
+}
+
+/// Cycle count header.
+model CycleCount {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+  locationId     String
+  location       InventoryLocation @relation(fields: [locationId], references: [id])
+
+  countName      String
+  countType      String   @default("full") // full | partial | spot
+  status         String   @default("scheduled") // scheduled | in_progress | pending_review | approved | cancelled
+
+  scheduledAt    DateTime
+  startedAt      DateTime?
+  completedAt    DateTime?
+  approvedAt     DateTime?
+
+  assignedToId   String?
+  assignedTo     Employee? @relation("CycleCountAssignee", fields: [assignedToId], references: [id])
+  createdById    String
+  createdBy      Employee @relation("CycleCountCreator", fields: [createdById], references: [id])
+  approvedById   String?
+  approvedBy     Employee? @relation("CycleCountApprover", fields: [approvedById], references: [id])
+
+  notes          String?
+  totalDiscrepancies Int  @default(0)
+  totalVarianceValue Decimal @default(0) @db.Decimal(16, 2)
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  items          CycleCountItem[]
+
+  @@index([companyId, status])
+}
+
+/// Individual items in a cycle count.
+model CycleCountItem {
+  id             String   @id @default(cuid())
+  cycleCountId   String
+  cycleCount     CycleCount @relation(fields: [cycleCountId], references: [id], onDelete: Cascade)
+  orgVariantId   String
+  orgVariant     OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  systemQuantity Int
+  countedQuantity Int?
+  // discrepancy = countedQuantity - systemQuantity (computed in app)
+  discrepancyValue Decimal? @db.Decimal(16, 2)
+
+  discrepancyReason String? // recording_error | theft_suspected | damage_not_recorded | transfer_not_recorded | unknown | no_discrepancy
+
+  adjustmentApproved Boolean @default(false)
+  inventoryTxnId String?
+  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+
+  countedById    String?
+  countedBy      Employee? @relation("CycleCountCounter", fields: [countedById], references: [id])
+  countedAt      DateTime?
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  @@index([cycleCountId])
+}
+
+/// Production order for made-to-order fabric tracking.
+model ProductionOrder {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  companyId      String
+  company        Company  @relation(fields: [companyId], references: [id])
+
+  stitchedVariantId String
+  stitchedVariant OrgProductVariant @relation("StitchedVariantProduction", fields: [stitchedVariantId], references: [id])
+  fabricVariantId String
+  fabricVariant   OrgProductVariant @relation("FabricVariantProduction", fields: [fabricVariantId], references: [id])
+  fabricLocationId String
+  fabricLocation  InventoryLocation @relation(fields: [fabricLocationId], references: [id])
+
+  quantity       Int      @default(1)
+
+  status         String   @default("pending") // pending | fabric_reserved | in_production | completed | dispatched | cancelled
+
+  stitchingCost  Decimal  @default(0) @db.Decimal(12, 2)
+  fabricCost     Decimal  @default(0) @db.Decimal(12, 2)
+  // totalCost = stitchingCost + fabricCost (computed in app)
+
+  assignedTailor String?
+  estimatedCompletionDate DateTime?
+  actualCompletionDate    DateTime?
+
+  referenceType  String   @default("order")
+  referenceId    String?  // will link to orders table in future sprint
+
+  // OMS: proper FK to order_items (keep the old generic referenceType/referenceId
+  // fields for backward compatibility)
+  orderItemId    String? @unique
+  orderItem      OrderItem? @relation("OrderItemProduction", fields: [orderItemId], references: [id])
+
+  fabricTxnId    String?
+  fabricTxn      InventoryTransaction? @relation(fields: [fabricTxnId], references: [id])
+
+  createdById    String
+  createdBy      Employee @relation("ProductionOrderCreator", fields: [createdById], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  cancelledAt    DateTime?
+  cancellationReason String?
+
+  @@index([companyId, status])
+  @@index([stitchedVariantId])
+}
+
+// ============================================================================
+// OMS — Order Management System (Step 1: Schema)
+// ============================================================================
+
+/// Customer record — the heart of the standalone Customer Management System.
+/// Phones and addresses live in separate child tables (CustomerPhone,
+/// CustomerAddress) so a customer can have multiple of each. Cross-platform
+/// identity mappings (Shopify/Daraz/Instagram) live in CustomerExternalIdentity.
+///
+/// NOTE: This model is managed jointly by Prisma (for ORM access) and raw SQL
+/// (migration 002). The DB-side defaults on `id` and `updatedAt` are set via
+/// SQL so the `match_or_create_customer()` SQL function can insert without
+/// Prisma. Prisma overrides both on its own writes. Do NOT run
+/// `prisma db push` against this model — it would try to drop the partial
+/// unique indexes, CHECK constraints, and RLS policies that Prisma can't
+/// represent. Use `prisma generate` only; schema changes go through
+/// /supabase/migrations/*.sql.
+model Customer {
+  id                String   @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name              String
+  email             String?
+
+  // Cached order history stats (denormalized for fast list views — kept in
+  // sync by Step 2's recomputeCustomerStats server action, not live joins).
+  totalOrdersCount  Int      @default(0)
+  totalOrderValue   Decimal  @default(0) @db.Decimal(14, 2)
+  totalRtoCount     Int      @default(0)
+
+  // RTO flagging for return-fraud detection
+  isFlagged         Boolean  @default(false)
+  flaggedReason     String?
+  flaggedAt         DateTime?
+  flaggedBy         String?
+  flaggedByEmployee Employee? @relation("CustomerFlagger", fields: [flaggedBy], references: [id], onDelete: SetNull)
+
+  createdBy         String?
+  createdByEmployee Employee? @relation("CustomerCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  orders            Order[]
+  phones            CustomerPhone[]
+  addresses         CustomerAddress[]
+  externalIdentities CustomerExternalIdentity[]
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments  ExchangeShipment[] @relation("ExchangeShipmentCustomer")
+
+  @@index([organizationId, isFlagged])
+}
+
+/// A customer can have multiple phone numbers (own, spouse's, family shared
+/// line). phoneRaw is for display; phoneNormalized (E.164) is for matching.
+/// UNIQUE(organizationId, phoneNormalized) prevents duplicate customer
+/// creation. The partial unique index "one primary per customer" is enforced
+/// in SQL (customer_phones_one_primary_idx) — Prisma can't represent it.
+model CustomerPhone {
+  id                String   @id @default(cuid())
+  customerId        String
+  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id])
+
+  phoneRaw          String
+  phoneNormalized   String
+  label             String?
+  isPrimary         Boolean  @default(false)
+  isValidFormat     Boolean  @default(true)  // false = phone failed format validation (e.g., from external platform)
+
+  createdAt         DateTime @default(now())
+
+  ordersUsedIn      Order[] @relation("OrderUsedPhone")
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments ExchangeShipment[] @relation("ExchangeShipmentShippingPhone")
+
+  @@unique([organizationId, phoneNormalized])
+  @@index([organizationId, phoneNormalized])
+  @@index([customerId])
+  @@map("customer_phones")
+}
+
+/// A customer can have multiple delivery addresses (home, office, relative's).
+/// NO province field — per product decision, addresses are just { address, city }.
+/// The partial unique index "one default per customer" is enforced in SQL
+/// (customer_addresses_one_default_idx).
+model CustomerAddress {
+  id                String   @id @default(cuid())
+  customerId        String
+  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id])
+
+  label             String?
+  address           String
+  city              String
+  // Country (Phase: Country System). Stores the ISO 3166-1 alpha-2 CODE
+  // (e.g. "PK", "GB", "AE") — NOT the country name. This matches
+  // CountrySelector's output (returns alpha-2 codes) + Shopify's
+  // default_address.country_code (already alpha-2) directly, with no
+  // translation at the form boundary. Defaults to "PK" (current majority
+  // use case) so existing rows backfill cleanly.
+  country           String  @default("PK")
+  isDefault         Boolean  @default(false)
+  lastUsedAt        DateTime?
+
+  // ─── City validation (Phase 7 — early warning, not blocking) ──────────
+  // cityMatchedCouriers stores the providerKey list (e.g. ['postex', 'tcs'])
+  // of couriers whose cached operational cities include this address's city.
+  // Populated by validateCustomerAddressCity() after create/update. This is
+  // INFORMATIONAL only — the authoritative check is always
+  // revalidateCityAtBookingTime() at booking time (with its live fallback).
+  // An empty array means "no connected courier recognizes this city yet" —
+  // a soft warning, NOT a block.
+  cityMatchedCouriers String[] @default([])
+  cityValidatedAt    DateTime?
+
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  ordersUsedIn      Order[] @relation("OrderUsedAddress")
+
+  // Exchange Shipments System back-relation (migration 008)
+  exchangeShipments ExchangeShipment[] @relation("ExchangeShipmentShippingAddress")
+
+  @@index([customerId])
+  @@index([organizationId])
+  @@map("customer_addresses")
+}
+
+/// Maps platform-specific customer IDs (Shopify, Daraz, Instagram) to internal
+/// FlowOps customer IDs. This is the fast path of the layered matching strategy
+/// in match_or_create_customer(). matchedVia records HOW each mapping was
+/// established. CHECK constraints on platform and matchedVia are enforced in SQL.
+model CustomerExternalIdentity {
+  id                String   @id @default(cuid())
+  customerId        String
+  customer          Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id])
+
+  platform          String   // 'shopify' | 'daraz' | 'instagram' (CHECK in SQL)
+  externalCustomerId String
+  matchedVia        String   @default("manual") // 'exact_identity' | 'phone_match' | 'email_match' | 'manual' (CHECK in SQL)
+
+  createdAt         DateTime @default(now())
+
+  @@unique([organizationId, platform, externalCustomerId])
+  @@index([customerId])
+  @@index([organizationId, platform, externalCustomerId])
+  @@map("customer_external_identities")
+}
+
+/// Item Exchange System — tracks a single item exchange request.
+/// An exchange can only be created against an order_item belonging to a
+/// DELIVERED order. Two exchange methods with distinct sequencing:
+///   - courier_replacement: new item dispatched first, courier collects old
+///   - customer_self_return: customer ships old item back FIRST, it's
+///     manually verified, THEN the new item is dispatched
+///
+/// newOrderId/newOrderItemId are nullable — populated only once the linked
+/// exchange order (order_source='exchange') is created, which for
+/// customer_self_return happens LATE (after old item verification).
+///
+/// priceDifference is GENERATED as newItemPrice - oldItemPrice. If positive,
+/// customer owes; if negative, refund due.
+///
+/// "Customer did not return" is a supported terminal outcome — the value of
+/// the never-returned old item becomes a recoverable amount, and Step 2's
+/// server actions will call the existing flagCustomer() with reason
+/// "Exchange item not returned".
+///
+/// NOTE: Managed jointly by Prisma (ORM access) + raw SQL (migration 003).
+/// Do NOT run `prisma db push` — it would drop the GENERATED column, CHECK
+/// constraints, and RLS policies Prisma can't represent. Use `prisma
+/// generate` only; schema changes go through /supabase/migrations/*.sql.
+model OrderExchange {
+  id                            String   @id @default(cuid())
+  organizationId                String
+  organization                  Organization @relation(fields: [organizationId], references: [id])
+  companyId                     String
+  company                       Company  @relation(fields: [companyId], references: [id])
+
+  // The OLD item being exchanged away
+  originalOrderId               String
+  originalOrder                 Order    @relation("ExchangeOriginalOrder", fields: [originalOrderId], references: [id])
+  originalOrderItemId           String
+  originalOrderItem             OrderItem @relation("ExchangeOriginalOrderItem", fields: [originalOrderItemId], references: [id])
+
+  // The NEW variant + (late-populated) new order/item
+  newOrgVariantId               String
+  newOrgVariant                 OrgProductVariant @relation("ExchangeNewVariant", fields: [newOrgVariantId], references: [id])
+  newOrderId                    String?
+  newOrder                      Order?   @relation("ExchangeNewOrder", fields: [newOrderId], references: [id])
+  newOrderItemId                String?
+  newOrderItem                  OrderItem? @relation("ExchangeNewOrderItem", fields: [newOrderItemId], references: [id])
+
+  // NEW (migration 008): link to the new exchange_shipments system. An exchange
+  // can have multiple shipments over its lifecycle (e.g. if the first is
+  // cancelled and a new one is created), so this is a 1-N relation.
+  // The legacy newOrderId/newOrderItemId above remain populated only on old,
+  // pre-migration historical exchange records.
+  exchangeShipments             ExchangeShipment[] @relation("ExchangeNewShipment")
+
+  exchangeMethod                String   // 'courier_replacement' | 'customer_self_return' (CHECK in SQL)
+  status                        String   @default("requested") // 10 states (CHECK in SQL) — migration 019 added 'exchange_item_returned'
+
+  // Old item verification (manual — no courier API confirms arrival)
+  oldItemCondition              String?  // 'perfect' | 'good' | 'open_box' | 'damaged' (CHECK in SQL)
+  oldItemVerifiedAt             DateTime?
+  oldItemVerifiedBy             String?
+  oldItemVerifiedByEmployee     Employee? @relation("ExchangeOldItemVerifier", fields: [oldItemVerifiedBy], references: [id], onDelete: SetNull)
+  oldItemEvidenceUrls           String   @default("[]") // JSONB array
+  oldItemNotes                  String?
+
+  // Links to inventory txn + optional stock_loss (if damaged)
+  oldItemInventoryTxnId         String?
+  oldItemInventoryTransaction   InventoryTransaction? @relation("ExchangeOldItemTxn", fields: [oldItemInventoryTxnId], references: [id], onDelete: SetNull)
+  oldItemStockLossId            String?
+  oldItemStockLossRecord        StockLossRecord? @relation("ExchangeOldItemLoss", fields: [oldItemStockLossId], references: [id], onDelete: SetNull)
+
+  // Customer self-return specific
+  customerReturnTrackingNumber  String?
+  customerReturnCourier         String?
+  customerConfirmedShippedAt    DateTime?
+  customerConfirmedShippedBy    String?
+  customerConfirmedShippedByEmployee Employee? @relation("ExchangeCustomerShippedConfirmer", fields: [customerConfirmedShippedBy], references: [id], onDelete: SetNull)
+
+  // Price difference (GENERATED in DB as new-old)
+  oldItemPrice                  Decimal  @db.Decimal(12, 2)
+  newItemPrice                  Decimal  @db.Decimal(12, 2)
+  priceDifference              Decimal  @db.Decimal(12, 2) // GENERATED ALWAYS AS (new-old) STORED in DB — managed via raw SQL, not Prisma
+  priceDifferenceStatus        String   @default("unsettled") // 'unsettled' | 'customer_owes' | 'refund_due' | 'settled' (CHECK in SQL)
+  priceDifferenceSettledAmount  Decimal? @db.Decimal(12, 2)
+  priceDifferenceSettledAt      DateTime?
+  priceDifferenceSettledBy      String?
+  priceDifferenceSettledByEmployee Employee? @relation("ExchangePriceDiffSettler", fields: [priceDifferenceSettledBy], references: [id], onDelete: SetNull)
+
+  // Refund tracking (migration 014) — for refund_due settlements
+  refundMethod                  String?  // 'cash' | 'bank_transfer' | 'store_credit' | 'other' (CHECK in SQL)
+  refundReference               String?  // transaction ID / cheque number / free-text
+  refundProcessedAt             DateTime?
+  refundProcessedBy             String?
+  refundProcessedByEmployee     Employee? @relation("ExchangeRefundProcessor", fields: [refundProcessedBy], references: [id], onDelete: SetNull)
+  refundAmount                  Decimal? @db.Decimal(14, 2)
+
+  // "Did not return" outcome
+  markedAsNotReturned           Boolean  @default(false)
+  notReturnedReason             String?
+  notReturnedRecoveryStatus     String?  // 'pending' | 'recovered' | 'written_off' (CHECK in SQL)
+  notReturnedRecoveryAmount     Decimal? @db.Decimal(12, 2)
+
+  reason                        String
+  requestedBy                   String
+  requestedByEmployee           Employee @relation("ExchangeRequester", fields: [requestedBy], references: [id])
+  requestedAt                   DateTime @default(now())
+  completedAt                   DateTime?
+  cancelledAt                   DateTime?
+  cancellationReason            String?
+
+  updatedAt                     DateTime @updatedAt
+
+  @@index([companyId, status])
+  @@index([originalOrderId])
+  @@index([originalOrderItemId])
+  @@index([exchangeMethod, status])
+  @@index([requestedBy])
+  @@map("order_exchanges")
+}
+
+// ============================================================================
+// Universal Integration Framework (migration 004)
+// ============================================================================
+
+/// Master catalog of integration providers (TCS, Leopard, PostEx, Shopify,
+/// Daraz). Platform-level, seeded/maintained — not company-specific. Each
+/// row defines the provider's category, auth type, webhook support, and a
+/// config_schema describing the required credential fields for dynamic UI
+/// rendering.
+///
+/// NOTE: Managed jointly by Prisma (ORM access) + raw SQL (migration 004).
+/// Do NOT run `prisma db push` — it would drop the CHECK constraints, seed
+/// data, and RLS policies. Use `prisma generate` only.
+model IntegrationProvider {
+  id              String   @id @default(cuid())
+  providerKey     String   @unique
+  providerName    String
+  category        String   // 'courier' | 'ecommerce' | 'ads' | 'payment' (CHECK in SQL)
+  logoUrl         String?
+  authType        String   // 'api_key' | 'oauth2' | 'basic_auth' (CHECK in SQL)
+  supportsWebhook Boolean  @default(false)
+  configSchema    String   @default("[]") // JSONB array of credential field defs
+  capabilities    String   @default("[]") // JSONB array of supported actions
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  companyIntegrations CompanyIntegration[]
+
+  @@map("integration_providers")
+}
+
+/// A company's actual connection to a provider — encrypted credentials,
+/// connection status, webhook routing. A company can connect multiple
+/// providers in the same category (e.g. TCS + Leopard). One is_default per
+/// category (enforced via app logic).
+///
+/// credentialsEncrypted is a TEXT column holding an encrypted string —
+/// actual encrypt/decrypt happens in Step 2's application code, NOT in SQL.
+model CompanyIntegration {
+  id                        String   @id @default(cuid())
+  companyId                 String
+  company                   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  organizationId            String
+  organization              Organization @relation(fields: [organizationId], references: [id])
+  providerId                String
+  provider                  IntegrationProvider @relation(fields: [providerId], references: [id])
+
+  connectionName            String
+  credentialsEncrypted      String?
+  webhookEndpointId         String?  @unique
+  webhookSecret             String?
+  isActive                  Boolean  @default(true)
+  isDefault                 Boolean  @default(false)
+  connectionStatus          String   @default("pending") // 'pending' | 'connected' | 'error' | 'expired' (CHECK in SQL)
+  lastSyncAt                DateTime?
+  lastError                 String?
+  // Per-integration JSON preferences blob. Currently used by Leopard (e.g.
+  // transactionNote prefs). Free-form JSON shape, parsed/validated at the
+  // boundary by parseLeopardPreferences() — see src/lib/integrations/couriers/leopard-preferences.ts.
+  preferencesJson           String?
+
+  createdBy                 String?
+  createdByEmployee         Employee? @relation("IntegrationCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  // Shopify Adapter Foundation: the employee who most recently connected OR
+  // reconnected this integration. Populated in the connect flow from
+  // ctx.employee.id. Used by the webhook route to build an injected
+  // WorkspaceContext (for audit attribution of webhook-triggered order
+  // creation/cancellation). Nullable so older integrations connected before
+  // this field existed remain valid — the webhook route rejects webhooks for
+  // integrations where this is null and instructs the seller to reconnect.
+  connectedByEmployeeId     String?
+  connectedByEmployee       Employee? @relation("IntegrationConnector", fields: [connectedByEmployeeId], references: [id], onDelete: SetNull)
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  actionLogs                IntegrationActionLog[]
+  ordersBooked              Order[]  @relation("OrderCourierIntegration")
+  ordersRecommended         Order[]  @relation("OrderRecommendedCourier")
+  companyOrderSettingsDefault CompanyOrderSetting[] @relation("CompanyOrderSettingsDefaultCourier")
+  pickupAddresses           CourierPickupAddress[]
+  exchangeShipmentsBooked   ExchangeShipment[] @relation("ExchangeShipmentCourierIntegration")
+  exchangeShipmentsRecommended ExchangeShipment[] @relation("ExchangeShipmentRecommendedCourier")
+  loadSheets                LoadSheet[]
+
+  @@unique([companyId, providerId])
+  @@index([companyId, isActive])
+  @@map("company_integrations")
+}
+
+/// Universal logging for every integration call — the single source of truth
+/// for debugging "why did this courier booking fail" or "did this Shopify
+/// webhook get processed." Immutable: no UPDATE or DELETE.
+model IntegrationActionLog {
+  id                    String   @id @default(cuid())
+  companyIntegrationId  String
+  companyIntegration    CompanyIntegration @relation(fields: [companyIntegrationId], references: [id], onDelete: Cascade)
+  organizationId        String
+  organization          Organization @relation(fields: [organizationId], references: [id])
+
+  actionType            String   // 'book_shipment', 'track_shipment', 'receive_order', etc.
+  direction             String   // 'outbound' | 'inbound' (CHECK in SQL)
+  requestPayload        String?  // JSONB
+  responsePayload       String?  // JSONB
+  status                String   // 'success' | 'failed' (CHECK in SQL)
+  errorMessage          String?
+  relatedEntityType     String?  // 'order' | 'product' | null (CHECK in SQL)
+  relatedEntityId       String?
+  durationMs            Int?
+  createdAt             DateTime @default(now())
+
+  @@index([companyIntegrationId, createdAt])
+  @@index([relatedEntityType, relatedEntityId])
+  @@index([status, createdAt])
+  @@map("integration_action_logs")
+}
+
+/// Generic form draft storage (Unsaved Changes Guard system). Stores
+/// in-progress product/order form data as JSON so users can save their work
+/// before completing a full creation flow.
+model FormDraft {
+  id              String   @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  companyId       String
+  company         Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy       String?
+  createdByEmployee Employee? @relation("FormDraftCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+
+  draftType       String   // 'product' | 'order' (CHECK in SQL)
+  draftData       String   @default("{}") // JSONB
+  draftTitle      String?
+  draftNumber     String?  // DRAFT-00001 format — only for order drafts, null for product drafts
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([companyId, draftType, updatedAt])
+  @@index([createdBy])
+  @@map("form_drafts")
+}
+
+/// Per-company configurable order workflow strictness. When
+/// requireOrderConfirmation or requirePackingStep are FALSE, orders can
+/// jump straight to 'dispatched' and the DB trigger auto-backfills the
+/// skipped timestamps. A default row should be auto-created on company creation.
+model CompanyOrderSetting {
+  id                          String   @id @default(cuid())
+  companyId                   String   @unique
+  company                     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  requireOrderConfirmation    Boolean  @default(false)
+  requirePackingStep          Boolean  @default(false)
+  defaultCourier              String?
+  defaultDispatchLocationId   String?
+  defaultDispatchLocation     InventoryLocation? @relation("CompanyOrderSettingsDefaultLocation", fields: [defaultDispatchLocationId], references: [id])
+
+  // Universal Integration Framework (migration 004)
+  courierBookingMode          String   @default("semi_manual") // 'automatic' | 'semi_manual' (CHECK in SQL)
+  defaultCourierCompanyIntegrationId String?
+  defaultCourierCompanyIntegration CompanyIntegration? @relation("CompanyOrderSettingsDefaultCourier", fields: [defaultCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  // Exchange refund setting (migration 014)
+  deductDeliveryChargeFromRefund Boolean @default(false) // if true, delivery charge is deducted from customer refund
+
+  // Optional per-company prefix for FlowOps order numbers (ORD-YYYY-NNNNN).
+  // When set, the prefix is inserted between "ORD-" and the year, producing
+  // e.g. "ORD-SFS-2026-00001" for prefix "SFS". This guarantees uniqueness
+  // across companies that share the same courier account (same api_key).
+  orderNumberPrefix           String?
+
+  updatedBy                   String?
+  updatedByEmployee           Employee? @relation("CompanyOrderSettingsUpdater", fields: [updatedBy], references: [id])
+  updatedAt                   DateTime @updatedAt
+
+  @@index([companyId])
+}
+
+/// The central order record. flowopsOrderNumber is unique per company
+/// (ORD-{year}-{seq}). externalOrderReference/externalOrderId track the
+/// source platform's identifiers (nullable for manual orders).
+model Order {
+  id                          String   @id @default(cuid())
+  organizationId              String
+  organization                Organization @relation(fields: [organizationId], references: [id])
+  companyId                   String
+  company                     Company  @relation(fields: [companyId], references: [id])
+
+  flowopsOrderNumber          String
+
+  orderSource                 String   @default("manual") // shopify | manual | daraz | instagram
+  externalOrderReference      String?
+  externalOrderId             String?
+
+  // Fulfillment channel (Phase B1 — Self-Fulfilled Channel). 'courier' =
+  // booked via a connected courier (PostEx/TCS/Leopard). 'self_fulfilled' =
+  // the merchant handles delivery themselves (e.g. international orders, own
+  // fleet, hand-delivery). When 'self_fulfilled', a selfFulfilledReferenceNumber
+  // is generated (SF-YYYY-NNNNN, per-company sequence) + auto-booking +
+  // city-courier-matching are explicitly skipped. Defaults to 'courier' so
+  // existing orders + flows are unaffected.
+  fulfillmentChannel          String   @default("courier") // courier | self_fulfilled
+  selfFulfilledReferenceNumber String? @unique
+
+  // Phase D3: market resolution issue for external orders. Set when an
+  // external order's delivery country isn't assigned to any market. The
+  // order is still created (never blocked for external orders), but this
+  // flag surfaces a banner on order-detail-view prompting the merchant to
+  // assign the country to a market + set pricing. Null for manual orders
+  // (manual orders are blocked server-side; external orders are flagged).
+  marketResolutionIssue        String?
+
+  customerId                  String
+  customer                    Customer @relation(fields: [customerId], references: [id])
+
+  // Customer Management System integration (migration 002).
+  // recipientName may differ from customer.name (e.g. son orders, mother receives).
+  // usedCustomerAddressId/usedCustomerPhoneId track which saved child row was
+  // used for this order (for lastUsedAt tracking); nullable because a one-off
+  // address/phone might be typed without saving it permanently.
+  recipientName               String?
+  usedCustomerAddressId       String?
+  usedCustomerAddress         CustomerAddress? @relation("OrderUsedAddress", fields: [usedCustomerAddressId], references: [id], onDelete: SetNull)
+  usedCustomerPhoneId         String?
+  usedCustomerPhone           CustomerPhone? @relation("OrderUsedPhone", fields: [usedCustomerPhoneId], references: [id], onDelete: SetNull)
+
+  status                      String   @default("pending") // pending | confirmed | partially_backordered | processing | dispatched | delivered | rto | cancelled | refunded
+
+  // Payment system: supports partial advance + COD remaining
+  paymentType                 String   @default("full_cod") // full_cod | partial_advance | fully_prepaid
+  paymentStatus               String   @default("cod_pending") // cod_pending | advance_paid | fully_prepaid | cod_collected
+  paymentSource               String   @default("cod_native") // shopify_gateway | manual_conversion | cod_native
+
+  subtotal                    Decimal  @default(0) @db.Decimal(14, 2)
+  discountAmount              Decimal? @db.Decimal(14, 2)
+  discountReason              String?
+  courierCharges              Decimal? @db.Decimal(14, 2)
+  totalOrderValue             Decimal  @default(0) @db.Decimal(14, 2)
+
+  // Delivery charge + tax tracking (migration 012)
+  estimatedDeliveryCharge     Decimal? @db.Decimal(14, 2) // staff-entered or courier-default at booking
+  actualDeliveryCharge        Decimal? @db.Decimal(14, 2) // populated from courier Payment Status API
+  taxAmount                   Decimal? @db.Decimal(14, 2) // staff-entered (e.g. GST)
+  taxLabel                    String?  // free text (e.g. "GST 17%")
+
+  advanceAmount               Decimal? @db.Decimal(14, 2)
+  advancePaymentMethod        String?
+  advancePaymentReference     String?
+  advancePaymentScreenshotUrl String?
+  advancePaidAt               DateTime?
+
+  // remainingCodAmount is a GENERATED column (totalOrderValue - advanceAmount)
+  // — represented here as a regular field; the DB generates it.
+  remainingCodAmount          Decimal? @db.Decimal(14, 2)
+  codCollected                Boolean  @default(false)
+  codCollectedAmount          Decimal? @db.Decimal(14, 2)
+  codCollectedAt              DateTime?
+
+  convertedBy                 String?
+  convertedByEmployee         Employee? @relation("OrderConverter", fields: [convertedBy], references: [id])
+  convertedAt                 DateTime?
+
+  deliveryAddress             String?  // JSONB
+  deliveryCity                String?
+  // Country (Phase: Country System). Denormalized snapshot of the delivery
+  // country at order creation time — mirrors the existing deliveryCity
+  // pattern. Stores the ISO 3166-1 alpha-2 CODE (e.g. "PK", "GB"), NOT the
+  // country name — consistent with CustomerAddress.country + Shopify's
+  // default_address.country_code. Nullable so historical orders (pre-country-
+  // system) don't break; new orders always populate it (defaulting to "PK"
+  // when no explicit country is provided).
+  deliveryCountry              String?  @default("PK")
+  courierName                 String?
+  trackingNumber              String?
+  // Universal Integration Framework (migration 004): links to the specific
+  // courier integration used to book this order's shipment. Distinct from
+  // courierName (display text) — this is the authoritative FK for tracing
+  // back to the actual integration/credentials used.
+  courierCompanyIntegrationId String?
+  courierCompanyIntegration   CompanyIntegration? @relation("OrderCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  // Booking Workbench fields (migration 013)
+  courierBookingStatus        String   @default("not_booked") // 'not_booked' | 'booked' | 'failed' | 'cancelled' (CHECK in SQL)
+  // Persisted booking failure reason (Phase 3/5). When courierBookingStatus='failed',
+  // this holds the specific error message from the courier adapter or city-validation
+  // step. Survives navigation so the user can see WHY booking failed from the
+  // order detail page or the Booking Workbench without re-attempting.
+  courierBookingFailureReason String?
+  // Per-order pickup address override (nullable). When set, booking uses
+  // this address instead of the integration's default. Falls back to the
+  // default when null.
+  pickupAddressId              String?
+  pickupAddress                CourierPickupAddress? @relation("OrderPickupAddress", fields: [pickupAddressId], references: [id], onDelete: SetNull)
+  recommendedCourierCompanyIntegrationId String?
+  recommendedCourierIntegration CompanyIntegration? @relation("OrderRecommendedCourier", fields: [recommendedCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  // City validation state for courier booking. 'not_applicable' until the
+  // order goes through courier city validation (Prompt 4/5). Left unused in
+  // this foundational prompt — no business logic touches Order here.
+  courierCityStatus           String   @default("not_applicable") // 'matched' | 'unresolved' | 'not_applicable' (CHECK in SQL)
+  lastPolledAt                DateTime? // last time this order was polled for courier status
+  courierSubStatus            String? // PostEx sub-status (e.g. 'picked_up', 'out_for_delivery')
+  needsShipperAdvice          Boolean  @default(false) // true if status requires shipper advice (Attempted, Delivery Under Review)
+  unrecognizedCourierStatus   Boolean  @default(false) // true if courier returned an unrecognized status
+  dispatchLocationId          String?
+  dispatchLocation            InventoryLocation? @relation("OrderDispatchLocation", fields: [dispatchLocationId], references: [id])
+  notesForCourier             String?
+
+  // ─── Universal courier reference fields (migration 015) ───────────────
+  // orderRefNumber is the universal "reference" passed to ANY courier at
+  // booking time. Defaults to flowopsOrderNumber at creation but is editable
+  // — staff can type a custom PO/channel reference that the courier should
+  // print on the airway bill. Almost every courier (PostEx, TCS, Leopard…)
+  // has a "reference" / "order ref" field, so this is a core OMS field, not
+  // a PostEx-specific one. The booking adapter maps it to the courier's own
+  // ref field (PostEx → orderRefNumber, TCS → consigneeRef, etc.).
+  orderRefNumber              String?
+  // orderDetail is the human-readable item description string passed to the
+  // courier (e.g. "Silk Kurta (SKU-001, Size: L, Color: Blue) ×2, …").
+  // Auto-generated from the cart at creation but editable so staff can
+  // replace it with a more courier-friendly summary when needed.
+  orderDetail                 String?
+
+  skippedConfirmation         Boolean  @default(false)
+  skippedPacking              Boolean  @default(false)
+
+  confirmedAt                 DateTime?
+  packedAt                    DateTime?
+  dispatchedAt                DateTime?
+  deliveredAt                 DateTime?
+  cancelledAt                 DateTime?
+  cancellationReason          String?
+  returnedAt                  DateTime?
+
+  createdBy                   String?
+  createdByEmployee           Employee? @relation("OrderCreator", fields: [createdBy], references: [id])
+  // ─── Sales attribution (HR/KPI module) ─────────────────────────────
+  // The employee attributed as the salesperson for this order. Distinct from
+  // createdBy (who typed the order) — a manager may create an order on behalf
+  // of a sales agent, in which case salesEmployeeId = the agent and
+  // createdBy = the manager. Nullable for legacy/Shopify-imported orders.
+  // Queried on every order-list + KPI request → MUST be indexed.
+  salesEmployeeId             String?
+  salesEmployee               Employee? @relation("OrderSalesEmployee", fields: [salesEmployeeId], references: [id], onDelete: SetNull)
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+
+  items                       OrderItem[]
+  inventoryTransactions       InventoryTransaction[]
+
+  // Item Exchange System back-relations (migration 003)
+  exchangesAsOriginalOrder    OrderExchange[] @relation("ExchangeOriginalOrder")
+  exchangesAsNewOrder         OrderExchange[] @relation("ExchangeNewOrder")
+
+  @@unique([companyId, flowopsOrderNumber])
+  @@index([companyId, status])
+  @@index([companyId, createdAt])
+  @@index([externalOrderId])
+  @@index([customerId])
+  @@index([usedCustomerAddressId])
+  @@index([usedCustomerPhoneId])
+  @@index([courierCompanyIntegrationId])
+  @@index([salesEmployeeId])
+
+  // ─── Order Scan Module fields (Phase 1) ────────────────────────────
+  // warehouseHandoverScannedAt: set when warehouse staff scans the
+  // tracking barcode in 'warehouse_handover' mode. Purely informational —
+  // does NOT change order.status, does NOT affect cancel eligibility.
+  warehouseHandoverScannedAt    DateTime?
+  // physicalUnpackRequired: set to true automatically when an order is
+  // cancelled while its status was 'processing' or beyond (a physical
+  // parcel likely already exists and needs to be taken apart).
+  physicalUnpackRequired        Boolean  @default(false)
+  // physicalUnpackConfirmedAt: set when staff confirms the physical
+  // unpacking is done (via 'locate_cancelled' scan mode confirmation).
+  physicalUnpackConfirmedAt     DateTime?
+
+  // ─── Load Sheet (migration 020) ──────────────────────────────────
+  // Set when this order is included in a generated load sheet (pickup manifest).
+  // Nullable — null means not yet load-sheeted. Once set, the order disappears
+  // from the "ready for load sheet" checklist.
+  loadSheetId                   String?
+  loadSheet                     LoadSheet? @relation("OrderLoadSheet", fields: [loadSheetId], references: [id], onDelete: SetNull)
+
+  // ─── Courier Slip (migration 021) ────────────────────────────────
+  // Path to our own stored copy of the courier's booking slip PDF (downloaded
+  // from the courier's slip_link). NULL for couriers that don't provide a slip
+  // or if the download failed (non-fatal — booking still succeeded).
+  courierSlipStoragePath        String?
+}
+
+/// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
+/// the variant's fulfillmentType — a stock_based item can be 'backordered'
+/// while a made_to_order item can be 'reserved' or 'dispatched'.
+/// fulfillmentTypeSnapshot captures the variant's type AT ORDER TIME.
+model OrderItem {
+  id                          String   @id @default(cuid())
+  orderId                     String
+  order                       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  orgVariantId                String
+  orgVariant                  OrgProductVariant @relation(fields: [orgVariantId], references: [id])
+  organizationId              String
+  organization                Organization @relation(fields: [organizationId], references: [id])
+
+  quantity                    Int
+  // The final charged price per unit (after per-item discount if any).
+  // lineTotal is GENERATED ALWAYS AS (quantity * unitPrice) STORED in the DB.
+  unitPrice                   Decimal  @db.Decimal(12, 2)
+  // The system-resolved original price from MarketVariantPricing for the
+  // resolved market. NEVER client-writable — resolved server-side only.
+  // If a per-item discount was applied, originalUnitPrice > unitPrice.
+  originalUnitPrice           Decimal? @db.Decimal(12, 2)
+  // Per-item discount (Phase: Discount Rework). discountType: 'percentage' |
+  // 'fixed' | null. discountValue: the percentage (0-100) or fixed amount.
+  // Both null when no per-item discount. unitPrice = originalUnitPrice minus
+  // the discount (clamped at 0 minimum).
+  discountType                String?  // percentage | fixed
+  discountValue               Decimal? @db.Decimal(12, 2)
+  lineTotal                   Decimal  @db.Decimal(14, 2)
+
+  fulfillmentStatus           String   @default("reserved") // reserved | backordered | dispatched
+  fulfillmentTypeSnapshot     String   // stock_based | made_to_order
+
+  backorderedAt               DateTime?
+  fulfilledAt                 DateTime?
+
+  productionOrderId           String?
+  productionOrder             ProductionOrder? @relation("OrderItemProduction")
+  returnedStitchedUsed        Boolean  @default(false)
+
+  autoProcessedAsPerfect      Boolean  @default(false)
+  needsReview                 Boolean  @default(false)
+  // Phase D3: when needsReview=true, the reason (e.g. "Not enabled for the
+  // UAE market", "No price set for UAE", "Country not in any market"). Null
+  // when needsReview=false. Used by external order ingestion (Shopify) to
+  // flag items that fail the 3-gate check without blocking order creation.
+  needsReviewReason           String?
+
+  reservedLocationId          String?
+  reservedLocation            InventoryLocation? @relation("OrderItemReservedLocation", fields: [reservedLocationId], references: [id])
+
+  createdAt                   DateTime @default(now())
+  updatedAt                   DateTime @updatedAt
+
+  stockLossRecords            StockLossRecord[]
+
+  // Item Exchange System back-relations (migration 003)
+  exchangesAsOriginalItem     OrderExchange[] @relation("ExchangeOriginalOrderItem")
+  exchangesAsNewItem          OrderExchange[] @relation("ExchangeNewOrderItem")
+
+  @@index([orderId])
+  @@index([orgVariantId, fulfillmentStatus])
+}
+
+// ============================================================================
+// City & Address Book System (migration 007) — Courier-Agnostic Foundation
+// ============================================================================
+
+/// Global, provider-level cache of which cities each courier serves.
+/// NOT company-scoped — cities don't vary per company. Synced via the
+/// syncCourierOperationalCities() server action from the adapter's
+/// fetchOperationalCities() method.
+model CourierOperationalCity {
+  id                String   @id @default(cuid())
+  providerKey       String   // 'postex', 'tcs', 'leopard' — matches integration_providers.providerKey
+  cityName          String   // Human-readable city name from courier API
+  cityId            String?  // Courier's own city ID (nullable, stored as TEXT)
+  isPickupCity      Boolean  @default(true)
+  isDeliveryCity    Boolean  @default(true)
+  // Leopard-specific: array of allowed shipment types per city (e.g. ["overnight","overland"]).
+  // Stored as a JSON array string. NULL for providers that don't return this field.
+  shipmentTypes     String?
+  lastSyncedAt      DateTime @default(now())
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([providerKey, cityName])
+  @@index([providerKey])
+  @@map("courier_operational_cities")
+}
+
+/// "City learning" fuzzy-match memory. When a staff member manually confirms
+/// a suggested/corrected city (e.g. "Karaci" → "Karachi"), the mapping is
+/// saved here so it auto-resolves next time. companyId is nullable:
+/// NULL = org-wide, set = company-specific (priority).
+model CourierCityAlias {
+  id                String   @id @default(cuid())
+  providerKey       String
+  typedCityText     String   // Lowercased/normalized text the user typed
+  resolvedCityName  String   // Confirmed city name from courier_operational_cities
+  companyId         String?  // NULL = org-wide; set = company-specific (FK → Company)
+  company           Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now())
+
+  @@unique([providerKey, typedCityText, companyId])
+  @@index([providerKey, typedCityText])
+  @@map("courier_city_aliases")
+}
+
+/// Pickup/return address book per company_integration. PostEx's API returns
+/// addressType="Pickup/Return Address" (one address serves both), so we do
+/// NOT build separate pickup vs return concepts. Only one row per
+/// companyIntegrationId may have isDefault=true (enforced in app logic).
+model CourierPickupAddress {
+  id                    String   @id @default(cuid())
+  companyIntegrationId  String
+  companyIntegration    CompanyIntegration @relation(fields: [companyIntegrationId], references: [id], onDelete: Cascade)
+
+  providerAddressCode   String   // Courier's own address code (TEXT always)
+  label                 String   // User-defined friendly name
+  address               String
+  cityName              String
+  contactPersonName     String
+  phone1                String
+  phone2                String?
+  isDefault             Boolean  @default(false)
+  // Leopard-specific: optional return address override (JSONB: {address, cityName,
+  // contactPersonName, phone}). NULL = use shipper's origin as return (Leopard default).
+  returnAddressOverride String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  // Back-relation: orders that use this address as a per-order override
+  ordersUsedIn          Order[] @relation("OrderPickupAddress")
+  // Back-relation: load sheets generated for this pickup address
+  loadSheets            LoadSheet[]
+
+  @@index([companyIntegrationId])
+  @@map("courier_pickup_addresses")
+}
+
+// ============================================================================
+// Exchange Shipments System (migration 008) — Structurally separate from Order
+// ============================================================================
+// Each row is one shipment of a new variant to a customer as part of an item
+// exchange. Has its own EXCH-{YYYY}-{NNNNN} numbering, completely independent
+// from ORD-{YYYY}-{NNNNN}. Never appears in Order list views, never affects
+// updateCustomerStats(), never counts toward revenue metrics.
+model ExchangeShipment {
+  id                            String   @id @default(cuid())
+  exchangeShipmentNumber        String   @unique // EXCH-{YYYY}-{NNNNN}
+  organizationId                String
+  organization                  Organization @relation(fields: [organizationId], references: [id])
+  companyId                     String
+  company                       Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Links back to the parent exchange request
+  orderExchangeId               String
+  orderExchange                 OrderExchange @relation("ExchangeNewShipment", fields: [orderExchangeId], references: [id], onDelete: Cascade)
+
+  // The new variant being shipped
+  newOrgVariantId               String
+  newOrgVariant                 OrgProductVariant @relation("ExchangeShipmentNewVariant", fields: [newOrgVariantId], references: [id])
+
+  quantity                      Int      @default(1)
+  fulfillmentTypeSnapshot       String   @default("stock_based") // stock_based | made_to_order
+
+  // Customer reference (always existing — createCustomer() is NEVER called here)
+  customerId                    String
+  customer                      Customer @relation("ExchangeShipmentCustomer", fields: [customerId], references: [id])
+
+  // CRM address/phone FKs (NOT snapshot copies — living references)
+  shippingAddressId             String?
+  shippingAddress               CustomerAddress? @relation("ExchangeShipmentShippingAddress", fields: [shippingAddressId], references: [id], onDelete: SetNull)
+  shippingPhoneId               String?
+  shippingPhone                 CustomerPhone? @relation("ExchangeShipmentShippingPhone", fields: [shippingPhoneId], references: [id], onDelete: SetNull)
+
+  shippingCityOverride          String?
+
+  // Simplified lifecycle (7 states — migration 019 added 'rto')
+  // RTO means the replacement item itself was returned by the courier.
+  // Triggers markExchangeShipmentRto() which restores inventory + sets the
+  // parent order_exchanges to 'exchange_item_returned' (terminal, manual follow-up).
+  status                        String   @default("confirmed") // pending | confirmed | backordered | dispatched | delivered | rto | cancelled (CHECK in SQL)
+  isPriorityBackorder           Boolean  @default(true)
+  backorderedAt                 DateTime?
+
+  invoiceAmount                 Decimal  @default(0) @db.Decimal(14, 2)
+
+  // Delivery charge + tax tracking (migration 012 — same as Order)
+  estimatedDeliveryCharge       Decimal? @db.Decimal(14, 2)
+  actualDeliveryCharge          Decimal? @db.Decimal(14, 2)
+  taxAmount                     Decimal? @db.Decimal(14, 2)
+  taxLabel                      String?
+
+  // Courier integration (nullable until courier chosen)
+  courierCompanyIntegrationId   String?
+  courierCompanyIntegration     CompanyIntegration? @relation("ExchangeShipmentCourierIntegration", fields: [courierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  // Booking Workbench fields (migration 013)
+  courierBookingStatus          String   @default("not_booked") // 'not_booked' | 'booked' | 'failed' (CHECK in SQL)
+  recommendedCourierCompanyIntegrationId String?
+  recommendedCourierIntegration CompanyIntegration? @relation("ExchangeShipmentRecommendedCourier", fields: [recommendedCourierCompanyIntegrationId], references: [id], onDelete: SetNull)
+  trackingNumber                String?
+  courierSubStatus              String?
+  needsShipperAdvice            Boolean  @default(false)
+  unrecognizedCourierStatus     Boolean  @default(false)
+  courierCityStatus             String   @default("not_applicable") // matched | unresolved | not_applicable (CHECK in SQL)
+  lastPolledAt                  DateTime? // last time this shipment was polled for courier status
+
+  // ─── Universal courier reference fields (migration 015) ───────────────
+  // Same semantic as Order.orderRefNumber / Order.orderDetail — defaults to
+  // exchangeShipmentNumber at creation, editable. Mapped to the courier's
+  // own ref field at booking time so the EXCH-##### number can be overridden
+  // with a custom reference if needed.
+  orderRefNumber                String?
+  orderDetail                   String?
+
+  // Lifecycle timestamps
+  confirmedAt                   DateTime?
+  dispatchedAt                  DateTime?
+  deliveredAt                   DateTime?
+  returnedAt                    DateTime? // migration 019 — set when status='rto' (replacement item returned)
+  cancelledAt                   DateTime?
+
+  createdBy                     String?
+  createdByEmployee             Employee? @relation("ExchangeShipmentCreator", fields: [createdBy], references: [id], onDelete: SetNull)
+  createdAt                     DateTime @default(now())
+  updatedAt                     DateTime @updatedAt
+
+  @@index([companyId, status])
+  @@index([orderExchangeId])
+  @@index([newOrgVariantId])
+
+  // ─── Order Scan Module fields (Phase 1) ────────────────────────────
+  warehouseHandoverScannedAt    DateTime?
+  physicalUnpackRequired        Boolean  @default(false)
+  physicalUnpackConfirmedAt     DateTime?
+
+  // ─── Load Sheet (migration 020) ──────────────────────────────────
+  // Set when this shipment is included in a generated load sheet (pickup manifest).
+  loadSheetId                   String?
+  loadSheet                     LoadSheet? @relation("ExchangeShipmentLoadSheet", fields: [loadSheetId], references: [id], onDelete: SetNull)
+
+  // ─── Courier Slip (migration 021) ────────────────────────────────
+  // Path to our own stored copy of the courier's booking slip PDF.
+  courierSlipStoragePath        String?
+
+  @@map("exchange_shipments")
+}
+
+// ============================================================================
+// Order Scan Module (migration 017) — Barcode scanning + reporting
+// ============================================================================
+
+/// Immutable scan-event ledger. Every barcode scan (success, rejection, or
+/// not-found) is recorded here for audit and reporting. No UPDATE/DELETE.
+model ScanEvent {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  organization          Organization @relation(fields: [organizationId], references: [id])
+  companyId             String
+  company               Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  scanMode              String   // 'mark_processing' | 'mark_packed' | 'warehouse_handover' | 'receive_return' | 'locate_cancelled' | 'cancel_via_scan'
+  entityType            String   // 'order' | 'exchange_shipment' (null if not_found)
+  entityId              String?  // null if scanned barcode matched nothing
+  trackingNumberScanned String   // raw scanned value, always recorded
+  scanResult            String   // 'success' | 'rejected' | 'not_found'
+  rejectionReason       String?  // populated for rejected/not_found
+
+  scannedBy             String?  // FK → Employee
+  scannedByEmployee     Employee? @relation("ScanEventScannedBy", fields: [scannedBy], references: [id], onDelete: SetNull)
+  scanStationLabel      String?  // optional free-text, e.g. "Packing Station 1"
+
+  createdAt             DateTime @default(now())
+
+  @@index([companyId, createdAt])
+  @@index([companyId, scanMode])
+  @@index([entityType, entityId])
+  @@index([scannedBy])
+  @@map("scan_events")
+}
+
+/// Daily aggregated scan report. One row per company per calendar day.
+/// Generated by the cron job shortly after midnight. Upsert-safe on
+/// (companyId, reportDate) so accidental double-runs don't create duplicates.
+model ScanDailyReport {
+  id                          String   @id @default(cuid())
+  organizationId              String
+  organization                Organization @relation(fields: [organizationId], references: [id])
+  companyId                   String
+  company                     Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  reportDate                  DateTime   // calendar day this report covers (in company's local timezone)
+  totalScans                  Int      @default(0)
+  totalProcessingMarked       Int      @default(0)
+  totalPacked                 Int      @default(0)
+  totalWarehouseHandover      Int      @default(0)
+  totalReturnsReceived        Int      @default(0)
+  totalCancellationsViaScan   Int      @default(0)
+  totalRejectedScans          Int      @default(0)
+  breakdownByEmployee         String   @default("[]")  // JSONB array
+  generatedAt                 DateTime @default(now())
+  pdfStoragePath              String?
+
+  @@unique([companyId, reportDate])
+  @@index([companyId, reportDate])
+  @@map("scan_daily_reports")
+}
+
+// ============================================================================
+// Load Sheets (migration 020) — courier-agnostic pickup manifest system
+// ============================================================================
+
+/// A generated load sheet (pickup manifest) from any courier provider.
+/// Combines orders AND exchange shipments (a courier rider picks up both
+/// types in one trip). The PDF is stored in OUR file storage (not an external
+/// courier URL that might expire — same principle as Proof of Delivery).
+///
+/// Immutable once generated (no UPDATE/DELETE exposed — consistent with other
+/// audit-adjacent records like inventory_transactions and scan_events).
+model LoadSheet {
+  id                      String   @id @default(cuid())
+  organizationId          String
+  organization            Organization @relation(fields: [organizationId], references: [id])
+  companyId               String
+  company                 Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  // Which courier provider generated this (e.g. 'postex', 'leopard', 'tcs')
+  providerKey             String
+  // The specific company_integration used (tracks which credentials were used)
+  companyIntegrationId    String
+  companyIntegration      CompanyIntegration @relation(fields: [companyIntegrationId], references: [id], onDelete: SetNull)
+  // Which pickup address this load sheet is for (nullable — some couriers may not require it)
+  pickupAddressId         String?
+  pickupAddress           CourierPickupAddress? @relation(fields: [pickupAddressId], references: [id], onDelete: SetNull)
+
+  // The entities included (orders + exchange shipments mixed).
+  // JSONB array of: { entityType: 'order'|'exchange_shipment', entityId, trackingNumber }
+  items                   String   @default("[]")
+
+  // Path to the stored PDF in our /uploads folder (e.g. /uploads/load-sheets/<companyId>/<filename>.pdf)
+  pdfStoragePath          String?
+
+  generatedBy             String?
+  generatedByEmployee     Employee? @relation("LoadSheetGenerator", fields: [generatedBy], references: [id], onDelete: SetNull)
+  generatedAt             DateTime @default(now())
+
+  createdAt               DateTime @default(now())
+
+  // Back-relations
+  orders                  Order[] @relation("OrderLoadSheet")
+  exchangeShipments       ExchangeShipment[] @relation("ExchangeShipmentLoadSheet")
+
+  @@index([companyId, generatedAt])
+  @@index([companyIntegrationId])
+  @@index([providerKey])
+  @@map("load_sheets")
+}
+
+// ============================================================================
+// HR / PAYROLL / COMMISSION MODULE
+// ============================================================================
+// These models add employee performance tracking, salary management,
+// commission rules, payroll runs, payslips, and salary advances.
+// All status fields are plain Strings (validated at the application layer),
+// consistent with how Order.status / OrderItem.fulfillmentStatus work.
+// ============================================================================
+
+/// Cached rollup of an employee's sales performance — mirrors the
+/// Customer.totalOrdersCount / totalRtoCount caching pattern. One row per
+/// employee (1:1). Recomputed by updateEmployeeStats() on every order mutation.
+model EmployeeStats {
+  id              String   @id @default(cuid())
+  employeeId      String   @unique
+  employee        Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  // Order count rollups (excludes cancelled orders from "total" per the
+  // same convention as Customer.totalOrdersCount)
+  totalOrders     Int      @default(0)
+  cancelledCount  Int      @default(0)
+  dispatchedCount Int      @default(0)
+  deliveredCount  Int      @default(0)
+  rtoCount        Int      @default(0)
+  inTransitCount  Int      @default(0) // dispatched but not yet delivered
+
+  // Computed rates (0-1 range). Recomputed at write-time, NOT read-time,
+  // so the cached values stay consistent with the counts above.
+  cancellationRate Decimal @default(0) @db.Decimal(5, 4) // 0.0000 - 1.0000
+  deliveryRate     Decimal @default(0) @db.Decimal(5, 4)
+  rtoRate          Decimal @default(0) @db.Decimal(5, 4)
+
+  // Volume rollups
+  itemsSoldQty    Int      @default(0) // sum of OrderItem.quantity for delivered+dispatched
+  damageLossCount Int      @default(0) // count of stock_loss_records reported by this employee
+  revenueGenerated Decimal @default(0) @db.Decimal(14, 2) // sum of totalOrderValue for delivered+dispatched
+
+  updatedAt       DateTime @updatedAt
+
+  @@index([employeeId])
+}
+
+/// Active salary profile for an employee (1:1). Only the LATEST profile is
+/// "active" — when a salary changes, a new EmployeeSalaryProfile row is
+/// created with effectiveFrom=now and the old one's status flips to
+/// "inactive". A SalaryRevision row is also appended for the audit trail.
+model EmployeeSalaryProfile {
+  id           String   @id @default(cuid())
+  employeeId   String   @unique
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  baseSalary   Decimal  @db.Decimal(14, 2)
+  currency     String   @default("PKR") // defaults to the company's baseCurrency at creation
+  effectiveFrom DateTime
+  status       String   @default("active") // "active" | "inactive"
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([employeeId])
+  @@index([status])
+}
+
+/// Append-only salary revision history. NEVER edit an existing row —
+/// every salary change creates a new row here. oldAmount is null for the
+/// first-ever revision (employee's initial salary).
+model SalaryRevision {
+  id                   String    @id @default(cuid())
+  employeeId           String
+  employee             Employee  @relation("SalaryRevisionEmployee", fields: [employeeId], references: [id], onDelete: Cascade)
+
+  oldAmount            Decimal?  @db.Decimal(14, 2) // null for first-ever revision
+  newAmount            Decimal   @db.Decimal(14, 2)
+  effectiveFrom        DateTime
+  changedByEmployeeId  String
+  changedBy            Employee  @relation("SalaryRevisionChangedBy", fields: [changedByEmployeeId], references: [id])
+  createdAt            DateTime  @default(now())
+
+  @@index([employeeId, effectiveFrom])
+  @@index([changedByEmployeeId])
+}
+
+/// Commission rule for an employee. An employee can have multiple active
+/// rules (e.g. "PKR 50 per dispatched order" + "5% of delivered revenue").
+/// The payroll generator sums all matching rules when computing commission.
+///
+/// rateValue interpretation depends on basisType:
+///   per_order              → currency amount (e.g. 50 = PKR 50 per order)
+///   per_item_sold          → currency amount per item (e.g. 10 = PKR 10/item)
+///   percentage_of_revenue  → 0-1 fraction (e.g. 0.05 = 5% of revenue)
+///
+/// triggerStatus: which Order.status or OrderItem.fulfillmentStatus value
+/// triggers this commission. Validated at the app layer (not a DB enum) to
+/// stay consistent with how other status fields work in this codebase.
+model CommissionRule {
+  id           String   @id @default(cuid())
+  employeeId   String
+  employee     Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  basisType    String   // "per_order" | "per_item_sold" | "percentage_of_revenue"
+  rateValue    Decimal  @db.Decimal(10, 4) // currency amount OR 0-1 fraction
+  triggerStatus String  // e.g. "dispatched", "delivered", "confirmed"
+  isActive     Boolean  @default(true)
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([employeeId, isActive])
+  @@index([triggerStatus])
+}
+
+/// A payroll run for a specific company + month + year. Only ONE run per
+/// company per month (enforced by unique constraint). A run progresses:
+/// draft → finalized → paid. Once finalized, the payslips are locked.
+model PayrollRun {
+  id                   String    @id @default(cuid())
+  companyId            String
+  company              Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  periodMonth          Int       // 1-12
+  periodYear           Int
+  status               String    @default("draft") // "draft" | "finalized" | "paid"
+
+  generatedAt          DateTime?
+  finalizedByEmployeeId String?
+  finalizedBy          Employee? @relation("PayrollFinalizer", fields: [finalizedByEmployeeId], references: [id], onDelete: SetNull)
+  finalizedAt          DateTime?
+
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  payslips             Payslip[]
+
+  @@unique([companyId, periodMonth, periodYear])
+  @@index([companyId, periodYear, periodMonth])
+  @@index([status])
+}
+
+/// A single employee's payslip within a PayrollRun. grossPay and netPay are
+/// computed at generation time (base + commission + otherAllowances, then
+/// minus advanceDeduction + otherDeductions) and stored — NOT recomputed
+/// on read, so the numbers stay frozen once finalized.
+model Payslip {
+  id                String    @id @default(cuid())
+  payrollRunId      String
+  payrollRun        PayrollRun @relation(fields: [payrollRunId], references: [id], onDelete: Cascade)
+  employeeId        String
+  employee          Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  baseSalary        Decimal   @db.Decimal(14, 2)
+  commissionEarned  Decimal   @default(0) @db.Decimal(14, 2)
+  advanceDeduction  Decimal   @default(0) @db.Decimal(14, 2)
+  otherDeductions   Decimal   @default(0) @db.Decimal(14, 2)
+  otherAllowances   Decimal   @default(0) @db.Decimal(14, 2)
+
+  // Computed at generation time (NOT a DB generated column):
+  //   grossPay = baseSalary + commissionEarned + otherAllowances
+  //   netPay   = grossPay - advanceDeduction - otherDeductions
+  grossPay          Decimal   @db.Decimal(14, 2)
+  netPay            Decimal   @db.Decimal(14, 2)
+
+  paymentStatus     String    @default("pending") // "pending" | "paid"
+  paymentDate       DateTime?
+  paymentMethod     String?   // e.g. "bank_transfer", "cash", "cheque"
+  paymentReference  String?   // e.g. transaction ID / cheque number
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([payrollRunId, employeeId]) // one payslip per employee per run
+  @@index([employeeId])
+  @@index([paymentStatus])
+}
+
+/// Salary advance given to an employee. Tracks repayment plan + remaining
+/// balance. When remainingBalance reaches 0, status flips to "settled".
+/// The payroll generator deducts from active advances when computing netPay.
+model EmployeeAdvance {
+  id                   String    @id @default(cuid())
+  employeeId           String
+  employee             Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  amount               Decimal   @db.Decimal(14, 2) // original advance amount
+  reason               String
+  dateGiven            DateTime
+  repaymentPlan        String    // "lump_sum" | "installments"
+  installmentAmount    Decimal?  @db.Decimal(14, 2) // required if repaymentPlan = "installments"
+  remainingBalance     Decimal   @db.Decimal(14, 2) // decremented as deductions are applied
+  status               String    @default("active") // "active" | "settled"
+
+  createdByEmployeeId  String
+  createdBy            Employee  @relation("AdvanceCreatedBy", fields: [createdByEmployeeId], references: [id])
+  createdAt            DateTime  @default(now())
+
+  @@index([employeeId, status])
+  @@index([createdByEmployeeId])
+}
+
+/// Idempotency key for duplicate-submission protection on creation endpoints.
+/// Client generates a UUID per form-session; server guarantees only ONE
+/// successful creation per key via the unique constraint on `key`.
+/// A ticket is only "claimed" on SUCCESS — failed attempts can be retried.
+model IdempotencyKey {
+  id            String   @id @default(cuid())
+  key           String   @unique
+  companyId     String
+  employeeId    String?
+  actionType    String
+  status        String   @default("processing") // 'processing' | 'completed' | 'failed'
+  resourceType  String?
+  resourceId    String?
+  responseBody  Json?
+  createdAt     DateTime @default(now())
+  completedAt   DateTime?
+
+  @@index([companyId, actionType])
+  @@index([createdAt])
+}

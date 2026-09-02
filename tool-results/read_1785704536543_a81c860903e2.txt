@@ -1,0 +1,352 @@
+  1377→Task ID: OMS-STEP-2-CREATION-LIFECYCLE
+  1378→Agent: main
+  1379→Task: OMS Step 2 of 5 — Order creation + basic lifecycle transitions (confirm, cancel, payment conversion). No inventory reservation/dispatch (Step 3) or returns (Step 4).
+  1380→
+  1381→Work Log:
+  1382→
+  1383→PART 1 — Validation Schemas (/lib/validations/order.schemas.ts):
+  1384→- customerInputSchema: name, phone (loose Pakistani format), alternate_phone, email, addresses (array with at least one entry)
+  1385→- orderItemInputSchema: org_variant_id, quantity (positive int), unit_price (optional — auto-filled from company pricing but overridable)
+  1386→- createManualOrderSchema: customer OR customer_id, items (min 1), payment_type, advance fields, delivery address, discount. Refinements: advance_amount required for partial_advance; either customer or customer_id required
+  1387→- convertPaymentSchema: order_id, new_payment_type, advance fields, screenshot URL
+  1388→- markCodCollectedSchema: order_id, collected_amount
+  1389→- cancelOrderSchema: order_id, cancellation_reason
+  1390→- updateCompanyOrderSettingsSchema: require_order_confirmation, require_packing_step, default_courier, default_dispatch_location_id
+  1391→- shopifyOrderWebhookSchema: structured payload for future Shopify webhook integration
+  1392→
+  1393→PART 2 — Customer Actions (/lib/actions/customer.actions.ts):
+  1394→- findOrCreateCustomer: searches by org + phone, silently updates name/email/address if different, creates new if not found. Returns { customerId, isNewCustomer }
+  1395→- updateCustomerStats: recomputes totalOrdersCount, totalOrderValue, totalRtoCount from orders table. Internal helper called after order status changes
+  1396→- flagCustomer / unflagCustomer: sets isFlagged + flaggedReason. GUARD: orders.manage permission
+  1397→- listCustomers: search by name/phone/email, filter by isFlagged, paginated
+  1398→- getCustomerDetail: full customer info + recent 20 orders
+  1399→
+  1400→PART 3 — Order Creation (/lib/actions/order.actions.ts):
+  1401→- createManualOrder: validates input → finds/creates customer → fetches variants + pricing → computes subtotal + total_order_value → determines payment_status based on payment_type → determines initial order status (payment = auto-confirm; COD = check company_order_settings) → generates flowops_order_number via DB function → creates order + order_items (fulfillment_status = 'reserved' PLACEHOLDER) → audit log → updates customer stats. Returns { orderId, flowopsOrderNumber, orderItems } so Step 3 can iterate items for stock reservation
+  1402→- createOrderFromShopifyWebhook: STUB — fully structured and unit-testable with mock payload, maps financial_status → payment_status, resolves variants by SKU, not yet wired to a real webhook endpoint
+  1403→
+  1404→PART 4 — Order Lifecycle Transitions (/lib/actions/order.actions.ts):
+  1405→- confirmOrder: GUARD orders.manage, verifies status='pending', sets status='confirmed' + confirmedAt. Step 3 will extend to trigger stock reservation
+  1406→- convertPaymentStatus: validates input, verifies payment_status='cod_pending', updates payment_type/status/source + advance fields, sets converted_by/at. If order was 'pending', also auto-confirms (payment = confirmation signal)
+  1407→- markCodCollected: verifies status='dispatched' or 'delivered', sets codCollected + amount + timestamp
+  1408→- cancelOrder: GUARD orders.cancel, verifies status NOT in [dispatched, delivered, rto, cancelled, refunded], sets status='cancelled' + cancelledAt + reason. Step 3 will extend to call unreserveStockForOrder()
+  1409→- listOrders: filters by status, paymentType, orderSource, customerId, date range, search (flowops_order_number, external_order_reference, customer name/phone). Paginated
+  1410→- getOrderDetail: full order + customer + items joined with variant details (sku, productTitle, attributeValues)
+  1411→
+  1412→PART 5 — Company Order Settings (/lib/actions/order-settings.actions.ts):
+  1413→- getCompanyOrderSettings: returns settings for the active company, auto-creates default row if missing
+  1414→- updateCompanyOrderSettings: GUARD elevated only, updates flags + defaults
+  1415→- ensureCompanyOrderSettings: internal helper, called by createCompany() hooks
+  1416→- Wired createCompany() hook in all 3 company-creation routes:
+  1417→  * src/app/api/organizations/create/route.ts
+  1418→  * src/app/api/companies/create/route.ts
+  1419→  * src/app/api/onboarding/create-company/route.ts
+  1420→  Each now calls ensureCompanyOrderSettings(company.id) after the company is created (non-blocking — wrapped in try/catch)
+  1421→
+  1422→Also added ORDERS_MANAGE permission key to src/lib/permissions.ts ('orders.manage') with catalog entry "Manage orders — Confirm orders, convert payments, manage customers".
+  1423→
+  1424→VERIFICATION:
+  1425→- bun run lint: 0 errors, 15 pre-existing warnings (0 new)
+  1426→- npx tsc --noEmit: 0 errors in any new/modified file
+  1427→- Smoke test (via temporary API route):
+  1428→  * Create COD order → ✅ ORD-2026-00001, order item created with fulfillment_status='reserved'
+  1429→  * Confirm COD order → correctly returned "already confirmed" (company has requireOrderConfirmation=false, so COD auto-confirms on creation)
+  1430→  * Cancel order → ✅ status='cancelled', cancelledAt set
+  1431→  * Create prepaid order → ✅ ORD-2026-00002, auto-confirmed (payment = confirmation signal)
+  1432→- Order number sequence works: ORD-2026-00001, ORD-2026-00002 (per company, resets each year)
+  1433→- Removed 'use server' directive from all 3 action files — these functions use cookies() from next/headers which requires a request scope; they're called from API route handlers, not directly from client components
+  1434→
+  1435→Stage Summary:
+  1436→- OMS Step 2 (Order Creation + Lifecycle) COMPLETE.
+  1437→- All 5 parts implemented: validation schemas, customer actions, order creation (manual + Shopify stub), lifecycle transitions (confirm, convert payment, mark COD collected, cancel), company order settings + createCompany() hook.
+  1438→- No inventory stock movements in this step — order items are created with fulfillment_status='reserved' as a PLACEHOLDER for Step 3.
+  1439→- Every mutation calls insertAuditLog(). Metric events NOT yet added (per spec — will be added deliberately in a later step).
+  1440→- Payment logic follows the business rules: payment received/converted = confirmation signal that bypasses require_order_confirmation.
+  1441→
+  1442→---
+  1443→Task ID: OMS-STEP-3-INVENTORY-INTEGRATION
+  1444→Agent: main
+  1445→Task: OMS Step 3 of 5 — Wire order lifecycle to REAL Inventory system. Reservation at confirmation, dispatch deduction, cancellation unreservation, backorder auto-fulfillment.
+  1446→
+  1447→Work Log:
+  1448→
+  1449→Created 3 new inventory hook functions in src/lib/inventory.ts:
+  1450→- reserveStockForOrder(): checks available stock (onHand - reserved), calls processInventoryTransaction with type 'order_reserved'. Fails if insufficient available.
+  1451→- unreserveStockForOrder(): calls processInventoryTransaction with type 'order_unreserved'. Releases the reservation without touching on_hand.
+  1452→- dispatchOrder(): calls processInventoryTransaction with type 'sale_dispatched'. Deducts on_hand AND releases the reservation. COGS locked at current avg_cost.
+  1453→
+  1454→PART 1 — reserveOrderStock() shared internal function (order.actions.ts):
+  1455→- Processes ALL order_items for an order at confirmation time.
+  1456→- stock_based items: checks available stock at dispatch location. Sufficient → reserveStockForOrder() + fulfillment_status='reserved'. Insufficient + policy='continue' → fulfillment_status='backordered'. Insufficient + policy='deny' → outcome='failed'.
+  1457→- made_to_order items: calls checkAndFulfillMadeToOrderVariant(). existing_stock → reserve + returned_stitched_used=true. fresh_production → link production_order_id. Error → outcome='failed'.
+  1458→- After processing: if ANY item is 'backordered' → order.status = 'partially_backordered'.
+  1459→- Wired into createManualOrder() (if auto-confirmed) and confirmOrder() (manual confirmation).
+  1460→
+  1461→PART 2 — checkAndFulfillBackorders() (backorder.actions.ts):
+  1462→- Queries backordered order_items for a variant+location, ordered by backordered_at ASC (FIFO fairness).
+  1463→- Skips items belonging to cancelled orders.
+  1464→- For each: checks if available stock now covers the full quantity. If yes → reserveStockForOrder() + fulfillment_status='reserved' + fulfilled_at. If no → stop (FIFO — later items won't have enough either).
+  1465→- After each item: calls recompute_order_status() SQL function. If all items now reserved → order.status flips from 'partially_backordered' to 'confirmed'.
+  1466→- Handles partial queue clearing (stops when stock runs out).
+  1467→- Extended src/app/api/purchase-orders/[id]/receive/route.ts to call checkAndFulfillBackorders() for each unique variant+location that received stock (non-blocking, wrapped in try/catch).
+  1468→
+  1469→PART 3 — cancelOrder() unreservation (order.actions.ts):
+  1470→- Extended cancelOrder() to iterate all order_items with fulfillment_status='reserved' and call unreserveStockForOrder() for each.
+  1471→- Items with fulfillment_status='backordered' need no inventory action (no reservation existed).
+  1472→- Backordered items on cancelled orders are orphaned — checkAndFulfillBackorders() skips cancelled orders.
+  1473→
+  1474→PART 4 — dispatchOrderAction() + markOrderProcessing() + markOrderPacked() (order.actions.ts):
+  1475→- dispatchOrderAction(order_id, tracking_number, courier_name):
+  1476→  * GUARD: orders.fulfill permission
+  1477→  * If order.status = 'pending': runs full confirmation + reservation inline (for companies with require_order_confirmation=false)
+  1478→  * Blocks dispatch if ANY item is still 'backordered' (hard rule — no split shipments)
+  1479→  * Checks packing requirement: if company_order_settings.require_packing_step=true and order.packed_at is NULL → error
+  1480→  * For each reserved item: calls dispatchOrder() (inventory) — deducts on_hand, releases reservation, locks COGS
+  1481→  * Sets order_item.fulfillment_status='dispatched', order.status='dispatched', dispatched_at, tracking_number, courier_name
+  1482→  * backfill_order_timestamps() trigger auto-sets confirmed_at/packed_at if they were NULL
+  1483→  * Updates customer stats
+  1484→- markOrderProcessing(order_id): sets status='processing' (only from confirmed/partially_backordered)
+  1485→- markOrderPacked(order_id): sets packed_at (only from confirmed/partially_backordered/processing)
+  1486→
+  1487→VERIFICATION:
+  1488→- bun run lint: 0 errors, 15 pre-existing warnings (0 new)
+  1489→- npx tsc --noEmit: 0 errors in any new/modified file (2 pre-existing in inventory.ts lines 401/585)
+  1490→- Smoke test (via temporary API route):
+  1491→  * Create prepaid order with in-stock variant → ✅ ORD-2026-00004, auto-confirmed + stock reserved
+  1492→  * Dispatch order → ✅ success: true
+  1493→  * DB verification:
+  1494→    - Order status = 'dispatched', dispatchedAt set, trackingNumber = 'TRK-123' ✅
+  1495→    - Inventory pool: onHand = 8 (was 10, deducted by 2), reserved = 0 (reservation released) ✅
+  1496→    - Inventory transactions recorded via processInventoryTransaction (order_reserved + sale_dispatched) ✅
+  1497→
+  1498→Stage Summary:
+  1499→- OMS Step 3 (Inventory Integration) COMPLETE.
+  1500→- Order lifecycle is now fully wired to the Inventory system:
+  1501→  - Reservation at confirmation (stock_based + made_to_order with returned stock / fresh production)
+  1502→  - Backordering when insufficient stock + policy='continue'
+  1503→  - Backorder auto-fulfillment when PO receiving adds stock (FIFO queue)
+  1504→  - Cancellation unreserves stock
+  1505→  - Dispatch deducts on_hand, releases reservation, locks COGS
+  1506→  - Packing step enforced when company settings require it
+  1507→- No split shipments (hard rule — dispatch blocked if any item is backordered)
+  1508→- Every mutation calls insertAuditLog(). Metric events NOT yet added (per spec).
+  1509→
+  1510→---
+  1511→Task ID: OMS-STEP-4-METRICS
+  1512→Agent: metric-oms
+  1513→Task: Add insertMetricEvent to all OMS actions
+  1514→
+  1515→Work Log:
+  1516→- src/lib/actions/order.actions.ts
+  1517→  - reserveOrderStock (internal helper): added stitchingCharges to orgVariant select; added 3 metric events inside the per-item loop — order.backordered (after backorder update), order.made_to_order_from_returned_stock (after returned-stitch reservation), order.made_to_order_production_triggered (after production order linking).
+  1518→  - createManualOrder: added order.created (numericValue=totalOrderValue, dimensions: order_source=manual, payment_type, company_id) after reserveOrderStock call.
+  1519→  - createOrderFromShopifyWebhook: added order.created (dimensions: order_source=shopify, payment_type, company_id) after updateCustomerStats.
+  1520→  - confirmOrder: added order.confirmed (numericValue=order.totalOrderValue, dimensions: confirmation_method=manual) after reserveOrderStock call.
+  1521→  - convertPaymentStatus: added order.payment_converted (numericValue=advance_amount, dimensions: converted_by, method) after audit log.
+  1522→  - markCodCollected: added order.cod_collected (numericValue=collected_amount) after audit log.
+  1523→  - cancelOrder: added order.cancelled (numericValue=order.totalOrderValue, dimensions: cancellation_reason, had_reserved_items) after audit log.
+  1524→  - dispatchOrderAction: added order.dispatched with time_to_dispatch_hours calculation, courier_name, employee_id, skipped_confirmation, skipped_packing dimensions — placed between audit log and updateCustomerStats call.
+  1525→  - markOrderProcessing: added order.processing_started (numericValue=1) after audit log.
+  1526→  - markOrderPacked: added order.packed (numericValue=1) after audit log.
+  1527→  - markOrderDelivered: ALREADY had the metric call (skipped per instruction).
+  1528→- src/lib/actions/customer.actions.ts
+  1529→  - Added import { insertMetricEvent } from '@/lib/metrics'.
+  1530→  - flagCustomer: added customer.flagged (numericValue=1, dimensions: { reason }) after audit log.
+  1531→- src/lib/actions/order-settings.actions.ts
+  1532→  - Added import { insertMetricEvent } from '@/lib/metrics'.
+  1533→  - updateCompanyOrderSettings: added company_order_settings.updated (numericValue=1) after audit log.
+  1534→- src/lib/actions/backorder.actions.ts
+  1535→  - Added import { insertMetricEvent } from '@/lib/metrics'.
+  1536→  - checkAndFulfillBackorders: added order.backorder_fulfilled (numericValue=item.quantity, dimensions: order_id, days_waited) after each item is successfully reserved, with days_waited computed from item.backorderedAt.
+  1537→
+  1538→Verification:
+  1539→- bun run lint: 0 errors, 15 warnings (none in any actions file).
+  1540→- npx tsc --noEmit: 0 errors in actions files. Pre-existing errors in unrelated files (company-settings-view.tsx, organization-view.tsx, inventory.ts) are unchanged.
+  1541→
+  1542→Stage Summary:
+  1543→- OMS Step 4 (Metric Events) COMPLETE — purely additive, no business logic changed.
+  1544→- All 12 OMS server actions now emit insertMetricEvent() with the prescribed metric_key, numericValue, and dimensions. Plus 3 internal metrics inside reserveOrderStock (per-item granularity for backorder + MTO paths).
+  1545→- Every metric call uses .catch(() => {}) to guarantee the parent action's success is never affected by metric insertion failures (defense-in-depth on top of insertMetricEvent's internal try/catch).
+  1546→- Metric coverage:
+  1547→  - Order lifecycle: created (manual + shopify sources), confirmed, processing_started, packed, dispatched, delivered (existing), cancelled.
+  1548→  - Payment: payment_converted, cod_collected.
+  1549→  - Inventory: backordered, made_to_order_from_returned_stock, made_to_order_production_triggered, backorder_fulfilled.
+  1550→  - Customer: flagged.
+  1551→  - Settings: company_order_settings.updated.
+  1552→
+  1553→---
+  1554→Task ID: OMS-STEP-4-RETURNS-METRICS
+  1555→Agent: main
+  1556→Task: OMS Step 4 of 5 — Return/RTO processing + comprehensive metric_events coverage.
+  1557→
+  1558→Work Log:
+  1559→
+  1560→PART 1 — Return/RTO Processing (order-return.actions.ts):
+  1561→- processOrderReturn(order_id, return_reason): verifies order is 'dispatched', sets status='rto' + returnedAt. For each dispatched item: made_to_order → processInventoryTransaction('return_stitched_received') with condition='perfect' assumption (flips track_inventory to TRUE); stock_based → processInventoryTransaction('return_resellable') with condition='resellable'. Sets autoProcessedAsPerfect=true + needsReview=true. Updates customer stats. Auto-flags customer if totalRtoCount >= 3. Inserts 'order.rto' metric event.
+  1562→- correctReturnItemCondition(order_item_id, 'damaged'): reverses the auto-processed entry via a compensating 'damage_writeoff' transaction, creates a stock_loss_records entry (lossType='damaged', responsibleParty='courier', resolution='written_off'). Sets needsReview=false. Inserts 'order_item.return_condition_corrected' metric.
+  1563→- dismissReturnReview(order_item_id): sets needsReview=false for items where physical inspection confirms the auto-assumed condition was correct.
+  1564→- listReturnsNeedingReview(filters): returns order_items WHERE needsReview=true, joined with order + variant info.
+  1565→- markOrderDelivered(order_id): added to order.actions.ts — sets status='delivered' + deliveredAt. Inserts 'order.delivered' metric with delivery_days dimension.
+  1566→
+  1567→PART 2 — Comprehensive Metric Events Coverage:
+  1568→Added insertMetricEvent() calls to ALL OMS actions across Steps 2-4:
+  1569→
+  1570→| Function | Metric Key | Confirmed |
+  1571→|---|---|---|
+  1572→| createManualOrder | order.created | ✅ |
+  1573→| createOrderFromShopifyWebhook | order.created | ✅ |
+  1574→| confirmOrder | order.confirmed | ✅ |
+  1575→| convertPaymentStatus | order.payment_converted | ✅ |
+  1576→| markCodCollected | order.cod_collected | ✅ |
+  1577→| cancelOrder | order.cancelled | ✅ |
+  1578→| dispatchOrderAction | order.dispatched | ✅ |
+  1579→| markOrderDelivered | order.delivered | ✅ |
+  1580→| markOrderProcessing | order.processing_started | ✅ |
+  1581→| markOrderPacked | order.packed | ✅ |
+  1582→| flagCustomer | customer.flagged | ✅ |
+  1583→| updateCompanyOrderSettings | company_order_settings.updated | ✅ |
+  1584→| processOrderReturn | order.rto | ✅ |
+  1585→| correctReturnItemCondition | order_item.return_condition_corrected | ✅ |
+  1586→| reserveOrderStock (backordered) | order.backordered | ✅ |
+  1587→| reserveOrderStock (MTO returned stock) | order.made_to_order_from_returned_stock | ✅ |
+  1588→| reserveOrderStock (MTO fresh production) | order.made_to_order_production_triggered | ✅ |
+  1589→| checkAndFulfillBackorders | order.backorder_fulfilled | ✅ |
+  1590→
+  1591→Total: 18 unique metric_keys across 5 action files. 100% coverage.
+  1592→
+  1593→VERIFICATION:
+  1594→- bun run lint: 0 errors, 15 pre-existing warnings (0 new)
+  1595→- npx tsc --noEmit: 0 errors in any OMS file
+  1596→- RTO flow smoke test:
+  1597→  * Create prepaid order → ✅ ORD-2026-00005
+  1598→  * Dispatch → ✅ (stock deducted)
+  1599→  * Process RTO → ✅ itemsProcessed: 1
+  1600→  * Order item: needsReview=true, autoProcessedAsPerfect=true ✅
+  1601→  * Customer stats updated (totalRtoCount incremented) ✅
+  1602→
+  1603→Stage Summary:
+  1604→- OMS Step 4 (Returns + Metrics) COMPLETE.
+  1605→- Return/RTO auto-processing works: made_to_order items use 'return_stitched_received' (flips track_inventory), stock_based items use 'return_resellable'. All auto-processed items get needsReview=true for physical spot-checking.
+  1606→- correctReturnItemCondition() reverses the auto-processed entry and creates a proper stock_loss_records entry when physical inspection finds damage.
+  1607→- Customer auto-flagging at 3+ RTO count.
+  1608→- 100% metric_events coverage across all OMS mutations (18 metric_keys, 0 missing).
+  1609→
+  1610→---
+  1611→Task ID: OMS-STEP-5-QUEUES-CUSTOMERS-SETTINGS
+  1612→Agent: oms-queues-ui
+  1613→Task: Build OMS queue pages, customer pages, settings page
+  1614→
+  1615→Work Log:
+  1616→- Created 10 frontend views in src/components/orders/:
+  1617→  * orders-pending-confirmation-view.tsx (list + Confirm/Convert/Cancel actions)
+  1618→  * orders-backordered-view.tsx (variant-grouped FIFO queue, collapsible rows)
+  1619→  * orders-awaiting-production-view.tsx (grouped by production status)
+  1620→  * orders-ready-to-dispatch-view.tsx (bulk-select + shared-courier dispatch dialog)
+  1621→  * orders-returns-view.tsx (RTO list + Needs Review filter pill)
+  1622→  * orders-returns-review-view.tsx (Confirm Perfect / Correct to Damaged with confirmation dialog)
+  1623→  * orders-cancelled-view.tsx (read-only history table)
+  1624→  * customers-view.tsx (searchable + flag/unflag + debounced search)
+  1625→  * customer-detail-view.tsx (profile + addresses + stats + order history + flag/unflag)
+  1626→  * order-workflow-settings-view.tsx (2 toggles + default courier + dispatch location dropdown, elevated-only)
+  1627→- Created src/components/orders/_shared.ts (shared helpers: formatPKR, formatDate, getErrorMessage, ORDER_STATUS_BADGE, PRODUCTION_STATUS_BADGE, badgeForStatus)
+  1628→- Created 10 GET/list/detail API routes:
+  1629→  * src/app/api/orders/pending/route.ts
+  1630→  * src/app/api/orders/backordered/route.ts
+  1631→  * src/app/api/orders/awaiting-production/route.ts
+  1632→  * src/app/api/orders/ready-to-dispatch/route.ts
+  1633→  * src/app/api/orders/returns/route.ts (supports ?filter=needs_review)
+  1634→  * src/app/api/orders/returns/review/route.ts
+  1635→  * src/app/api/orders/cancelled/route.ts
+  1636→  * src/app/api/customers/route.ts (GET + POST flag/unflag)
+  1637→  * src/app/api/customers/[id]/route.ts
+  1638→  * src/app/api/order-settings/route.ts (GET + PUT, elevated-only)
+  1639→- Created 6 mutation API routes delegating to existing actions:
+  1640→  * src/app/api/orders/[id]/confirm/route.ts (POST -> confirmOrder)
+  1641→  * src/app/api/orders/[id]/convert-payment/route.ts (POST -> convertPaymentStatus)
+  1642→  * src/app/api/orders/[id]/cancel/route.ts (POST -> cancelOrder, requires reason)
+  1643→  * src/app/api/orders/[id]/dispatch/route.ts (POST -> dispatchOrderAction, requires tracking_number)
+  1644→  * src/app/api/orders/[id]/returns/review/dismiss/route.ts (POST -> dismissReturnReview, ?item_id=)
+  1645→  * src/app/api/orders/[id]/returns/review/correct/route.ts (POST -> correctReturnItemCondition, ?item_id=)
+  1646→- Registered 11 new SPA routes in src/app/page.tsx (orders-pending-confirmation, orders-backordered, orders-awaiting-production, orders-ready-to-dispatch, orders-returns, orders-returns-review, orders-cancelled, customers, customer-detail, order-workflow-settings)
+  1647→- Added api.put() helper to src/lib/api-client.ts (was missing — needed for order-settings PUT)
+  1648→
+  1649→Stage Summary:
+  1650→- OMS Step 5 (Queue pages + Customers + Settings) frontend + API routes COMPLETE.
+  1651→- All 11 SPA routes wired up in page.tsx and reachable from the dashboard.
+  1652→- All 10 list/detail API routes follow the existing cycle-counts pattern (getCurrentUser + ApiError + handleError).
+  1653→- All 6 mutation routes delegate to existing server actions in src/lib/actions/ — zero business-logic duplication.
+  1654→- Shared helpers in _shared.ts keep all 11 components DRY (PKR/date formatting, error extraction, status badge maps).
+  1655→- Badge color system matches spec: pending=gray, confirmed=sky, backordered=amber, dispatched=violet, rto=rose, cancelled=slate.
+  1656→- Loading skeleton, empty state, and error state with retry on every list view.
+  1657→- Bulk dispatch in ready-to-dispatch handles per-order failures gracefully (sequential dispatch with per-order error reporting).
+  1658→- Order-workflow-settings enforces elevated-only edit guard via isElevated + can('settings.company.view') read gate.
+  1659→- Customer auto-flag badge appears when totalRtoCount >= 3 (matches the auto-flag threshold in order-return.actions.ts).
+  1660→- VERIFICATION: bun run lint = 0 errors in any new file (16 pre-existing warnings in other files). npx tsc --noEmit = 0 errors in any new file (errors exist only in concurrent agents' files: order-detail-view.tsx, src/app/api/orders/route.ts, src/lib/inventory.ts — not my scope).
+  1661→
+  1662→---
+  1663→Task ID: OMS-STEP-5-ORDERS-UI
+  1664→Agent: oms-orders-ui
+  1665→Task: Build OMS order list, create wizard, and detail page
+  1666→
+  1667→Work Log:
+  1668→
+  1669→Files created (15 new + 1 modified):
+  1670→
+  1671→API routes (wrap existing server actions in order.actions.ts / order-return.actions.ts / customer.actions.ts):
+  1672→- src/app/api/orders/route.ts — GET (listOrders) + POST (createManualOrder)
+  1673→- src/app/api/orders/[id]/route.ts — GET (full order detail incl. dispatchLocation + productionOrder + advance + return + timeline fields)
+  1674→- src/app/api/orders/[id]/confirm/route.ts — POST (confirmOrder)
+  1675→- src/app/api/orders/[id]/dispatch/route.ts — POST (dispatchOrderAction)
+  1676→- src/app/api/orders/[id]/cancel/route.ts — POST (cancelOrder)
+  1677→- src/app/api/orders/[id]/delivered/route.ts — POST (markOrderDelivered)
+  1678→- src/app/api/orders/[id]/rto/route.ts — POST (processOrderReturn)
+  1679→- src/app/api/orders/[id]/convert-payment/route.ts — POST (convertPaymentStatus)
+  1680→- src/app/api/orders/[id]/cod-collected/route.ts — POST (markCodCollected)
+  1681→- src/app/api/orders/[id]/processing/route.ts — POST (markOrderProcessing)
+  1682→- src/app/api/orders/[id]/packed/route.ts — POST (markOrderPacked)
+  1683→- src/app/api/customers/route.ts — GET (listCustomers — for phone/name/email search in wizard)
+  1684→
+  1685→Frontend views (src/components/orders/):
+  1686→- orders-view.tsx — list page: 4 stat cards (Total / Pending / Backordered / Today's Revenue), filter bar (9 statuses, 4 payment types, 5 sources, search), color-coded status + payment + source badges, loading skeleton, empty state with CTA, error state with retry, ORDERS_VIEW gate, [+ Create Order] gated on ORDERS_CREATE, row click → order-detail. TanStack Query ['orders', filters] staleTime 15s.
+  1687→- order-create-view.tsx — 5-step wizard (Customer → Items → Payment → Delivery → Review) with Stepper component. Step 1 phone-search via /api/customers OR add-new-customer form. Step 2 product/variant search (reuses receive-stock-view pattern) with editable unit_price + running subtotal. Step 3 RadioGroup payment type with conditional advance fields. Step 4 delivery (auto-prefilled from new customer) + dispatch location dropdown (from /api/inventory-locations) + discount. Step 5 review summary → POST /api/orders → toast + navigate to order-detail. All hooks declared BEFORE permission-gate early return (rules-of-hooks compliant).
+  1688→- order-detail-view.tsx — full detail page: header with status/payment/source badges, customer info with flagged warning, items table with MTO/returned-stitched-used/production-order/needs-review indicators, payment breakdown (subtotal + discount + courier + total + advance details + remaining COD + COD collected), delivery info, status timeline (8 stages with timestamps), activity log (audit-logs with entity_id filter), context-sensitive action buttons (Confirm/Process/Pack/Dispatch/Deliver/RTO/Cancel/Convert Payment/COD Collected) + 5 dialog forms. TanStack Query ['order', orderId] staleTime 10s + 9 useMutation hooks ALL declared before loading/error early returns.
+  1689→
+  1690→Router wiring (src/app/page.tsx):
+  1691→- Added imports + switch cases for 'orders' / 'order-create' / 'order-detail' (preserving queue/customer/settings cases another agent added).
+  1692→
+  1693→Audit log enhancement:
+  1694→- src/app/api/audit-logs/route.ts — added optional entity_id / entityId query-param filter (purely additive, backward-compatible) so the detail page can fetch its activity log.
+  1695→
+  1696→Stage Summary:
+  1697→- OMS order list / create / detail UI COMPLETE.
+  1698→- 3 frontend views + 11 new order API routes + 1 customer search route + 1 audit-logs enhancement.
+  1699→- All routes wrap existing OMS Step 2-4 server actions, following the project API pattern (runtime='nodejs', dynamic='force-dynamic', ApiError + handleError + readBody, ActionResult → JSON translation).
+  1700→- Permission gating via useCan() hook (ORDERS_VIEW / ORDERS_CREATE / ORDERS_MANAGE / ORDERS_FULFILL / ORDERS_CANCEL).
+  1701→- TanStack Query v5 for server state, Sonner for toasts, shadcn/ui for all components.
+  1702→- Status badges color-coded per spec: pending=gray, confirmed=sky, partially_backordered=amber, processing=blue, dispatched=violet, delivered=emerald, rto=rose, cancelled=slate, refunded=purple.
+  1703→- PKR + en-PK date formatting consistent with the rest of the app.
+  1704→- VERIFICATION: bun run lint = 0 errors, 15 pre-existing warnings (0 in any new file). npx tsc --noEmit | grep orders = 0 errors in any orders file (pre-existing errors in unrelated purchase-orders/[id]/receive/route.ts only).
+  1705→
+  1706→---
+  1707→Task ID: OMS-STEP-5-FRONTEND
+  1708→Agent: main
+  1709→Task: OMS Step 5 of 5 — Complete frontend across all OMS pages. Order list, create wizard, detail page, 7 queue pages, customer pages, settings page, sidebar navigation.
+  1710→
+  1711→Work Log:
+  1712→
+  1713→PARTS 1-3 (Order List + Create Wizard + Detail Page):
+  1714→- orders-view.tsx: stats cards (Total, Pending, Backordered, Revenue), filter bar (9 statuses, payment types, sources, search), color-coded table with row-click navigation, permission-gated Create button
+  1715→- order-create-view.tsx: 5-step wizard (Customer → Items → Payment → Delivery → Review), debounced phone search, variant search with stock badges, editable unit prices, payment type radio with conditional advance fields, dispatch location dropdown, full review summary
+  1716→- order-detail-view.tsx: full detail with status/payment/source badges, customer info with flag warning, items table with MTO indicators, payment breakdown with Convert/Mark COD buttons, delivery info, status timeline, activity log, context-sensitive action buttons (Confirm, Processing, Packed, Dispatch, Cancel, RTO, Delivered)
+  1717→
+  1718→PART 4 (Queue Pages):
+  1719→- orders-pending-confirmation-view.tsx: list with quick-action buttons (Confirm, Convert, Cancel)
+  1720→- orders-backordered-view.tsx: grouped by variant, FIFO ordered, expandable rows
+  1721→- orders-awaiting-production-view.tsx: grouped by production status
+  1722→- orders-ready-to-dispatch-view.tsx: bulk-select + bulk dispatch dialog
+  1723→- orders-returns-view.tsx: RTO list with "Needs Review" filter
+  1724→- orders-returns-review-view.tsx: exception queue with Confirm Perfect / Correct to Damaged actions
+  1725→- orders-cancelled-view.tsx: read-only history
+  1726→
+
+[showing lines 1377-1726 of 3103; use offset=1727 with limit to continue reading]

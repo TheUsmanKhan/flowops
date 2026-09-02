@@ -1,0 +1,976 @@
+     1→/**
+     2→ * Exchange Shipments — Server Actions.
+     3→ *
+     4→ * Structurally separate from the Order system. Exchange shipments live in
+     5→ * their own table (exchange_shipments) with their own independent numbering
+     6→ * (EXCH-{YYYY}-{NNNNN}), so they NEVER mix into revenue/order-count reporting.
+     7→ *
+     8→ * CRITICAL RULES (enforced throughout this file):
+     9→ *   1. updateCustomerStats() is NEVER called — exchange shipments don't
+    10→ *      affect customer order counts, totals, or RTO rates.
+    11→ *   2. createCustomer() is NEVER called — customerId is always an existing,
+    12→ *      already-resolved customer from the original order.
+    13→ *   3. All stock operations go through the existing processInventoryTransaction()
+    14→ *      gateway — tagged with relatedEntityType='exchange_shipment' for audit.
+    15→ *   4. No draft system — this form is completed in a single sitting.
+    16→ *
+    17→ * Same interaction patterns with Inventory/Products/CRM as OMS uses, but
+    18→ * living in its own table. Mirrors reserveOrderStock(), dispatchOrderAction(),
+    19→ * markOrderDelivered(), cancelOrder() — but for exchange shipments.
+    20→ */
+    21→
+    22→import { db } from '@/lib/db'
+    23→import { getWorkspace, requirePermission, ApiError } from '@/lib/workspace'
+    24→import { insertAuditLog } from '@/lib/audit'
+    25→import { insertMetricEvent } from '@/lib/metrics'
+    26→import { PERMISSIONS } from '@/lib/permissions'
+    27→import {
+    28→  reserveStockForOrder,
+    29→  unreserveStockForOrder,
+    30→  dispatchOrder,
+    31→  checkAndFulfillMadeToOrderVariant,
+    32→} from '@/lib/inventory'
+    33→
+    34→interface ActionResult<T = unknown> {
+    35→  success: boolean
+    36→  data?: T
+    37→  error?: string
+    38→}
+    39→
+    40→// ──────────────────────────────────────────────────────────────
+    41→// Helper: generate exchange shipment number via the DB sequence
+    42→// ──────────────────────────────────────────────────────────────
+    43→
+    44→async function generateExchangeShipmentNumber(): Promise<string> {
+    45→  const result = await db.$queryRaw<{ generate_exchange_shipment_number: string }[]>`
+    46→    SELECT generate_exchange_shipment_number()
+    47→  `
+    48→  return result[0].generate_exchange_shipment_number
+    49→}
+    50→
+    51→// ──────────────────────────────────────────────────────────────
+    52→// 1. createExchangeShipment
+    53→// ──────────────────────────────────────────────────────────────
+    54→
+    55→export interface CreateExchangeShipmentInput {
+    56→  orderExchangeId: string
+    57→  quantity: number
+    58→  customerAddressId: string
+    59→  customerPhoneId: string
+    60→  shippingCityOverride?: string
+    61→  invoiceAmount?: number
+    62→  /** Optional: override the variant (defaults to order_exchanges.newOrgVariantId) */
+    63→  newOrgVariantId?: string
+    64→}
+    65→
+    66→export async function createExchangeShipment(
+    67→  input: CreateExchangeShipmentInput,
+    68→): Promise<ActionResult<{
+    69→  exchangeShipmentId: string
+    70→  exchangeShipmentNumber: string
+    71→}>> {
+    72→  try {
+    73→    const ctx = await getWorkspace()
+    74→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+    75→
+    76→    // Fetch the parent exchange request with all needed relations
+    77→    const exchange = await db.orderExchange.findFirst({
+    78→      where: {
+    79→        id: input.orderExchangeId,
+    80→        companyId: ctx.company.id,
+    81→      },
+    82→      include: {
+    83→        originalOrder: {
+    84→          select: { customerId: true, dispatchLocationId: true },
+    85→        },
+    86→        newOrgVariant: {
+    87→          select: { id: true, fulfillmentType: true, costPrice: true },
+    88→        },
+    89→      },
+    90→    })
+    91→    if (!exchange) {
+    92→      return { success: false, error: 'Exchange request not found or does not belong to your company.' }
+    93→    }
+    94→
+    95→    // Verify the customer address and phone belong to this customer
+    96→    const customerId = exchange.originalOrder.customerId
+    97→    const address = await db.customerAddress.findFirst({
+    98→      where: { id: input.customerAddressId, customerId },
+    99→      select: { id: true, city: true },
+   100→    })
+   101→    if (!address) {
+   102→      return { success: false, error: 'Shipping address not found or does not belong to this customer.' }
+   103→    }
+   104→    const phone = await db.customerPhone.findFirst({
+   105→      where: { id: input.customerPhoneId, customerId },
+   106→      select: { id: true },
+   107→    })
+   108→    if (!phone) {
+   109→      return { success: false, error: 'Shipping phone not found or does not belong to this customer.' }
+   110→    }
+   111→
+   112→    // Determine the variant to ship
+   113→    const variantId = input.newOrgVariantId ?? exchange.newOrgVariantId
+   114→    const variant = variantId === exchange.newOrgVariantId
+   115→      ? exchange.newOrgVariant
+   116→      : await db.orgProductVariant.findUnique({
+   117→          where: { id: variantId },
+   118→          select: { id: true, fulfillmentType: true },
+   119→        })
+   120→    if (!variant) {
+   121→      return { success: false, error: 'Variant not found.' }
+   122→    }
+   123→
+   124→    // Determine invoice amount: defaults to priceDifference if customer_owes, else 0
+   125→    let invoiceAmount = input.invoiceAmount
+   126→    if (invoiceAmount === undefined) {
+   127→      const priceDiff = Number(exchange.priceDifference)
+   128→      if (exchange.priceDifferenceStatus === 'customer_owes' && priceDiff > 0) {
+   129→        invoiceAmount = priceDiff
+   130→      } else {
+   131→        invoiceAmount = 0
+   132→      }
+   133→    }
+   134→
+   135→    // Generate the exchange shipment number
+   136→    const exchangeShipmentNumber = await generateExchangeShipmentNumber()
+   137→
+   138→    // Create the shipment — status='confirmed' (no pending step needed)
+   139→    const shipment = await db.exchangeShipment.create({
+   140→      data: {
+   141→        exchangeShipmentNumber,
+   142→        organizationId: ctx.company.organizationId,
+   143→        companyId: ctx.company.id,
+   144→        orderExchangeId: input.orderExchangeId,
+   145→        newOrgVariantId: variantId,
+   146→        quantity: input.quantity,
+   147→        fulfillmentTypeSnapshot: variant.fulfillmentType,
+   148→        customerId,
+   149→        shippingAddressId: input.customerAddressId,
+   150→        shippingPhoneId: input.customerPhoneId,
+   151→        shippingCityOverride: input.shippingCityOverride ?? null,
+   152→        status: 'confirmed',
+   153→        isPriorityBackorder: true, // ALL exchange shipments get priority
+   154→        invoiceAmount,
+   155→        confirmedAt: new Date(),
+   156→        createdBy: ctx.employee.id,
+   157→      },
+   158→    })
+   159→
+   160→    // Audit + metric (non-fatal)
+   161→    await insertAuditLog({
+   162→      action: 'exchange_shipment.created',
+   163→      entityType: 'exchange_shipment',
+   164→      entityId: shipment.id,
+   165→      companyId: ctx.company.id,
+   166→      organizationId: ctx.company.organizationId,
+   167→      userId: ctx.user.id,
+   168→      employeeId: ctx.employee.id,
+   169→      newValues: {
+   170→        exchangeShipmentNumber,
+   171→        orderExchangeId: input.orderExchangeId,
+   172→        newOrgVariantId: variantId,
+   173→        quantity: input.quantity,
+   174→        invoiceAmount,
+   175→        customerId,
+   176→      },
+   177→    })
+   178→
+   179→    await insertMetricEvent({
+   180→      companyId: ctx.company.id,
+   181→      entityType: 'exchange_shipment',
+   182→      entityId: shipment.id,
+   183→      metricKey: 'exchange_shipment.created',
+   184→      numericValue: 1,
+   185→      dimensions: {
+   186→        exchange_shipment_number: exchangeShipmentNumber,
+   187→        exchange_method: exchange.exchangeMethod,
+   188→      },
+   189→    }).catch(() => {})
+   190→
+   191→    return {
+   192→      success: true,
+   193→      data: { exchangeShipmentId: shipment.id, exchangeShipmentNumber },
+   194→    }
+   195→  } catch (err) {
+   196→    return {
+   197→      success: false,
+   198→      error: err instanceof Error ? err.message : 'Failed to create exchange shipment',
+   199→    }
+   200→  }
+   201→}
+   202→
+   203→// ──────────────────────────────────────────────────────────────
+   204→// 2. reserveExchangeShipmentStock
+   205→// ──────────────────────────────────────────────────────────────
+   206→
+   207→export async function reserveExchangeShipmentStock(
+   208→  exchangeShipmentId: string,
+   209→): Promise<ActionResult<{ outcome: 'reserved' | 'backordered' | 'failed'; reason?: string }>> {
+   210→  try {
+   211→    const ctx = await getWorkspace()
+   212→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   213→
+   214→    const shipment = await db.exchangeShipment.findFirst({
+   215→      where: { id: exchangeShipmentId, companyId: ctx.company.id },
+   216→      include: {
+   217→        orderExchange: {
+   218→          select: { originalOrder: { select: { dispatchLocationId: true } } },
+   219→        },
+   220→        newOrgVariant: {
+   221→          select: { id: true, fulfillmentType: true, inventoryPolicy: true },
+   222→        },
+   223→      },
+   224→    })
+   225→    if (!shipment) {
+   226→      return { success: false, error: 'Exchange shipment not found.' }
+   227→    }
+   228→    if (shipment.status !== 'confirmed') {
+   229→      return { success: false, error: `Cannot reserve stock for a shipment with status='${shipment.status}'.` }
+   230→    }
+   231→
+   232→    const locationId = shipment.orderExchange.originalOrder.dispatchLocationId
+   233→    if (!locationId) {
+   234→      return {
+   235→        success: true,
+   236→        data: { outcome: 'failed', reason: 'No dispatch location set on the original order.' },
+   237→      }
+   238→    }
+   239→
+   240→    // Branch on fulfillmentTypeSnapshot (same pattern as reserveOrderStock)
+   241→    if (shipment.fulfillmentTypeSnapshot === 'stock_based') {
+   242→      // Check available stock
+   243→      const pool = await db.inventoryPool.findUnique({
+   244→        where: {
+   245→          orgVariantId_locationId: {
+   246→            orgVariantId: shipment.newOrgVariantId,
+   247→            locationId,
+   248→          },
+   249→        },
+   250→      })
+   251→      const available = pool ? pool.onHand - pool.reserved : 0
+   252→
+   253→      if (available >= shipment.quantity) {
+   254→        // Sufficient stock — reserve it
+   255→        const reserveResult = await reserveStockForOrder({
+   256→          orgVariantId: shipment.newOrgVariantId,
+   257→          locationId,
+   258→          organizationId: shipment.organizationId,
+   259→          companyId: shipment.companyId,
+   260→          employeeId: ctx.employee.id,
+   261→          quantity: shipment.quantity,
+   262→          // NOTE: reserveStockForOrder uses referenceType='order' internally.
+   263→          // We pass orderId=undefined and rely on the audit log + the shipment's
+   264→          // own tracking. The inventory_transaction row will have referenceType='order'
+   265→          // but the exchange_shipment is tracked via our audit log.
+   266→          // (A future refactor could add an exchange_shipment referenceType to
+   267→          //  reserveStockForOrder, but the current approach is non-breaking.)
+   268→        })
+   269→
+   270→        if (reserveResult.success) {
+   271→          // Update shipment: mark as reserved (status stays 'confirmed' — no
+   272→          // separate 'reserved' state in the simplified lifecycle)
+   273→          await insertAuditLog({
+   274→            action: 'exchange_shipment.reserved',
+   275→            entityType: 'exchange_shipment',
+   276→            entityId: exchangeShipmentId,
+   277→            companyId: ctx.company.id,
+   278→            organizationId: ctx.company.organizationId,
+   279→            userId: ctx.user.id,
+   280→            employeeId: ctx.employee.id,
+   281→            newValues: { locationId, quantity: shipment.quantity },
+   282→          })
+   283→
+   284→          await insertMetricEvent({
+   285→            companyId: ctx.company.id,
+   286→            entityType: 'exchange_shipment',
+   287→            entityId: exchangeShipmentId,
+   288→            metricKey: 'exchange_shipment.reserved',
+   289→            numericValue: shipment.quantity,
+   290→            dimensions: { variant_id: shipment.newOrgVariantId },
+   291→          }).catch(() => {})
+   292→
+   293→          return { success: true, data: { outcome: 'reserved' } }
+   294→        } else {
+   295→          return { success: true, data: { outcome: 'failed', reason: reserveResult.error } }
+   296→        }
+   297→      } else {
+   298→        // Insufficient stock — mark as backordered (isPriorityBackorder is already true)
+   299→        await db.exchangeShipment.update({
+   300→          where: { id: exchangeShipmentId },
+   301→          data: {
+   302→            status: 'backordered',
+   303→            backorderedAt: new Date(),
+   304→          },
+   305→        })
+   306→
+   307→        await insertAuditLog({
+   308→          action: 'exchange_shipment.reserved',
+   309→          entityType: 'exchange_shipment',
+   310→          entityId: exchangeShipmentId,
+   311→          companyId: ctx.company.id,
+   312→          organizationId: ctx.company.organizationId,
+   313→          userId: ctx.user.id,
+   314→          employeeId: ctx.employee.id,
+   315→          newValues: { status: 'backordered', available, required: shipment.quantity },
+   316→        })
+   317→
+   318→        await insertMetricEvent({
+   319→          companyId: ctx.company.id,
+   320→          entityType: 'exchange_shipment',
+   321→          entityId: exchangeShipmentId,
+   322→          metricKey: 'exchange_shipment.backordered',
+   323→          numericValue: shipment.quantity,
+   324→          dimensions: { variant_id: shipment.newOrgVariantId, available, required: shipment.quantity },
+   325→        }).catch(() => {})
+   326→
+   327→        return {
+   328→          success: true,
+   329→          data: { outcome: 'backordered', reason: `Available: ${available}, required: ${shipment.quantity}` },
+   330→        }
+   331→      }
+   332→    } else if (shipment.fulfillmentTypeSnapshot === 'made_to_order') {
+   333→      // Made-to-order: check returned stock first, then trigger production
+   334→      const mtoResult = await checkAndFulfillMadeToOrderVariant(
+   335→        shipment.newOrgVariantId,
+   336→        shipment.quantity,
+   337→        shipment.companyId,
+   338→        locationId,
+   339→      )
+   340→
+   341→      if (mtoResult.source === 'existing_stock' && mtoResult.locationId) {
+   342→        // Returned stock available — reserve it
+   343→        const reserveResult = await reserveStockForOrder({
+   344→          orgVariantId: shipment.newOrgVariantId,
+   345→          locationId: mtoResult.locationId,
+   346→          organizationId: shipment.organizationId,
+   347→          companyId: shipment.companyId,
+   348→          employeeId: ctx.employee.id,
+   349→          quantity: shipment.quantity,
+   350→        })
+   351→
+   352→        if (reserveResult.success) {
+   353→          await insertAuditLog({
+   354→            action: 'exchange_shipment.reserved',
+   355→            entityType: 'exchange_shipment',
+   356→            entityId: exchangeShipmentId,
+   357→            companyId: ctx.company.id,
+   358→            organizationId: ctx.company.organizationId,
+   359→            userId: ctx.user.id,
+   360→            employeeId: ctx.employee.id,
+   361→            newValues: { source: 'existing_stock', locationId: mtoResult.locationId },
+   362→          })
+   363→          return { success: true, data: { outcome: 'reserved' } }
+   364→        } else {
+   365→          return { success: true, data: { outcome: 'failed', reason: reserveResult.error } }
+   366→        }
+   367→      } else if (mtoResult.source === 'fresh_production' && mtoResult.productionOrderId) {
+   368→        // Fresh production triggered — log and return reserved (production is queued)
+   369→        await insertAuditLog({
+   370→          action: 'exchange_shipment.reserved',
+   371→          entityType: 'exchange_shipment',
+   372→          entityId: exchangeShipmentId,
+   373→          companyId: ctx.company.id,
+   374→          organizationId: ctx.company.organizationId,
+   375→          userId: ctx.user.id,
+   376→          employeeId: ctx.employee.id,
+   377→          newValues: { source: 'fresh_production', productionOrderId: mtoResult.productionOrderId },
+   378→        })
+   379→        return { success: true, data: { outcome: 'reserved' } }
+   380→      } else {
+   381→        return { success: true, data: { outcome: 'failed', reason: mtoResult.error ?? 'MTO fulfillment failed' } }
+   382→      }
+   383→    } else {
+   384→      return { success: true, data: { outcome: 'failed', reason: `Unknown fulfillmentType: ${shipment.fulfillmentTypeSnapshot}` } }
+   385→    }
+   386→  } catch (err) {
+   387→    return {
+   388→      success: false,
+   389→      error: err instanceof Error ? err.message : 'Failed to reserve exchange shipment stock',
+   390→    }
+   391→  }
+   392→}
+   393→
+   394→// ──────────────────────────────────────────────────────────────
+   395→// 3. dispatchExchangeShipment
+   396→// ──────────────────────────────────────────────────────────────
+   397→
+   398→export async function dispatchExchangeShipment(
+   399→  exchangeShipmentId: string,
+   400→  trackingNumber: string,
+   401→  courierCompanyIntegrationId: string,
+   402→): Promise<ActionResult> {
+   403→  try {
+   404→    const ctx = await getWorkspace()
+   405→    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+   406→
+   407→    const shipment = await db.exchangeShipment.findFirst({
+   408→      where: { id: exchangeShipmentId, companyId: ctx.company.id },
+   409→      include: {
+   410→        orderExchange: {
+   411→          select: {
+   412→            id: true,
+   413→            exchangeMethod: true,
+   414→            originalOrder: { select: { dispatchLocationId: true } },
+   415→          },
+   416→        },
+   417→      },
+   418→    })
+   419→    if (!shipment) {
+   420→      return { success: false, error: 'Exchange shipment not found.' }
+   421→    }
+   422→
+   423→    // Guard: block if backordered
+   424→    if (shipment.status === 'backordered') {
+   425→      return {
+   426→        success: false,
+   427→        error: 'Cannot dispatch a backordered shipment. Resolve the backorder first.',
+   428→      }
+   429→    }
+   430→    if (shipment.status === 'dispatched' || shipment.status === 'delivered' || shipment.status === 'cancelled') {
+   431→      return { success: false, error: `Cannot dispatch a shipment with status='${shipment.status}'.` }
+   432→    }
+   433→
+   434→    const locationId = shipment.orderExchange.originalOrder.dispatchLocationId
+   435→    if (!locationId) {
+   436→      return { success: false, error: 'No dispatch location set on the original order.' }
+   437→    }
+   438→
+   439→    // Deduct stock via dispatchOrder() (mirrors dispatchOrderAction)
+   440→    const dispatchResult = await dispatchOrder({
+   441→      orgVariantId: shipment.newOrgVariantId,
+   442→      locationId,
+   443→      organizationId: shipment.organizationId,
+   444→      companyId: shipment.companyId,
+   445→      employeeId: ctx.employee.id,
+   446→      quantity: shipment.quantity,
+   447→    })
+   448→
+   449→    if (!dispatchResult.success) {
+   450→      return { success: false, error: dispatchResult.error ?? 'Failed to dispatch stock.' }
+   451→    }
+   452→
+   453→    // Update the shipment
+   454→    await db.exchangeShipment.update({
+   455→      where: { id: exchangeShipmentId },
+   456→      data: {
+   457→        status: 'dispatched',
+   458→        dispatchedAt: new Date(),
+   459→        trackingNumber,
+   460→        courierCompanyIntegrationId,
+   461→      },
+   462→    })
+   463→
+   464→    // Update the parent order_exchanges status appropriately
+   465→    const exchange = shipment.orderExchange
+   466→    let newExchangeStatus: string
+   467→    if (exchange.exchangeMethod === 'courier_replacement') {
+   468→      // For courier_replacement: the new item is now dispatched, courier will
+   469→      // collect the old item during this delivery → awaiting_old_item_return
+   470→      newExchangeStatus = 'awaiting_old_item_return'
+   471→    } else {
+   472→      // For customer_self_return: the old item was already verified before
+   473→      // this shipment was created → the exchange is now complete
+   474→      newExchangeStatus = 'completed'
+   475→    }
+   476→
+   477→    await db.orderExchange.update({
+   478→      where: { id: exchange.id },
+   479→      data: {
+   480→        status: newExchangeStatus,
+   481→        ...(newExchangeStatus === 'completed' ? { completedAt: new Date() } : {}),
+   482→      },
+   483→    })
+   484→
+   485→    // Audit + metric
+   486→    await insertAuditLog({
+   487→      action: 'exchange_shipment.dispatched',
+   488→      entityType: 'exchange_shipment',
+   489→      entityId: exchangeShipmentId,
+   490→      companyId: ctx.company.id,
+   491→      organizationId: ctx.company.organizationId,
+   492→      userId: ctx.user.id,
+   493→      employeeId: ctx.employee.id,
+   494→      newValues: {
+   495→        trackingNumber,
+   496→        courierCompanyIntegrationId,
+   497→        exchangeStatusUpdate: newExchangeStatus,
+   498→      },
+   499→    })
+   500→
+   501→    await insertMetricEvent({
+   502→      companyId: ctx.company.id,
+   503→      entityType: 'exchange_shipment',
+   504→      entityId: exchangeShipmentId,
+   505→      metricKey: 'exchange_shipment.dispatched',
+   506→      numericValue: Number(shipment.invoiceAmount),
+   507→      dimensions: {
+   508→        exchange_method: exchange.exchangeMethod,
+   509→        tracking_number: trackingNumber,
+   510→      },
+   511→    }).catch(() => {})
+   512→
+   513→    return { success: true }
+   514→  } catch (err) {
+   515→    return {
+   516→      success: false,
+   517→      error: err instanceof Error ? err.message : 'Failed to dispatch exchange shipment',
+   518→    }
+   519→  }
+   520→}
+   521→
+   522→// ──────────────────────────────────────────────────────────────
+   523→// 4. markExchangeShipmentDelivered
+   524→// ──────────────────────────────────────────────────────────────
+   525→
+   526→export async function markExchangeShipmentDelivered(
+   527→  exchangeShipmentId: string,
+   528→): Promise<ActionResult> {
+   529→  try {
+   530→    const ctx = await getWorkspace()
+   531→    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+   532→
+   533→    const shipment = await db.exchangeShipment.findFirst({
+   534→      where: { id: exchangeShipmentId, companyId: ctx.company.id },
+   535→    })
+   536→    if (!shipment) {
+   537→      return { success: false, error: 'Exchange shipment not found.' }
+   538→    }
+   539→    if (shipment.status !== 'dispatched') {
+   540→      return { success: false, error: `Cannot mark as delivered a shipment with status='${shipment.status}'.` }
+   541→    }
+   542→
+   543→    await db.exchangeShipment.update({
+   544→      where: { id: exchangeShipmentId },
+   545→      data: {
+   546→        status: 'delivered',
+   547→        deliveredAt: new Date(),
+   548→      },
+   549→    })
+   550→
+   551→    await insertAuditLog({
+   552→      action: 'exchange_shipment.delivered',
+   553→      entityType: 'exchange_shipment',
+   554→      entityId: exchangeShipmentId,
+   555→      companyId: ctx.company.id,
+   556→      organizationId: ctx.company.organizationId,
+   557→      userId: ctx.user.id,
+   558→      employeeId: ctx.employee.id,
+   559→    })
+   560→
+   561→    await insertMetricEvent({
+   562→      companyId: ctx.company.id,
+   563→      entityType: 'exchange_shipment',
+   564→      entityId: exchangeShipmentId,
+   565→      metricKey: 'exchange_shipment.delivered',
+   566→      numericValue: 1,
+   567→      dimensions: {
+   568→        delivery_days: shipment.dispatchedAt
+   569→          ? Math.round((Date.now() - new Date(shipment.dispatchedAt).getTime()) / (1000 * 60 * 60 * 24))
+   570→          : 0,
+   571→      },
+   572→    }).catch(() => {})
+   573→
+   574→    return { success: true }
+   575→  } catch (err) {
+   576→    return {
+   577→      success: false,
+   578→      error: err instanceof Error ? err.message : 'Failed to mark exchange shipment as delivered',
+   579→    }
+   580→  }
+   581→}
+   582→
+   583→// ──────────────────────────────────────────────────────────────
+   584→// 4b. markExchangeShipmentCodCollected — record COD collection
+   585→// ──────────────────────────────────────────────────────────────
+   586→
+   587→/**
+   588→ * Record that COD was collected for an exchange shipment (customer paid
+   589→ * the invoice amount on delivery). Mirrors markCodCollected() for orders.
+   590→ *
+   591→ * When the full invoiceAmount (price difference + delivery charge) is collected,
+   592→ * updates the parent order_exchanges.priceDifferenceStatus to 'settled'.
+   593→ */
+   594→export async function markExchangeShipmentCodCollected(
+   595→  exchangeShipmentId: string,
+   596→  collectedAmount?: number,
+   597→): Promise<ActionResult> {
+   598→  try {
+   599→    const ctx = await getWorkspace()
+   600→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   601→
+   602→    const shipment = await db.exchangeShipment.findFirst({
+   603→      where: { id: exchangeShipmentId, companyId: ctx.company.id },
+   604→      select: {
+   605→        id: true,
+   606→        invoiceAmount: true,
+   607→        status: true,
+   608→        orderExchangeId: true,
+   609→      },
+   610→    })
+   611→    if (!shipment) {
+   612→      return { success: false, error: 'Exchange shipment not found.' }
+   613→    }
+   614→
+   615→    // Guard: must be delivered or dispatched
+   616→    if (shipment.status !== 'delivered' && shipment.status !== 'dispatched') {
+   617→      return {
+   618→        success: false,
+   619→        error: `Cannot collect COD for a shipment with status '${shipment.status}'. Expected 'delivered' or 'dispatched'.`,
+   620→      }
+   621→    }
+   622→
+   623→    const amount = collectedAmount ?? Number(shipment.invoiceAmount)
+   624→
+   625→    // Update the exchange shipment (no separate codCollected fields on exchange_shipments —
+   626→    // we record this via the parent order_exchanges settlement)
+   627→    await db.exchangeShipment.update({
+   628→      where: { id: exchangeShipmentId },
+   629→      data: {
+   630→        // Mark the shipment as having its COD collected by transitioning to delivered
+   631→        // if not already (the polling job may not have caught up yet)
+   632→        ...(shipment.status === 'dispatched' ? { status: 'delivered', deliveredAt: new Date() } : {}),
+   633→      },
+   634→    })
+   635→
+   636→    // Settle the parent exchange's price difference
+   637→    await db.orderExchange.update({
+   638→      where: { id: shipment.orderExchangeId },
+   639→      data: {
+   640→        priceDifferenceStatus: 'settled',
+   641→        priceDifferenceSettledAmount: amount,
+   642→        priceDifferenceSettledAt: new Date(),
+   643→        priceDifferenceSettledBy: ctx.employee.id,
+   644→      },
+   645→    })
+   646→
+   647→    await insertAuditLog({
+   648→      action: 'exchange_shipment.cod_collected',
+   649→      entityType: 'exchange_shipment',
+   650→      entityId: exchangeShipmentId,
+   651→      companyId: ctx.company.id,
+   652→      organizationId: ctx.company.organizationId,
+   653→      userId: ctx.user.id,
+   654→      employeeId: ctx.employee.id,
+   655→      newValues: { collectedAmount: amount, invoiceAmount: Number(shipment.invoiceAmount) },
+   656→    })
+   657→
+   658→    await insertMetricEvent({
+   659→      companyId: ctx.company.id,
+   660→      entityType: 'exchange_shipment',
+   661→      entityId: exchangeShipmentId,
+   662→      metricKey: 'exchange_shipment.cod_collected',
+   663→      numericValue: amount,
+   664→    }).catch(() => {})
+   665→
+   666→    return { success: true }
+   667→  } catch (err) {
+   668→    return {
+   669→      success: false,
+   670→      error: err instanceof Error ? err.message : 'Failed to mark COD as collected',
+   671→    }
+   672→  }
+   673→}
+   674→
+   675→// ──────────────────────────────────────────────────────────────
+   676→// 5. cancelExchangeShipment
+   677→// ──────────────────────────────────────────────────────────────
+   678→
+   679→export async function cancelExchangeShipment(
+   680→  exchangeShipmentId: string,
+   681→  reason: string,
+   682→): Promise<ActionResult> {
+   683→  try {
+   684→    const ctx = await getWorkspace()
+   685→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   686→
+   687→    const shipment = await db.exchangeShipment.findFirst({
+   688→      where: { id: exchangeShipmentId, companyId: ctx.company.id },
+   689→      include: {
+   690→        orderExchange: {
+   691→          select: { originalOrder: { select: { dispatchLocationId: true } } },
+   692→        },
+   693→      },
+   694→    })
+   695→    if (!shipment) {
+   696→      return { success: false, error: 'Exchange shipment not found.' }
+   697→    }
+   698→
+   699→    const nonCancellableStatuses = ['dispatched', 'delivered', 'cancelled']
+   700→    if (nonCancellableStatuses.includes(shipment.status)) {
+   701→      return {
+   702→        success: false,
+   703→        error: `Cannot cancel a shipment with status='${shipment.status}'.`,
+   704→      }
+   705→    }
+   706→
+   707→    // If stock was reserved, unreserve it
+   708→    if (shipment.status === 'confirmed') {
+   709→      const locationId = shipment.orderExchange.originalOrder.dispatchLocationId
+   710→      if (locationId) {
+   711→        await unreserveStockForOrder({
+   712→          orgVariantId: shipment.newOrgVariantId,
+   713→          locationId,
+   714→          organizationId: shipment.organizationId,
+   715→          companyId: shipment.companyId,
+   716→          employeeId: ctx.employee.id,
+   717→          quantity: shipment.quantity,
+   718→        })
+   719→      }
+   720→    }
+   721→
+   722→    await db.exchangeShipment.update({
+   723→      where: { id: exchangeShipmentId },
+   724→      data: {
+   725→        status: 'cancelled',
+   726→        cancelledAt: new Date(),
+   727→      },
+   728→    })
+   729→
+   730→    await insertAuditLog({
+   731→      action: 'exchange_shipment.cancelled',
+   732→      entityType: 'exchange_shipment',
+   733→      entityId: exchangeShipmentId,
+   734→      companyId: ctx.company.id,
+   735→      organizationId: ctx.company.organizationId,
+   736→      userId: ctx.user.id,
+   737→      employeeId: ctx.employee.id,
+   738→      newValues: { reason, previousStatus: shipment.status },
+   739→    })
+   740→
+   741→    await insertMetricEvent({
+   742→      companyId: ctx.company.id,
+   743→      entityType: 'exchange_shipment',
+   744→      entityId: exchangeShipmentId,
+   745→      metricKey: 'exchange_shipment.cancelled',
+   746→      numericValue: 1,
+   747→      dimensions: { reason },
+   748→    }).catch(() => {})
+   749→
+   750→    return { success: true }
+   751→  } catch (err) {
+   752→    return {
+   753→      success: false,
+   754→      error: err instanceof Error ? err.message : 'Failed to cancel exchange shipment',
+   755→    }
+   756→  }
+   757→}
+   758→
+   759→// ──────────────────────────────────────────────────────────────
+   760→// 6. listExchangeShipments
+   761→// ──────────────────────────────────────────────────────────────
+   762→
+   763→export interface ExchangeShipmentFilters {
+   764→  statuses?: string[]
+   765→  orderExchangeId?: string
+   766→  customerId?: string
+   767→  newOrgVariantId?: string
+   768→  trackingNumber?: string
+   769→  isBackordered?: boolean
+   770→  limit?: number
+   771→  offset?: number
+   772→}
+   773→
+   774→export async function listExchangeShipments(
+   775→  filters: ExchangeShipmentFilters,
+   776→): Promise<ActionResult<{
+   777→  shipments: Array<{
+   778→    id: string
+   779→    exchangeShipmentNumber: string
+   780→    status: string
+   781→    quantity: number
+   782→    invoiceAmount: number
+   783→    trackingNumber: string | null
+   784→    isPriorityBackorder: boolean
+   785→    backorderedAt: Date | null
+   786→    createdAt: Date
+   787→    customer: { id: string; name: string }
+   788→    newOrgVariant: { id: string; sku: string; product: { title: string } }
+   789→    orderExchange: { id: string; exchangeMethod: string; status: string }
+   790→  }>
+   791→  total: number
+   792→}>> {
+   793→  try {
+   794→    const ctx = await getWorkspace()
+   795→
+   796→    const where = {
+   797→      companyId: ctx.company.id,
+   798→      ...(filters.statuses && filters.statuses.length > 0 ? { status: { in: filters.statuses } } : {}),
+   799→      ...(filters.orderExchangeId ? { orderExchangeId: filters.orderExchangeId } : {}),
+   800→      ...(filters.customerId ? { customerId: filters.customerId } : {}),
+   801→      ...(filters.newOrgVariantId ? { newOrgVariantId: filters.newOrgVariantId } : {}),
+   802→      ...(filters.trackingNumber ? { trackingNumber: { contains: filters.trackingNumber, mode: 'insensitive' as const } } : {}),
+   803→      ...(filters.isBackordered ? { status: 'backordered' } : {}),
+   804→    }
+   805→
+   806→    const limit = Math.min(filters.limit ?? 50, 100)
+   807→    const offset = filters.offset ?? 0
+   808→
+   809→    const [shipments, total] = await Promise.all([
+   810→      db.exchangeShipment.findMany({
+   811→        where,
+   812→        include: {
+   813→          customer: { select: { id: true, name: true } },
+   814→          newOrgVariant: {
+   815→            select: {
+   816→              id: true,
+   817→              sku: true,
+   818→              product: { select: { title: true } },
+   819→            },
+   820→          },
+   821→          orderExchange: {
+   822→            select: { id: true, exchangeMethod: true, status: true },
+   823→          },
+   824→        },
+   825→        orderBy: { createdAt: 'desc' },
+   826→        take: limit,
+   827→        skip: offset,
+   828→      }),
+   829→      db.exchangeShipment.count({ where }),
+   830→    ])
+   831→
+   832→    return {
+   833→      success: true,
+   834→      data: {
+   835→        shipments: shipments.map((s) => ({
+   836→          id: s.id,
+   837→          exchangeShipmentNumber: s.exchangeShipmentNumber,
+   838→          status: s.status,
+   839→          quantity: s.quantity,
+   840→          invoiceAmount: Number(s.invoiceAmount),
+   841→          trackingNumber: s.trackingNumber,
+   842→          isPriorityBackorder: s.isPriorityBackorder,
+   843→          backorderedAt: s.backorderedAt,
+   844→          createdAt: s.createdAt,
+   845→          customer: s.customer,
+   846→          newOrgVariant: s.newOrgVariant,
+   847→          orderExchange: s.orderExchange,
+   848→        })),
+   849→        total,
+   850→      },
+   851→    }
+   852→  } catch (err) {
+   853→    return {
+   854→      success: false,
+   855→      error: err instanceof Error ? err.message : 'Failed to list exchange shipments',
+   856→    }
+   857→  }
+   858→}
+   859→
+   860→// ──────────────────────────────────────────────────────────────
+   861→// 7. getExchangeShipmentDetail
+   862→// ──────────────────────────────────────────────────────────────
+   863→
+   864→export async function getExchangeShipmentDetail(
+   865→  exchangeShipmentId: string,
+   866→): Promise<ActionResult> {
+   867→  try {
+   868→    const ctx = await getWorkspace()
+   869→
+   870→    const shipment = await db.exchangeShipment.findFirst({
+   871→      where: { id: exchangeShipmentId, companyId: ctx.company.id },
+   872→      include: {
+   873→        customer: {
+   874→          select: {
+   875→            id: true,
+   876→            name: true,
+   877→            email: true,
+   878→            isFlagged: true,
+   879→            phones: { select: { id: true, phoneRaw: true, isPrimary: true } },
+   880→          },
+   881→        },
+   882→        shippingAddress: true,
+   883→        shippingPhone: true,
+   884→        newOrgVariant: {
+   885→          select: {
+   886→            id: true,
+   887→            sku: true,
+   888→            costPrice: true,
+   889→            fulfillmentType: true,
+   890→            product: { select: { title: true } },
+   891→          },
+   892→        },
+   893→        orderExchange: {
+   894→          select: {
+   895→            id: true,
+   896→            exchangeMethod: true,
+   897→            status: true,
+   898→            reason: true,
+   899→            originalOrder: {
+   900→              select: { id: true, flowopsOrderNumber: true },
+   901→            },
+   902→          },
+   903→        },
+   904→        courierCompanyIntegration: {
+   905→          select: { id: true, provider: { select: { providerKey: true, providerName: true } } },
+   906→        },
+   907→        createdByEmployee: {
+   908→          select: { id: true, designation: true, user: { select: { fullName: true } } },
+   909→        },
+   910→      },
+   911→    })
+   912→
+   913→    if (!shipment) {
+   914→      return { success: false, error: 'Exchange shipment not found.' }
+   915→    }
+   916→
+   917→    return { success: true, data: shipment }
+   918→  } catch (err) {
+   919→    return {
+   920→      success: false,
+   921→      error: err instanceof Error ? err.message : 'Failed to get exchange shipment detail',
+   922→    }
+   923→  }
+   924→}
+   925→
+   926→// ──────────────────────────────────────────────────────────────
+   927→// 8. updateExchangeShipmentInvoiceAmount (staff edits invoice before dispatch)
+   928→// ──────────────────────────────────────────────────────────────
+   929→
+   930→export async function updateExchangeShipmentInvoiceAmount(
+   931→  exchangeShipmentId: string,
+   932→  invoiceAmount: number,
+   933→): Promise<ActionResult> {
+   934→  try {
+   935→    const ctx = await getWorkspace()
+   936→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   937→
+   938→    const shipment = await db.exchangeShipment.findFirst({
+   939→      where: { id: exchangeShipmentId, companyId: ctx.company.id },
+   940→    })
+   941→    if (!shipment) {
+   942→      return { success: false, error: 'Exchange shipment not found.' }
+   943→    }
+   944→    if (shipment.status === 'dispatched' || shipment.status === 'delivered' || shipment.status === 'cancelled') {
+   945→      return { success: false, error: 'Cannot edit invoice amount after dispatch.' }
+   946→    }
+   947→    if (invoiceAmount < 0) {
+   948→      return { success: false, error: 'Invoice amount must be 0 or positive.' }
+   949→    }
+   950→
+   951→    await db.exchangeShipment.update({
+   952→      where: { id: exchangeShipmentId },
+   953→      data: { invoiceAmount },
+   954→    })
+   955→
+   956→    await insertAuditLog({
+   957→      action: 'exchange_shipment.invoice_updated',
+   958→      entityType: 'exchange_shipment',
+   959→      entityId: exchangeShipmentId,
+   960→      companyId: ctx.company.id,
+   961→      organizationId: ctx.company.organizationId,
+   962→      userId: ctx.user.id,
+   963→      employeeId: ctx.employee.id,
+   964→      oldValues: { invoiceAmount: Number(shipment.invoiceAmount) },
+   965→      newValues: { invoiceAmount },
+   966→    })
+   967→
+   968→    return { success: true }
+   969→  } catch (err) {
+   970→    return {
+   971→      success: false,
+   972→      error: err instanceof Error ? err.message : 'Failed to update invoice amount',
+   973→    }
+   974→  }
+   975→}
+   976→

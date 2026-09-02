@@ -1,0 +1,1332 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import { api, FetchError } from '@/lib/api-client'
+     7→import { useAppStore, useCan } from '@/stores/app-store'
+     8→import { PERMISSIONS } from '@/lib/permissions'
+     9→import { PageHeader } from '@/components/layout/dashboard-shell'
+    10→import { Button } from '@/components/ui/button'
+    11→import { Input } from '@/components/ui/input'
+    12→import { Label } from '@/components/ui/label'
+    13→import { Textarea } from '@/components/ui/textarea'
+    14→import { Badge } from '@/components/ui/badge'
+    15→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+    16→import { Skeleton } from '@/components/ui/skeleton'
+    17→import { Progress } from '@/components/ui/progress'
+    18→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+    19→import {
+    20→  Select,
+    21→  SelectContent,
+    22→  SelectItem,
+    23→  SelectTrigger,
+    24→  SelectValue,
+    25→} from '@/components/ui/select'
+    26→import {
+    27→  Dialog,
+    28→  DialogContent,
+    29→  DialogDescription,
+    30→  DialogFooter,
+    31→  DialogHeader,
+    32→  DialogTitle,
+    33→} from '@/components/ui/dialog'
+    34→import {
+    35→  AlertDialog,
+    36→  AlertDialogAction,
+    37→  AlertDialogCancel,
+    38→  AlertDialogContent,
+    39→  AlertDialogDescription,
+    40→  AlertDialogFooter,
+    41→  AlertDialogHeader,
+    42→  AlertDialogTitle,
+    43→} from '@/components/ui/alert-dialog'
+    44→import {
+    45→  Table,
+    46→  TableBody,
+    47→  TableCell,
+    48→  TableHead,
+    49→  TableHeader,
+    50→  TableRow,
+    51→} from '@/components/ui/table'
+    52→import {
+    53→  ClipboardList,
+    54→  Plus,
+    55→  Search,
+    56→  RefreshCw,
+    57→  Loader2,
+    58→  PlayCircle,
+    59→  CheckCircle2,
+    60→  XCircle,
+    61→  Send,
+    62→  AlertTriangle,
+    63→  ArrowLeft,
+    64→} from 'lucide-react'
+    65→
+    66→// ─────────────────────────────────────────────────────────────────────────────
+    67→// Types
+    68→// ─────────────────────────────────────────────────────────────────────────────
+    69→
+    70→type CountType = 'full' | 'partial' | 'spot'
+    71→type CountStatus =
+    72→  | 'scheduled'
+    73→  | 'in_progress'
+    74→  | 'pending_review'
+    75→  | 'approved'
+    76→  | 'cancelled'
+    77→
+    78→interface CycleCountRow {
+    79→  id: string
+    80→  countName: string
+    81→  countType: CountType
+    82→  status: CountStatus
+    83→  location: string
+    84→  scheduledAt: string
+    85→  startedAt: string | null
+    86→  completedAt: string | null
+    87→  approvedAt: string | null
+    88→  totalDiscrepancies: number
+    89→  totalVarianceValue: number
+    90→  itemCount: number
+    91→}
+    92→
+    93→interface CycleCountsResponse {
+    94→  counts: CycleCountRow[]
+    95→}
+    96→
+    97→interface CycleCountItemRow {
+    98→  id: string
+    99→  variant: {
+   100→    id: string
+   101→    sku: string
+   102→    productTitle: string
+   103→  }
+   104→  systemQuantity: number
+   105→  countedQuantity: number | null
+   106→  discrepancy: number | null
+   107→  discrepancyValue: number | null
+   108→  discrepancyReason: string | null
+   109→  adjustmentApproved: boolean
+   110→  inventoryTxnId?: string | null
+   111→  notes: string | null
+   112→  countedAt: string | null
+   113→}
+   114→
+   115→interface CycleCountDetail {
+   116→  id: string
+   117→  countName: string
+   118→  countType: CountType
+   119→  status: CountStatus
+   120→  location: { id: string; name: string }
+   121→  scheduledAt: string
+   122→  startedAt: string | null
+   123→  completedAt: string | null
+   124→  approvedAt: string | null
+   125→  totalDiscrepancies: number
+   126→  totalVarianceValue: number
+   127→  notes: string | null
+   128→  items: CycleCountItemRow[]
+   129→}
+   130→
+   131→interface CycleCountDetailResponse {
+   132→  count: CycleCountDetail
+   133→}
+   134→
+   135→interface InventoryLocation {
+   136→  id: string
+   137→  name: string
+   138→}
+   139→interface LocationsResponse {
+   140→  locations: InventoryLocation[]
+   141→}
+   142→
+   143→interface CreatePayload {
+   144→  location_id: string
+   145→  count_name: string
+   146→  count_type: CountType
+   147→  scheduled_at?: string
+   148→  notes?: string
+   149→}
+   150→
+   151→interface SubmitCountsPayload {
+   152→  action: 'submit_counts'
+   153→  counted_items: Array<{
+   154→    item_id: string
+   155→    counted_quantity: number
+   156→    discrepancy_reason?: string
+   157→    notes?: string
+   158→  }>
+   159→}
+   160→
+   161→interface ActionPayload {
+   162→  action: 'start' | 'submit_counts' | 'approve' | 'cancel'
+   163→  counted_items?: SubmitCountsPayload['counted_items']
+   164→}
+   165→
+   166→// ─────────────────────────────────────────────────────────────────────────────
+   167→// Display maps
+   168→// ─────────────────────────────────────────────────────────────────────────────
+   169→
+   170→const STATUS_BADGE: Record<CountStatus, { label: string; className: string }> = {
+   171→  scheduled: { label: 'Scheduled', className: 'bg-gray-100 text-gray-700 border-gray-200' },
+   172→  in_progress: {
+   173→    label: 'In Progress',
+   174→    className: 'bg-sky-50 text-sky-700 border-sky-200',
+   175→  },
+   176→  pending_review: {
+   177→    label: 'Pending Review',
+   178→    className: 'bg-amber-50 text-amber-700 border-amber-200',
+   179→  },
+   180→  approved: {
+   181→    label: 'Approved',
+   182→    className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+   183→  },
+   184→  cancelled: { label: 'Cancelled', className: 'bg-rose-50 text-rose-700 border-rose-200' },
+   185→}
+   186→
+   187→const COUNT_TYPE_LABEL: Record<CountType, string> = {
+   188→  full: 'Full Count',
+   189→  partial: 'Partial',
+   190→  spot: 'Spot Check',
+   191→}
+   192→
+   193→/**
+   194→ * Discrepancy reason options for cycle count items.
+   195→ * These values are sent to the backend and drive the approve-time behavior:
+   196→ *   - theft_suspected / unknown → shortage is QUARANTINED + a missing
+   197→ *     stock_loss_record is auto-created (investigation opens)
+   198→ *   - recording_error / transfer_not_recorded / damage_not_recorded /
+   199→ *     no_discrepancy → standard cycle_count_adjust (on_hand set to counted)
+   200→ *   - surplus (positive discrepancy) → standard adjust (on_hand set to counted)
+   201→ *
+   202→ * The backend reads these from item.discrepancyReason in the approve action.
+   203→ */
+   204→type DiscrepancyReason =
+   205→  | 'recording_error'
+   206→  | 'theft_suspected'
+   207→  | 'damage_not_recorded'
+   208→  | 'transfer_not_recorded'
+   209→  | 'unknown'
+   210→  | 'no_discrepancy'
+   211→
+   212→const DISCREPANCY_REASONS: Array<{
+   213→  value: DiscrepancyReason
+   214→  label: string
+   215→  hint: string
+   216→}> = [
+   217→  { value: 'no_discrepancy', label: 'No discrepancy', hint: 'Count matches — no action needed.' },
+   218→  { value: 'recording_error', label: 'Recording error', hint: 'Data-entry mistake in a prior receive/adjust/transfer.' },
+   219→  { value: 'transfer_not_recorded', label: 'Transfer not recorded', hint: 'Stock moved to/from another location but the transfer was not logged.' },
+   220→  { value: 'damage_not_recorded', label: 'Damage not recorded', hint: 'Units were damaged but no stock-loss report was filed.' },
+   221→  { value: 'theft_suspected', label: 'Theft suspected', hint: 'Shortage appears stolen — will quarantine + open a missing-stock investigation on approval.' },
+   222→  { value: 'unknown', label: 'Unknown', hint: 'Cause cannot be determined — will quarantine + open a missing-stock investigation on approval.' },
+   223→]
+   224→
+   225→const DISCREPANCY_REASON_LABEL: Record<DiscrepancyReason, string> = {
+   226→  recording_error: 'Recording error',
+   227→  theft_suspected: 'Theft suspected',
+   228→  damage_not_recorded: 'Damage not recorded',
+   229→  transfer_not_recorded: 'Transfer not recorded',
+   230→  unknown: 'Unknown',
+   231→  no_discrepancy: 'No discrepancy',
+   232→}
+   233→
+   234→const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
+   235→function formatPKR(n: number): string {
+   236→  return `Rs. ${PKR.format(n)}`
+   237→}
+   238→
+   239→function formatDate(iso: string | null): string {
+   240→  if (!iso) return '—'
+   241→  try {
+   242→    return new Date(iso).toLocaleDateString('en-PK', {
+   243→      day: '2-digit',
+   244→      month: 'short',
+   245→      year: 'numeric',
+   246→    })
+   247→  } catch {
+   248→    return iso
+   249→  }
+   250→}
+   251→
+   252→function getErrorMessage(err: unknown): string {
+   253→  if (err instanceof FetchError) return err.message
+   254→  if (err instanceof Error) return err.message
+   255→  return 'Something went wrong. Please try again.'
+   256→}
+   257→
+   258→// ─────────────────────────────────────────────────────────────────────────────
+   259→// Main view
+   260→// ─────────────────────────────────────────────────────────────────────────────
+   261→
+   262→export function CycleCountsView() {
+   263→  const can = useCan()
+   264→  const queryClient = useQueryClient()
+   265→
+   266→  const [search, setSearch] = useState('')
+   267→  const [statusFilter, setStatusFilter] = useState<string>('all')
+   268→  const [createOpen, setCreateOpen] = useState(false)
+   269→  const [selectedId, setSelectedId] = useState<string | null>(null)
+   270→  const [cancelTarget, setCancelTarget] = useState<CycleCountRow | null>(null)
+   271→
+   272→  const canManage = can(PERMISSIONS.INVENTORY_CYCLE_COUNT)
+   273→
+   274→  const countsQuery = useQuery<CycleCountsResponse>({
+   275→    queryKey: ['cycle-counts'],
+   276→    queryFn: () => api.get<CycleCountsResponse>('/api/cycle-counts'),
+   277→    staleTime: 15_000,
+   278→  })
+   279→
+   280→  const counts = countsQuery.data?.counts ?? []
+   281→
+   282→  const filtered = useMemo(() => {
+   283→    return counts.filter((c) => {
+   284→      if (statusFilter !== 'all' && c.status !== statusFilter) return false
+   285→      if (search) {
+   286→        const q = search.toLowerCase()
+   287→        return (
+   288→          c.countName.toLowerCase().includes(q) ||
+   289→          c.location.toLowerCase().includes(q)
+   290→        )
+   291→      }
+   292→      return true
+   293→    })
+   294→  }, [counts, statusFilter, search])
+   295→
+   296→  const invalidateAll = (id?: string) => {
+   297→    void queryClient.invalidateQueries({ queryKey: ['cycle-counts'] })
+   298→    if (id) {
+   299→      void queryClient.invalidateQueries({ queryKey: ['cycle-count', id] })
+   300→    }
+   301→    void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+   302→  }
+   303→
+   304→  // ── Action mutations ─────────────────────────────────────────────────────
+   305→  const startMutation = useMutation({
+   306→    mutationFn: async (id: string) =>
+   307→      api.patch(`/api/cycle-counts/${id}`, { action: 'start' }),
+   308→    onSuccess: () => {
+   309→      toast.success('Count started. Inventory snapshot captured.')
+   310→      if (selectedId) invalidateAll(selectedId)
+   311→      else invalidateAll()
+   312→    },
+   313→    onError: (err) => toast.error(getErrorMessage(err)),
+   314→  })
+   315→
+   316→  const approveMutation = useMutation({
+   317→    mutationFn: async (id: string) =>
+   318→      api.patch(`/api/cycle-counts/${id}`, { action: 'approve' }),
+   319→    onSuccess: () => {
+   320→      toast.success('Count approved. Adjustments applied to inventory.')
+   321→      if (selectedId) invalidateAll(selectedId)
+   322→    },
+   323→    onError: (err) => toast.error(getErrorMessage(err)),
+   324→  })
+   325→
+   326→  const cancelMutation = useMutation({
+   327→    mutationFn: async (id: string) =>
+   328→      api.patch(`/api/cycle-counts/${id}`, { action: 'cancel' }),
+   329→    onSuccess: () => {
+   330→      toast.success('Count cancelled.')
+   331→      setCancelTarget(null)
+   332→      if (selectedId) invalidateAll(selectedId)
+   333→    },
+   334→    onError: (err) => toast.error(getErrorMessage(err)),
+   335→  })
+   336→
+   337→  return (
+   338→    <div className="space-y-6">
+   339→      <PageHeader
+   340→        title="Cycle Counts"
+   341→        description="Reconcile system stock against physical counts. Discrepancies become inventory adjustments on approval."
+   342→        actions={
+   343→          <div className="flex items-center gap-2">
+   344→            <Button
+   345→              variant="outline"
+   346→              size="sm"
+   347→              onClick={() => countsQuery.refetch()}
+   348→              disabled={countsQuery.isFetching}
+   349→            >
+   350→              <RefreshCw
+   351→                className={countsQuery.isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'}
+   352→              />
+   353→              Refresh
+   354→            </Button>
+   355→            {canManage && (
+   356→              <Button onClick={() => setCreateOpen(true)}>
+   357→                <Plus className="h-4 w-4" /> New Cycle Count
+   358→              </Button>
+   359→            )}
+   360→          </div>
+   361→        }
+   362→      />
+   363→
+   364→      {/* ── Filter bar ─────────────────────────────────────────────────────── */}
+   365→      <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+   366→        <div className="relative flex-1">
+   367→          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+   368→          <Input
+   369→            placeholder="Search count name or location…"
+   370→            className="pl-9"
+   371→            value={search}
+   372→            onChange={(e) => setSearch(e.target.value)}
+   373→          />
+   374→        </div>
+   375→        <Select value={statusFilter} onValueChange={setStatusFilter}>
+   376→          <SelectTrigger className="w-full sm:w-48">
+   377→            <SelectValue placeholder="All statuses" />
+   378→          </SelectTrigger>
+   379→          <SelectContent>
+   380→            <SelectItem value="all">All statuses</SelectItem>
+   381→            <SelectItem value="scheduled">Scheduled</SelectItem>
+   382→            <SelectItem value="in_progress">In Progress</SelectItem>
+   383→            <SelectItem value="pending_review">Pending Review</SelectItem>
+   384→            <SelectItem value="approved">Approved</SelectItem>
+   385→            <SelectItem value="cancelled">Cancelled</SelectItem>
+   386→          </SelectContent>
+   387→        </Select>
+   388→      </div>
+   389→
+   390→      <div className="grid gap-6 lg:grid-cols-5">
+   391→        {/* ── Left: counts list ─────────────────────────────────────────── */}
+   392→        <div className="lg:col-span-2 space-y-3">
+   393→          {countsQuery.isLoading ? (
+   394→            <Card>
+   395→              <CardContent className="p-3 space-y-2">
+   396→                {Array.from({ length: 5 }).map((_, i) => (
+   397→                  <Skeleton key={i} className="h-16" />
+   398→                ))}
+   399→              </CardContent>
+   400→            </Card>
+   401→          ) : countsQuery.isError ? (
+   402→            <Card>
+   403→              <CardContent className="p-10 text-center">
+   404→                <p className="text-sm text-muted-foreground mb-4">
+   405→                  Couldn&apos;t load cycle counts. {getErrorMessage(countsQuery.error)}
+   406→                </p>
+   407→                <Button variant="outline" onClick={() => countsQuery.refetch()}>
+   408→                  Try again
+   409→                </Button>
+   410→              </CardContent>
+   411→            </Card>
+   412→          ) : filtered.length === 0 ? (
+   413→            <EmptyState
+   414→              hasCounts={counts.length > 0}
+   415→              canManage={canManage}
+   416→              onCreate={() => setCreateOpen(true)}
+   417→            />
+   418→          ) : (
+   419→            <div className="space-y-2 max-h-[70vh] overflow-y-auto scrollbar-thin pr-1">
+   420→              {filtered.map((c) => {
+   421→                const badge = STATUS_BADGE[c.status]
+   422→                const isSelected = c.id === selectedId
+   423→                return (
+   424→                  <button
+   425→                    type="button"
+   426→                    key={c.id}
+   427→                    onClick={() => setSelectedId(c.id)}
+   428→                    className={`w-full text-left rounded-md border p-3 transition-colors ${
+   429→                      isSelected
+   430→                        ? 'border-primary bg-primary/5'
+   431→                        : 'hover:bg-muted/50 border-border'
+   432→                    }`}
+   433→                  >
+   434→                    <div className="flex items-start justify-between gap-2 mb-1">
+   435→                      <div className="min-w-0">
+   436→                        <p className="font-medium text-sm truncate">{c.countName}</p>
+   437→                        <p className="text-xs text-muted-foreground">{c.location}</p>
+   438→                      </div>
+   439→                      <Badge variant="outline" className={badge.className}>
+   440→                        {badge.label}
+   441→                      </Badge>
+   442→                    </div>
+   443→                    <div className="flex items-center justify-between text-xs text-muted-foreground mt-2">
+   444→                      <span>
+   445→                        {c.itemCount} item{c.itemCount === 1 ? '' : 's'} ·{' '}
+   446→                        {COUNT_TYPE_LABEL[c.countType]}
+   447→                      </span>
+   448→                      {c.status === 'approved' || c.status === 'pending_review' ? (
+   449→                        <span
+   450→                          className={`tabular-nums font-medium ${
+   451→                            c.totalDiscrepancies > 0
+   452→                              ? 'text-amber-700'
+   453→                              : 'text-emerald-700'
+   454→                          }`}
+   455→                        >
+   456→                          {c.totalDiscrepancies} discrepancies · {formatPKR(c.totalVarianceValue)}
+   457→                        </span>
+   458→                      ) : (
+   459→                        <span className="whitespace-nowrap">{formatDate(c.scheduledAt)}</span>
+   460→                      )}
+   461→                    </div>
+   462→                  </button>
+   463→                )
+   464→              })}
+   465→            </div>
+   466→          )}
+   467→        </div>
+   468→
+   469→        {/* ── Right: detail or empty ────────────────────────────────────── */}
+   470→        <div className="lg:col-span-3">
+   471→          {selectedId ? (
+   472→            <CycleCountDetailPanel
+   473→              countId={selectedId}
+   474→              onBack={() => setSelectedId(null)}
+   475→              onStart={() => startMutation.mutate(selectedId)}
+   476→              onApprove={() => approveMutation.mutate(selectedId)}
+   477→              onCancel={() => {
+   478→                const target = counts.find((c) => c.id === selectedId)
+   479→                if (target) setCancelTarget(target)
+   480→              }}
+   481→              starting={startMutation.isPending}
+   482→              approving={approveMutation.isPending}
+   483→              canManage={canManage}
+   484→            />
+   485→          ) : (
+   486→            <Card>
+   487→              <CardContent className="p-10 text-center">
+   488→                <ClipboardList className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
+   489→                <p className="text-sm text-muted-foreground">
+   490→                  Select a cycle count on the left to see its items and take action.
+   491→                </p>
+   492→              </CardContent>
+   493→            </Card>
+   494→          )}
+   495→        </div>
+   496→      </div>
+   497→
+   498→      {/* ── Create dialog ─────────────────────────────────────────────────── */}
+   499→      {canManage && (
+   500→        <CreateCountDialog
+   501→          open={createOpen}
+   502→          onOpenChange={setCreateOpen}
+   503→          onSuccess={() => {
+   504→            void queryClient.invalidateQueries({ queryKey: ['cycle-counts'] })
+   505→            setCreateOpen(false)
+   506→          }}
+   507→        />
+   508→      )}
+   509→
+   510→      {/* ── Cancel dialog ─────────────────────────────────────────────────── */}
+   511→      <AlertDialog
+   512→        open={!!cancelTarget}
+   513→        onOpenChange={(open) => {
+   514→          if (!open) setCancelTarget(null)
+   515→        }}
+   516→      >
+   517→        <AlertDialogContent>
+   518→          <AlertDialogHeader>
+   519→            <AlertDialogTitle>Reject for recount?</AlertDialogTitle>
+   520→            <AlertDialogDescription>
+   521→              {cancelTarget && (
+   522→                <>
+   523→                  <strong>{cancelTarget.countName}</strong> will be cancelled. You can create a new
+   524→                  count if you need to recount this location.
+   525→                </>
+   526→              )}
+   527→            </AlertDialogDescription>
+   528→          </AlertDialogHeader>
+   529→          <AlertDialogFooter>
+   530→            <AlertDialogCancel disabled={cancelMutation.isPending}>Keep</AlertDialogCancel>
+   531→            <AlertDialogAction
+   532→              className="bg-rose-600 hover:bg-rose-700"
+   533→              disabled={cancelMutation.isPending}
+   534→              onClick={(e) => {
+   535→                e.preventDefault()
+   536→                if (cancelTarget) cancelMutation.mutate(cancelTarget.id)
+   537→              }}
+   538→            >
+   539→              {cancelMutation.isPending ? (
+   540→                <>
+   541→                  <Loader2 className="h-4 w-4 animate-spin" /> Cancelling…
+   542→                </>
+   543→              ) : (
+   544→                <>
+   545→                  <XCircle className="h-4 w-4" /> Reject &amp; Cancel
+   546→                </>
+   547→              )}
+   548→            </AlertDialogAction>
+   549→          </AlertDialogFooter>
+   550→        </AlertDialogContent>
+   551→      </AlertDialog>
+   552→    </div>
+   553→  )
+   554→}
+   555→
+   556→// ─────────────────────────────────────────────────────────────────────────────
+   557→// Cycle count detail panel
+   558→// ─────────────────────────────────────────────────────────────────────────────
+   559→
+   560→function CycleCountDetailPanel({
+   561→  countId,
+   562→  onBack,
+   563→  onStart,
+   564→  onApprove,
+   565→  onCancel,
+   566→  starting,
+   567→  approving,
+   568→  canManage,
+   569→}: {
+   570→  countId: string
+   571→  onBack: () => void
+   572→  onStart: () => void
+   573→  onApprove: () => void
+   574→  onCancel: () => void
+   575→  starting: boolean
+   576→  approving: boolean
+   577→  canManage: boolean
+   578→}) {
+   579→  const detailQuery = useQuery<CycleCountDetailResponse>({
+   580→    queryKey: ['cycle-count', countId],
+   581→    queryFn: () => api.get<CycleCountDetailResponse>(`/api/cycle-counts/${countId}`),
+   582→    staleTime: 10_000,
+   583→  })
+   584→
+   585→  const count = detailQuery.data?.count
+   586→
+   587→  if (detailQuery.isLoading) {
+   588→    return (
+   589→      <Card>
+   590→        <CardContent className="p-5 space-y-3">
+   591→          <Skeleton className="h-8 w-1/2" />
+   592→          <Skeleton className="h-32" />
+   593→        </CardContent>
+   594→      </Card>
+   595→    )
+   596→  }
+   597→
+   598→  if (detailQuery.isError || !count) {
+   599→    return (
+   600→      <Card>
+   601→        <CardContent className="p-10 text-center">
+   602→          <p className="text-sm text-muted-foreground mb-4">
+   603→            {detailQuery.isError ? getErrorMessage(detailQuery.error) : 'Count not found.'}
+   604→          </p>
+   605→          <Button variant="outline" onClick={() => detailQuery.refetch()}>
+   606→            Try again
+   607→          </Button>
+   608→        </CardContent>
+   609→      </Card>
+   610→    )
+   611→  }
+   612→
+   613→  const badge = STATUS_BADGE[count.status]
+   614→  const showActionButtons = canManage && count.status !== 'cancelled' && count.status !== 'approved'
+   615→
+   616→  return (
+   617→    <Card>
+   618→      <CardHeader className="pb-3">
+   619→        <div className="flex items-start justify-between gap-2">
+   620→          <div className="min-w-0">
+   621→            <CardTitle className="text-base flex items-center gap-2">
+   622→              <Button size="sm" variant="ghost" onClick={onBack} className="lg:hidden -ml-2">
+   623→                <ArrowLeft className="h-4 w-4" />
+   624→              </Button>
+   625→              {count.countName}
+   626→            </CardTitle>
+   627→            <p className="text-xs text-muted-foreground mt-0.5">
+   628→              {count.location.name} · {COUNT_TYPE_LABEL[count.countType]}
+   629→            </p>
+   630→          </div>
+   631→          <Badge variant="outline" className={badge.className}>
+   632→            {badge.label}
+   633→          </Badge>
+   634→        </div>
+   635→        {(count.status === 'approved' || count.status === 'pending_review') && (
+   636→          <div className="grid grid-cols-2 gap-3 mt-3">
+   637→            <div className="rounded-md bg-muted/40 p-2">
+   638→              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+   639→                Discrepancies
+   640→              </p>
+   641→              <p
+   642→                className={`text-lg font-semibold tabular-nums ${
+   643→                  count.totalDiscrepancies > 0 ? 'text-amber-700' : 'text-emerald-700'
+   644→                }`}
+   645→              >
+   646→                {count.totalDiscrepancies}
+   647→              </p>
+   648→            </div>
+   649→            <div className="rounded-md bg-muted/40 p-2">
+   650→              <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+   651→                Variance value
+   652→              </p>
+   653→              <p
+   654→                className={`text-lg font-semibold tabular-nums ${
+   655→                  count.totalVarianceValue < 0 ? 'text-rose-700' : 'text-amber-700'
+   656→                }`}
+   657→              >
+   658→                {formatPKR(count.totalVarianceValue)}
+   659→              </p>
+   660→            </div>
+   661→          </div>
+   662→        )}
+   663→      </CardHeader>
+   664→      <CardContent className="space-y-4">
+   665→        {/* ── Status-aware actions ────────────────────────────────────────── */}
+   666→        {showActionButtons && (
+   667→          <div className="flex flex-wrap items-center gap-2">
+   668→            {count.status === 'scheduled' && (
+   669→              <Button onClick={onStart} disabled={starting}>
+   670→                {starting ? (
+   671→                  <>
+   672→                    <Loader2 className="h-4 w-4 animate-spin" /> Starting…
+   673→                  </>
+   674→                ) : (
+   675→                  <>
+   676→                    <PlayCircle className="h-4 w-4" /> Start Count
+   677→                  </>
+   678→                )}
+   679→              </Button>
+   680→            )}
+   681→            {count.status === 'in_progress' && (
+   682→              <SubmitCountsButton countId={count.id} items={count.items} />
+   683→            )}
+   684→            {count.status === 'pending_review' && (
+   685→              <>
+   686→                <Button onClick={onApprove} disabled={approving}>
+   687→                  {approving ? (
+   688→                    <>
+   689→                      <Loader2 className="h-4 w-4 animate-spin" /> Approving…
+   690→                    </>
+   691→                  ) : (
+   692→                    <>
+   693→                      <CheckCircle2 className="h-4 w-4" /> Approve &amp; Apply Adjustments
+   694→                    </>
+   695→                  )}
+   696→                </Button>
+   697→                <Button
+   698→                  variant="outline"
+   699→                  className="text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+   700→                  onClick={onCancel}
+   701→                >
+   702→                  <XCircle className="h-4 w-4" /> Reject for Recount
+   703→                </Button>
+   704→              </>
+   705→            )}
+   706→          </div>
+   707→        )}
+   708→
+   709→        {/* ── Items table ──────────────────────────────────────────────────── */}
+   710→        {count.items.length === 0 ? (
+   711→          <div className="text-center py-8">
+   712→            <ClipboardList className="h-8 w-8 mx-auto text-muted-foreground/40 mb-2" />
+   713→            <p className="text-sm text-muted-foreground">
+   714→              {count.status === 'scheduled'
+   715→                ? 'No items yet. Start the count to capture a snapshot of current stock.'
+   716→                : 'No items in this count.'}
+   717→            </p>
+   718→          </div>
+   719→        ) : (
+   720→          <div className="rounded-md border overflow-x-auto max-h-[60vh] overflow-y-auto scrollbar-thin">
+   721→            <Table>
+   722→              <TableHeader className="sticky top-0 bg-background">
+   723→                <TableRow>
+   724→                  <TableHead>Variant</TableHead>
+   725→                  <TableHead className="text-right">System</TableHead>
+   726→                  <TableHead className="text-right">Counted</TableHead>
+   727→                  <TableHead className="text-right">Discrepancy</TableHead>
+   728→                  {(count.status === 'pending_review' || count.status === 'approved') && (
+   729→                    <TableHead>Reason</TableHead>
+   730→                  )}
+   731→                  {count.status === 'pending_review' && <TableHead>Status</TableHead>}
+   732→                  {count.status === 'approved' && <TableHead>Adjustment</TableHead>}
+   733→                </TableRow>
+   734→              </TableHeader>
+   735→              <TableBody>
+   736→                {count.items.map((item) => {
+   737→                  const disc = item.discrepancy
+   738→                  const reason = item.discrepancyReason as DiscrepancyReason | null
+   739→                  const isQuarantined = reason === 'theft_suspected' || reason === 'unknown'
+   740→                  return (
+   741→                    <TableRow key={item.id}>
+   742→                      <TableCell>
+   743→                        <div className="flex flex-col">
+   744→                          <span className="text-sm font-medium">{item.variant.productTitle}</span>
+   745→                          <span className="text-xs text-muted-foreground font-mono">
+   746→                            {item.variant.sku}
+   747→                          </span>
+   748→                          {item.notes && (
+   749→                            <span className="text-[10px] text-muted-foreground mt-0.5 italic">
+   750→                              {item.notes}
+   751→                            </span>
+   752→                          )}
+   753→                        </div>
+   754→                      </TableCell>
+   755→                      <TableCell className="text-right tabular-nums text-muted-foreground">
+   756→                        {item.systemQuantity}
+   757→                      </TableCell>
+   758→                      <TableCell className="text-right tabular-nums">
+   759→                        {item.countedQuantity === null ? (
+   760→                          <span className="text-muted-foreground">—</span>
+   761→                        ) : (
+   762→                          item.countedQuantity
+   763→                        )}
+   764→                      </TableCell>
+   765→                      <TableCell className="text-right tabular-nums">
+   766→                        {disc === null ? (
+   767→                          <span className="text-muted-foreground">—</span>
+   768→                        ) : disc === 0 ? (
+   769→                          <span className="text-emerald-600 font-medium">0</span>
+   770→                        ) : (
+   771→                          <span
+   772→                            className={`font-medium ${disc > 0 ? 'text-emerald-600' : 'text-rose-600'}`}
+   773→                          >
+   774→                            {disc > 0 ? '+' : ''}
+   775→                            {disc}
+   776→                          </span>
+   777→                        )}
+   778→                      </TableCell>
+   779→                      {(count.status === 'pending_review' || count.status === 'approved') && (
+   780→                        <TableCell>
+   781→                          {disc !== null && disc !== 0 && reason ? (
+   782→                            <Badge
+   783→                              variant="outline"
+   784→                              className={`text-[10px] ${
+   785→                                isQuarantined
+   786→                                  ? 'bg-rose-50 text-rose-700 border-rose-200'
+   787→                                  : 'bg-amber-50 text-amber-700 border-amber-200'
+   788→                              }`}
+   789→                            >
+   790→                              {DISCREPANCY_REASON_LABEL[reason] ?? reason}
+   791→                            </Badge>
+   792→                          ) : (
+   793→                            <span className="text-xs text-muted-foreground">—</span>
+   794→                          )}
+   795→                        </TableCell>
+   796→                      )}
+   797→                      {count.status === 'pending_review' && (
+   798→                        <TableCell>
+   799→                          {disc !== null && disc !== 0 ? (
+   800→                            isQuarantined ? (
+   801→                              <Badge
+   802→                                variant="outline"
+   803→                                className="text-[10px] bg-rose-50 text-rose-700 border-rose-200"
+   804→                              >
+   805→                                Quarantine on approve
+   806→                              </Badge>
+   807→                            ) : (
+   808→                              <Badge
+   809→                                variant="outline"
+   810→                                className="text-[10px] bg-amber-50 text-amber-700 border-amber-200"
+   811→                              >
+   812→                                Pending
+   813→                              </Badge>
+   814→                            )
+   815→                          ) : disc === 0 ? (
+   816→                            <Badge
+   817→                              variant="outline"
+   818→                              className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200"
+   819→                            >
+   820→                              Match
+   821→                            </Badge>
+   822→                          ) : (
+   823→                            <span className="text-xs text-muted-foreground">—</span>
+   824→                          )}
+   825→                        </TableCell>
+   826→                      )}
+   827→                      {count.status === 'approved' && (
+   828→                        <TableCell>
+   829→                          {disc === null || disc === 0 ? (
+   830→                            <span className="text-xs text-muted-foreground">—</span>
+   831→                          ) : item.adjustmentApproved ? (
+   832→                            <div className="flex flex-col gap-0.5">
+   833→                              <Badge
+   834→                                variant="outline"
+   835→                                className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200 w-fit"
+   836→                              >
+   837→                                Applied
+   838→                              </Badge>
+   839→                              {isQuarantined && (
+   840→                                <span className="text-[10px] text-rose-600">
+   841→                                  + Missing stock report opened
+   842→                                </span>
+   843→                              )}
+   844→                            </div>
+   845→                          ) : (
+   846→                            <Badge
+   847→                              variant="outline"
+   848→                              className="text-[10px] bg-gray-100 text-gray-600 border-gray-200 w-fit"
+   849→                            >
+   850→                              Not applied
+   851→                            </Badge>
+   852→                          )}
+   853→                        </TableCell>
+   854→                      )}
+   855→                    </TableRow>
+   856→                  )
+   857→                })}
+   858→              </TableBody>
+   859→            </Table>
+   860→          </div>
+   861→        )}
+   862→
+   863→        {count.notes && (
+   864→          <div>
+   865→            <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-1">Notes</p>
+   866→            <p className="text-xs text-foreground whitespace-pre-wrap">{count.notes}</p>
+   867→          </div>
+   868→        )}
+   869→      </CardContent>
+   870→    </Card>
+   871→  )
+   872→}
+   873→
+   874→// ─────────────────────────────────────────────────────────────────────────────
+   875→// Submit counts button (in_progress → pending_review)
+   876→// Opens an inline dialog where each item's counted qty can be entered
+   877→// ─────────────────────────────────────────────────────────────────────────────
+   878→
+   879→function SubmitCountsButton({
+   880→  countId,
+   881→  items,
+   882→}: {
+   883→  countId: string
+   884→  items: CycleCountItemRow[]
+   885→}) {
+   886→  const queryClient = useQueryClient()
+   887→  const [open, setOpen] = useState(false)
+   888→  const [counts, setCounts] = useState<Record<string, string>>({})
+   889→  // Per-item reason + notes — only meaningful for discrepant rows
+   890→  const [reasons, setReasons] = useState<Record<string, DiscrepancyReason>>({})
+   891→  const [notes, setNotes] = useState<Record<string, string>>({})
+   892→
+   893→  useEffect(() => {
+   894→    if (open) {
+   895→      const initCounts: Record<string, string> = {}
+   896→      const initReasons: Record<string, DiscrepancyReason> = {}
+   897→      const initNotes: Record<string, string> = {}
+   898→      for (const i of items) {
+   899→        initCounts[i.id] = i.countedQuantity === null ? String(i.systemQuantity) : String(i.countedQuantity)
+   900→        // Preserve existing reason if re-opening after a previous submit attempt
+   901→        initReasons[i.id] = (i.discrepancyReason as DiscrepancyReason) ?? 'no_discrepancy'
+   902→        initNotes[i.id] = i.notes ?? ''
+   903→      }
+   904→      setCounts(initCounts)
+   905→      setReasons(initReasons)
+   906→      setNotes(initNotes)
+   907→    }
+   908→  }, [open, items])
+   909→
+   910→  const submitMutation = useMutation({
+   911→    mutationFn: async (payload: SubmitCountsPayload) =>
+   912→      api.patch(`/api/cycle-counts/${countId}`, payload),
+   913→    onSuccess: (_data, vars) => {
+   914→      const totalDisc = vars.counted_items.reduce((s, i) => s + i.counted_quantity, 0)
+   915→      toast.success(`Submitted ${totalDisc} units counted. Awaiting review.`)
+   916→      void queryClient.invalidateQueries({ queryKey: ['cycle-count', countId] })
+   917→      void queryClient.invalidateQueries({ queryKey: ['cycle-counts'] })
+   918→      setOpen(false)
+   919→    },
+   920→    onError: (err) => toast.error(getErrorMessage(err)),
+   921→  })
+   922→
+   923→  // Build a list of discrepant item IDs (counted != system)
+   924→  const discrepantItems = items.filter((i) => {
+   925→    const c = parseInt(counts[i.id] ?? '0', 10) || 0
+   926→    return c !== i.systemQuantity
+   927→  })
+   928→  const totalDiscrepancies = discrepantItems.length
+   929→
+   930→  // Items requiring a reason (shortage with theft/unknown triggers quarantine)
+   931→  const itemsNeedingReason = discrepantItems.filter((i) => {
+   932→    const c = parseInt(counts[i.id] ?? '0', 10) || 0
+   933→    return c < i.systemQuantity // shortage
+   934→  })
+   935→
+   936→  return (
+   937→    <>
+   938→      <Button onClick={() => setOpen(true)}>
+   939→        <Send className="h-4 w-4" /> Submit for Review
+   940→      </Button>
+   941→      <Dialog open={open} onOpenChange={setOpen}>
+   942→        <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto scrollbar-thin">
+   943→          <DialogHeader>
+   944→            <DialogTitle>Submit counted quantities</DialogTitle>
+   945→            <DialogDescription>
+   946→              Enter the actual counted quantity for each item. Discrepancies require a reason — theft/unknown will open a missing-stock investigation on approval.
+   947→            </DialogDescription>
+   948→          </DialogHeader>
+   949→          <div className="rounded-md border max-h-[50vh] overflow-y-auto scrollbar-thin">
+   950→            <Table>
+   951→              <TableHeader className="sticky top-0 bg-background z-10">
+   952→                <TableRow>
+   953→                  <TableHead>Variant</TableHead>
+   954→                  <TableHead className="text-right">System</TableHead>
+   955→                  <TableHead className="w-24">Counted</TableHead>
+   956→                  <TableHead className="text-right">Diff</TableHead>
+   957→                  <TableHead className="w-44">Reason</TableHead>
+   958→                  <TableHead className="w-32">Notes</TableHead>
+   959→                </TableRow>
+   960→              </TableHeader>
+   961→              <TableBody>
+   962→                {items.map((i) => {
+   963→                  const c = parseInt(counts[i.id] ?? '0', 10) || 0
+   964→                  const diff = c - i.systemQuantity
+   965→                  const isDiscrepancy = diff !== 0
+   966→                  const isShortage = diff < 0
+   967→                  return (
+   968→                    <TableRow key={i.id} className={isDiscrepancy ? 'bg-amber-50/40' : ''}>
+   969→                      <TableCell>
+   970→                        <div className="flex flex-col">
+   971→                          <span className="text-sm font-medium">{i.variant.productTitle}</span>
+   972→                          <span className="text-xs text-muted-foreground font-mono">
+   973→                            {i.variant.sku}
+   974→                          </span>
+   975→                        </div>
+   976→                      </TableCell>
+   977→                      <TableCell className="text-right tabular-nums text-muted-foreground">
+   978→                        {i.systemQuantity}
+   979→                      </TableCell>
+   980→                      <TableCell>
+   981→                        <Input
+   982→                          type="number"
+   983→                          min="0"
+   984→                          step="1"
+   985→                          className="h-8 tabular-nums"
+   986→                          value={counts[i.id] ?? ''}
+   987→                          onChange={(e) =>
+   988→                            setCounts((prev) => ({ ...prev, [i.id]: e.target.value }))
+   989→                          }
+   990→                        />
+   991→                      </TableCell>
+   992→                      <TableCell
+   993→                        className={`text-right tabular-nums font-medium ${
+   994→                          diff === 0
+   995→                            ? 'text-emerald-600'
+   996→                            : diff > 0
+   997→                              ? 'text-emerald-600'
+   998→                              : 'text-rose-600'
+   999→                        }`}
+  1000→                      >
+  1001→                        {diff > 0 ? '+' : ''}
+  1002→                        {diff}
+  1003→                      </TableCell>
+  1004→                      <TableCell>
+  1005→                        {isDiscrepancy ? (
+  1006→                          <Select
+  1007→                            value={reasons[i.id] ?? 'no_discrepancy'}
+  1008→                            onValueChange={(val) =>
+  1009→                              setReasons((prev) => ({ ...prev, [i.id]: val as DiscrepancyReason }))
+  1010→                            }
+  1011→                          >
+  1012→                            <SelectTrigger className="h-8 text-xs">
+  1013→                              <SelectValue />
+  1014→                            </SelectTrigger>
+  1015→                            <SelectContent>
+  1016→                              {DISCREPANCY_REASONS.map((r) => (
+  1017→                                <SelectItem
+  1018→                                  key={r.value}
+  1019→                                  value={r.value}
+  1020→                                  className="text-xs"
+  1021→                                >
+  1022→                                  {r.label}
+  1023→                                </SelectItem>
+  1024→                              ))}
+  1025→                            </SelectContent>
+  1026→                          </Select>
+  1027→                        ) : (
+  1028→                          <span className="text-xs text-muted-foreground">—</span>
+  1029→                        )}
+  1030→                      </TableCell>
+  1031→                      <TableCell>
+  1032→                        {isDiscrepancy ? (
+  1033→                          <Input
+  1034→                            type="text"
+  1035→                            className="h-8 text-xs"
+  1036→                            placeholder="Optional"
+  1037→                            value={notes[i.id] ?? ''}
+  1038→                            onChange={(e) =>
+  1039→                              setNotes((prev) => ({ ...prev, [i.id]: e.target.value }))
+  1040→                            }
+  1041→                          />
+  1042→                        ) : (
+  1043→                          <span className="text-xs text-muted-foreground">—</span>
+  1044→                        )}
+  1045→                      </TableCell>
+  1046→                    </TableRow>
+  1047→                  )
+  1048→                })}
+  1049→              </TableBody>
+  1050→            </Table>
+  1051→          </div>
+  1052→
+  1053→          {/* Contextual alerts */}
+  1054→          {totalDiscrepancies > 0 && (
+  1055→            <Alert>
+  1056→              <AlertTriangle className="h-4 w-4" />
+  1057→              <AlertTitle>{totalDiscrepancies} item{totalDiscrepancies === 1 ? '' : 's'} with discrepancies</AlertTitle>
+  1058→              <AlertDescription>
+  1059→                On approval, these will be applied as cycle count adjustments to your inventory.
+  1060→                {itemsNeedingReason.length > 0 && (
+  1061→                  <>
+  1062→                    {' '}
+  1063→                    <span className="font-medium text-amber-700">
+  1064→                      {itemsNeedingReason.length} shortage{itemsNeedingReason.length === 1 ? '' : 's'} — if marked theft/unknown, stock will be quarantined and a missing-stock investigation will open automatically.
+  1065→                    </span>
+  1066→                  </>
+  1067→                )}
+  1068→              </AlertDescription>
+  1069→            </Alert>
+  1070→          )}
+  1071→
+  1072→          {/* Show selected reason hints for shortage rows */}
+  1073→          {itemsNeedingReason.length > 0 && (
+  1074→            <div className="space-y-1.5">
+  1075→              {itemsNeedingReason.map((i) => {
+  1076→                const reason = reasons[i.id] ?? 'no_discrepancy'
+  1077→                const hint = DISCREPANCY_REASONS.find((r) => r.value === reason)?.hint
+  1078→                if (!hint || reason === 'no_discrepancy') return null
+  1079→                const isQuarantine = reason === 'theft_suspected' || reason === 'unknown'
+  1080→                return (
+  1081→                  <div
+  1082→                    key={i.id}
+  1083→                    className={`flex items-start gap-2 rounded-md border px-3 py-2 text-xs ${
+  1084→                      isQuarantine
+  1085→                        ? 'border-rose-200 bg-rose-50 text-rose-800'
+  1086→                        : 'border-amber-200 bg-amber-50/60 text-amber-800'
+  1087→                    }`}
+  1088→                  >
+  1089→                    <span className="font-mono font-medium shrink-0">{i.variant.sku}:</span>
+  1090→                    <span>{hint}</span>
+  1091→                  </div>
+  1092→                )
+  1093→              })}
+  1094→            </div>
+  1095→          )}
+  1096→
+  1097→          <DialogFooter>
+  1098→            <Button variant="outline" onClick={() => setOpen(false)}>
+  1099→              Cancel
+  1100→            </Button>
+  1101→            <Button
+  1102→              onClick={() => {
+  1103→                const counted_items = items.map((i) => {
+  1104→                  const c = parseInt(counts[i.id] ?? '0', 10) || 0
+  1105→                  const diff = c - i.systemQuantity
+  1106→                  const payload: SubmitCountsPayload['counted_items'][number] = {
+  1107→                    item_id: i.id,
+  1108→                    counted_quantity: c,
+  1109→                  }
+  1110→                  if (diff !== 0) {
+  1111→                    payload.discrepancy_reason = reasons[i.id] ?? 'recording_error'
+  1112→                    if (notes[i.id]?.trim()) {
+  1113→                      payload.notes = notes[i.id].trim()
+  1114→                    }
+  1115→                  }
+  1116→                  return payload
+  1117→                })
+  1118→                submitMutation.mutate({ action: 'submit_counts', counted_items })
+  1119→              }}
+  1120→              disabled={submitMutation.isPending}
+  1121→            >
+  1122→              {submitMutation.isPending ? (
+  1123→                <>
+  1124→                  <Loader2 className="h-4 w-4 animate-spin" /> Submitting…
+  1125→                </>
+  1126→              ) : (
+  1127→                <>
+  1128→                  <Send className="h-4 w-4" /> Submit Counts
+  1129→                </>
+  1130→              )}
+  1131→            </Button>
+  1132→          </DialogFooter>
+  1133→        </DialogContent>
+  1134→      </Dialog>
+  1135→    </>
+  1136→  )
+  1137→}
+  1138→
+  1139→// ─────────────────────────────────────────────────────────────────────────────
+  1140→// Empty state + create dialog
+  1141→// ─────────────────────────────────────────────────────────────────────────────
+  1142→
+  1143→function EmptyState({
+  1144→  hasCounts,
+  1145→  canManage,
+  1146→  onCreate,
+  1147→}: {
+  1148→  hasCounts: boolean
+  1149→  canManage: boolean
+  1150→  onCreate: () => void
+  1151→}) {
+  1152→  return (
+  1153→    <Card>
+  1154→      <CardContent className="p-10 sm:p-14 text-center">
+  1155→        <div className="mx-auto h-14 w-14 rounded-full bg-primary/10 flex items-center justify-center mb-4">
+  1156→          <ClipboardList className="h-7 w-7 text-primary" />
+  1157→        </div>
+  1158→        <h3 className="text-lg font-semibold">
+  1159→          {hasCounts ? 'No counts match your filters' : 'No cycle counts yet'}
+  1160→        </h3>
+  1161→        <p className="text-sm text-muted-foreground mt-1 max-w-sm mx-auto">
+  1162→          {hasCounts
+  1163→            ? 'Try a different search or status filter.'
+  1164→            : 'Schedule a cycle count to reconcile physical stock against your system inventory. Discrepancies become adjustments on approval.'}
+  1165→        </p>
+  1166→        {!hasCounts && canManage && (
+  1167→          <Button className="mt-5" onClick={onCreate}>
+  1168→            <Plus className="h-4 w-4" /> Schedule a count
+  1169→          </Button>
+  1170→        )}
+  1171→      </CardContent>
+  1172→    </Card>
+  1173→  )
+  1174→}
+  1175→
+  1176→function CreateCountDialog({
+  1177→  open,
+  1178→  onOpenChange,
+  1179→  onSuccess,
+  1180→}: {
+  1181→  open: boolean
+  1182→  onOpenChange: (v: boolean) => void
+  1183→  onSuccess: () => void
+  1184→}) {
+  1185→  const [locationId, setLocationId] = useState('')
+  1186→  const [countName, setCountName] = useState('')
+  1187→  const [countType, setCountType] = useState<CountType>('full')
+  1188→  const [scheduledAt, setScheduledAt] = useState('')
+  1189→  const [notes, setNotes] = useState('')
+  1190→
+  1191→  const locationsQuery = useQuery<LocationsResponse>({
+  1192→    queryKey: ['locations'],
+  1193→    queryFn: () => api.get<LocationsResponse>('/api/inventory-locations'),
+  1194→    staleTime: 30_000,
+  1195→  })
+  1196→
+  1197→  useEffect(() => {
+  1198→    if (!open) {
+  1199→      setLocationId('')
+  1200→      setCountName('')
+  1201→      setCountType('full')
+  1202→      setScheduledAt('')
+  1203→      setNotes('')
+  1204→    }
+  1205→  }, [open])
+  1206→
+  1207→  useEffect(() => {
+  1208→    if (!locationId && locationsQuery.data?.locations.length) {
+  1209→      const def = locationsQuery.data.locations.find((l) => l.isDefault)
+  1210→      setLocationId(def?.id ?? locationsQuery.data.locations[0].id)
+  1211→    }
+  1212→  }, [locationId, locationsQuery.data])
+  1213→
+  1214→  const createMutation = useMutation({
+  1215→    mutationFn: async (payload: CreatePayload) => api.post('/api/cycle-counts', payload),
+  1216→    onSuccess: () => {
+  1217→      toast.success('Cycle count scheduled.')
+  1218→      onSuccess()
+  1219→    },
+  1220→    onError: (err) => toast.error(getErrorMessage(err)),
+  1221→  })
+  1222→
+  1223→  const handleSubmit = () => {
+  1224→    if (!locationId) return toast.error('Select a location.')
+  1225→    if (countName.trim().length < 2) return toast.error('Count name is required.')
+  1226→    createMutation.mutate({
+  1227→      location_id: locationId,
+  1228→      count_name: countName.trim(),
+  1229→      count_type: countType,
+  1230→      scheduled_at: scheduledAt || undefined,
+  1231→      notes: notes.trim() || undefined,
+  1232→    })
+  1233→  }
+  1234→
+  1235→  return (
+  1236→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1237→      <DialogContent className="sm:max-w-md">
+  1238→        <DialogHeader>
+  1239→          <DialogTitle className="flex items-center gap-2">
+  1240→            <ClipboardList className="h-4 w-4" /> New cycle count
+  1241→          </DialogTitle>
+  1242→          <DialogDescription>
+  1243→            Schedule a count for a single location. After starting, the system captures a snapshot
+  1244→            of current stock.
+  1245→          </DialogDescription>
+  1246→        </DialogHeader>
+  1247→        <div className="space-y-4">
+  1248→          <div className="space-y-1.5">
+  1249→            <Label htmlFor="cc-name">Count name</Label>
+  1250→            <Input
+  1251→              id="cc-name"
+  1252→              placeholder="e.g. Monthly warehouse count — Oct 2024"
+  1253→              value={countName}
+  1254→              onChange={(e) => setCountName(e.target.value)}
+  1255→              autoFocus
+  1256→            />
+  1257→          </div>
+  1258→          <div className="space-y-1.5">
+  1259→            <Label htmlFor="cc-location">Location</Label>
+  1260→            {locationsQuery.isLoading ? (
+  1261→              <Skeleton className="h-9" />
+  1262→            ) : (
+  1263→              <Select value={locationId} onValueChange={setLocationId}>
+  1264→                <SelectTrigger id="cc-location">
+  1265→                  <SelectValue placeholder="Select location" />
+  1266→                </SelectTrigger>
+  1267→                <SelectContent>
+  1268→                  {locationsQuery.data?.locations.map((l) => (
+  1269→                    <SelectItem key={l.id} value={l.id}>
+  1270→                      {l.name}
+  1271→                    </SelectItem>
+  1272→                  ))}
+  1273→                </SelectContent>
+  1274→              </Select>
+  1275→            )}
+  1276→          </div>
+  1277→          <div className="grid grid-cols-2 gap-3">
+  1278→            <div className="space-y-1.5">
+  1279→              <Label htmlFor="cc-type">Count type</Label>
+  1280→              <Select value={countType} onValueChange={(v) => setCountType(v as CountType)}>
+  1281→                <SelectTrigger id="cc-type">
+  1282→                  <SelectValue />
+  1283→                </SelectTrigger>
+  1284→                <SelectContent>
+  1285→                  <SelectItem value="full">Full Count</SelectItem>
+  1286→                  <SelectItem value="partial">Partial</SelectItem>
+  1287→                  <SelectItem value="spot">Spot Check</SelectItem>
+  1288→                </SelectContent>
+  1289→              </Select>
+  1290→            </div>
+  1291→            <div className="space-y-1.5">
+  1292→              <Label htmlFor="cc-scheduled">Scheduled for (optional)</Label>
+  1293→              <Input
+  1294→                id="cc-scheduled"
+  1295→                type="date"
+  1296→                value={scheduledAt}
+  1297→                onChange={(e) => setScheduledAt(e.target.value)}
+  1298→              />
+  1299→            </div>
+  1300→          </div>
+  1301→          <div className="space-y-1.5">
+  1302→            <Label htmlFor="cc-notes">Notes (optional)</Label>
+  1303→            <Textarea
+  1304→              id="cc-notes"
+  1305→              placeholder="Any context for this count…"
+  1306→              rows={2}
+  1307→              value={notes}
+  1308→              onChange={(e) => setNotes(e.target.value)}
+  1309→            />
+  1310→          </div>
+  1311→        </div>
+  1312→        <DialogFooter>
+  1313→          <Button variant="outline" onClick={() => onOpenChange(false)}>
+  1314→            Cancel
+  1315→          </Button>
+  1316→          <Button onClick={handleSubmit} disabled={createMutation.isPending}>
+  1317→            {createMutation.isPending ? (
+  1318→              <>
+  1319→                <Loader2 className="h-4 w-4 animate-spin" /> Scheduling…
+  1320→              </>
+  1321→            ) : (
+  1322→              <>
+  1323→                <Plus className="h-4 w-4" /> Schedule Count
+  1324→              </>
+  1325→            )}
+  1326→          </Button>
+  1327→        </DialogFooter>
+  1328→      </DialogContent>
+  1329→    </Dialog>
+  1330→  )
+  1331→}
+  1332→

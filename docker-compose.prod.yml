@@ -1,0 +1,43 @@
+# ════════════════════════════════════════════════════════════════════
+# FlowOps ERP — Production Docker Compose
+# ════════════════════════════════════════════════════════════════════
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up --build -d
+#   docker compose -f docker-compose.prod.yml down
+#
+# WHY A SEPARATE FILE (not docker-compose.override.yml):
+#   The override pattern auto-merges both files when running `docker compose up`,
+#   which means you'd ALWAYS get the dev bind-mount + dev Dockerfile even in
+#   production. Using a separate file (docker-compose.prod.yml) with the
+#   -f flag makes the intent explicit: you choose dev OR prod, never both.
+#   This is safer for production deployments where the source code must NOT
+#   be bind-mounted (the image is self-contained).
+#
+# The production image is self-contained (no source bind-mount).
+# The named uploads volume persists uploaded files across rebuilds.
+# ════════════════════════════════════════════════════════════════════
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.docker
+    volumes:
+      # Named volume for uploaded files (persists across rebuilds)
+      - flowops_uploads:/app/public/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 5s
+      retries: 3
+
+volumes:
+  flowops_uploads:
+    driver: local

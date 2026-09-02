@@ -1,0 +1,43 @@
+# ════════════════════════════════════════════════════════════════════
+# FlowOps ERP — Development Docker Compose
+# ════════════════════════════════════════════════════════════════════
+#
+# Usage:
+#   docker compose up --build     (start dev server with hot reload)
+#   docker compose down           (stop + remove containers)
+#
+# The dev container bind-mounts the source code so Turbopack hot reload
+# works exactly as on the host. node_modules and .next are preserved as
+# anonymous volumes so the container's own installed deps aren't overwritten
+# by the host mount.
+#
+# Uploaded files (public/uploads/) persist NATURALLY on the host filesystem
+# via the bind-mount (.:/app) — no separate named volume is needed in dev.
+# The named volume for uploads exists ONLY in docker-compose.prod.yml, where
+# there is no bind-mount and a dedicated volume is genuinely required.
+# ════════════════════════════════════════════════════════════════════
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.docker
+    volumes:
+      # Bind-mount the source code for Turbopack hot reload.
+      # This also means public/uploads/ writes land on the host filesystem
+      # directly — no separate named volume needed (unlike prod).
+      - .:/app
+      # Anonymous volumes to prevent the host's node_modules/.next
+      # from overwriting the container's installed versions
+      - /app/node_modules
+      - /app/.next
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3

@@ -1,0 +1,65 @@
+# ════════════════════════════════════════════════════════════════════
+# FlowOps ERP — Local PostgreSQL for Schema Experimentation
+# ════════════════════════════════════════════════════════════════════
+#
+# ⚠️  WARNING — READ THIS BEFORE USING:
+#
+#   This local database has NO relation to production data.
+#   It must NEVER be assumed to contain real customer/order records.
+#   It is for SCHEMA AND LOGIC TESTING ONLY.
+#
+#   Never run `prisma db push` against Supabase Mumbai without first
+#   testing here. But also never assume data in this DB is real —
+#   it is disposable and can be destroyed at any time with:
+#     docker compose -f docker-compose.local-db.yml down -v
+#
+# USAGE:
+#   # Start the local Postgres container:
+#   docker compose -f docker-compose.local-db.yml up -d
+#
+#   # Point Prisma at the local DB (see DOCKER.md for full workflow):
+#   export DATABASE_URL="postgresql://flowops:flowops_local_dev_password@localhost:5433/flowops_local"
+#   export DIRECT_URL="$DATABASE_URL"
+#
+#   # Push schema + apply SQL functions:
+#   bun run db:push
+#   # Then apply SQL functions (see DOCKER.md)
+#
+#   # When done, switch back to Supabase Mumbai:
+#   # (unset the env vars or restore .env)
+#
+#   # Destroy the local DB entirely:
+#   docker compose -f docker-compose.local-db.yml down -v
+#
+# ════════════════════════════════════════════════════════════════════
+
+services:
+  postgres:
+    # PostgreSQL 17 — matches Supabase's version (17.6 as of Aug 2026).
+    # Pinned to 17-alpine for reproducibility + small image size.
+    image: postgres:17-alpine
+    container_name: flowops-local-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-flowops_local}
+      POSTGRES_USER: ${POSTGRES_USER:-flowops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flowops_local_dev_password}
+    env_file:
+      - .env.local-db
+    ports:
+      # Exposed on host port 5433 (NOT 5432) to avoid clashing with
+      # any locally-installed Postgres or the Supabase pooler.
+      # The app connects to localhost:5433 when using the local DB.
+      - "5433:5432"
+    volumes:
+      # Named volume for data persistence — survives `down` (not `down -v`)
+      - flowops_local_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flowops} -d ${POSTGRES_DB:-flowops_local}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  flowops_local_pgdata:
+    driver: local

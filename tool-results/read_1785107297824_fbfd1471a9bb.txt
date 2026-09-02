@@ -1,0 +1,1608 @@
+     1→'use client'
+     2→
+     3→import { useMemo, useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import { api, FetchError } from '@/lib/api-client'
+     7→import { useAppStore, useCan } from '@/stores/app-store'
+     8→import { PERMISSIONS } from '@/lib/permissions'
+     9→import { PageHeader } from '@/components/layout/dashboard-shell'
+    10→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+    11→import { Button } from '@/components/ui/button'
+    12→import { Input } from '@/components/ui/input'
+    13→import { Label } from '@/components/ui/label'
+    14→import { Textarea } from '@/components/ui/textarea'
+    15→import { Badge } from '@/components/ui/badge'
+    16→import { Skeleton } from '@/components/ui/skeleton'
+    17→import { Separator } from '@/components/ui/separator'
+    18→import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+    19→import {
+    20→  Select,
+    21→  SelectContent,
+    22→  SelectItem,
+    23→  SelectTrigger,
+    24→  SelectValue,
+    25→} from '@/components/ui/select'
+    26→import {
+    27→  Table,
+    28→  TableBody,
+    29→  TableCell,
+    30→  TableHead,
+    31→  TableHeader,
+    32→  TableRow,
+    33→} from '@/components/ui/table'
+    34→import {
+    35→  Dialog,
+    36→  DialogContent,
+    37→  DialogDescription,
+    38→  DialogFooter,
+    39→  DialogHeader,
+    40→  DialogTitle,
+    41→} from '@/components/ui/dialog'
+    42→import {
+    43→  ArrowLeft,
+    44→  RefreshCw,
+    45→  AlertCircle,
+    46→  Loader2,
+    47→  User,
+    48→  Flag,
+    49→  Truck,
+    50→  MapPin,
+    51→  Package,
+    52→  CheckCircle2,
+    53→  Clock,
+    54→  XCircle,
+    55→  Banknote,
+    56→  CreditCard,
+    57→  ArrowRight,
+    58→  History,
+    59→  RotateCcw,
+    60→  PackageCheck,
+    61→  Boxes,
+    62→  ExternalLink,
+    63→} from 'lucide-react'
+    64→import { cn } from '@/lib/utils'
+    65→
+    66→// ─────────────────────────────────────────────────────────────────────────────
+    67→// Types — match GET /api/orders/[id] response shape
+    68→// ─────────────────────────────────────────────────────────────────────────────
+    69→
+    70→interface OrderItem {
+    71→  id: string
+    72→  orgVariantId: string
+    73→  quantity: number
+    74→  unitPrice: number
+    75→  lineTotal: number
+    76→  fulfillmentStatus: string
+    77→  fulfillmentTypeSnapshot: string
+    78→  returnedStitchedUsed: boolean
+    79→  needsReview: boolean
+    80→  backorderedAt: string | null
+    81→  fulfilledAt: string | null
+    82→  productionOrderId: string | null
+    83→  productionOrder: { id: string; status: string; assignedTailor: string | null } | null
+    84→  variant: {
+    85→    sku: string
+    86→    productTitle: string
+    87→    attributeValues: Record<string, string>
+    88→    fulfillmentType: string
+    89→  }
+    90→}
+    91→
+    92→interface OrderDetail {
+    93→  order: {
+    94→    id: string
+    95→    flowopsOrderNumber: string
+    96→    externalOrderReference: string | null
+    97→    externalOrderId: string | null
+    98→    orderSource: string
+    99→    status: string
+   100→    paymentType: string
+   101→    paymentStatus: string
+   102→    paymentSource: string
+   103→
+   104→    subtotal: number
+   105→    discountAmount: number | null
+   106→    discountReason: string | null
+   107→    courierCharges: number | null
+   108→    totalOrderValue: number
+   109→
+   110→    advanceAmount: number | null
+   111→    advancePaymentMethod: string | null
+   112→    advancePaymentReference: string | null
+   113→    advancePaymentScreenshotUrl: string | null
+   114→    advancePaidAt: string | null
+   115→
+   116→    remainingCodAmount: number | null
+   117→    codCollected: boolean
+   118→    codCollectedAmount: number | null
+   119→    codCollectedAt: string | null
+   120→
+   121→    deliveryAddress: string | null
+   122→    deliveryCity: string | null
+   123→    courierName: string | null
+   124→    trackingNumber: string | null
+   125→    notesForCourier: string | null
+   126→    dispatchLocationId: string | null
+   127→    dispatchLocation: { id: string; name: string; city: string } | null
+   128→
+   129→    skippedConfirmation: boolean
+   130→    skippedPacking: boolean
+   131→
+   132→    confirmedAt: string | null
+   133→    packedAt: string | null
+   134→    dispatchedAt: string | null
+   135→    deliveredAt: string | null
+   136→    cancelledAt: string | null
+   137→    cancellationReason: string | null
+   138→    returnedAt: string | null
+   139→    convertedAt: string | null
+   140→
+   141→    createdAt: string
+   142→  }
+   143→  customer: {
+   144→    id: string
+   145→    name: string
+   146→    phone: string
+   147→    alternatePhone: string | null
+   148→    email: string | null
+   149→    isFlagged: boolean
+   150→    flaggedReason: string | null
+   151→    totalOrdersCount: number
+   152→    totalRtoCount: number
+   153→  }
+   154→  items: OrderItem[]
+   155→}
+   156→
+   157→interface AuditLogResponse {
+   158→  rows: Array<{
+   159→    id: string
+   160→    action: string
+   161→    entityType: string
+   162→    entityId: string
+   163→    createdAt: string
+   164→    user: { id: string; fullName: string; email: string } | null
+   165→    newValues: Record<string, unknown> | null
+   166→  }>
+   167→  total: number
+   168→}
+   169→
+   170→// ─────────────────────────────────────────────────────────────────────────────
+   171→// Display maps
+   172→// ─────────────────────────────────────────────────────────────────────────────
+   173→
+   174→const ORDER_STATUS_BADGE: Record<string, { label: string; className: string }> = {
+   175→  pending: { label: 'Pending', className: 'bg-gray-100 text-gray-700 border-gray-200' },
+   176→  confirmed: { label: 'Confirmed', className: 'bg-sky-50 text-sky-700 border-sky-200' },
+   177→  partially_backordered: {
+   178→    label: 'Backordered',
+   179→    className: 'bg-amber-50 text-amber-700 border-amber-200',
+   180→  },
+   181→  processing: { label: 'Processing', className: 'bg-blue-50 text-blue-700 border-blue-200' },
+   182→  dispatched: { label: 'Dispatched', className: 'bg-violet-50 text-violet-700 border-violet-200' },
+   183→  delivered: { label: 'Delivered', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+   184→  rto: { label: 'RTO', className: 'bg-rose-50 text-rose-700 border-rose-200' },
+   185→  cancelled: { label: 'Cancelled', className: 'bg-slate-100 text-slate-600 border-slate-200' },
+   186→  refunded: { label: 'Refunded', className: 'bg-purple-50 text-purple-700 border-purple-200' },
+   187→}
+   188→
+   189→const PAYMENT_STATUS_BADGE: Record<string, { label: string; className: string }> = {
+   190→  cod_pending: { label: 'COD Pending', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+   191→  advance_paid: { label: 'Advance Paid', className: 'bg-sky-50 text-sky-700 border-sky-200' },
+   192→  fully_prepaid: { label: 'Prepaid', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+   193→  cod_collected: {
+   194→    label: 'COD Collected',
+   195→    className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+   196→  },
+   197→}
+   198→
+   199→const SOURCE_BADGE: Record<string, { label: string; className: string }> = {
+   200→  manual: { label: 'Manual', className: 'bg-gray-100 text-gray-700 border-gray-200' },
+   201→  shopify: { label: 'Shopify', className: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+   202→  daraz: { label: 'Daraz', className: 'bg-orange-50 text-orange-700 border-orange-200' },
+   203→  instagram: { label: 'Instagram', className: 'bg-pink-50 text-pink-700 border-pink-200' },
+   204→}
+   205→
+   206→const FULFILLMENT_STATUS_BADGE: Record<string, { label: string; className: string }> = {
+   207→  reserved: { label: 'Reserved', className: 'bg-sky-50 text-sky-700 border-sky-200' },
+   208→  backordered: { label: 'Backordered', className: 'bg-amber-50 text-amber-700 border-amber-200' },
+   209→  dispatched: { label: 'Dispatched', className: 'bg-violet-50 text-violet-700 border-violet-200' },
+   210→}
+   211→
+   212→const PAYMENT_METHODS = [
+   213→  { value: 'bank_transfer', label: 'Bank Transfer' },
+   214→  { value: 'easy_paisa', label: 'EasyPaisa' },
+   215→  { value: 'jazz_cash', label: 'JazzCash' },
+   216→  { value: 'cash', label: 'Cash' },
+   217→  { value: 'card', label: 'Card' },
+   218→  { value: 'other', label: 'Other' },
+   219→]
+   220→
+   221→// ─────────────────────────────────────────────────────────────────────────────
+   222→// Helpers
+   223→// ─────────────────────────────────────────────────────────────────────────────
+   224→
+   225→const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
+   226→
+   227→function formatPKR(n: number): string {
+   228→  return `Rs. ${PKR.format(n)}`
+   229→}
+   230→
+   231→function formatDate(iso: string | null): string {
+   232→  if (!iso) return '—'
+   233→  try {
+   234→    return new Date(iso).toLocaleDateString('en-PK', {
+   235→      day: '2-digit',
+   236→      month: 'short',
+   237→      year: 'numeric',
+   238→    })
+   239→  } catch {
+   240→    return iso
+   241→  }
+   242→}
+   243→
+   244→function formatDateTime(iso: string | null): string {
+   245→  if (!iso) return '—'
+   246→  try {
+   247→    return new Date(iso).toLocaleString('en-PK', {
+   248→      day: '2-digit',
+   249→      month: 'short',
+   250→      hour: '2-digit',
+   251→      minute: '2-digit',
+   252→    })
+   253→  } catch {
+   254→    return iso
+   255→  }
+   256→}
+   257→
+   258→function getErrorMessage(err: unknown): string {
+   259→  if (err instanceof FetchError) return err.message
+   260→  if (err instanceof Error) return err.message
+   261→  return 'Something went wrong.'
+   262→}
+   263→
+   264→function formatAttributeValues(values: Record<string, string>): string {
+   265→  if (!values || Object.keys(values).length === 0) return ''
+   266→  return Object.entries(values)
+   267→    .map(([k, v]) => `${k}: ${v}`)
+   268→    .join(' · ')
+   269→}
+   270→
+   271→// ─────────────────────────────────────────────────────────────────────────────
+   272→// Main view
+   273→// ─────────────────────────────────────────────────────────────────────────────
+   274→
+   275→export function OrderDetailView({ orderId }: { orderId: string }) {
+   276→  const navigate = useAppStore((s) => s.navigate)
+   277→  const can = useCan()
+   278→  const queryClient = useQueryClient()
+   279→
+   280→  const canManage = can(PERMISSIONS.ORDERS_MANAGE)
+   281→  const canFulfill = can(PERMISSIONS.ORDERS_FULFILL)
+   282→  const canCancel = can(PERMISSIONS.ORDERS_CANCEL)
+   283→
+   284→  // ── Data queries ──────────────────────────────────────────────────────────
+   285→  const orderQuery = useQuery<OrderDetail>({
+   286→    queryKey: ['order', orderId],
+   287→    queryFn: () => api.get<OrderDetail>(`/api/orders/${orderId}`),
+   288→    staleTime: 10_000,
+   289→  })
+   290→
+   291→  const auditQuery = useQuery<AuditLogResponse>({
+   292→    queryKey: ['order', orderId, 'activity'],
+   293→    queryFn: () =>
+   294→      api.get<AuditLogResponse>(
+   295→        `/api/audit-logs?entityType=order&entity_id=${encodeURIComponent(orderId)}&pageSize=50`,
+   296→      ),
+   297→    staleTime: 10_000,
+   298→  })
+   299→
+   300→  // ── Dialog state ──────────────────────────────────────────────────────────
+   301→  const [dispatchDialogOpen, setDispatchDialogOpen] = useState(false)
+   302→  const [cancelDialogOpen, setCancelDialogOpen] = useState(false)
+   303→  const [rtoDialogOpen, setRtoDialogOpen] = useState(false)
+   304→  const [convertDialogOpen, setConvertDialogOpen] = useState(false)
+   305→  const [codDialogOpen, setCodDialogOpen] = useState(false)
+   306→
+   307→  // ── Invalidate helper ─────────────────────────────────────────────────────
+   308→  const invalidateAll = () => {
+   309→    void queryClient.invalidateQueries({ queryKey: ['order', orderId] })
+   310→    void queryClient.invalidateQueries({ queryKey: ['order', orderId, 'activity'] })
+   311→    void queryClient.invalidateQueries({ queryKey: ['orders'] })
+   312→  }
+   313→
+   314→  // ── Mutations ─────────────────────────────────────────────────────────────
+   315→  const confirmMutation = useMutation({
+   316→    mutationFn: () => api.post(`/api/orders/${orderId}/confirm`),
+   317→    onSuccess: () => {
+   318→      toast.success('Confirm order succeeded.')
+   319→      invalidateAll()
+   320→    },
+   321→    onError: (err) => toast.error(getErrorMessage(err)),
+   322→  })
+   323→  const processingMutation = useMutation({
+   324→    mutationFn: () => api.post(`/api/orders/${orderId}/processing`),
+   325→    onSuccess: () => {
+   326→      toast.success('Mark as processing succeeded.')
+   327→      invalidateAll()
+   328→    },
+   329→    onError: (err) => toast.error(getErrorMessage(err)),
+   330→  })
+   331→  const packedMutation = useMutation({
+   332→    mutationFn: () => api.post(`/api/orders/${orderId}/packed`),
+   333→    onSuccess: () => {
+   334→      toast.success('Mark as packed succeeded.')
+   335→      invalidateAll()
+   336→    },
+   337→    onError: (err) => toast.error(getErrorMessage(err)),
+   338→  })
+   339→  const deliveredMutation = useMutation({
+   340→    mutationFn: () => api.post(`/api/orders/${orderId}/delivered`),
+   341→    onSuccess: () => {
+   342→      toast.success('Mark as delivered succeeded.')
+   343→      invalidateAll()
+   344→    },
+   345→    onError: (err) => toast.error(getErrorMessage(err)),
+   346→  })
+   347→
+   348→  const dispatchMutation = useMutation({
+   349→    mutationFn: (vars: { tracking_number: string; courier_name?: string }) =>
+   350→      api.post(`/api/orders/${orderId}/dispatch`, vars),
+   351→    onSuccess: () => {
+   352→      toast.success('Order dispatched.')
+   353→      setDispatchDialogOpen(false)
+   354→      invalidateAll()
+   355→    },
+   356→    onError: (err) => toast.error(getErrorMessage(err)),
+   357→  })
+   358→
+   359→  const cancelMutation = useMutation({
+   360→    mutationFn: (vars: { cancellation_reason: string }) =>
+   361→      api.post(`/api/orders/${orderId}/cancel`, vars),
+   362→    onSuccess: () => {
+   363→      toast.success('Order cancelled.')
+   364→      setCancelDialogOpen(false)
+   365→      invalidateAll()
+   366→    },
+   367→    onError: (err) => toast.error(getErrorMessage(err)),
+   368→  })
+   369→
+   370→  const rtoMutation = useMutation({
+   371→    mutationFn: (vars: { return_reason: string }) =>
+   372→      api.post(`/api/orders/${orderId}/rto`, vars),
+   373→    onSuccess: () => {
+   374→      toast.success('Order marked as RTO.')
+   375→      setRtoDialogOpen(false)
+   376→      invalidateAll()
+   377→    },
+   378→    onError: (err) => toast.error(getErrorMessage(err)),
+   379→  })
+   380→
+   381→  const convertMutation = useMutation({
+   382→    mutationFn: (vars: {
+   383→      new_payment_type: 'partial_advance' | 'fully_prepaid'
+   384→      advance_amount?: number
+   385→      advance_payment_method?: string
+   386→      advance_payment_reference?: string
+   387→      advance_payment_screenshot_url?: string
+   388→    }) => api.post(`/api/orders/${orderId}/convert-payment`, vars),
+   389→    onSuccess: () => {
+   390→      toast.success('Payment converted.')
+   391→      setConvertDialogOpen(false)
+   392→      invalidateAll()
+   393→    },
+   394→    onError: (err) => toast.error(getErrorMessage(err)),
+   395→  })
+   396→
+   397→  const codMutation = useMutation({
+   398→    mutationFn: (vars: { collected_amount: number }) =>
+   399→      api.post(`/api/orders/${orderId}/cod-collected`, vars),
+   400→    onSuccess: () => {
+   401→      toast.success('COD marked as collected.')
+   402→      setCodDialogOpen(false)
+   403→      invalidateAll()
+   404→    },
+   405→    onError: (err) => toast.error(getErrorMessage(err)),
+   406→  })
+   407→
+   408→  // ── Loading state ─────────────────────────────────────────────────────────
+   409→  if (orderQuery.isLoading) {
+   410→    return (
+   411→      <div className="space-y-6">
+   412→        <PageHeader
+   413→          title="Order detail"
+   414→          actions={
+   415→            <Button variant="outline" size="sm" onClick={() => navigate({ name: 'orders' })}>
+   416→              <ArrowLeft className="h-4 w-4" /> Back to Orders
+   417→            </Button>
+   418→          }
+   419→        />
+   420→        <Card>
+   421→          <CardContent className="p-6 space-y-3">
+   422→            <Skeleton className="h-7 w-48" />
+   423→            <Skeleton className="h-5 w-full" />
+   424→            <Skeleton className="h-5 w-2/3" />
+   425→            <Skeleton className="h-64 w-full" />
+   426→          </CardContent>
+   427→        </Card>
+   428→      </div>
+   429→    )
+   430→  }
+   431→
+   432→  if (orderQuery.isError || !orderQuery.data) {
+   433→    return (
+   434→      <div className="space-y-6">
+   435→        <PageHeader
+   436→          title="Order detail"
+   437→          actions={
+   438→            <Button variant="outline" size="sm" onClick={() => navigate({ name: 'orders' })}>
+   439→              <ArrowLeft className="h-4 w-4" /> Back to Orders
+   440→            </Button>
+   441→          }
+   442→        />
+   443→        <Card>
+   444→          <CardContent className="p-10 text-center">
+   445→            <AlertCircle className="h-10 w-10 mx-auto text-rose-500 mb-3" />
+   446→            <p className="text-sm text-muted-foreground mb-4">
+   447→              {getErrorMessage(orderQuery.error)}
+   448→            </p>
+   449→            <Button variant="outline" onClick={() => orderQuery.refetch()}>
+   450→              Try again
+   451→            </Button>
+   452→          </CardContent>
+   453→        </Card>
+   454→      </div>
+   455→    )
+   456→  }
+   457→
+   458→  const { order, customer, items } = orderQuery.data
+   459→
+   460→  // ── Status + action availability ──────────────────────────────────────────
+   461→  const status = order.status
+   462→  const canConfirm = status === 'pending' && canManage
+   463→  const canProcess =
+   464→    (status === 'confirmed' || status === 'partially_backordered') && canFulfill
+   465→  const canPack =
+   466→    (status === 'confirmed' ||
+   467→      status === 'partially_backordered' ||
+   468→      status === 'processing') &&
+   469→    canFulfill &&
+   470→    !order.packedAt
+   471→  const canDispatch =
+   472→    (status === 'confirmed' ||
+   473→      status === 'partially_backordered' ||
+   474→      status === 'processing') &&
+   475→    canFulfill
+   476→  const canMarkDelivered = status === 'dispatched' && canFulfill
+   477→  const canMarkRto = status === 'dispatched' && canManage
+   478→  const canCancelOrder =
+   479→    !['dispatched', 'delivered', 'rto', 'cancelled', 'refunded'].includes(status) &&
+   480→    canCancel
+   481→
+   482→  const canConvertPayment = order.paymentStatus === 'cod_pending' && canManage
+   483→  const canMarkCodCollected =
+   484→    (status === 'dispatched' || status === 'delivered') &&
+   485→    !order.codCollected &&
+   486→    order.paymentType !== 'fully_prepaid' &&
+   487→    canManage
+   488→
+   489→  const statusBadge = ORDER_STATUS_BADGE[status] ?? {
+   490→    label: status,
+   491→    className: 'bg-gray-100 text-gray-700 border-gray-200',
+   492→  }
+   493→  const paymentBadge = PAYMENT_STATUS_BADGE[order.paymentStatus] ?? {
+   494→    label: order.paymentStatus,
+   495→    className: 'bg-gray-100 text-gray-700 border-gray-200',
+   496→  }
+   497→  const sourceBadge = SOURCE_BADGE[order.orderSource] ?? {
+   498→    label: order.orderSource,
+   499→    className: 'bg-gray-100 text-gray-700 border-gray-200',
+   500→  }
+   501→
+   502→  const remainingCod = order.remainingCodAmount ?? Math.max(
+   503→    0,
+   504→    order.totalOrderValue - (order.advanceAmount ?? 0),
+   505→  )
+   506→
+   507→  return (
+   508→    <div className="space-y-6">
+   509→      <PageHeader
+   510→        title={order.flowopsOrderNumber}
+   511→        description={
+   512→          order.externalOrderReference
+   513→            ? `External ref: ${order.externalOrderReference}`
+   514→            : 'Order detail'
+   515→        }
+   516→        actions={
+   517→          <div className="flex items-center gap-2">
+   518→            <Button
+   519→              variant="outline"
+   520→              size="sm"
+   521→              onClick={() => orderQuery.refetch()}
+   522→              disabled={orderQuery.isFetching}
+   523→            >
+   524→              <RefreshCw className={orderQuery.isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />
+   525→              Refresh
+   526→            </Button>
+   527→            <Button variant="outline" size="sm" onClick={() => navigate({ name: 'orders' })}>
+   528→              <ArrowLeft className="h-4 w-4" /> Back to Orders
+   529→            </Button>
+   530→          </div>
+   531→        }
+   532→      />
+   533→
+   534→      {/* ── Status badge row ─────────────────────────────────────────────── */}
+   535→      <div className="flex flex-wrap items-center gap-2">
+   536→        <Badge variant="outline" className={statusBadge.className}>
+   537→          {statusBadge.label}
+   538→        </Badge>
+   539→        <Badge variant="outline" className={paymentBadge.className}>
+   540→          {paymentBadge.label}
+   541→        </Badge>
+   542→        <Badge variant="outline" className={sourceBadge.className}>
+   543→          {sourceBadge.label}
+   544→        </Badge>
+   545→        {order.paymentType === 'partial_advance' && (
+   546→          <Badge variant="outline" className="bg-sky-50 text-sky-700 border-sky-200">
+   547→            Partial Advance
+   548→          </Badge>
+   549→        )}
+   550→        {order.paymentType === 'fully_prepaid' && (
+   551→          <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200">
+   552→            Prepaid
+   553→          </Badge>
+   554→        )}
+   555→        {order.skippedConfirmation && (
+   556→          <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
+   557→            Skipped Confirmation
+   558→          </Badge>
+   559→        )}
+   560→      </div>
+   561→
+   562→      {/* ── Action buttons (context-sensitive) ─────────────────────────────── */}
+   563→      <Card>
+   564→        <CardContent className="p-4 flex flex-wrap gap-2">
+   565→          {canConfirm && (
+   566→            <Button
+   567→              size="sm"
+   568→              onClick={() => confirmMutation.mutate()}
+   569→              disabled={confirmMutation.isPending}
+   570→            >
+   571→              {confirmMutation.isPending ? (
+   572→                <Loader2 className="h-4 w-4 animate-spin" />
+   573→              ) : (
+   574→                <CheckCircle2 className="h-4 w-4" />
+   575→              )}
+   576→              Confirm Order
+   577→            </Button>
+   578→          )}
+   579→          {canProcess && (
+   580→            <Button
+   581→              size="sm"
+   582→              variant="outline"
+   583→              onClick={() => processingMutation.mutate()}
+   584→              disabled={processingMutation.isPending}
+   585→            >
+   586→              {processingMutation.isPending ? (
+   587→                <Loader2 className="h-4 w-4 animate-spin" />
+   588→              ) : (
+   589→                <Package className="h-4 w-4" />
+   590→              )}
+   591→              Mark as Processing
+   592→            </Button>
+   593→          )}
+   594→          {canPack && (
+   595→            <Button
+   596→              size="sm"
+   597→              variant="outline"
+   598→              onClick={() => packedMutation.mutate()}
+   599→              disabled={packedMutation.isPending}
+   600→            >
+   601→              {packedMutation.isPending ? (
+   602→                <Loader2 className="h-4 w-4 animate-spin" />
+   603→              ) : (
+   604→                <PackageCheck className="h-4 w-4" />
+   605→              )}
+   606→              Mark as Packed
+   607→            </Button>
+   608→          )}
+   609→          {canDispatch && (
+   610→            <Button size="sm" onClick={() => setDispatchDialogOpen(true)}>
+   611→              <Truck className="h-4 w-4" />
+   612→              Dispatch Order
+   613→            </Button>
+   614→          )}
+   615→          {canMarkDelivered && (
+   616→            <Button
+   617→              size="sm"
+   618→              onClick={() => deliveredMutation.mutate()}
+   619→              disabled={deliveredMutation.isPending}
+   620→            >
+   621→              {deliveredMutation.isPending ? (
+   622→                <Loader2 className="h-4 w-4 animate-spin" />
+   623→              ) : (
+   624→                <CheckCircle2 className="h-4 w-4" />
+   625→              )}
+   626→              Mark as Delivered
+   627→            </Button>
+   628→          )}
+   629→          {canMarkRto && (
+   630→            <Button size="sm" variant="outline" onClick={() => setRtoDialogOpen(true)}>
+   631→              <RotateCcw className="h-4 w-4" />
+   632→              Mark as Returned/RTO
+   633→            </Button>
+   634→          )}
+   635→          {canConvertPayment && (
+   636→            <Button size="sm" variant="outline" onClick={() => setConvertDialogOpen(true)}>
+   637→              <CreditCard className="h-4 w-4" />
+   638→              Convert Payment
+   639→            </Button>
+   640→          )}
+   641→          {canMarkCodCollected && (
+   642→            <Button size="sm" variant="outline" onClick={() => setCodDialogOpen(true)}>
+   643→              <Banknote className="h-4 w-4" />
+   644→              Mark COD Collected
+   645→            </Button>
+   646→          )}
+   647→          {canCancelOrder && (
+   648→            <Button
+   649→              size="sm"
+   650→              variant="outline"
+   651→              className="text-rose-600 hover:bg-rose-50 hover:text-rose-700"
+   652→              onClick={() => setCancelDialogOpen(true)}
+   653→            >
+   654→              <XCircle className="h-4 w-4" />
+   655→              Cancel Order
+   656→            </Button>
+   657→          )}
+   658→        </CardContent>
+   659→      </Card>
+   660→
+   661→      <div className="grid gap-6 lg:grid-cols-3">
+   662→        {/* ── Main column: items + payment + delivery ────────────────────── */}
+   663→        <div className="lg:col-span-2 space-y-6">
+   664→          {/* ── Items table ───────────────────────────────────────────────── */}
+   665→          <Card>
+   666→            <CardHeader>
+   667→              <CardTitle className="text-base">Items ({items.length})</CardTitle>
+   668→            </CardHeader>
+   669→            <CardContent className="p-0">
+   670→              <div className="overflow-x-auto">
+   671→                <Table>
+   672→                  <TableHeader>
+   673→                    <TableRow>
+   674→                      <TableHead>Variant</TableHead>
+   675→                      <TableHead className="text-right">Qty</TableHead>
+   676→                      <TableHead className="text-right">Unit price</TableHead>
+   677→                      <TableHead className="text-right">Line total</TableHead>
+   678→                      <TableHead>Fulfillment</TableHead>
+   679→                    </TableRow>
+   680→                  </TableHeader>
+   681→                  <TableBody>
+   682→                    {items.map((item) => {
+   683→                      const fBadge = FULFILLMENT_STATUS_BADGE[item.fulfillmentStatus] ?? {
+   684→                        label: item.fulfillmentStatus,
+   685→                        className: 'bg-gray-100 text-gray-700 border-gray-200',
+   686→                      }
+   687→                      return (
+   688→                        <TableRow key={item.id}>
+   689→                          <TableCell>
+   690→                            <div className="flex flex-col">
+   691→                              <span className="font-medium text-sm">
+   692→                                {item.variant.productTitle}
+   693→                              </span>
+   694→                              <span className="text-xs text-muted-foreground font-mono">
+   695→                                {item.variant.sku}
+   696→                              </span>
+   697→                              {Object.keys(item.variant.attributeValues).length > 0 && (
+   698→                                <span className="text-xs text-muted-foreground">
+   699→                                  {formatAttributeValues(item.variant.attributeValues)}
+   700→                                </span>
+   701→                              )}
+   702→                              <div className="flex flex-wrap gap-1 mt-1">
+   703→                                <Badge
+   704→                                  variant="outline"
+   705→                                  className={cn(
+   706→                                    'text-[10px]',
+   707→                                    item.fulfillmentTypeSnapshot === 'made_to_order'
+   708→                                      ? 'bg-purple-50 text-purple-700 border-purple-200'
+   709→                                      : 'bg-sky-50 text-sky-700 border-sky-200',
+   710→                                  )}
+   711→                                >
+   712→                                  {item.fulfillmentTypeSnapshot === 'made_to_order'
+   713→                                    ? 'MTO'
+   714→                                    : 'Stock'}
+   715→                                </Badge>
+   716→                                {item.returnedStitchedUsed && (
+   717→                                  <Badge
+   718→                                    variant="outline"
+   719→                                    className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-200"
+   720→                                  >
+   721→                                    Returned-stitched used
+   722→                                  </Badge>
+   723→                                )}
+   724→                                {item.productionOrder && (
+   725→                                  <a
+   726→                                    href="#"
+   727→                                    onClick={(e) => {
+   728→                                      e.preventDefault()
+   729→                                      navigate({
+   730→                                        name: 'inventory-production-orders',
+   731→                                      })
+   732→                                    }}
+   733→                                    className="inline-flex"
+   734→                                  >
+   735→                                    <Badge
+   736→                                      variant="outline"
+   737→                                      className="text-[10px] bg-purple-50 text-purple-700 border-purple-200 cursor-pointer hover:bg-purple-100"
+   738→                                    >
+   739→                                      Production: {item.productionOrder.status}
+   740→                                      <ExternalLink className="h-2.5 w-2.5 ml-1" />
+   741→                                    </Badge>
+   742→                                  </a>
+   743→                                )}
+   744→                                {item.needsReview && (
+   745→                                  <Badge
+   746→                                    variant="outline"
+   747→                                    className="text-[10px] bg-amber-50 text-amber-700 border-amber-200"
+   748→                                  >
+   749→                                    Needs Review
+   750→                                  </Badge>
+   751→                                )}
+   752→                              </div>
+   753→                            </div>
+   754→                          </TableCell>
+   755→                          <TableCell className="text-right tabular-nums">
+   756→                            {item.quantity}
+   757→                          </TableCell>
+   758→                          <TableCell className="text-right tabular-nums text-muted-foreground">
+   759→                            {formatPKR(item.unitPrice)}
+   760→                          </TableCell>
+   761→                          <TableCell className="text-right tabular-nums font-medium">
+   762→                            {formatPKR(item.lineTotal)}
+   763→                          </TableCell>
+   764→                          <TableCell>
+   765→                            <Badge variant="outline" className={fBadge.className}>
+   766→                              {fBadge.label}
+   767→                            </Badge>
+   768→                            {item.backorderedAt && (
+   769→                              <p className="text-[10px] text-muted-foreground mt-1">
+   770→                                Since {formatDate(item.backorderedAt)}
+   771→                              </p>
+   772→                            )}
+   773→                          </TableCell>
+   774→                        </TableRow>
+   775→                      )
+   776→                    })}
+   777→                  </TableBody>
+   778→                </Table>
+   779→              </div>
+   780→            </CardContent>
+   781→          </Card>
+   782→
+   783→          {/* ── Payment breakdown ─────────────────────────────────────────── */}
+   784→          <Card>
+   785→            <CardHeader>
+   786→              <CardTitle className="text-base">Payment</CardTitle>
+   787→            </CardHeader>
+   788→            <CardContent className="space-y-3">
+   789→              <div className="space-y-2 text-sm">
+   790→                <PaymentRow label="Subtotal" value={formatPKR(order.subtotal)} />
+   791→                {order.discountAmount !== null && order.discountAmount > 0 && (
+   792→                  <>
+   793→                    <PaymentRow
+   794→                      label="Discount"
+   795→                      value={`−${formatPKR(order.discountAmount)}`}
+   796→                      valueClassName="text-rose-600"
+   797→                    />
+   798→                    {order.discountReason && (
+   799→                      <PaymentRow label="Reason" value={order.discountReason} muted />
+   800→                    )}
+   801→                  </>
+   802→                )}
+   803→                {order.courierCharges !== null && order.courierCharges > 0 && (
+   804→                  <PaymentRow label="Courier charges" value={formatPKR(order.courierCharges)} />
+   805→                )}
+   806→                <Separator />
+   807→                <PaymentRow
+   808→                  label="Total"
+   809→                  value={formatPKR(order.totalOrderValue)}
+   810→                  valueClassName="font-semibold"
+   811→                />
+   812→              </div>
+   813→
+   814→              {(order.advanceAmount !== null || order.paymentType !== 'full_cod') && (
+   815→                <div className="rounded-md bg-muted/40 p-3 space-y-1.5 text-sm">
+   816→                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+   817→                    Advance details
+   818→                  </p>
+   819→                  <PaymentRow
+   820→                    label="Advance paid"
+   821→                    value={order.advanceAmount ? formatPKR(order.advanceAmount) : '—'}
+   822→                  />
+   823→                  {order.advancePaymentMethod && (
+   824→                    <PaymentRow
+   825→                      label="Method"
+   826→                      value={
+   827→                        PAYMENT_METHODS.find((m) => m.value === order.advancePaymentMethod)
+   828→                          ?.label ?? order.advancePaymentMethod
+   829→                      }
+   830→                      muted
+   831→                    />
+   832→                  )}
+   833→                  {order.advancePaymentReference && (
+   834→                    <PaymentRow label="Reference" value={order.advancePaymentReference} muted />
+   835→                  )}
+   836→                  {order.advancePaidAt && (
+   837→                    <PaymentRow label="Paid at" value={formatDateTime(order.advancePaidAt)} muted />
+   838→                  )}
+   839→                  <PaymentRow
+   840→                    label="Remaining COD"
+   841→                    value={formatPKR(remainingCod)}
+   842→                    valueClassName="font-medium"
+   843→                  />
+   844→                </div>
+   845→              )}
+   846→
+   847→              {order.codCollected && (
+   848→                <div className="rounded-md bg-emerald-50 border border-emerald-200 p-3 space-y-1.5 text-sm">
+   849→                  <p className="text-xs font-medium text-emerald-700 uppercase tracking-wide flex items-center gap-1">
+   850→                    <CheckCircle2 className="h-3.5 w-3.5" /> COD Collected
+   851→                  </p>
+   852→                  <PaymentRow
+   853→                    label="Collected"
+   854→                    value={
+   855→                      order.codCollectedAmount ? formatPKR(order.codCollectedAmount) : '—'
+   856→                    }
+   857→                  />
+   858→                  {order.codCollectedAt && (
+   859→                    <PaymentRow
+   860→                      label="At"
+   861→                      value={formatDateTime(order.codCollectedAt)}
+   862→                      muted
+   863→                    />
+   864→                  )}
+   865→                </div>
+   866→              )}
+   867→            </CardContent>
+   868→          </Card>
+   869→
+   870→          {/* ── Delivery info ─────────────────────────────────────────────── */}
+   871→          <Card>
+   872→            <CardHeader>
+   873→              <CardTitle className="text-base">Delivery</CardTitle>
+   874→            </CardHeader>
+   875→            <CardContent className="space-y-2 text-sm">
+   876→              <InfoRow
+   877→                icon={<MapPin className="h-3.5 w-3.5" />}
+   878→                label="Address"
+   879→                value={order.deliveryAddress ?? '—'}
+   880→              />
+   881→              <InfoRow label="City" value={order.deliveryCity ?? '—'} />
+   882→              <InfoRow label="Courier" value={order.courierName ?? '—'} />
+   883→              {order.trackingNumber && (
+   884→                <InfoRow
+   885→                  label="Tracking #"
+   886→                  value={order.trackingNumber}
+   887→                  valueClassName="font-mono"
+   888→                />
+   889→              )}
+   890→              {order.dispatchLocation && (
+   891→                <InfoRow
+   892→                  icon={<Boxes className="h-3.5 w-3.5" />}
+   893→                  label="Dispatch from"
+   894→                  value={`${order.dispatchLocation.name}${
+   895→                    order.dispatchLocation.city ? ` · ${order.dispatchLocation.city}` : ''
+   896→                  }`}
+   897→                />
+   898→              )}
+   899→              {order.notesForCourier && (
+   900→                <InfoRow label="Notes" value={order.notesForCourier} muted />
+   901→              )}
+   902→            </CardContent>
+   903→          </Card>
+   904→        </div>
+   905→
+   906→        {/* ── Side column: customer + timeline + activity ────────────────── */}
+   907→        <div className="space-y-6">
+   908→          {/* ── Customer info ─────────────────────────────────────────────── */}
+   909→          <Card>
+   910→            <CardHeader>
+   911→              <CardTitle className="text-base">Customer</CardTitle>
+   912→            </CardHeader>
+   913→            <CardContent className="space-y-2 text-sm">
+   914→              <div className="flex items-start gap-2">
+   915→                <User className="h-4 w-4 mt-0.5 text-muted-foreground shrink-0" />
+   916→                <div>
+   917→                  <p className="font-medium">{customer.name}</p>
+   918→                  <p className="text-xs text-muted-foreground font-mono">{customer.phone}</p>
+   919→                  {customer.alternatePhone && (
+   920→                    <p className="text-xs text-muted-foreground font-mono">
+   921→                      alt: {customer.alternatePhone}
+   922→                    </p>
+   923→                  )}
+   924→                  {customer.email && (
+   925→                    <p className="text-xs text-muted-foreground">{customer.email}</p>
+   926→                  )}
+   927→                </div>
+   928→              </div>
+   929→              <Separator />
+   930→              <InfoRow
+   931→                label="Previous orders"
+   932→                value={String(customer.totalOrdersCount)}
+   933→              />
+   934→              <InfoRow label="Total RTOs" value={String(customer.totalRtoCount)} />
+   935→              {customer.isFlagged && (
+   936→                <div className="rounded-md bg-rose-50 border border-rose-200 p-2.5 flex items-start gap-2">
+   937→                  <Flag className="h-3.5 w-3.5 text-rose-600 mt-0.5 shrink-0" />
+   938→                  <div>
+   939→                    <p className="text-xs font-medium text-rose-700">Flagged customer</p>
+   940→                    {customer.flaggedReason && (
+   941→                      <p className="text-xs text-rose-600">{customer.flaggedReason}</p>
+   942→                    )}
+   943→                  </div>
+   944→                </div>
+   945→              )}
+   946→            </CardContent>
+   947→          </Card>
+   948→
+   949→          {/* ── Status timeline ──────────────────────────────────────────── */}
+   950→          <Card>
+   951→            <CardHeader>
+   952→              <CardTitle className="text-base">Timeline</CardTitle>
+   953→            </CardHeader>
+   954→            <CardContent>
+   955→              <Timeline order={order} />
+   956→            </CardContent>
+   957→          </Card>
+   958→
+   959→          {/* ── Activity log ─────────────────────────────────────────────── */}
+   960→          <Card>
+   961→            <CardHeader>
+   962→              <CardTitle className="text-base flex items-center gap-1.5">
+   963→                <History className="h-4 w-4" /> Activity
+   964→              </CardTitle>
+   965→            </CardHeader>
+   966→            <CardContent>
+   967→              {auditQuery.isLoading ? (
+   968→                <div className="space-y-2">
+   969→                  {Array.from({ length: 4 }).map((_, i) => (
+   970→                    <Skeleton key={i} className="h-12" />
+   971→                  ))}
+   972→                </div>
+   973→              ) : auditQuery.isError ? (
+   974→                <p className="text-xs text-muted-foreground">Failed to load activity log.</p>
+   975→              ) : auditQuery.data && auditQuery.data.rows.length > 0 ? (
+   976→                <ol className="space-y-3 max-h-96 overflow-y-auto scrollbar-thin pr-1">
+   977→                  {auditQuery.data.rows.map((row) => (
+   978→                    <li key={row.id} className="flex gap-2.5 text-xs">
+   979→                      <div className="flex flex-col items-center pt-1">
+   980→                        <div className="h-2 w-2 rounded-full bg-primary/60" />
+   981→                        <div className="w-px flex-1 bg-border" />
+   982→                      </div>
+   983→                      <div className="min-w-0 flex-1 pb-1">
+   984→                        <p className="font-medium">{row.action}</p>
+   985→                        <p className="text-muted-foreground">
+   986→                          {row.user?.fullName ?? 'System'} ·{' '}
+   987→                          {formatDateTime(row.createdAt)}
+   988→                        </p>
+   989→                      </div>
+   990→                    </li>
+   991→                  ))}
+   992→                </ol>
+   993→              ) : (
+   994→                <p className="text-xs text-muted-foreground">No activity recorded.</p>
+   995→              )}
+   996→            </CardContent>
+   997→          </Card>
+   998→        </div>
+   999→      </div>
+  1000→
+  1001→      {/* ── Dialogs ──────────────────────────────────────────────────────── */}
+  1002→      <DispatchDialog
+  1003→        open={dispatchDialogOpen}
+  1004→        onOpenChange={setDispatchDialogOpen}
+  1005→        onSubmit={(vars) => dispatchMutation.mutate(vars)}
+  1006→        isPending={dispatchMutation.isPending}
+  1007→        defaultCourier={order.courierName ?? ''}
+  1008→      />
+  1009→      <CancelDialog
+  1010→        open={cancelDialogOpen}
+  1011→        onOpenChange={setCancelDialogOpen}
+  1012→        onSubmit={(reason) => cancelMutation.mutate({ cancellation_reason: reason })}
+  1013→        isPending={cancelMutation.isPending}
+  1014→      />
+  1015→      <RtoDialog
+  1016→        open={rtoDialogOpen}
+  1017→        onOpenChange={setRtoDialogOpen}
+  1018→        onSubmit={(reason) => rtoMutation.mutate({ return_reason: reason })}
+  1019→        isPending={rtoMutation.isPending}
+  1020→      />
+  1021→      <ConvertPaymentDialog
+  1022→        open={convertDialogOpen}
+  1023→        onOpenChange={setConvertDialogOpen}
+  1024→        onSubmit={(vars) => convertMutation.mutate(vars)}
+  1025→        isPending={convertMutation.isPending}
+  1026→        total={order.totalOrderValue}
+  1027→      />
+  1028→      <CodCollectedDialog
+  1029→        open={codDialogOpen}
+  1030→        onOpenChange={setCodDialogOpen}
+  1031→        onSubmit={(amount) => codMutation.mutate({ collected_amount: amount })}
+  1032→        isPending={codMutation.isPending}
+  1033→        defaultAmount={remainingCod}
+  1034→      />
+  1035→    </div>
+  1036→  )
+  1037→}
+  1038→
+  1039→// ─────────────────────────────────────────────────────────────────────────────
+  1040→// Sub-components
+  1041→// ─────────────────────────────────────────────────────────────────────────────
+  1042→
+  1043→function PaymentRow({
+  1044→  label,
+  1045→  value,
+  1046→  valueClassName,
+  1047→  muted,
+  1048→}: {
+  1049→  label: string
+  1050→  value: string
+  1051→  valueClassName?: string
+  1052→  muted?: boolean
+  1053→}) {
+  1054→  return (
+  1055→    <div className="flex items-center justify-between">
+  1056→      <span className={cn(muted ? 'text-muted-foreground text-xs' : 'text-muted-foreground')}>
+  1057→        {label}
+  1058→      </span>
+  1059→      <span
+  1060→        className={cn(
+  1061→          'tabular-nums',
+  1062→          muted && 'text-xs text-muted-foreground',
+  1063→          valueClassName,
+  1064→        )}
+  1065→      >
+  1066→        {value}
+  1067→      </span>
+  1068→    </div>
+  1069→  )
+  1070→}
+  1071→
+  1072→function InfoRow({
+  1073→  icon,
+  1074→  label,
+  1075→  value,
+  1076→  valueClassName,
+  1077→  muted,
+  1078→}: {
+  1079→  icon?: React.ReactNode
+  1080→  label: string
+  1081→  value: string
+  1082→  valueClassName?: string
+  1083→  muted?: boolean
+  1084→}) {
+  1085→  return (
+  1086→    <div className="flex items-start justify-between gap-3">
+  1087→      <span className="flex items-center gap-1.5 text-muted-foreground shrink-0">
+  1088→        {icon}
+  1089→        {label}
+  1090→      </span>
+  1091→      <span
+  1092→        className={cn(
+  1093→          'text-right',
+  1094→          muted && 'text-muted-foreground text-xs',
+  1095→          valueClassName,
+  1096→        )}
+  1097→      >
+  1098→        {value}
+  1099→      </span>
+  1100→    </div>
+  1101→  )
+  1102→}
+  1103→
+  1104→function Timeline({
+  1105→  order,
+  1106→}: {
+  1107→  order: OrderDetail['order']
+  1108→}) {
+  1109→  const steps = useMemo(() => {
+  1110→    return [
+  1111→      {
+  1112→        key: 'created',
+  1113→        label: 'Order placed',
+  1114→        time: order.createdAt,
+  1115→        icon: Clock,
+  1116→        tone: 'muted' as const,
+  1117→      },
+  1118→      {
+  1119→        key: 'confirmed',
+  1120→        label: 'Confirmed',
+  1121→        time: order.confirmedAt,
+  1122→        icon: CheckCircle2,
+  1123→        tone: 'sky' as const,
+  1124→      },
+  1125→      {
+  1126→        key: 'processing',
+  1127→        label: 'Processing',
+  1128→        time: order.status === 'processing' || order.packedAt || order.dispatchedAt
+  1129→          ? order.createdAt
+  1130→          : null,
+  1131→        icon: Package,
+  1132→        tone: 'blue' as const,
+  1133→      },
+  1134→      {
+  1135→        key: 'packed',
+  1136→        label: 'Packed',
+  1137→        time: order.packedAt,
+  1138→        icon: PackageCheck,
+  1139→        tone: 'blue' as const,
+  1140→      },
+  1141→      {
+  1142→        key: 'dispatched',
+  1143→        label: 'Dispatched',
+  1144→        time: order.dispatchedAt,
+  1145→        icon: Truck,
+  1146→        tone: 'violet' as const,
+  1147→      },
+  1148→      {
+  1149→        key: 'delivered',
+  1150→        label: 'Delivered',
+  1151→        time: order.deliveredAt,
+  1152→        icon: CheckCircle2,
+  1153→        tone: 'emerald' as const,
+  1154→      },
+  1155→      {
+  1156→        key: 'rto',
+  1157→        label: 'Returned (RTO)',
+  1158→        time: order.returnedAt,
+  1159→        icon: RotateCcw,
+  1160→        tone: 'rose' as const,
+  1161→      },
+  1162→      {
+  1163→        key: 'cancelled',
+  1164→        label: 'Cancelled',
+  1165→        time: order.cancelledAt,
+  1166→        icon: XCircle,
+  1167→        tone: 'slate' as const,
+  1168→      },
+  1169→    ]
+  1170→  }, [order])
+  1171→
+  1172→  const toneClasses: Record<string, string> = {
+  1173→    muted: 'bg-gray-100 text-gray-500',
+  1174→    sky: 'bg-sky-50 text-sky-600',
+  1175→    blue: 'bg-blue-50 text-blue-600',
+  1176→    violet: 'bg-violet-50 text-violet-600',
+  1177→    emerald: 'bg-emerald-50 text-emerald-600',
+  1178→    rose: 'bg-rose-50 text-rose-600',
+  1179→    slate: 'bg-slate-100 text-slate-500',
+  1180→  }
+  1181→
+  1182→  // Filter to relevant steps — show cancelled/rto only if they occurred
+  1183→  const visibleSteps = steps.filter((s) => {
+  1184→    if (s.key === 'rto') return !!s.time
+  1185→    if (s.key === 'cancelled') return !!s.time
+  1186→    if (s.key === 'processing')
+  1187→      return order.status === 'processing' || !!order.packedAt || !!order.dispatchedAt
+  1188→    if (s.key === 'packed') return !!s.time
+  1189→    return true
+  1190→  })
+  1191→
+  1192→  return (
+  1193→    <ol className="space-y-3">
+  1194→      {visibleSteps.map((s, idx) => {
+  1195→        const Icon = s.icon
+  1196→        const reached = !!s.time
+  1197→        return (
+  1198→          <li key={s.key} className="flex gap-3">
+  1199→            <div className="flex flex-col items-center">
+  1200→              <div
+  1201→                className={cn(
+  1202→                  'flex h-7 w-7 items-center justify-center rounded-full',
+  1203→                  reached ? toneClasses[s.tone] : 'bg-muted text-muted-foreground',
+  1204→                )}
+  1205→              >
+  1206→                <Icon className="h-3.5 w-3.5" />
+  1207→              </div>
+  1208→              {idx < visibleSteps.length - 1 && (
+  1209→                <div className={cn('w-px flex-1 my-1', reached ? 'bg-border' : 'bg-muted')} />
+  1210→              )}
+  1211→            </div>
+  1212→            <div className="min-w-0 flex-1 pb-1">
+  1213→              <p className={cn('text-sm', reached ? 'font-medium' : 'text-muted-foreground')}>
+  1214→                {s.label}
+  1215→              </p>
+  1216→              <p className="text-xs text-muted-foreground">
+  1217→                {reached ? formatDateTime(s.time) : 'Pending'}
+  1218→              </p>
+  1219→            </div>
+  1220→          </li>
+  1221→        )
+  1222→      })}
+  1223→    </ol>
+  1224→  )
+  1225→}
+  1226→
+  1227→// ─────────────────────────────────────────────────────────────────────────────
+  1228→// Dialogs
+  1229→// ─────────────────────────────────────────────────────────────────────────────
+  1230→
+  1231→function DispatchDialog({
+  1232→  open,
+  1233→  onOpenChange,
+  1234→  onSubmit,
+  1235→  isPending,
+  1236→  defaultCourier,
+  1237→}: {
+  1238→  open: boolean
+  1239→  onOpenChange: (v: boolean) => void
+  1240→  onSubmit: (vars: { tracking_number: string; courier_name?: string }) => void
+  1241→  isPending: boolean
+  1242→  defaultCourier: string
+  1243→}) {
+  1244→  const [trackingNumber, setTrackingNumber] = useState('')
+  1245→  const [courierName, setCourierName] = useState(defaultCourier)
+  1246→
+  1247→  return (
+  1248→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1249→      <DialogContent>
+  1250→        <DialogHeader>
+  1251→          <DialogTitle>Dispatch order</DialogTitle>
+  1252→          <DialogDescription>
+  1253→            Enter the courier tracking number. Stock will be deducted from inventory.
+  1254→          </DialogDescription>
+  1255→        </DialogHeader>
+  1256→        <div className="space-y-3 py-2">
+  1257→          <div className="space-y-1.5">
+  1258→            <Label htmlFor="d-tracking">Tracking number *</Label>
+  1259→            <Input
+  1260→              id="d-tracking"
+  1261→              placeholder="e.g. TCS-12345"
+  1262→              value={trackingNumber}
+  1263→              onChange={(e) => setTrackingNumber(e.target.value)}
+  1264→            />
+  1265→          </div>
+  1266→          <div className="space-y-1.5">
+  1267→            <Label htmlFor="d-courier">Courier name</Label>
+  1268→            <Input
+  1269→              id="d-courier"
+  1270→              placeholder="e.g. TCS, Leopards"
+  1271→              value={courierName}
+  1272→              onChange={(e) => setCourierName(e.target.value)}
+  1273→            />
+  1274→          </div>
+  1275→        </div>
+  1276→        <DialogFooter>
+  1277→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isPending}>
+  1278→            Cancel
+  1279→          </Button>
+  1280→          <Button
+  1281→            onClick={() =>
+  1282→              onSubmit({
+  1283→                tracking_number: trackingNumber.trim(),
+  1284→                courier_name: courierName.trim() || undefined,
+  1285→              })
+  1286→            }
+  1287→            disabled={isPending || !trackingNumber.trim()}
+  1288→          >
+  1289→            {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Truck className="h-4 w-4" />}
+  1290→            Dispatch
+  1291→          </Button>
+  1292→        </DialogFooter>
+  1293→      </DialogContent>
+  1294→    </Dialog>
+  1295→  )
+  1296→}
+  1297→
+  1298→function CancelDialog({
+  1299→  open,
+  1300→  onOpenChange,
+  1301→  onSubmit,
+  1302→  isPending,
+  1303→}: {
+  1304→  open: boolean
+  1305→  onOpenChange: (v: boolean) => void
+  1306→  onSubmit: (reason: string) => void
+  1307→  isPending: boolean
+  1308→}) {
+  1309→  const [reason, setReason] = useState('')
+  1310→  return (
+  1311→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1312→      <DialogContent>
+  1313→        <DialogHeader>
+  1314→          <DialogTitle>Cancel order</DialogTitle>
+  1315→          <DialogDescription>
+  1316→            Reserved stock will be released back to inventory. This cannot be undone.
+  1317→          </DialogDescription>
+  1318→        </DialogHeader>
+  1319→        <div className="space-y-1.5 py-2">
+  1320→          <Label htmlFor="c-reason">Reason *</Label>
+  1321→          <Textarea
+  1322→            id="c-reason"
+  1323→            placeholder="e.g. Customer changed mind, out of stock, etc."
+  1324→            value={reason}
+  1325→            onChange={(e) => setReason(e.target.value)}
+  1326→          />
+  1327→        </div>
+  1328→        <DialogFooter>
+  1329→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isPending}>
+  1330→            Keep order
+  1331→          </Button>
+  1332→          <Button
+  1333→            variant="destructive"
+  1334→            onClick={() => onSubmit(reason.trim())}
+  1335→            disabled={isPending || reason.trim().length < 3}
+  1336→          >
+  1337→            {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
+  1338→            Cancel Order
+  1339→          </Button>
+  1340→        </DialogFooter>
+  1341→      </DialogContent>
+  1342→    </Dialog>
+  1343→  )
+  1344→}
+  1345→
+  1346→function RtoDialog({
+  1347→  open,
+  1348→  onOpenChange,
+  1349→  onSubmit,
+  1350→  isPending,
+  1351→}: {
+  1352→  open: boolean
+  1353→  onOpenChange: (v: boolean) => void
+  1354→  onSubmit: (reason: string) => void
+  1355→  isPending: boolean
+  1356→}) {
+  1357→  const [reason, setReason] = useState('')
+  1358→  return (
+  1359→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1360→      <DialogContent>
+  1361→        <DialogHeader>
+  1362→          <DialogTitle>Process return (RTO)</DialogTitle>
+  1363→          <DialogDescription>
+  1364→            The order will be marked as RTO. Returned items will be auto-processed (made-to-order
+  1365→            items assumed perfect, stock-based items assumed resellable). Items will be flagged for
+  1366→            review.
+  1367→          </DialogDescription>
+  1368→        </DialogHeader>
+  1369→        <div className="space-y-1.5 py-2">
+  1370→          <Label htmlFor="r-reason">Return reason *</Label>
+  1371→          <Textarea
+  1372→            id="r-reason"
+  1373→            placeholder="e.g. Customer refused delivery, wrong address, etc."
+  1374→            value={reason}
+  1375→            onChange={(e) => setReason(e.target.value)}
+  1376→          />
+  1377→        </div>
+  1378→        <DialogFooter>
+  1379→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isPending}>
+  1380→            Cancel
+  1381→          </Button>
+  1382→          <Button
+  1383→            variant="destructive"
+  1384→            onClick={() => onSubmit(reason.trim())}
+  1385→            disabled={isPending || reason.trim().length < 3}
+  1386→          >
+  1387→            {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+  1388→            Process RTO
+  1389→          </Button>
+  1390→        </DialogFooter>
+  1391→      </DialogContent>
+  1392→    </Dialog>
+  1393→  )
+  1394→}
+  1395→
+  1396→function ConvertPaymentDialog({
+  1397→  open,
+  1398→  onOpenChange,
+  1399→  onSubmit,
+  1400→  isPending,
+  1401→  total,
+  1402→}: {
+  1403→  open: boolean
+  1404→  onOpenChange: (v: boolean) => void
+  1405→  onSubmit: (vars: {
+  1406→    new_payment_type: 'partial_advance' | 'fully_prepaid'
+  1407→    advance_amount?: number
+  1408→    advance_payment_method?: string
+  1409→    advance_payment_reference?: string
+  1410→    advance_payment_screenshot_url?: string
+  1411→  }) => void
+  1412→  isPending: boolean
+  1413→  total: number
+  1414→}) {
+  1415→  const [newType, setNewType] = useState<'partial_advance' | 'fully_prepaid'>('partial_advance')
+  1416→  const [advanceAmount, setAdvanceAmount] = useState('')
+  1417→  const [method, setMethod] = useState('')
+  1418→  const [reference, setReference] = useState('')
+  1419→  const [screenshot, setScreenshot] = useState('')
+  1420→
+  1421→  const effectiveAdvance =
+  1422→    newType === 'fully_prepaid' ? total : Number(advanceAmount) || 0
+  1423→
+  1424→  return (
+  1425→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1426→      <DialogContent className="sm:max-w-lg">
+  1427→        <DialogHeader>
+  1428→          <DialogTitle>Convert payment</DialogTitle>
+  1429→          <DialogDescription>
+  1430→            Convert this COD order to partial advance or fully prepaid. If the order is still
+  1431→            pending, this also confirms it.
+  1432→          </DialogDescription>
+  1433→        </DialogHeader>
+  1434→        <div className="space-y-3 py-2">
+  1435→          <RadioGroup
+  1436→            value={newType}
+  1437→            onValueChange={(v) => setNewType(v as 'partial_advance' | 'fully_prepaid')}
+  1438→            className="grid gap-2"
+  1439→          >
+  1440→            <label
+  1441→              htmlFor="cp-partial"
+  1442→              className={cn(
+  1443→                'flex items-start gap-3 rounded-lg border p-3 cursor-pointer',
+  1444→                newType === 'partial_advance'
+  1445→                  ? 'border-primary bg-primary/5'
+  1446→                  : 'border-border',
+  1447→              )}
+  1448→            >
+  1449→              <RadioGroupItem value="partial_advance" id="cp-partial" className="mt-1" />
+  1450→              <div>
+  1451→                <p className="text-sm font-medium">Partial advance</p>
+  1452→                <p className="text-xs text-muted-foreground">Customer pays a portion upfront</p>
+  1453→              </div>
+  1454→            </label>
+  1455→            <label
+  1456→              htmlFor="cp-full"
+  1457→              className={cn(
+  1458→                'flex items-start gap-3 rounded-lg border p-3 cursor-pointer',
+  1459→                newType === 'fully_prepaid'
+  1460→                  ? 'border-primary bg-primary/5'
+  1461→                  : 'border-border',
+  1462→              )}
+  1463→            >
+  1464→              <RadioGroupItem value="fully_prepaid" id="cp-full" className="mt-1" />
+  1465→              <div>
+  1466→                <p className="text-sm font-medium">Fully prepaid</p>
+  1467→                <p className="text-xs text-muted-foreground">
+  1468→                  Full amount ({formatPKR(total)}) paid upfront
+  1469→                </p>
+  1470→              </div>
+  1471→            </label>
+  1472→          </RadioGroup>
+  1473→
+  1474→          <div className="grid sm:grid-cols-2 gap-3">
+  1475→            <div className="space-y-1.5">
+  1476→              <Label htmlFor="cp-amount">Advance amount</Label>
+  1477→              <Input
+  1478→                id="cp-amount"
+  1479→                type="number"
+  1480→                min="0"
+  1481→                step="0.01"
+  1482→                value={newType === 'fully_prepaid' ? String(total) : advanceAmount}
+  1483→                onChange={(e) => setAdvanceAmount(e.target.value)}
+  1484→                disabled={newType === 'fully_prepaid'}
+  1485→              />
+  1486→            </div>
+  1487→            <div className="space-y-1.5">
+  1488→              <Label htmlFor="cp-method">Method</Label>
+  1489→              <Select value={method} onValueChange={setMethod}>
+  1490→                <SelectTrigger id="cp-method">
+  1491→                  <SelectValue placeholder="Select" />
+  1492→                </SelectTrigger>
+  1493→                <SelectContent>
+  1494→                  {PAYMENT_METHODS.map((m) => (
+  1495→                    <SelectItem key={m.value} value={m.value}>
+  1496→                      {m.label}
+  1497→                    </SelectItem>
+  1498→                  ))}
+  1499→                </SelectContent>
+  1500→              </Select>
+  1501→            </div>
+  1502→            <div className="space-y-1.5 sm:col-span-2">
+  1503→              <Label htmlFor="cp-ref">Reference</Label>
+  1504→              <Input
+  1505→                id="cp-ref"
+  1506→                placeholder="Transaction ID"
+  1507→                value={reference}
+  1508→                onChange={(e) => setReference(e.target.value)}
+  1509→              />
+  1510→            </div>
+  1511→            <div className="space-y-1.5 sm:col-span-2">
+  1512→              <Label htmlFor="cp-shot">Screenshot URL</Label>
+  1513→              <Input
+  1514→                id="cp-shot"
+  1515→                type="url"
+  1516→                placeholder="https://…"
+  1517→                value={screenshot}
+  1518→                onChange={(e) => setScreenshot(e.target.value)}
+  1519→              />
+  1520→            </div>
+  1521→          </div>
+  1522→
+  1523→          <div className="rounded-md bg-muted/40 p-2 text-xs flex items-center justify-between">
+  1524→            <span className="text-muted-foreground">Remaining COD</span>
+  1525→            <span className="font-medium tabular-nums">
+  1526→              {formatPKR(Math.max(0, total - effectiveAdvance))}
+  1527→            </span>
+  1528→          </div>
+  1529→        </div>
+  1530→        <DialogFooter>
+  1531→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isPending}>
+  1532→            Cancel
+  1533→          </Button>
+  1534→          <Button
+  1535→            onClick={() =>
+  1536→              onSubmit({
+  1537→                new_payment_type: newType,
+  1538→                advance_amount: effectiveAdvance,
+  1539→                advance_payment_method: method || undefined,
+  1540→                advance_payment_reference: reference.trim() || undefined,
+  1541→                advance_payment_screenshot_url: screenshot.trim() || undefined,
+  1542→              })
+  1543→            }
+  1544→            disabled={isPending || (newType === 'partial_advance' && effectiveAdvance <= 0)}
+  1545→          >
+  1546→            {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <CreditCard className="h-4 w-4" />}
+  1547→            Convert
+  1548→          </Button>
+  1549→        </DialogFooter>
+  1550→      </DialogContent>
+  1551→    </Dialog>
+  1552→  )
+  1553→}
+  1554→
+  1555→function CodCollectedDialog({
+  1556→  open,
+  1557→  onOpenChange,
+  1558→  onSubmit,
+  1559→  isPending,
+  1560→  defaultAmount,
+  1561→}: {
+  1562→  open: boolean
+  1563→  onOpenChange: (v: boolean) => void
+  1564→  onSubmit: (amount: number) => void
+  1565→  isPending: boolean
+  1566→  defaultAmount: number
+  1567→}) {
+  1568→  const [amount, setAmount] = useState(String(defaultAmount))
+  1569→  return (
+  1570→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1571→      <DialogContent>
+  1572→        <DialogHeader>
+  1573→          <DialogTitle>Mark COD collected</DialogTitle>
+  1574→          <DialogDescription>
+  1575→            Record the amount collected from the customer on delivery.
+  1576→          </DialogDescription>
+  1577→        </DialogHeader>
+  1578→        <div className="space-y-1.5 py-2">
+  1579→          <Label htmlFor="cod-amount">Collected amount *</Label>
+  1580→          <Input
+  1581→            id="cod-amount"
+  1582→            type="number"
+  1583→            min="0"
+  1584→            step="0.01"
+  1585→            value={amount}
+  1586→            onChange={(e) => setAmount(e.target.value)}
+  1587→          />
+  1588→          <p className="text-xs text-muted-foreground">
+  1589→            Expected COD: {formatPKR(defaultAmount)}
+  1590→          </p>
+  1591→        </div>
+  1592→        <DialogFooter>
+  1593→          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isPending}>
+  1594→            Cancel
+  1595→          </Button>
+  1596→          <Button
+  1597→            onClick={() => onSubmit(Number(amount) || 0)}
+  1598→            disabled={isPending || Number(amount) <= 0}
+  1599→          >
+  1600→            {isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Banknote className="h-4 w-4" />}
+  1601→            Mark Collected
+  1602→          </Button>
+  1603→        </DialogFooter>
+  1604→      </DialogContent>
+  1605→    </Dialog>
+  1606→  )
+  1607→}
+  1608→

@@ -1,0 +1,982 @@
+-- ============================================================================
+-- FlowOps — Customer Management System Schema (Step 1: Schema + RLS only)
+-- ============================================================================
+-- This migration REPLACES the simplified customer design from the OMS sprint
+-- (flat JSONB shippingAddress/billingAddress + single phone column) with a
+-- proper, fully-featured Customer Management System modeled as separate child
+-- tables: customer_phones, customer_addresses, customer_external_identities.
+--
+-- The OMS will CONSUME this system's data, but this system owns its own
+-- schema. Product / Inventory / existing Order+OrderItem tables are touched
+-- ONLY to add the integration columns explicitly required by the spec.
+--
+-- ============================================================================
+-- INVESTIGATION FINDINGS (live Supabase instance, pre-migration)
+-- ============================================================================
+-- Existing "Customer" table (PascalCase, Prisma-managed):
+--   id              TEXT (cuid) PK
+--   organizationId  TEXT NOT NULL -> "Organization"(id) ON DELETE CASCADE
+--   name            TEXT NOT NULL
+--   phone           TEXT NOT NULL              <- LEGACY (dropped this migration)
+--   alternatePhone  TEXT                       <- LEGACY (dropped this migration)
+--   email           TEXT
+--   shippingAddress TEXT DEFAULT '{}' (JSONB)  <- LEGACY (dropped this migration)
+--   billingAddress  TEXT DEFAULT '{}' (JSONB)  <- LEGACY (dropped this migration)
+--   totalOrdersCount, totalOrderValue, totalRtoCount  (cached stats — kept)
+--   isFlagged, flaggedReason                          (kept; +flaggedAt/+flaggedBy added)
+--   createdAt, updatedAt
+--
+-- Live data: 5 customers (all test data).
+--   - 3 had non-empty shippingAddress/billingAddress JSON (test data).
+--   - All 5 had a phone number; 0 had alternatePhone.
+--   - 2 had an email.
+--   - 92 orders reference these customers.
+--   - 0 RLS policies currently on "Customer"; RLS was DISABLED.
+--   - 0 triggers currently on "Customer".
+--
+-- NOTE ON DATA LOSS: A first apply attempt used a buggy SQL statement splitter
+-- that partially applied the migration — it dropped the legacy phone/address
+-- columns before the backfills executed. The lost data was test data only
+-- (test customer rows like "Test Customer 1785150542" with address "123 Test
+-- St"). The customer ROWS themselves, their 92 orders, and the cached stats
+-- are all intact. Phones/addresses will be re-added via Step 3's UI. The
+-- backfills below are now wrapped in conditional DO blocks so the migration
+-- is safe to re-run from any state.
+--
+-- Existing helper functions present (from migration 001):
+--   get_active_org_id(), get_active_company_id(), get_active_user_id(),
+--   has_permission(company_id, key), is_elevated_employee(company_id)
+--
+-- ============================================================================
+-- ADAPTATIONS FROM SPEC (necessary to integrate with the live schema)
+-- ============================================================================
+-- The spec was written in idealized PostgreSQL terms (lowercase table names,
+-- UUID primary keys, snake_case columns, `organizations(id)` references).
+-- The LIVE FlowOps schema uses the opposite conventions because it was built
+-- with Prisma on an existing multi-tenant SaaS. To produce SQL that actually
+-- runs on this live instance WITHOUT breaking the 92 existing orders, the
+-- following adaptations are made (each is the correct production call):
+--
+--   1. Table name "Customer" (PascalCase) instead of `customers`.
+--      The table already exists with 5 rows + 92 FK references from "Order".
+--      Creating a parallel `customers` table would orphan every order. We
+--      ALTER the existing table in place. The three NEW child tables use
+--      lowercase names (customer_phones, customer_addresses,
+--      customer_external_identities) exactly as the spec names them.
+--
+--   2. All IDs are TEXT (cuid) instead of UUID.
+--      Every existing PK/FK in the schema (Organization, Employee, Customer,
+--      Order, OrderItem, ...) is TEXT. A UUID customer_phones.customerId FK
+--      could not reference the TEXT "Customer".id. New child tables use
+--      TEXT PKs with `DEFAULT gen_random_uuid()::text` so raw-SQL inserts
+--      get a DB-generated ID while Prisma client inserts override with a
+--      cuid (same pattern the rest of the app uses).
+--
+--   3. All columns are camelCase (Prisma convention) instead of snake_case,
+--      AND are double-quoted everywhere so PostgreSQL preserves the casing
+--      (unquoted identifiers are folded to lowercase). camelCase columns on
+--      the new tables: "phoneRaw", "phoneNormalized", "isPrimary",
+--      "isDefault", "lastUsedAt", "externalCustomerId", "matchedVia",
+--      "organizationId", "customerId", "createdAt", "updatedAt". This
+--      matches the existing "Customer"/"Order" tables which Prisma created
+--      with quoted camelCase columns.
+--
+--   4. FK references use PascalCase: REFERENCES "Organization"(id),
+--      "Employee"(id), "Customer"(id).
+--
+--   5. RLS uses ENABLE (not FORCE ROW LEVEL SECURITY). The application
+--      connects via the `postgres` role, which BYPASSES RLS by default.
+--      This means:
+--        - The Prisma app keeps working exactly as before (no GUC-setting
+--          middleware required for the app to function).
+--        - Direct Supabase API access (anon/authenticated roles) IS subject
+--          to these RLS policies -> defense-in-depth for any future direct
+--          client access, exactly as the spec intends.
+--      When Step 2 wires GUC-setting middleware (app.active_org_id etc.),
+--      the policies become actively enforced for non-bypass roles.
+--
+--   6. normalize_phone() and match_or_create_customer() accept/return TEXT
+--      (not UUID) for the same ID-compatibility reason.
+--
+-- All other semantics — table structure, constraints, indexes, the layered
+-- matching strategy, RLS policy logic — follow the spec exactly.
+-- ============================================================================
+
+BEGIN;
+
+-- ============================================================================
+-- PART 0: normalize_phone() FUNCTION
+-- ============================================================================
+-- Strips all non-digit characters, then canonicalizes Pakistani phone numbers
+-- to E.164-style "+92XXXXXXXXXX". Used both at storage time (so every
+-- customer_phones."phoneNormalized" is canonical) and at lookup time (so
+-- matching is format-independent).
+--
+-- Examples:
+--   normalize_phone('0300-1234567')    -> '+923001234567'
+--   normalize_phone('+92 300 1234567') -> '+923001234567'
+--   normalize_phone('923001234567')    -> '+923001234567'
+--   normalize_phone('3001234567')      -> '+923001234567'  (10-digit local)
+--   normalize_phone(NULL)              -> NULL
+--   normalize_phone('')                -> NULL
+--
+-- Marked IMMUTABLE so it can be used in indexes and CHECK constraints.
+
+CREATE OR REPLACE FUNCTION normalize_phone(p_raw_phone TEXT)
+RETURNS TEXT
+LANGUAGE plpgsql
+IMMUTABLE
+AS $$
+DECLARE
+  v_digits TEXT;
+  v_len    INT;
+BEGIN
+  IF p_raw_phone IS NULL OR BTRIM(p_raw_phone) = '' THEN
+    RETURN NULL;
+  END IF;
+
+  -- Keep digits only
+  v_digits := REGEXP_REPLACE(p_raw_phone, '[^0-9]', '', 'g');
+  v_len    := LENGTH(v_digits);
+
+  IF v_len = 0 THEN
+    RETURN NULL;
+  END IF;
+
+  -- 12 digits starting with '92' -> already has country code, just prefix '+'
+  IF v_len = 12 AND v_digits LIKE '92%' THEN
+    RETURN '+' || v_digits;
+  END IF;
+
+  -- 11 digits starting with '0' -> local Pakistani format (03XXXXXXXXX)
+  IF v_len = 11 AND v_digits LIKE '0%' THEN
+    RETURN '+92' || SUBSTRING(v_digits FROM 2);
+  END IF;
+
+  -- 10 digits without leading 0 (e.g. 3001234567) -> treat as local, prefix +92
+  IF v_len = 10 THEN
+    RETURN '+92' || v_digits;
+  END IF;
+
+  -- Fallback for unusual lengths (10-13 digits): strip a leading 0 if present
+  -- and prefix +92. Best-effort consistency for storage/matching.
+  IF v_len BETWEEN 10 AND 13 THEN
+    IF v_digits LIKE '0%' THEN
+      v_digits := SUBSTRING(v_digits FROM 2);
+    END IF;
+    RETURN '+92' || v_digits;
+  END IF;
+
+  -- Anything outside 10-13 digits: return +digits as-is (rare, best-effort)
+  RETURN '+' || v_digits;
+END;
+$$;
+
+-- ============================================================================
+-- PART 1: customer_phones TABLE
+-- ============================================================================
+-- A customer can have multiple phone numbers (own, spouse's, family shared
+-- line). Each row stores the raw phone (for display, since Pakistani staff
+-- are used to seeing "0300-1234567") AND a normalized E.164 form (for
+-- reliable matching/deduplication).
+--
+-- UNIQUE("organizationId", "phoneNormalized") is what prevents duplicate
+-- customer creation when the same number is reused — within one organization,
+-- one normalized phone maps to exactly one customer.
+--
+-- ALL camelCase columns are double-quoted to preserve casing (PostgreSQL
+-- folds unquoted identifiers to lowercase).
+
+CREATE TABLE IF NOT EXISTS customer_phones (
+  id                 TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  "customerId"       TEXT NOT NULL REFERENCES "Customer"(id) ON DELETE CASCADE,
+  "organizationId"   TEXT NOT NULL REFERENCES "Organization"(id),
+
+  "phoneRaw"         TEXT NOT NULL,
+  -- as entered/received, e.g. "0300-1234567" — for display
+
+  "phoneNormalized"  TEXT NOT NULL,
+  -- canonical E.164 form, e.g. "+923001234567" — for all matching/search/dedup
+
+  label              TEXT,
+  -- optional: "Personal", "Husband's number", "Work" (lowercase ok — not camelCase)
+
+  "isPrimary"        BOOLEAN NOT NULL DEFAULT FALSE,
+
+  "createdAt"        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT customer_phones_org_phone_unique UNIQUE ("organizationId", "phoneNormalized")
+);
+
+CREATE INDEX IF NOT EXISTS customer_phones_org_normalized_idx
+  ON customer_phones ("organizationId", "phoneNormalized");
+
+CREATE INDEX IF NOT EXISTS customer_phones_customer_idx
+  ON customer_phones ("customerId");
+
+-- Enforce at most one "isPrimary"=true per customer (partial unique index).
+CREATE UNIQUE INDEX IF NOT EXISTS customer_phones_one_primary_idx
+  ON customer_phones ("customerId") WHERE "isPrimary" = TRUE;
+
+-- ============================================================================
+-- PART 2: customer_addresses TABLE
+-- ============================================================================
+-- A customer can have multiple delivery addresses (home, office, relative's
+-- house). NO province column — per explicit product decision, addresses in
+-- this system are just { address, city }.
+
+CREATE TABLE IF NOT EXISTS customer_addresses (
+  id                 TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  "customerId"       TEXT NOT NULL REFERENCES "Customer"(id) ON DELETE CASCADE,
+  "organizationId"   TEXT NOT NULL REFERENCES "Organization"(id),
+
+  label              TEXT,
+  -- optional: "Home", "Office", "Mother's House"
+
+  address            TEXT NOT NULL,
+  city               TEXT NOT NULL,
+  -- NO province column — explicitly excluded per business context point 2
+
+  "isDefault"        BOOLEAN NOT NULL DEFAULT FALSE,
+  "lastUsedAt"       TIMESTAMPTZ,
+  -- updated whenever an order is placed using this address
+
+  "createdAt"        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  "updatedAt"        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS customer_addresses_customer_idx
+  ON customer_addresses ("customerId");
+
+CREATE INDEX IF NOT EXISTS customer_addresses_org_idx
+  ON customer_addresses ("organizationId");
+
+-- Enforce at most one "isDefault"=true per customer (partial unique index).
+CREATE UNIQUE INDEX IF NOT EXISTS customer_addresses_one_default_idx
+  ON customer_addresses ("customerId") WHERE "isDefault" = TRUE;
+
+-- ============================================================================
+-- PART 3: customer_external_identities TABLE
+-- ============================================================================
+-- Maps platform-specific customer IDs (Shopify, Daraz, Instagram) to internal
+-- FlowOps customer IDs, per organization. This is the FAST path of the layered
+-- matching strategy: an exact previous match is recognized instantly.
+--
+-- "matchedVia" records HOW each mapping was established (for audit/debugging):
+--   exact_identity — first time this external ID was seen (Layer 4 of matching)
+--   phone_match    — matched an existing customer by normalized phone (Layer 2)
+--   email_match    — matched an existing customer by email (Layer 3)
+--   manual         — an operator explicitly linked the accounts
+
+CREATE TABLE IF NOT EXISTS customer_external_identities (
+  id                    TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  "customerId"          TEXT NOT NULL REFERENCES "Customer"(id) ON DELETE CASCADE,
+  "organizationId"      TEXT NOT NULL REFERENCES "Organization"(id),
+
+  platform              TEXT NOT NULL
+                          CHECK (platform IN ('shopify','daraz','instagram')),
+
+  "externalCustomerId"  TEXT NOT NULL,
+  -- the platform's own customer identifier
+
+  "matchedVia"          TEXT NOT NULL DEFAULT 'manual'
+                          CHECK ("matchedVia" IN
+                            ('exact_identity','phone_match','email_match','manual')),
+
+  "createdAt"           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+  CONSTRAINT customer_ext_identities_unique
+    UNIQUE ("organizationId", platform, "externalCustomerId")
+);
+
+CREATE INDEX IF NOT EXISTS customer_external_identities_customer_idx
+  ON customer_external_identities ("customerId");
+
+CREATE INDEX IF NOT EXISTS customer_external_identities_org_platform_idx
+  ON customer_external_identities ("organizationId", platform, "externalCustomerId");
+
+-- ============================================================================
+-- PART 4: ADD NEW COLUMNS TO "Customer" + DB-SIDE ID DEFAULT
+-- ============================================================================
+-- flaggedAt / flaggedBy: track WHEN and WHO flagged a customer for RTO fraud.
+-- createdBy: audit trail for manual customer creation.
+-- (The spec's cached stats — totalOrdersCount, totalOrderValue, totalRtoCount,
+--  isFlagged, flaggedReason — already exist on the live table and are kept.)
+--
+-- ID DEFAULT: Prisma's @default(cuid()) generates IDs CLIENT-SIDE, so the
+-- "Customer".id column has NO DB-side default. The match_or_create_customer()
+-- SQL function (Part 10) inserts into "Customer" directly (no Prisma), so it
+-- needs a DB-side default to generate an id. We set DEFAULT gen_random_uuid()::text
+-- — Prisma will continue to override this with cuids on its own inserts, so
+-- existing behavior is unchanged; only raw-SQL inserts (from the function)
+-- use the DB default. The resulting id is a TEXT value either way (cuid or
+-- uuid-as-text), which is what every FK in the schema expects.
+
+ALTER TABLE "Customer"
+  ADD COLUMN IF NOT EXISTS "flaggedAt" TIMESTAMPTZ;
+ALTER TABLE "Customer"
+  ADD COLUMN IF NOT EXISTS "flaggedBy" TEXT REFERENCES "Employee"(id) ON DELETE SET NULL;
+ALTER TABLE "Customer"
+  ADD COLUMN IF NOT EXISTS "createdBy" TEXT REFERENCES "Employee"(id) ON DELETE SET NULL;
+
+ALTER TABLE "Customer"
+  ALTER COLUMN id SET DEFAULT gen_random_uuid()::text;
+
+-- "updatedAt" is NOT NULL but Prisma's @updatedAt only sets it CLIENT-SIDE,
+-- so the DB column has no default. Raw SQL inserts (from the function) need
+-- a DB-side default so the NOT NULL constraint is satisfied on INSERT. Prisma
+-- will continue to set updatedAt explicitly on its own writes, so this is safe.
+ALTER TABLE "Customer"
+  ALTER COLUMN "updatedAt" SET DEFAULT NOW();
+
+-- Index for the "flagged customers" list view (per organization).
+CREATE INDEX IF NOT EXISTS "Customer_organizationId_isFlagged_idx"
+  ON "Customer" ("organizationId", "isFlagged");
+
+-- ============================================================================
+-- PART 5: BACKFILL customer_phones FROM LEGACY Customer.phone (IF PRESENT)
+-- ============================================================================
+-- Migrate every customer's primary phone + alternate phone into customer_phones
+-- BEFORE the legacy columns are dropped. The primary phone gets
+-- "isPrimary"=TRUE (the partial unique index guarantees one primary per
+-- customer). Alternate phones get "isPrimary"=FALSE.
+--
+-- Wrapped in DO blocks that first check information_schema.columns so the
+-- migration is SAFE TO RE-RUN from any state — if the legacy columns were
+-- already dropped by a prior partial run, the backfill is a no-op rather than
+-- a hard error.
+--
+-- ON CONFLICT ("organizationId", "phoneNormalized") DO NOTHING handles the
+-- rare case where a customer's alternatePhone collides with another
+-- customer's already-migrated primary phone — the primary wins, the duplicate
+-- alternate is silently skipped (it is, by definition, the same contact).
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'Customer' AND column_name = 'phone'
+  ) THEN
+    INSERT INTO customer_phones
+      ("customerId", "organizationId", "phoneRaw", "phoneNormalized", "isPrimary", label, "createdAt")
+    SELECT
+      c.id,
+      c."organizationId",
+      c.phone,
+      normalize_phone(c.phone),
+      TRUE,
+      'Primary',
+      c."createdAt"
+    FROM "Customer" c
+    WHERE c.phone IS NOT NULL AND BTRIM(c.phone) <> ''
+    ON CONFLICT ("organizationId", "phoneNormalized") DO NOTHING;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'Customer' AND column_name = 'alternatePhone'
+  )
+  AND EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'Customer' AND column_name = 'phone'
+  ) THEN
+    INSERT INTO customer_phones
+      ("customerId", "organizationId", "phoneRaw", "phoneNormalized", "isPrimary", label, "createdAt")
+    SELECT
+      c.id,
+      c."organizationId",
+      c."alternatePhone",
+      normalize_phone(c."alternatePhone"),
+      FALSE,
+      'Alternate',
+      c."createdAt"
+    FROM "Customer" c
+    WHERE c."alternatePhone" IS NOT NULL
+      AND BTRIM(c."alternatePhone") <> ''
+      AND normalize_phone(c."alternatePhone") IS DISTINCT FROM normalize_phone(c.phone)
+    ON CONFLICT ("organizationId", "phoneNormalized") DO NOTHING;
+  END IF;
+END $$;
+
+-- ============================================================================
+-- PART 6: BACKFILL customer_addresses FROM LEGACY JSON (IF PRESENT)
+-- ============================================================================
+-- Parse the flat JSONB { "address": "...", "city": "..." } that was stored in
+-- Customer.shippingAddress and Customer.billingAddress, and migrate each into
+-- a customer_addresses row.
+--
+--  - Shipping address -> "isDefault" = TRUE (it is the primary delivery address)
+--  - Billing address  -> "isDefault" = FALSE, and ONLY if it differs from the
+--    shipping address (no point storing an exact duplicate)
+--
+-- "lastUsedAt" is set to the customer's most recent order's createdAt, so the
+-- UI can sort addresses by recency immediately after migration.
+--
+-- Wrapped in DO blocks (same re-run-safety rationale as Part 5).
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'Customer' AND column_name = 'shippingAddress'
+  ) THEN
+    INSERT INTO customer_addresses
+      ("customerId", "organizationId", label, address, city, "isDefault", "lastUsedAt", "createdAt", "updatedAt")
+    SELECT
+      c.id,
+      c."organizationId",
+      'Shipping',
+      BTRIM(c."shippingAddress"::jsonb ->> 'address'),
+      BTRIM(c."shippingAddress"::jsonb ->> 'city'),
+      TRUE,
+      (SELECT MAX(o."createdAt") FROM "Order" o WHERE o."customerId" = c.id),
+      c."createdAt",
+      NOW()
+    FROM "Customer" c
+    WHERE c."shippingAddress" IS NOT NULL
+      AND c."shippingAddress"::text NOT IN ('', '{}', 'null')
+      AND c."shippingAddress"::jsonb ->> 'address' IS NOT NULL
+      AND BTRIM(c."shippingAddress"::jsonb ->> 'address') <> ''
+    ON CONFLICT DO NOTHING;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'Customer' AND column_name = 'billingAddress'
+  ) THEN
+    INSERT INTO customer_addresses
+      ("customerId", "organizationId", label, address, city, "isDefault", "lastUsedAt", "createdAt", "updatedAt")
+    SELECT
+      c.id,
+      c."organizationId",
+      'Billing',
+      BTRIM(c."billingAddress"::jsonb ->> 'address'),
+      BTRIM(c."billingAddress"::jsonb ->> 'city'),
+      FALSE,
+      (SELECT MAX(o."createdAt") FROM "Order" o WHERE o."customerId" = c.id),
+      c."createdAt",
+      NOW()
+    FROM "Customer" c
+    WHERE c."billingAddress" IS NOT NULL
+      AND c."billingAddress"::text NOT IN ('', '{}', 'null')
+      AND c."billingAddress"::jsonb ->> 'address' IS NOT NULL
+      AND BTRIM(c."billingAddress"::jsonb ->> 'address') <> ''
+      AND (
+        c."billingAddress"::text IS DISTINCT FROM c."shippingAddress"::text
+        OR c."shippingAddress" IS NULL
+        OR c."shippingAddress"::text IN ('', '{}', 'null')
+        OR c."shippingAddress"::jsonb ->> 'address' IS NULL
+        OR BTRIM(c."shippingAddress"::jsonb ->> 'address') = ''
+      )
+    ON CONFLICT DO NOTHING;
+  END IF;
+END $$;
+
+-- ============================================================================
+-- PART 7: ADD INTEGRATION COLUMNS TO "Order"
+-- ============================================================================
+-- recipientName: the name to deliver to. May differ from Customer.name (e.g.
+--   a son orders using his phone but the item is for his mother). Defaults to
+--   Customer.name at order creation time but is independently editable per
+--   order. (Spec Part 5.)
+-- usedCustomerAddressId: which saved customer_addresses row (if any) was
+--   selected for this order — for lastUsedAt tracking and reporting. Nullable
+--   because a one-off address might be typed without saving it permanently.
+-- usedCustomerPhoneId: which saved customer_phones row was used for this order.
+
+ALTER TABLE "Order"
+  ADD COLUMN IF NOT EXISTS "recipientName" TEXT;
+ALTER TABLE "Order"
+  ADD COLUMN IF NOT EXISTS "usedCustomerAddressId" TEXT
+    REFERENCES customer_addresses(id) ON DELETE SET NULL;
+ALTER TABLE "Order"
+  ADD COLUMN IF NOT EXISTS "usedCustomerPhoneId" TEXT
+    REFERENCES customer_phones(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS "Order_usedCustomerAddressId_idx"
+  ON "Order" ("usedCustomerAddressId");
+CREATE INDEX IF NOT EXISTS "Order_usedCustomerPhoneId_idx"
+  ON "Order" ("usedCustomerPhoneId");
+
+-- ============================================================================
+-- PART 8: BACKFILL Order.recipientName FROM Customer.name
+-- ============================================================================
+-- For all existing orders, recipientName defaults to the linked customer's
+-- name (per spec: "defaults to customers.name at order creation time").
+-- New orders created after this migration will set recipientName explicitly
+-- in Step 2's server action (defaulting to customer name if not provided).
+-- Safe to re-run: only updates rows where recipientName IS NULL.
+
+UPDATE "Order" o
+SET "recipientName" = c.name
+FROM "Customer" c
+WHERE o."customerId" = c.id
+  AND o."recipientName" IS NULL;
+
+-- ============================================================================
+-- PART 9: DROP LEGACY Customer COLUMNS + INDEXES
+-- ============================================================================
+-- Only after the phone + address data has been safely migrated into the child
+-- tables (or confirmed absent) do we drop the legacy columns. IF EXISTS makes
+-- this safe to re-run.
+
+-- Drop the legacy UNIQUE(organizationId, phone) constraint + its index.
+DROP INDEX IF EXISTS "Customer_organizationId_phone_idx";
+ALTER TABLE "Customer"
+  DROP CONSTRAINT IF EXISTS "Customer_organizationId_phone_key";
+
+-- Drop legacy columns.
+ALTER TABLE "Customer" DROP COLUMN IF EXISTS phone;
+ALTER TABLE "Customer" DROP COLUMN IF EXISTS "alternatePhone";
+ALTER TABLE "Customer" DROP COLUMN IF EXISTS "shippingAddress";
+ALTER TABLE "Customer" DROP COLUMN IF EXISTS "billingAddress";
+
+-- ============================================================================
+-- PART 10: match_or_create_customer() FUNCTION
+-- ============================================================================
+-- Implements the layered cross-platform customer identity matching strategy.
+-- Called by Step 2's server actions and, in a future Shopify sprint, directly
+-- from a webhook handler.
+--
+-- Layered strategy:
+--   1. EXACT IDENTITY — look up customer_external_identities for an existing
+--      ("organizationId", platform, "externalCustomerId") mapping. Fastest
+--      and most reliable. Return immediately if found.
+--   2. PHONE MATCH — if p_phone is provided, normalize it and look up
+--      customer_phones within this org. If found, establish a NEW external
+--      identity mapping ("matchedVia"='phone_match') so future orders from
+--      the same platform hit Layer 1, and return that customer_id.
+--   3. EMAIL MATCH — if no phone match and p_email is provided, look up
+--      Customer.email within this org. If found, establish an external
+--      identity mapping ("matchedVia"='email_match') and return.
+--   4. CREATE — if nothing matches, create a new Customer row, a primary
+--      customer_phones row (if p_phone provided), and an external identity
+--      mapping ("matchedVia"='exact_identity'). Return the new customer_id.
+--
+-- Concurrency: Layers 1-3 are read-only lookups. Before Layer 4 creates
+-- anything, we acquire a transaction-scoped advisory lock keyed on
+-- ("organizationId", platform, "externalCustomerId") and RE-RUN Layer 1.
+-- This guarantees that two simultaneous webhook calls for the same external
+-- ID cannot create duplicate customers.
+--
+-- SECURITY DEFINER + SET search_path=public: the function must insert into
+-- customer_phones and customer_external_identities even when the caller
+-- lacks INSERT permission. search_path is pinned to prevent search_path
+-- injection (standard SECURITY DEFINER hardening).
+
+CREATE OR REPLACE FUNCTION match_or_create_customer(
+  p_organization_id      TEXT,
+  p_platform             TEXT,
+  p_external_customer_id TEXT,
+  p_phone                TEXT DEFAULT NULL,
+  p_email                TEXT DEFAULT NULL,
+  p_name                 TEXT DEFAULT NULL
+) RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public
+AS $$
+DECLARE
+  v_customer_id      TEXT;
+  v_normalized_phone TEXT;
+  v_lock_key         BIGINT;
+BEGIN
+  -- ------------------------------------------------------------------
+  -- Layer 1: exact external identity match (fast path)
+  -- ------------------------------------------------------------------
+  SELECT cei."customerId" INTO v_customer_id
+  FROM customer_external_identities cei
+  WHERE cei."organizationId" = p_organization_id
+    AND cei.platform = p_platform
+    AND cei."externalCustomerId" = p_external_customer_id
+  LIMIT 1;
+
+  IF v_customer_id IS NOT NULL THEN
+    RETURN v_customer_id;
+  END IF;
+
+  -- ------------------------------------------------------------------
+  -- Layer 2: phone match
+  -- ------------------------------------------------------------------
+  IF p_phone IS NOT NULL AND BTRIM(p_phone) <> '' THEN
+    v_normalized_phone := normalize_phone(p_phone);
+    IF v_normalized_phone IS NOT NULL THEN
+      SELECT cp."customerId" INTO v_customer_id
+      FROM customer_phones cp
+      WHERE cp."organizationId" = p_organization_id
+        AND cp."phoneNormalized" = v_normalized_phone
+      LIMIT 1;
+
+      IF v_customer_id IS NOT NULL THEN
+        INSERT INTO customer_external_identities
+          ("customerId", "organizationId", platform, "externalCustomerId", "matchedVia")
+        VALUES
+          (v_customer_id, p_organization_id, p_platform, p_external_customer_id, 'phone_match')
+        ON CONFLICT ("organizationId", platform, "externalCustomerId") DO NOTHING;
+        RETURN v_customer_id;
+      END IF;
+    END IF;
+  END IF;
+
+  -- ------------------------------------------------------------------
+  -- Layer 3: email match
+  -- ------------------------------------------------------------------
+  IF p_email IS NOT NULL AND BTRIM(p_email) <> '' THEN
+    SELECT c.id INTO v_customer_id
+    FROM "Customer" c
+    WHERE c."organizationId" = p_organization_id
+      AND c.email = p_email
+    LIMIT 1;
+
+    IF v_customer_id IS NOT NULL THEN
+      INSERT INTO customer_external_identities
+        ("customerId", "organizationId", platform, "externalCustomerId", "matchedVia")
+      VALUES
+        (v_customer_id, p_organization_id, p_platform, p_external_customer_id, 'email_match')
+      ON CONFLICT ("organizationId", platform, "externalCustomerId") DO NOTHING;
+      RETURN v_customer_id;
+    END IF;
+  END IF;
+
+  -- ------------------------------------------------------------------
+  -- Layer 4: create new customer (race-protected)
+  -- ------------------------------------------------------------------
+  v_lock_key := hashtextextended(
+    p_organization_id || ':' || p_platform || ':' || p_external_customer_id,
+    0
+  );
+  PERFORM pg_advisory_xact_lock(v_lock_key);
+
+  -- Re-check Layer 1 under the lock.
+  SELECT cei."customerId" INTO v_customer_id
+  FROM customer_external_identities cei
+  WHERE cei."organizationId" = p_organization_id
+    AND cei.platform = p_platform
+    AND cei."externalCustomerId" = p_external_customer_id
+  LIMIT 1;
+
+  IF v_customer_id IS NOT NULL THEN
+    RETURN v_customer_id;
+  END IF;
+
+  -- Create the new customer. Name defaults to 'Unknown Customer' if the
+  -- platform did not supply one (Shopify sometimes doesn't for guest orders).
+  INSERT INTO "Customer" ("organizationId", name, email)
+  VALUES (p_organization_id, COALESCE(NULLIF(BTRIM(p_name), ''), 'Unknown Customer'), NULLIF(BTRIM(p_email), ''))
+  RETURNING id INTO v_customer_id;
+
+  -- Create the primary phone row (if provided). ON CONFLICT DO NOTHING guards
+  -- against the very rare case where the normalized phone already exists for
+  -- a different customer in this org.
+  IF p_phone IS NOT NULL AND BTRIM(p_phone) <> '' THEN
+    v_normalized_phone := normalize_phone(p_phone);
+    IF v_normalized_phone IS NOT NULL THEN
+      INSERT INTO customer_phones
+        ("customerId", "organizationId", "phoneRaw", "phoneNormalized", "isPrimary", label)
+      VALUES
+        (v_customer_id, p_organization_id, p_phone, v_normalized_phone, TRUE, 'Primary')
+      ON CONFLICT ("organizationId", "phoneNormalized") DO NOTHING;
+    END IF;
+  END IF;
+
+  -- Establish the external identity mapping (first time this external ID is
+  -- seen, hence 'exact_identity').
+  INSERT INTO customer_external_identities
+    ("customerId", "organizationId", platform, "externalCustomerId", "matchedVia")
+  VALUES
+    (v_customer_id, p_organization_id, p_platform, p_external_customer_id, 'exact_identity');
+
+  RETURN v_customer_id;
+END;
+$$;
+
+-- ============================================================================
+-- PART 11: updatedAt TRIGGERS
+-- ============================================================================
+-- customer_addresses has an "updatedAt" column — keep it fresh on every UPDATE.
+-- (customer_phones has no "updatedAt" by design.)
+-- The Customer table's updatedAt trigger from migration 001 was never applied
+-- to the live DB, so we (re)create it here too.
+
+CREATE OR REPLACE FUNCTION update_customer_addresses_updatedAt()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  NEW."updatedAt" := NOW();
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_customer_addresses_updatedAt ON customer_addresses;
+CREATE TRIGGER trg_customer_addresses_updatedAt
+  BEFORE UPDATE ON customer_addresses
+  FOR EACH ROW
+  EXECUTE FUNCTION update_customer_addresses_updatedAt();
+
+-- (Re)create the Customer updatedAt trigger.
+DROP TRIGGER IF EXISTS trg_customers_updatedAt ON "Customer";
+CREATE TRIGGER trg_customers_updatedAt
+  BEFORE UPDATE ON "Customer"
+  FOR EACH ROW
+  EXECUTE FUNCTION update_customers_updatedat();
+
+-- ============================================================================
+-- PART 12: ROW LEVEL SECURITY
+-- ============================================================================
+-- Defense-in-depth RLS on top of the application-layer scoping
+-- (getWorkspace/requirePermission in src/lib/workspace.ts).
+--
+-- RLS is ENABLED (not FORCED) so the `postgres` role (which the Prisma app
+-- connects as) bypasses RLS and the app keeps working without GUC-setting
+-- middleware. Supabase anon/authenticated roles ARE subject to these policies.
+--
+-- Helper functions return NULL when session GUCs are unset -> policies
+-- evaluate to FALSE -> access denied by default (secure-by-default).
+--
+-- Permission model:
+--   SELECT: "organizationId" = get_active_org_id()
+--   INSERT/UPDATE: has_permission('orders.create') OR has_permission('orders.manage')
+--   DELETE: DISABLED for Customer + customer_external_identities (never hard-delete).
+--           ALLOWED for customer_phones + customer_addresses (removing an old
+--           address/phone is a normal action), guarded by 'orders.manage'.
+
+-- ----------------------------------------------------------------------------
+-- Enable RLS on all four tables
+-- ----------------------------------------------------------------------------
+ALTER TABLE "Customer" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_phones ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_addresses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_external_identities ENABLE ROW LEVEL SECURITY;
+
+-- ----------------------------------------------------------------------------
+-- Customer RLS
+-- ----------------------------------------------------------------------------
+DROP POLICY IF EXISTS customers_select ON "Customer";
+DROP POLICY IF EXISTS customers_insert ON "Customer";
+DROP POLICY IF EXISTS customers_update ON "Customer";
+DROP POLICY IF EXISTS customers_delete ON "Customer";
+
+CREATE POLICY customers_select ON "Customer"
+  FOR SELECT
+  USING ("organizationId" = get_active_org_id());
+
+CREATE POLICY customers_insert ON "Customer"
+  FOR INSERT
+  WITH CHECK (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  );
+
+CREATE POLICY customers_update ON "Customer"
+  FOR UPDATE
+  USING (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  )
+  WITH CHECK (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  );
+
+-- No DELETE policy -> DELETE denied by default (never hard-delete customers).
+
+-- ----------------------------------------------------------------------------
+-- customer_phones RLS
+-- ----------------------------------------------------------------------------
+DROP POLICY IF EXISTS customer_phones_select ON customer_phones;
+DROP POLICY IF EXISTS customer_phones_insert ON customer_phones;
+DROP POLICY IF EXISTS customer_phones_update ON customer_phones;
+DROP POLICY IF EXISTS customer_phones_delete ON customer_phones;
+
+CREATE POLICY customer_phones_select ON customer_phones
+  FOR SELECT
+  USING ("organizationId" = get_active_org_id());
+
+CREATE POLICY customer_phones_insert ON customer_phones
+  FOR INSERT
+  WITH CHECK (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  );
+
+CREATE POLICY customer_phones_update ON customer_phones
+  FOR UPDATE
+  USING (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  )
+  WITH CHECK (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  );
+
+CREATE POLICY customer_phones_delete ON customer_phones
+  FOR DELETE
+  USING (
+    "organizationId" = get_active_org_id()
+    AND has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+  );
+
+-- ----------------------------------------------------------------------------
+-- customer_addresses RLS
+-- ----------------------------------------------------------------------------
+DROP POLICY IF EXISTS customer_addresses_select ON customer_addresses;
+DROP POLICY IF EXISTS customer_addresses_insert ON customer_addresses;
+DROP POLICY IF EXISTS customer_addresses_update ON customer_addresses;
+DROP POLICY IF EXISTS customer_addresses_delete ON customer_addresses;
+
+CREATE POLICY customer_addresses_select ON customer_addresses
+  FOR SELECT
+  USING ("organizationId" = get_active_org_id());
+
+CREATE POLICY customer_addresses_insert ON customer_addresses
+  FOR INSERT
+  WITH CHECK (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  );
+
+CREATE POLICY customer_addresses_update ON customer_addresses
+  FOR UPDATE
+  USING (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  )
+  WITH CHECK (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  );
+
+CREATE POLICY customer_addresses_delete ON customer_addresses
+  FOR DELETE
+  USING (
+    "organizationId" = get_active_org_id()
+    AND has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+  );
+
+-- ----------------------------------------------------------------------------
+-- customer_external_identities RLS
+-- ----------------------------------------------------------------------------
+DROP POLICY IF EXISTS customer_external_identities_select ON customer_external_identities;
+DROP POLICY IF EXISTS customer_external_identities_insert ON customer_external_identities;
+DROP POLICY IF EXISTS customer_external_identities_update ON customer_external_identities;
+DROP POLICY IF EXISTS customer_external_identities_delete ON customer_external_identities;
+
+CREATE POLICY customer_external_identities_select ON customer_external_identities
+  FOR SELECT
+  USING ("organizationId" = get_active_org_id());
+
+CREATE POLICY customer_external_identities_insert ON customer_external_identities
+  FOR INSERT
+  WITH CHECK (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  );
+
+CREATE POLICY customer_external_identities_update ON customer_external_identities
+  FOR UPDATE
+  USING (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  )
+  WITH CHECK (
+    "organizationId" = get_active_org_id()
+    AND (
+      has_permission(get_active_company_id(), 'orders.create') IS TRUE
+      OR has_permission(get_active_company_id(), 'orders.manage') IS TRUE
+    )
+  );
+
+-- No DELETE policy -> DELETE denied by default (external identity mappings are
+-- an audit record; never hard-delete). ON DELETE CASCADE from Customer still
+-- fires if a customer is ever deleted by a superuser.
+
+COMMIT;
+
+-- ============================================================================
+-- END OF MIGRATION 002
+-- ============================================================================
+-- Summary:
+--
+--   NEW TABLES:
+--     customer_phones            ("phoneRaw", "phoneNormalized", "isPrimary", ...)
+--     customer_addresses         (address, city, "isDefault", "lastUsedAt", ...)
+--     customer_external_identities (platform, "externalCustomerId", "matchedVia")
+--
+--   ALTERED TABLES:
+--     "Customer"  + "flaggedAt", "flaggedBy", "createdBy"
+--                  - phone, alternatePhone, shippingAddress, billingAddress (dropped)
+--                  - UNIQUE(organizationId, phone) + its index (dropped)
+--     "Order"     + "recipientName", "usedCustomerAddressId", "usedCustomerPhoneId"
+--
+--   NEW FUNCTIONS:
+--     normalize_phone(text) -> text          (IMMUTABLE, E.164 canonicalization)
+--     match_or_create_customer(org, platform, ext_id, phone, email, name) -> text
+--              (layered: exact-identity -> phone -> email -> create; race-safe)
+--
+--   NEW TRIGGERS:
+--     trg_customer_addresses_updatedAt  (BEFORE UPDATE on customer_addresses)
+--     trg_customers_updatedAt           (BEFORE UPDATE on "Customer")
+--
+--   RLS:
+--     ENABLED on "Customer", customer_phones, customer_addresses,
+--               customer_external_identities
+--     SELECT  : "organizationId" = get_active_org_id()
+--     INSERT/UPDATE : org check + (orders.create OR orders.manage)
+--     DELETE  : denied for Customer + external_identities;
+--               allowed for phones + addresses (orders.manage)
+--
+--   DATA MIGRATION:
+--     - Legacy phone/address columns were already dropped by a prior buggy
+--       partial run, so no phone/address backfill occurred (test data only).
+--     - 92 orders' "recipientName" backfilled from Customer.name.
+--     - Customer rows, order history, and cached stats are intact.
+--
+-- NEXT STEPS (Step 2 — NOT in this migration):
+--   - Server actions: searchCustomerByPhone, getCustomerWithPhonesAndAddresses,
+--     addCustomerPhone, addCustomerAddress, setPrimaryPhone, setDefaultAddress,
+--     flagCustomer, recomputeCustomerStats (updates cached counts via triggers)
+--   - Wire app.active_org_id / app.active_company_id / app.user_id GUC setting
+--     in API middleware so RLS becomes actively enforced for non-bypass roles.
+--   - Shopify webhook handler calls match_or_create_customer() on every order.
+-- ============================================================================

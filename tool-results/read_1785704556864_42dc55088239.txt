@@ -1,0 +1,1173 @@
+     1→/**
+     2→ * Item Exchange System — server actions.
+     3→ *
+     4→ * Implements the full exchange lifecycle with STRICT SEQUENCING for the two
+     5→ * exchange methods:
+     6→ *
+     7→ *   courier_replacement:    request → dispatch new item → (courier collects old)
+     8→ *                           → await return → manually verify old → complete
+     9→ *
+    10→ *   customer_self_return:   request (awaiting_customer_to_ship) → customer
+    11→ *                           confirmed shipped → await physical arrival →
+    12→ *                           manually verify old (THIS IS THE GATE) →
+    13→ *                           create+dispatch new order → complete
+    14→ *
+    15→ * CRITICAL RULE (enforced throughout):
+    16→ *   For customer_self_return, the new order/item is NEVER created before
+    17→ *   verifyOldItemReceived() succeeds. This sequential gate is the core
+    18→ *   business rule and must not be bypassed by any code path.
+    19→ *
+    20→ * INVENTORY INTEGRATION:
+    21→ *   verifyOldItemReceived() is the ONLY function that processes the old item's
+    22→ *   return in inventory. It calls processInventoryTransaction() directly (the
+    23→ *   same function the /api/inventory/receive-returned-stitched and
+    24→ *   /api/inventory/receive routes use) — we do NOT reimplement that logic.
+    25→ *   For damaged items, a stock_loss_records entry is created directly.
+    26→ *
+    27→ * Every mutation calls insertAuditLog() AND insertMetricEvent(), and returns
+    28→ * { success, data?, error? }.
+    29→ */
+    30→
+    31→import { db } from '@/lib/db'
+    32→import { getWorkspace, requirePermission, ApiError } from '@/lib/workspace'
+    33→import { insertAuditLog } from '@/lib/audit'
+    34→import { insertMetricEvent } from '@/lib/metrics'
+    35→import { PERMISSIONS } from '@/lib/permissions'
+    36→import {
+    37→  processInventoryTransaction,
+    38→  reserveStockForOrder,
+    39→} from '@/lib/inventory'
+    40→import { flagCustomer } from './customer.actions'
+    41→import {
+    42→  createExchangeRequestSchema,
+    43→  confirmCustomerShippedSchema,
+    44→  verifyOldItemReceivedSchema,
+    45→  settlePriceDifferenceSchema,
+    46→  markNotReturnedSchema,
+    47→  cancelExchangeSchema,
+    48→  type CreateExchangeRequestInput,
+    49→  type ConfirmCustomerShippedInput,
+    50→  type VerifyOldItemReceivedInput,
+    51→  type SettlePriceDifferenceInput,
+    52→  type MarkNotReturnedInput,
+    53→  type CancelExchangeInput,
+    54→} from '@/lib/validations/exchange.schemas'
+    55→import type { Prisma } from '@prisma/client'
+    56→
+    57→// ──────────────────────────────────────────────────────────────
+    58→// Types
+    59→// ──────────────────────────────────────────────────────────────
+    60→
+    61→interface ActionResult<T = unknown> {
+    62→  success: boolean
+    63→  data?: T
+    64→  error?: string
+    65→}
+    66→
+    67→// ──────────────────────────────────────────────────────────────
+    68→// Internal helper: generate order number via the DB function
+    69→// (mirrors order.actions.ts's private generateOrderNumber)
+    70→// ──────────────────────────────────────────────────────────────
+    71→async function generateOrderNumber(companyId: string): Promise<string> {
+    72→  const result = await db.$queryRaw<{ generate_order_number: string }[]>`
+    73→    SELECT generate_order_number(${companyId}::TEXT)
+    74→  `
+    75→  return result[0].generate_order_number
+    76→}
+    77→
+    78→// ──────────────────────────────────────────────────────────────
+    79→// Internal helper: create the linked exchange order + order_item + reserve
+    80→// stock + dispatch. Used by BOTH:
+    81→//   - dispatchExchangeNewItem() for courier_replacement (immediate)
+    82→//   - verifyOldItemReceived() for customer_self_return (after verification)
+    83→// Returns the new order + order_item IDs.
+    84→// ──────────────────────────────────────────────────────────────
+    85→async function createAndDispatchExchangeOrder(
+    86→  exchangeId: string,
+    87→  ctx: Awaited<ReturnType<typeof getWorkspace>>,
+    88→): Promise<{ newOrderId: string; newOrderItemId: string }> {
+    89→  // Fetch the exchange record (already validated by caller)
+    90→  const exchange = await db.orderExchange.findUniqueOrThrow({
+    91→    where: { id: exchangeId },
+    92→    include: {
+    93→      originalOrder: { select: { customerId: true, dispatchLocationId: true } },
+    94→      newOrgVariant: {
+    95→        select: {
+    96→          id: true,
+    97→          fulfillmentType: true,
+    98→          costPrice: true,
+    99→          companyPricing: { where: { companyId: ctx.company.id }, take: 1 },
+   100→        },
+   101→      },
+   102→    },
+   103→  })
+   104→
+   105→  const unitPrice = exchange.newItemPrice
+   106→  const lineTotal = unitPrice
+   107→
+   108→  // 1. Generate order number
+   109→  const flowopsOrderNumber = await generateOrderNumber(ctx.company.id)
+   110→
+   111→  // 2. Create the new order (order_source='exchange')
+   112→  const newOrder = await db.order.create({
+   113→    data: {
+   114→      organizationId: ctx.company.organizationId,
+   115→      companyId: ctx.company.id,
+   116→      flowopsOrderNumber,
+   117→      orderSource: 'exchange',
+   118→      customerId: exchange.originalOrder.customerId,
+   119→      // This is an exchange — no separate COD collection for the item itself.
+   120→      // The price_difference (if any) is settled separately via settlePriceDifference().
+   121→      status: 'confirmed',
+   122→      paymentType: 'fully_prepaid',
+   123→      paymentStatus: 'fully_prepaid',
+   124→      paymentSource: 'cod_native',
+   125→      subtotal: lineTotal,
+   126→      totalOrderValue: lineTotal,
+   127→      advanceAmount: lineTotal, // mark as fully paid (exchange item)
+   128→      advancePaidAt: new Date(),
+   129→      remainingCodAmount: 0,
+   130→      confirmedAt: new Date(),
+   131→      createdBy: ctx.employee.id,
+   132→    },
+   133→  })
+   134→
+   135→  // 3. Create the single order_item for the new variant
+   136→  const newItem = await db.orderItem.create({
+   137→    data: {
+   138→      orderId: newOrder.id,
+   139→      orgVariantId: exchange.newOrgVariantId,
+   140→      organizationId: ctx.company.organizationId,
+   141→      quantity: 1,
+   142→      unitPrice,
+   143→      lineTotal,
+   144→      fulfillmentStatus: 'reserved',
+   145→      fulfillmentTypeSnapshot: exchange.newOrgVariant.fulfillmentType,
+   146→      reservedLocationId: exchange.originalOrder.dispatchLocationId,
+   147→    },
+   148→  })
+   149→
+   150→  // 4. Link the exchange to the new order/item
+   151→  await db.orderExchange.update({
+   152→    where: { id: exchangeId },
+   153→    data: {
+   154→      newOrderId: newOrder.id,
+   155→      newOrderItemId: newItem.id,
+   156→    },
+   157→  })
+   158→
+   159→  // 5. Reserve stock for the new item (if stock_based)
+   160→  const dispatchLocationId = exchange.originalOrder.dispatchLocationId
+   161→  if (dispatchLocationId && exchange.newOrgVariant.fulfillmentType === 'stock_based') {
+   162→    const reserveResult = await reserveStockForOrder({
+   163→      orgVariantId: exchange.newOrgVariantId,
+   164→      locationId: dispatchLocationId,
+   165→      organizationId: ctx.company.organizationId,
+   166→      companyId: ctx.company.id,
+   167→      employeeId: ctx.employee.id,
+   168→      quantity: 1,
+   169→      orderId: newOrder.id,
+   170→    })
+   171→    if (!reserveResult.success) {
+   172→      // Mark the item as backordered if reservation fails
+   173→      await db.orderItem.update({
+   174→        where: { id: newItem.id },
+   175→        data: { fulfillmentStatus: 'backordered', backorderedAt: new Date() },
+   176→      })
+   177→      await db.order.update({
+   178→        where: { id: newOrder.id },
+   179→        data: { status: 'partially_backordered' },
+   180→      })
+   181→    }
+   182→  }
+   183→
+   184→  // 6. Dispatch the order immediately (for courier_replacement, the courier
+   185→  //    collects the old item during this same delivery; for customer_self_return,
+   186→  //    the old item was already verified before this function is called)
+   187→  await db.order.update({
+   188→    where: { id: newOrder.id },
+   189→    data: {
+   190→      status: 'dispatched',
+   191→      dispatchedAt: new Date(),
+   192→    },
+   193→  })
+   194→  await db.orderItem.update({
+   195→    where: { id: newItem.id },
+   196→    data: { fulfillmentStatus: 'dispatched', fulfilledAt: new Date() },
+   197→  })
+   198→
+   199→  await insertAuditLog({
+   200→    action: 'exchange.new_item_dispatched',
+   201→    entityType: 'order',
+   202→    entityId: newOrder.id,
+   203→    companyId: ctx.company.id,
+   204→    organizationId: ctx.company.organizationId,
+   205→    userId: ctx.user.id,
+   206→    employeeId: ctx.employee.id,
+   207→    newValues: {
+   208→      exchangeId,
+   209→      flowopsOrderNumber,
+   210→      newOrgVariantId: exchange.newOrgVariantId,
+   211→      unitPrice: Number(unitPrice),
+   212→    },
+   213→  })
+   214→
+   215→  await insertMetricEvent({
+   216→    companyId: ctx.company.id,
+   217→    entityType: 'order',
+   218→    entityId: newOrder.id,
+   219→    metricKey: 'exchange.new_item_dispatched',
+   220→    numericValue: Number(unitPrice),
+   221→    dimensions: { exchange_id: exchangeId, exchange_method: exchange.exchangeMethod },
+   222→  }).catch(() => {})
+   223→
+   224→  return { newOrderId: newOrder.id, newOrderItemId: newItem.id }
+   225→}
+   226→
+   227→// ══════════════════════════════════════════════════════════════
+   228→// PART 2: CREATE EXCHANGE REQUEST
+   229→// ══════════════════════════════════════════════════════════════
+   230→
+   231→export async function createExchangeRequest(
+   232→  input: CreateExchangeRequestInput,
+   233→): Promise<ActionResult<{ exchangeId: string }>> {
+   234→  try {
+   235→    const ctx = await getWorkspace()
+   236→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   237→
+   238→    const parsed = createExchangeRequestSchema.safeParse(input)
+   239→    if (!parsed.success) {
+   240→      return {
+   241→        success: false,
+   242→        error: parsed.error.issues[0]?.message ?? 'Invalid exchange request data',
+   243→      }
+   244→    }
+   245→    const d = parsed.data
+   246→
+   247→    // 3. Fetch the original order_item + its parent order — VERIFY delivered
+   248→    const orderItem = await db.orderItem.findFirst({
+   249→      where: { id: d.original_order_item_id },
+   250→      include: {
+   251→        order: {
+   252→          select: {
+   253→            id: true,
+   254→            status: true,
+   255→            companyId: true,
+   256→            organizationId: true,
+   257→            customerId: true,
+   258→          },
+   259→        },
+   260→      },
+   261→    })
+   262→    if (!orderItem) {
+   263→      return { success: false, error: 'Original order item not found' }
+   264→    }
+   265→    // Verify the order belongs to this company
+   266→    if (orderItem.order.companyId !== ctx.company.id) {
+   267→      return { success: false, error: 'Original order item not found' }
+   268→    }
+   269→    // CRITICAL: only delivered orders can have exchanges
+   270→    if (orderItem.order.status !== 'delivered') {
+   271→      return {
+   272→        success: false,
+   273→        error: 'Items can only be exchanged after the order has been delivered to the customer.',
+   274→      }
+   275→    }
+   276→
+   277→    // 4. old_item_price from the order_item's unit_price
+   278→    const oldItemPrice = Number(orderItem.unitPrice)
+   279→
+   280→    // 5. new_item_price from the target variant's company_variant_pricing
+   281→    const variant = await db.orgProductVariant.findFirst({
+   282→      where: {
+   283→        id: d.new_org_variant_id,
+   284→        organizationId: ctx.company.organizationId,
+   285→      },
+   286→      include: {
+   287→        companyPricing: { where: { companyId: ctx.company.id }, take: 1 },
+   288→      },
+   289→    })
+   290→    if (!variant) {
+   291→      return { success: false, error: 'New variant not found in this organization' }
+   292→    }
+   293→    const newItemPrice = variant.companyPricing[0]?.salePrice
+   294→      ? Number(variant.companyPricing[0].salePrice)
+   295→      : Number(variant.costPrice)
+   296→
+   297→    // 6. Determine price_difference_status
+   298→    const priceDifference = newItemPrice - oldItemPrice
+   299→    const priceDifferenceStatus: 'customer_owes' | 'refund_due' | 'settled' =
+   300→      priceDifference > 0 ? 'customer_owes' : priceDifference < 0 ? 'refund_due' : 'settled'
+   301→
+   302→    // 7. INSERT order_exchanges — status depends on exchange_method
+   303→    const initialStatus =
+   304→      d.exchange_method === 'courier_replacement'
+   305→        ? 'requested' // ready to proceed to immediate new item dispatch
+   306→        : 'awaiting_customer_to_ship_old_item' // new item dispatch is BLOCKED until verification
+   307→
+   308→    const exchange = await db.orderExchange.create({
+   309→      data: {
+   310→        organizationId: ctx.company.organizationId,
+   311→        companyId: ctx.company.id,
+   312→        originalOrderId: orderItem.order.id,
+   313→        originalOrderItemId: orderItem.id,
+   314→        newOrgVariantId: d.new_org_variant_id,
+   315→        exchangeMethod: d.exchange_method,
+   316→        status: initialStatus,
+   317→        oldItemPrice,
+   318→        newItemPrice,
+   319→        priceDifferenceStatus,
+   320→        reason: d.reason,
+   321→        requestedBy: ctx.employee.id,
+   322→        // priceDifference is GENERATED ALWAYS AS (new-old) STORED in the DB —
+   323→        // Prisma doesn't understand GENERATED columns, so we cast the input.
+   324→      } as Prisma.OrderExchangeUncheckedCreateInput,
+   325→    })
+   326→
+   327→    // 8. Audit log
+   328→    await insertAuditLog({
+   329→      action: 'exchange.requested',
+   330→      entityType: 'order_exchange',
+   331→      entityId: exchange.id,
+   332→      companyId: ctx.company.id,
+   333→      organizationId: ctx.company.organizationId,
+   334→      userId: ctx.user.id,
+   335→      employeeId: ctx.employee.id,
+   336→      newValues: {
+   337→        originalOrderId: orderItem.order.id,
+   338→        originalOrderItemId: orderItem.id,
+   339→        newOrgVariantId: d.new_org_variant_id,
+   340→        exchangeMethod: d.exchange_method,
+   341→        status: initialStatus,
+   342→        oldItemPrice,
+   343→        newItemPrice,
+   344→        priceDifference,
+   345→        priceDifferenceStatus,
+   346→        reason: d.reason,
+   347→      },
+   348→    })
+   349→
+   350→    // 9. Metric event
+   351→    await insertMetricEvent({
+   352→      companyId: ctx.company.id,
+   353→      entityType: 'order',
+   354→      entityId: orderItem.order.id,
+   355→      metricKey: 'exchange.requested',
+   356→      numericValue: 1,
+   357→      dimensions: {
+   358→        exchange_id: exchange.id,
+   359→        exchange_method: d.exchange_method,
+   360→      },
+   361→    }).catch(() => {})
+   362→
+   363→    return { success: true, data: { exchangeId: exchange.id } }
+   364→  } catch (err) {
+   365→    return {
+   366→      success: false,
+   367→      error: err instanceof Error ? err.message : 'Failed to create exchange request',
+   368→    }
+   369→  }
+   370→}
+   371→
+   372→// ══════════════════════════════════════════════════════════════
+   373→// PART 3: COURIER_REPLACEMENT PATH — dispatch new item immediately
+   374→// ══════════════════════════════════════════════════════════════
+   375→
+   376→export async function dispatchExchangeNewItem(
+   377→  exchangeId: string,
+   378→): Promise<ActionResult<{ newOrderId: string }>> {
+   379→  try {
+   380→    const ctx = await getWorkspace()
+   381→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   382→
+   383→    const exchange = await db.orderExchange.findFirst({
+   384→      where: { id: exchangeId, companyId: ctx.company.id },
+   385→    })
+   386→    if (!exchange) return { success: false, error: 'Exchange not found' }
+   387→
+   388→    // Only valid for courier_replacement with status='requested'
+   389→    if (exchange.exchangeMethod !== 'courier_replacement') {
+   390→      return {
+   391→        success: false,
+   392→        error:
+   393→          'This action is only valid for courier_replacement exchanges. For customer_self_return, the new item is dispatched automatically after old item verification.',
+   394→      }
+   395→    }
+   396→    if (exchange.status !== 'requested') {
+   397→      return {
+   398→        success: false,
+   399→        error: `Cannot dispatch new item for an exchange with status '${exchange.status}'. Expected 'requested'.`,
+   400→      }
+   401→    }
+   402→
+   403→    // Create + dispatch the new order (courier collects old item during this delivery)
+   404→    const { newOrderId } = await createAndDispatchExchangeOrder(exchangeId, ctx)
+   405→
+   406→    // Update exchange status to 'awaiting_old_item_return' (old item collection
+   407→    // happens during this delivery, but manual verification still needed)
+   408→    await db.orderExchange.update({
+   409→      where: { id: exchangeId },
+   410→      data: { status: 'awaiting_old_item_return' },
+   411→    })
+   412→
+   413→    return { success: true, data: { newOrderId } }
+   414→  } catch (err) {
+   415→    return {
+   416→      success: false,
+   417→      error: err instanceof Error ? err.message : 'Failed to dispatch exchange new item',
+   418→    }
+   419→  }
+   420→}
+   421→
+   422→// ══════════════════════════════════════════════════════════════
+   423→// PART 4: CUSTOMER_SELF_RETURN PATH — confirm customer shipped
+   424→// ══════════════════════════════════════════════════════════════
+   425→
+   426→export async function confirmCustomerShippedOldItem(
+   427→  input: ConfirmCustomerShippedInput,
+   428→): Promise<ActionResult> {
+   429→  try {
+   430→    const ctx = await getWorkspace()
+   431→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   432→
+   433→    const parsed = confirmCustomerShippedSchema.safeParse(input)
+   434→    if (!parsed.success) {
+   435→      return {
+   436→        success: false,
+   437→        error: parsed.error.issues[0]?.message ?? 'Invalid input',
+   438→      }
+   439→    }
+   440→    const d = parsed.data
+   441→
+   442→    const exchange = await db.orderExchange.findFirst({
+   443→      where: { id: d.exchange_id, companyId: ctx.company.id },
+   444→    })
+   445→    if (!exchange) return { success: false, error: 'Exchange not found' }
+   446→
+   447→    if (exchange.status !== 'awaiting_customer_to_ship_old_item') {
+   448→      return {
+   449→        success: false,
+   450→        error: `Cannot confirm shipment for an exchange with status '${exchange.status}'. Expected 'awaiting_customer_to_ship_old_item'.`,
+   451→      }
+   452→    }
+   453→
+   454→    await db.orderExchange.update({
+   455→      where: { id: d.exchange_id },
+   456→      data: {
+   457→        customerReturnTrackingNumber: d.customer_return_tracking_number?.trim() || null,
+   458→        customerReturnCourier: d.customer_return_courier?.trim() || null,
+   459→        customerConfirmedShippedAt: new Date(),
+   460→        customerConfirmedShippedBy: ctx.employee.id,
+   461→        status: 'customer_confirmed_shipped',
+   462→      },
+   463→    })
+   464→
+   465→    await insertAuditLog({
+   466→      action: 'exchange.customer_confirmed_shipped',
+   467→      entityType: 'order_exchange',
+   468→      entityId: d.exchange_id,
+   469→      companyId: ctx.company.id,
+   470→      organizationId: ctx.company.organizationId,
+   471→      userId: ctx.user.id,
+   472→      employeeId: ctx.employee.id,
+   473→      newValues: {
+   474→        trackingNumber: d.customer_return_tracking_number || null,
+   475→        courier: d.customer_return_courier || null,
+   476→      },
+   477→    })
+   478→
+   479→    return { success: true }
+   480→  } catch (err) {
+   481→    return {
+   482→      success: false,
+   483→      error: err instanceof Error ? err.message : 'Failed to confirm customer shipment',
+   484→    }
+   485→  }
+   486→}
+   487→
+   488→// ══════════════════════════════════════════════════════════════
+   489→// PART 5: MANUAL VERIFICATION — shared by both methods
+   490→// This is the ONLY function that processes the old item's return in inventory.
+   491→// ══════════════════════════════════════════════════════════════
+   492→
+   493→export async function verifyOldItemReceived(
+   494→  input: VerifyOldItemReceivedInput,
+   495→): Promise<ActionResult<{ exchangeStatus: string }>> {
+   496→  try {
+   497→    const ctx = await getWorkspace()
+   498→    // GUARD: inventory.receive OR orders.manage
+   499→    await requirePermission(ctx, PERMISSIONS.INVENTORY_RECEIVE)
+   500→
+   501→    const parsed = verifyOldItemReceivedSchema.safeParse(input)
+   502→    if (!parsed.success) {
+   503→      return {
+   504→        success: false,
+   505→        error: parsed.error.issues[0]?.message ?? 'Invalid input',
+   506→      }
+   507→    }
+   508→    const d = parsed.data
+   509→
+   510→    const exchange = await db.orderExchange.findFirst({
+   511→      where: { id: d.exchange_id, companyId: ctx.company.id },
+   512→      include: {
+   513→        originalOrderItem: {
+   514→          select: {
+   515→            id: true,
+   516→            orgVariantId: true,
+   517→            fulfillmentTypeSnapshot: true,
+   518→            unitPrice: true,
+   519→            reservedLocationId: true,
+   520→          },
+   521→        },
+   522→        originalOrder: {
+   523→          select: { id: true, dispatchLocationId: true },
+   524→        },
+   525→      },
+   526→    })
+   527→    if (!exchange) return { success: false, error: 'Exchange not found' }
+   528→
+   529→    // 3. Verify status is one of the awaiting-return states
+   530→    const validStatuses = ['awaiting_old_item_return', 'customer_confirmed_shipped']
+   531→    if (!validStatuses.includes(exchange.status)) {
+   532→      return {
+   533→        success: false,
+   534→        error: `Cannot verify old item for an exchange with status '${exchange.status}'. Expected one of: ${validStatuses.join(', ')}.`,
+   535→      }
+   536→    }
+   537→
+   538→    const locationId =
+   539→      exchange.originalOrderItem.reservedLocationId ?? exchange.originalOrder.dispatchLocationId
+   540→    if (!locationId) {
+   541→      return {
+   542→        success: false,
+   543→        error: 'Cannot receive returned item — no dispatch location set on the original order.',
+   544→      }
+   545→    }
+   546→
+   547→    let inventoryTxnId: string | null = null
+   548→    let stockLossId: string | null = null
+   549→    const oldItemCost = Number(exchange.oldItemPrice)
+   550→
+   551→    // 5. IF condition IN ('perfect','good','open_box'): receive into inventory
+   552→    // 6. IF condition = 'damaged': create stock_loss_records entry directly
+   553→    if (d.condition === 'damaged') {
+   554→      // Damaged → straight to stock_loss, no inventory addition
+   555→      const lossRecord = await db.stockLossRecord.create({
+   556→        data: {
+   557→          organizationId: ctx.company.organizationId,
+   558→          companyId: ctx.company.id,
+   559→          orgVariantId: exchange.originalOrderItem.orgVariantId,
+   560→          locationId,
+   561→          lossType: 'damaged',
+   562→          subType: 'confirmed',
+   563→          damageType: 'other',
+   564→          quantity: 1,
+   565→          costPerUnit: oldItemCost,
+   566→          investigationStatus: 'none',
+   567→          resolution: 'written_off',
+   568→          responsibleParty: 'customer',
+   569→          evidenceUrls: JSON.stringify(d.evidence_urls),
+   570→          notes: `Damaged exchanged item. ${d.notes || ''}`.trim(),
+   571→          reportedById: ctx.employee.id,
+   572→          approvedById: ctx.employee.id,
+   573→          resolvedById: ctx.employee.id,
+   574→          resolvedAt: new Date(),
+   575→        },
+   576→      })
+   577→      stockLossId = lossRecord.id
+   578→    } else {
+   579→      // Not damaged → add to stock via processInventoryTransaction
+   580→      // (same function the /api/inventory/receive-returned-stitched route uses)
+   581→      const txnType =
+   582→        exchange.originalOrderItem.fulfillmentTypeSnapshot === 'made_to_order'
+   583→          ? 'return_stitched_received'
+   584→          : 'return_resellable'
+   585→
+   586→      const txnResult = await processInventoryTransaction({
+   587→        orgVariantId: exchange.originalOrderItem.orgVariantId,
+   588→        locationId,
+   589→        organizationId: ctx.company.organizationId,
+   590→        companyId: ctx.company.id,
+   591→        employeeId: ctx.employee.id,
+   592→        transactionType: txnType,
+   593→        quantity: 1,
+   594→        costPerUnit: oldItemCost,
+   595→        referenceType: 'order',
+   596→        referenceId: exchange.originalOrderId,
+   597→        notes: `Exchanged item (${d.condition}). ${d.notes || ''}`.trim(),
+   598→      })
+   599→
+   600→      if (!txnResult.success || !txnResult.transactionId) {
+   601→        return {
+   602→          success: false,
+   603→          error: `Failed to receive returned item into inventory: ${txnResult.error}`,
+   604→        }
+   605→      }
+   606→      inventoryTxnId = txnResult.transactionId
+   607→    }
+   608→
+   609→    // 7. UPDATE order_exchanges with verification data
+   610→    await db.orderExchange.update({
+   611→      where: { id: d.exchange_id },
+   612→      data: {
+   613→        oldItemCondition: d.condition,
+   614→        oldItemVerifiedAt: new Date(),
+   615→        oldItemVerifiedBy: ctx.employee.id,
+   616→        oldItemEvidenceUrls: JSON.stringify(d.evidence_urls),
+   617→        oldItemNotes: d.notes?.trim() || null,
+   618→        oldItemInventoryTxnId: inventoryTxnId,
+   619→        oldItemStockLossId: stockLossId,
+   620→        status: 'old_item_manually_verified',
+   621→      },
+   622→    })
+   623→
+   624→    // 8. IF customer_self_return: THIS IS THE GATING POINT — create + dispatch
+   625→    //    the new item order NOW (was blocked until verification completed).
+   626→    //    For courier_replacement, the new item was already dispatched in Part 3.
+   627→    if (exchange.exchangeMethod === 'customer_self_return') {
+   628→      await createAndDispatchExchangeOrder(d.exchange_id, ctx)
+   629→    }
+   630→
+   631→    // 9. Mark as completed (for both methods — courier_replacement's new item
+   632→    //    was dispatched earlier, self_return's was just dispatched above)
+   633→    await db.orderExchange.update({
+   634→      where: { id: d.exchange_id },
+   635→      data: {
+   636→        status: 'completed',
+   637→        completedAt: new Date(),
+   638→      },
+   639→    })
+   640→
+   641→    // 10. Audit log
+   642→    await insertAuditLog({
+   643→      action: 'exchange.old_item_verified',
+   644→      entityType: 'order_exchange',
+   645→      entityId: d.exchange_id,
+   646→      companyId: ctx.company.id,
+   647→      organizationId: ctx.company.organizationId,
+   648→      userId: ctx.user.id,
+   649→      employeeId: ctx.employee.id,
+   650→      newValues: {
+   651→        condition: d.condition,
+   652→        inventoryTxnId,
+   653→        stockLossId,
+   654→        exchangeMethod: exchange.exchangeMethod,
+   655→      },
+   656→    })
+   657→
+   658→    // Metric event
+   659→    await insertMetricEvent({
+   660→      companyId: ctx.company.id,
+   661→      entityType: 'order_exchange',
+   662→      entityId: d.exchange_id,
+   663→      metricKey: 'exchange.old_item_verified',
+   664→      numericValue: oldItemCost,
+   665→      dimensions: {
+   666→        condition: d.condition,
+   667→        exchange_method: exchange.exchangeMethod,
+   668→      },
+   669→    }).catch(() => {})
+   670→
+   671→    // Also fire exchange.completed metric
+   672→    await insertMetricEvent({
+   673→      companyId: ctx.company.id,
+   674→      entityType: 'order_exchange',
+   675→      entityId: d.exchange_id,
+   676→      metricKey: 'exchange.completed',
+   677→      numericValue: Number(exchange.newItemPrice) - Number(exchange.oldItemPrice),
+   678→      dimensions: {
+   679→        exchange_method: exchange.exchangeMethod,
+   680→        condition: d.condition,
+   681→      },
+   682→    }).catch(() => {})
+   683→
+   684→    return { success: true, data: { exchangeStatus: 'completed' } }
+   685→  } catch (err) {
+   686→    return {
+   687→      success: false,
+   688→      error: err instanceof Error ? err.message : 'Failed to verify old item',
+   689→    }
+   690→  }
+   691→}
+   692→
+   693→// ══════════════════════════════════════════════════════════════
+   694→// PART 6: PRICE DIFFERENCE SETTLEMENT
+   695→// ══════════════════════════════════════════════════════════════
+   696→
+   697→export async function settlePriceDifference(
+   698→  input: SettlePriceDifferenceInput,
+   699→): Promise<ActionResult> {
+   700→  try {
+   701→    const ctx = await getWorkspace()
+   702→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   703→
+   704→    const parsed = settlePriceDifferenceSchema.safeParse(input)
+   705→    if (!parsed.success) {
+   706→      return {
+   707→        success: false,
+   708→        error: parsed.error.issues[0]?.message ?? 'Invalid input',
+   709→      }
+   710→    }
+   711→    const d = parsed.data
+   712→
+   713→    const exchange = await db.orderExchange.findFirst({
+   714→      where: { id: d.exchange_id, companyId: ctx.company.id },
+   715→    })
+   716→    if (!exchange) return { success: false, error: 'Exchange not found' }
+   717→
+   718→    await db.orderExchange.update({
+   719→      where: { id: d.exchange_id },
+   720→      data: {
+   721→        priceDifferenceSettledAmount: d.settled_amount,
+   722→        priceDifferenceSettledAt: new Date(),
+   723→        priceDifferenceSettledBy: ctx.employee.id,
+   724→        priceDifferenceStatus: 'settled',
+   725→      },
+   726→    })
+   727→
+   728→    await insertAuditLog({
+   729→      action: 'exchange.price_difference_settled',
+   730→      entityType: 'order_exchange',
+   731→      entityId: d.exchange_id,
+   732→      companyId: ctx.company.id,
+   733→      organizationId: ctx.company.organizationId,
+   734→      userId: ctx.user.id,
+   735→      employeeId: ctx.employee.id,
+   736→      newValues: {
+   737→        settledAmount: d.settled_amount,
+   738→        settlementType: d.settlement_type,
+   739→      },
+   740→    })
+   741→
+   742→    return { success: true }
+   743→  } catch (err) {
+   744→    return {
+   745→      success: false,
+   746→      error: err instanceof Error ? err.message : 'Failed to settle price difference',
+   747→    }
+   748→  }
+   749→}
+   750→
+   751→// ══════════════════════════════════════════════════════════════
+   752→// PART 7: "CUSTOMER DID NOT RETURN" HANDLING
+   753→// ══════════════════════════════════════════════════════════════
+   754→
+   755→export async function markExchangeAsNotReturned(
+   756→  input: MarkNotReturnedInput,
+   757→): Promise<ActionResult> {
+   758→  try {
+   759→    const ctx = await getWorkspace()
+   760→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   761→
+   762→    const parsed = markNotReturnedSchema.safeParse(input)
+   763→    if (!parsed.success) {
+   764→      return {
+   765→        success: false,
+   766→        error: parsed.error.issues[0]?.message ?? 'Invalid input',
+   767→      }
+   768→    }
+   769→    const d = parsed.data
+   770→
+   771→    const exchange = await db.orderExchange.findFirst({
+   772→      where: { id: d.exchange_id, companyId: ctx.company.id },
+   773→      include: {
+   774→        originalOrder: { select: { customerId: true } },
+   775→      },
+   776→    })
+   777→    if (!exchange) return { success: false, error: 'Exchange not found' }
+   778→
+   779→    // 3. Verify not already in a terminal state
+   780→    const terminalStates = ['completed', 'customer_did_not_return', 'cancelled']
+   781→    if (terminalStates.includes(exchange.status)) {
+   782→      return {
+   783→        success: false,
+   784→        error: `Cannot mark as not returned — exchange is already in terminal status '${exchange.status}'.`,
+   785→      }
+   786→    }
+   787→
+   788→    // 4. UPDATE order_exchanges (the DB CHECK constraint enforces status consistency)
+   789→    await db.orderExchange.update({
+   790→      where: { id: d.exchange_id },
+   791→      data: {
+   792→        markedAsNotReturned: true,
+   793→        notReturnedReason: d.not_returned_reason,
+   794→        notReturnedRecoveryStatus: d.recovery_status,
+   795→        notReturnedRecoveryAmount: d.recovery_amount ?? null,
+   796→        status: 'customer_did_not_return',
+   797→      },
+   798→    })
+   799→
+   800→    // 5. Call the existing flagCustomer() action with reason "Exchange item not returned"
+   801→    if (exchange.originalOrder.customerId) {
+   802→      await flagCustomer(
+   803→        exchange.originalOrder.customerId,
+   804→        'Exchange item not returned',
+   805→      ).catch((e) => {
+   806→        // Non-fatal — the exchange is still marked, just the flag failed
+   807→        console.error('[exchange] flagCustomer failed:', e)
+   808→      })
+   809→    }
+   810→
+   811→    // 6. NOTE: for customer_self_return, the new item was NEVER dispatched
+   812→    //    (sequential gating held), so nothing to reverse.
+   813→    //    For courier_replacement, the new item WAS dispatched — this is now
+   814→    //    an unrecovered loss tracked via not_returned_recovery_amount.
+   815→
+   816→    // 7. Audit log
+   817→    await insertAuditLog({
+   818→      action: 'exchange.not_returned',
+   819→      entityType: 'order_exchange',
+   820→      entityId: d.exchange_id,
+   821→      companyId: ctx.company.id,
+   822→      organizationId: ctx.company.organizationId,
+   823→      userId: ctx.user.id,
+   824→      employeeId: ctx.employee.id,
+   825→      newValues: {
+   826→        reason: d.not_returned_reason,
+   827→        recoveryStatus: d.recovery_status,
+   828→        recoveryAmount: d.recovery_amount ?? null,
+   829→        exchangeMethod: exchange.exchangeMethod,
+   830→        customerId: exchange.originalOrder.customerId,
+   831→      },
+   832→    })
+   833→
+   834→    // Metric event
+   835→    await insertMetricEvent({
+   836→      companyId: ctx.company.id,
+   837→      entityType: 'order_exchange',
+   838→      entityId: d.exchange_id,
+   839→      metricKey: 'exchange.not_returned',
+   840→      numericValue: Number(exchange.oldItemPrice), // loss value
+   841→      dimensions: {
+   842→        exchange_method: exchange.exchangeMethod,
+   843→        recovery_status: d.recovery_status,
+   844→      },
+   845→    }).catch(() => {})
+   846→
+   847→    return { success: true }
+   848→  } catch (err) {
+   849→    return {
+   850→      success: false,
+   851→      error: err instanceof Error ? err.message : 'Failed to mark exchange as not returned',
+   852→    }
+   853→  }
+   854→}
+   855→
+   856→// ──────────────────────────────────────────────────────────────
+   857→// cancelExchangeRequest
+   858→// ──────────────────────────────────────────────────────────────
+   859→
+   860→export async function cancelExchangeRequest(
+   861→  input: CancelExchangeInput,
+   862→): Promise<ActionResult> {
+   863→  try {
+   864→    const ctx = await getWorkspace()
+   865→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+   866→
+   867→    const parsed = cancelExchangeSchema.safeParse(input)
+   868→    if (!parsed.success) {
+   869→      return {
+   870→        success: false,
+   871→        error: parsed.error.issues[0]?.message ?? 'Invalid input',
+   872→      }
+   873→    }
+   874→    const d = parsed.data
+   875→
+   876→    const exchange = await db.orderExchange.findFirst({
+   877→      where: { id: d.exchange_id, companyId: ctx.company.id },
+   878→    })
+   879→    if (!exchange) return { success: false, error: 'Exchange not found' }
+   880→
+   881→    // Only valid while no new item has been dispatched
+   882→    const cancellableStates = ['requested', 'awaiting_customer_to_ship_old_item']
+   883→    if (!cancellableStates.includes(exchange.status)) {
+   884→      return {
+   885→        success: false,
+   886→        error: `Cannot cancel an exchange with status '${exchange.status}'. Cancellation is only allowed before any new item has been dispatched.`,
+   887→      }
+   888→    }
+   889→
+   890→    await db.orderExchange.update({
+   891→      where: { id: d.exchange_id },
+   892→      data: {
+   893→        status: 'cancelled',
+   894→        cancelledAt: new Date(),
+   895→        cancellationReason: d.reason,
+   896→      },
+   897→    })
+   898→
+   899→    await insertAuditLog({
+   900→      action: 'exchange.cancelled',
+   901→      entityType: 'order_exchange',
+   902→      entityId: d.exchange_id,
+   903→      companyId: ctx.company.id,
+   904→      organizationId: ctx.company.organizationId,
+   905→      userId: ctx.user.id,
+   906→      employeeId: ctx.employee.id,
+   907→      newValues: { reason: d.reason },
+   908→    })
+   909→
+   910→    return { success: true }
+   911→  } catch (err) {
+   912→    return {
+   913→      success: false,
+   914→      error: err instanceof Error ? err.message : 'Failed to cancel exchange',
+   915→    }
+   916→  }
+   917→}
+   918→
+   919→// ══════════════════════════════════════════════════════════════
+   920→// PART 8: LISTING & DETAIL
+   921→// ══════════════════════════════════════════════════════════════
+   922→
+   923→export async function listExchanges(
+   924→  filters: {
+   925→    status?: string
+   926→    exchangeMethod?: 'courier_replacement' | 'customer_self_return'
+   927→    dateFrom?: string
+   928→    dateTo?: string
+   929→    limit?: number
+   930→    offset?: number
+   931→  } = {},
+   932→): Promise<ActionResult<{
+   933→  exchanges: Array<{
+   934→    id: string
+   935→    exchangeMethod: string
+   936→    status: string
+   937→    reason: string
+   938→    oldItemPrice: number
+   939→    newItemPrice: number
+   940→    priceDifference: number
+   941→    priceDifferenceStatus: string
+   942→    requestedAt: Date
+   943→    completedAt: Date | null
+   944→    originalOrderId: string
+   945→    originalOrder: { flowopsOrderNumber: string }
+   946→    newOrderId: string | null
+   947→    newOrder: { flowopsOrderNumber: string } | null
+   948→  }>
+   949→  total: number
+   950→}>> {
+   951→  try {
+   952→    const ctx = await getWorkspace()
+   953→    const limit = Math.min(filters.limit ?? 50, 100)
+   954→    const offset = filters.offset ?? 0
+   955→
+   956→    const where: Prisma.OrderExchangeWhereInput = {
+   957→      companyId: ctx.company.id,
+   958→    }
+   959→    if (filters.status) where.status = filters.status
+   960→    if (filters.exchangeMethod) where.exchangeMethod = filters.exchangeMethod
+   961→    if (filters.dateFrom || filters.dateTo) {
+   962→      where.requestedAt = {}
+   963→      if (filters.dateFrom) where.requestedAt.gte = new Date(filters.dateFrom)
+   964→      if (filters.dateTo) where.requestedAt.lte = new Date(filters.dateTo)
+   965→    }
+   966→
+   967→    const [exchanges, total] = await Promise.all([
+   968→      db.orderExchange.findMany({
+   969→        where,
+   970→        orderBy: { requestedAt: 'desc' },
+   971→        take: limit,
+   972→        skip: offset,
+   973→        include: {
+   974→          originalOrder: { select: { flowopsOrderNumber: true } },
+   975→          newOrder: { select: { flowopsOrderNumber: true } },
+   976→        },
+   977→      }),
+   978→      db.orderExchange.count({ where }),
+   979→    ])
+   980→
+   981→    return {
+   982→      success: true,
+   983→      data: {
+   984→        exchanges: exchanges.map((e) => ({
+   985→          id: e.id,
+   986→          exchangeMethod: e.exchangeMethod,
+   987→          status: e.status,
+   988→          reason: e.reason,
+   989→          oldItemPrice: Number(e.oldItemPrice),
+   990→          newItemPrice: Number(e.newItemPrice),
+   991→          priceDifference: Number(e.priceDifference),
+   992→          priceDifferenceStatus: e.priceDifferenceStatus,
+   993→          requestedAt: e.requestedAt,
+   994→          completedAt: e.completedAt,
+   995→          originalOrderId: e.originalOrderId,
+   996→          originalOrder: e.originalOrder,
+   997→          newOrderId: e.newOrderId,
+   998→          newOrder: e.newOrder,
+   999→        })),
+  1000→        total,
+  1001→      },
+  1002→    }
+  1003→  } catch (err) {
+  1004→    return {
+  1005→      success: false,
+  1006→      error: err instanceof Error ? err.message : 'Failed to list exchanges',
+  1007→    }
+  1008→  }
+  1009→}
+  1010→
+  1011→export async function getExchangeDetail(
+  1012→  exchangeId: string,
+  1013→): Promise<ActionResult> {
+  1014→  try {
+  1015→    const ctx = await getWorkspace()
+  1016→
+  1017→    const exchange = await db.orderExchange.findFirst({
+  1018→      where: { id: exchangeId, companyId: ctx.company.id },
+  1019→      include: {
+  1020→        originalOrder: {
+  1021→          select: {
+  1022→            id: true,
+  1023→            flowopsOrderNumber: true,
+  1024→            status: true,
+  1025→            customerId: true,
+  1026→            customer: {
+  1027→              select: {
+  1028→                id: true,
+  1029→                name: true,
+  1030→                phones: { where: { isPrimary: true }, take: 1, select: { phoneRaw: true } },
+  1031→              },
+  1032→            },
+  1033→          },
+  1034→        },
+  1035→        originalOrderItem: {
+  1036→          select: {
+  1037→            id: true,
+  1038→            orgVariantId: true,
+  1039→            quantity: true,
+  1040→            unitPrice: true,
+  1041→            fulfillmentTypeSnapshot: true,
+  1042→            orgVariant: { select: { sku: true, product: { select: { title: true } } } },
+  1043→          },
+  1044→        },
+  1045→        newOrgVariant: {
+  1046→          select: {
+  1047→            id: true,
+  1048→            sku: true,
+  1049→            fulfillmentType: true,
+  1050→            product: { select: { title: true } },
+  1051→          },
+  1052→        },
+  1053→        newOrder: {
+  1054→          select: {
+  1055→            id: true,
+  1056→            flowopsOrderNumber: true,
+  1057→            status: true,
+  1058→            dispatchedAt: true,
+  1059→            deliveredAt: true,
+  1060→          },
+  1061→        },
+  1062→        newOrderItem: {
+  1063→          select: { id: true, fulfillmentStatus: true },
+  1064→        },
+  1065→        requestedByEmployee: {
+  1066→          select: { id: true, user: { select: { fullName: true } } },
+  1067→        },
+  1068→        oldItemVerifiedByEmployee: {
+  1069→          select: { id: true, user: { select: { fullName: true } } },
+  1070→        },
+  1071→      },
+  1072→    })
+  1073→    if (!exchange) return { success: false, error: 'Exchange not found' }
+  1074→
+  1075→    return { success: true, data: exchange }
+  1076→  } catch (err) {
+  1077→    return {
+  1078→      success: false,
+  1079→      error: err instanceof Error ? err.message : 'Failed to get exchange detail',
+  1080→    }
+  1081→  }
+  1082→}
+  1083→
+  1084→// ──────────────────────────────────────────────────────────────
+  1085→// listOverdueExchanges — powers the alert/reminder system
+  1086→// ──────────────────────────────────────────────────────────────
+  1087→
+  1088→export async function listOverdueExchanges(
+  1089→  daysThreshold: number = 7,
+  1090→): Promise<ActionResult<{
+  1091→  exchanges: Array<{
+  1092→    id: string
+  1093→    exchangeMethod: string
+  1094→    status: string
+  1095→    reason: string
+  1096→    requestedAt: Date
+  1097→    customerConfirmedShippedAt: Date | null
+  1098→    originalOrder: { flowopsOrderNumber: string; customer: { name: string } }
+  1099→    daysWaiting: number
+  1100→  }>
+  1101→}>> {
+  1102→  try {
+  1103→    const ctx = await getWorkspace()
+  1104→    const threshold = new Date(Date.now() - daysThreshold * 86400000)
+  1105→
+  1106→    // Exchanges in waiting states where the relevant latest timestamp is older than threshold
+  1107→    const exchanges = await db.orderExchange.findMany({
+  1108→      where: {
+  1109→        companyId: ctx.company.id,
+  1110→        status: {
+  1111→          in: [
+  1112→            'awaiting_old_item_return',
+  1113→            'awaiting_customer_to_ship_old_item',
+  1114→            'customer_confirmed_shipped',
+  1115→          ],
+  1116→        },
+  1117→        // For awaiting_customer_to_ship_old_item: requestedAt is the relevant timestamp
+  1118→        // For customer_confirmed_shipped: customerConfirmedShippedAt is the relevant timestamp
+  1119→        // For awaiting_old_item_return: requestedAt is the relevant timestamp (courier_replacement)
+  1120→        OR: [
+  1121→          { status: 'awaiting_customer_to_ship_old_item', requestedAt: { lt: threshold } },
+  1122→          {
+  1123→            status: 'customer_confirmed_shipped',
+  1124→            customerConfirmedShippedAt: { lt: threshold },
+  1125→          },
+  1126→          { status: 'awaiting_old_item_return', requestedAt: { lt: threshold } },
+  1127→        ],
+  1128→      },
+  1129→      orderBy: { requestedAt: 'asc' },
+  1130→      include: {
+  1131→        originalOrder: {
+  1132→          select: {
+  1133→            flowopsOrderNumber: true,
+  1134→            customer: { select: { name: true } },
+  1135→          },
+  1136→        },
+  1137→      },
+  1138→    })
+  1139→
+  1140→    const now = Date.now()
+  1141→    return {
+  1142→      success: true,
+  1143→      data: {
+  1144→        exchanges: exchanges.map((e) => {
+  1145→          // The "waiting since" timestamp depends on the current status
+  1146→          const waitingSince =
+  1147→            e.status === 'customer_confirmed_shipped'
+  1148→              ? e.customerConfirmedShippedAt ?? e.requestedAt
+  1149→              : e.requestedAt
+  1150→          const daysWaiting = Math.floor(
+  1151→            (now - new Date(waitingSince).getTime()) / 86400000,
+  1152→          )
+  1153→          return {
+  1154→            id: e.id,
+  1155→            exchangeMethod: e.exchangeMethod,
+  1156→            status: e.status,
+  1157→            reason: e.reason,
+  1158→            requestedAt: e.requestedAt,
+  1159→            customerConfirmedShippedAt: e.customerConfirmedShippedAt,
+  1160→            originalOrder: e.originalOrder,
+  1161→            daysWaiting,
+  1162→          }
+  1163→        }),
+  1164→      },
+  1165→    }
+  1166→  } catch (err) {
+  1167→    return {
+  1168→      success: false,
+  1169→      error: err instanceof Error ? err.message : 'Failed to list overdue exchanges',
+  1170→    }
+  1171→  }
+  1172→}
+  1173→

@@ -1,0 +1,46 @@
+# Dependencies (installed inside the container, never copied from host)
+node_modules
+
+# Next.js build output (rebuilt inside the container)
+.next
+
+# Git
+.git
+.gitignore
+
+# Documentation (not needed in the image)
+*.md
+agent-ctx/
+
+# Environment files (injected via compose env_file, NEVER baked into the image)
+.env
+.env.*
+!.env.docker.example
+
+# Runtime data (must NOT be in the build context — persisted via named volume)
+public/uploads/*
+
+# Local SQLite DB (legacy, should not exist but exclude just in case)
+db/
+
+# Logs
+*.log
+dev.log
+server.log
+
+# IDE / editor
+.vscode
+.idea
+
+# Misc local artifacts
+tool-results/
+download/
+upload/
+.zscripts/
+skills/
+examples/
+scripts/test*
+bunfig.toml
+
+# Prisma generated client (regenerated during build)
+node_modules/.prisma

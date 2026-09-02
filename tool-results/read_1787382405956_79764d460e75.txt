@@ -1,0 +1,2002 @@
+     1→'use client'
+     2→
+     3→import { useCallback, useEffect, useMemo, useRef, useState , memo} from 'react'
+     4→import { useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import { api, FetchError, getSessionToken } from '@/lib/api-client'
+     7→import { useAppStore, useCan } from '@/stores/app-store'
+     8→import { PERMISSIONS } from '@/lib/permissions'
+     9→import { useFormGuard } from '@/hooks/form-guard/use-form-guard'
+    10→import { PageHeader } from '@/components/layout/dashboard-shell'
+    11→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+    12→import { Button } from '@/components/ui/button'
+    13→import { Input } from '@/components/ui/input'
+    14→import { Label } from '@/components/ui/label'
+    15→import { Badge } from '@/components/ui/badge'
+    16→import { Skeleton } from '@/components/ui/skeleton'
+    17→import { Separator } from '@/components/ui/separator'
+    18→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+    19→
+    20→import {
+    21→  Select,
+    22→  SelectContent,
+    23→  SelectItem,
+    24→  SelectTrigger,
+    25→  SelectValue,
+    26→} from '@/components/ui/select'
+    27→import {
+    28→  ArrowLeft,
+    29→  Plus,
+    30→  Trash2,
+    31→  Search,
+    32→  AlertCircle,
+    33→  Loader2,
+    34→  User,
+    35→  Phone,
+    36→  MapPin,
+    37→  Package,
+    38→  CreditCard,
+    39→  Truck,
+    40→  CheckCircle2,
+    41→  Check,
+    42→  Upload,
+    43→  X,
+    44→  ShoppingBag,
+    45→  History,
+    46→  PackageCheck,
+    47→  FileImage,
+    48→  RotateCcw,
+    49→  Save,
+    50→  AlertTriangle,
+    51→} from 'lucide-react'
+    52→import { cn } from '@/lib/utils'
+    53→import { createManualOrderSchema } from '@/lib/validations/order.schemas'
+    54→
+    55→// Shared customer components (the entire customer-search + create + address
+    56→// selection flow lives in these — order-create-view just orchestrates them).
+    57→import { CustomerSearchAutocomplete } from '@/components/customers/CustomerSearchAutocomplete'
+    58→import { CreateCustomerForm } from '@/components/customers/CreateCustomerForm'
+    59→import {
+    60→  AddressSelector,
+    61→  type AddressSelectorValue,
+    62→} from '@/components/customers/AddressSelector'
+    63→import type {
+    64→  CustomerSearchResult,
+    65→  CustomerDetail,
+    66→} from '@/components/customers/types'
+    67→
+    68→// ─────────────────────────────────────────────────────────────────────────────
+    69→// Types
+    70→// ─────────────────────────────────────────────────────────────────────────────
+    71→
+    72→interface InventoryLocation {
+    73→  id: string
+    74→  name: string
+    75→  locationType: string
+    76→  city: string
+    77→  isOrgLevel: boolean
+    78→  isDefault: boolean
+    79→}
+    80→
+    81→interface LocationsResponse {
+    82→  locations: InventoryLocation[]
+    83→}
+    84→
+    85→/**
+    86→ * The customer shape returned by CustomerSearchAutocomplete.onSelect —
+    87→ * matches `NonNullable<CustomerSearchResult['customer']>`.
+    88→ */
+    89→type SelectedCustomer = NonNullable<CustomerSearchResult['customer']>
+    90→
+    91→interface VariantOption {
+    92→  variantId: string
+    93→  sku: string
+    94→  productTitle: string
+    95→  costPrice: number
+    96→  salePrice: number | null
+    97→  fulfillmentType: string
+    98→  primaryImage: string | null
+    99→  attributeValues: Record<string, string>
+   100→}
+   101→
+   102→interface ProductsResponse {
+   103→  products: Array<{
+   104→    id: string
+   105→    title: string
+   106→    primaryImage: string | null
+   107→    variants: Array<{
+   108→      id: string
+   109→      sku: string
+   110→      costPrice: number
+   111→      salePrice: number | null
+   112→      fulfillmentType: string
+   113→      attributeValues: Record<string, string>
+   114→    }>
+   115→  }>
+   116→}
+   117→
+   118→interface CartItem {
+   119→  variantId: string
+   120→  sku: string
+   121→  productTitle: string
+   122→  primaryImage: string | null
+   123→  unitPrice: number
+   124→  quantity: number
+   125→  fulfillmentType: string
+   126→}
+   127→
+   128→interface CreateOrderResponse {
+   129→  orderId: string
+   130→  flowopsOrderNumber: string
+   131→  orderItems: Array<{ id: string; orgVariantId: string; quantity: number }>
+   132→  /** Auto-booking is now ASYNC — bookingAttempted=true means it's running in the background. */
+   133→  bookingAttempted: boolean
+   134→  bookingSucceeded?: boolean
+   135→  bookingError?: string
+   136→  bookingTrackingNumber?: string
+   137→}
+   138→
+   139→type PaymentType = 'full_cod' | 'partial_advance' | 'fully_prepaid'
+   140→
+   141→// ─────────────────────────────────────────────────────────────────────────────
+   142→// Helpers
+   143→// ─────────────────────────────────────────────────────────────────────────────
+   144→
+   145→const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
+   146→
+   147→function formatPKR(n: number): string {
+   148→  return `Rs. ${PKR.format(n)}`
+   149→}
+   150→
+   151→function getErrorMessage(err: unknown): string {
+   152→  if (err instanceof FetchError) return err.message
+   153→  if (err instanceof Error) return err.message
+   154→  return 'Something went wrong. Please try again.'
+   155→}
+   156→
+   157→function parseQty(v: string): number {
+   158→  if (v === '') return 0
+   159→  const n = Number(v)
+   160→  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
+   161→}
+   162→
+   163→function parsePrice(v: string): number {
+   164→  if (v === '') return 0
+   165→  const n = Number(v)
+   166→  return Number.isFinite(n) && n >= 0 ? n : 0
+   167→}
+   168→
+   169→const PAYMENT_METHODS = [
+   170→  { value: 'bank_transfer', label: 'Bank Transfer' },
+   171→  { value: 'easy_paisa', label: 'EasyPaisa' },
+   172→  { value: 'jazz_cash', label: 'JazzCash' },
+   173→  { value: 'cash', label: 'Cash' },
+   174→  { value: 'card', label: 'Card' },
+   175→  { value: 'other', label: 'Other' },
+   176→]
+   177→
+   178→/** Stock badge for a variant based on fulfillmentType. */
+   179→function stockBadgeFor(
+   180→  fulfillmentType: string,
+   181→): { label: string; className: string } {
+   182→  if (fulfillmentType === 'made_to_order') {
+   183→    return {
+   184→      label: 'Made to Order',
+   185→      className: 'bg-purple-50 text-purple-700 border-purple-200',
+   186→    }
+   187→  }
+   188→  if (fulfillmentType === 'backorder') {
+   189→    return {
+   190→      label: 'Backorder Available',
+   191→      className: 'bg-orange-50 text-orange-700 border-orange-200',
+   192→    }
+   193→  }
+   194→  return {
+   195→    label: 'In Stock',
+   196→    className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+   197→  }
+   198→}
+   199→
+   200→// ─────────────────────────────────────────────────────────────────────────────
+   201→// Main view — single-page scrollable order creation form
+   202→// ─────────────────────────────────────────────────────────────────────────────
+   203→
+   204→export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: () => void; draftId?: string }) {
+   205→  const navigate = useAppStore((s) => s.navigate)
+   206→  const can = useCan()
+   207→  const queryClient = useQueryClient()
+   208→  const canCreate = can(PERMISSIONS.ORDERS_CREATE)
+   209→
+   210→  // ── Form state ────────────────────────────────────────────────────────────
+   211→  // Customer — the search, dropdown, and inline-create flow are owned entirely
+   212→  // by <CustomerSearchAutocomplete /> + <CreateCustomerForm />. The parent only
+   213→  // holds the resulting customer + the per-order address/phone/recipient
+   214→  // selection so buildPayload can reference them.
+   215→  const [selectedCustomer, setSelectedCustomer] = useState<SelectedCustomer | null>(null)
+   216→  const [showCreateForm, setShowCreateForm] = useState(false)
+   217→  const [usedCustomerAddressId, setUsedCustomerAddressId] = useState<string | null>(null)
+   218→  const [usedCustomerPhoneId, setUsedCustomerPhoneId] = useState<string | null>(null)
+   219→  const [recipientName, setRecipientName] = useState('')
+   220→  const [saveAddressForNextTime, setSaveAddressForNextTime] = useState(false)
+   221→
+   222→  // Items
+   223→  const [cart, setCart] = useState<CartItem[]>([])
+   224→  const [variantSearch, setVariantSearch] = useState('')
+   225→
+   226→  // Payment
+   227→  const [paymentType, setPaymentType] = useState<PaymentType>('full_cod')
+   228→  const [advanceAmount, setAdvanceAmount] = useState('')
+   229→  const [advancePaymentMethod, setAdvancePaymentMethod] = useState('')
+   230→  const [advancePaymentReference, setAdvancePaymentReference] = useState('')
+   231→  // The payment proof is held in browser memory as a raw File during the
+   232→  // order creation flow. NO upload happens until the order_id exists.
+   233→  const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null)
+   234→  const [paymentProofPreview, setPaymentProofPreview] = useState<string>('')
+   235→  const [proofError, setProofError] = useState<string | null>(null)
+   236→
+   237→  // Delivery / dispatch / discount — folded into the customer section now,
+   238→  // but the underlying state still lives here so the order payload builder
+   239→  // and validation can reference it cleanly.
+   240→  // The order's own delivery_address/delivery_city are editable snapshots
+   241→  // controlled by <AddressSelector /> (it owns the live text; we mirror it
+   242→  // here for buildPayload + validation).
+   243→  const [deliveryAddress, setDeliveryAddress] = useState('')
+   244→  const [deliveryCity, setDeliveryCity] = useState('')
+   245→  const [courierName, setCourierName] = useState('')
+   246→  const [courierIntegrationId, setCourierIntegrationId] = useState('')
+   247→  const [dispatchLocationId, setDispatchLocationId] = useState('')
+   248→  const [notesForCourier, setNotesForCourier] = useState('')
+   249→  // Per-order pickup address override. When empty, booking uses the
+   250→  // integration's default pickup address. When set, overrides the default.
+   251→  const [pickupAddressId, setPickupAddressId] = useState('')
+   252→  const [orderRefNumber, setOrderRefNumber] = useState('')
+   253→  const [orderDetail, setOrderDetail] = useState('')
+   254→  const [discountAmount, setDiscountAmount] = useState('')
+   255→  const [discountReason, setDiscountReason] = useState('')
+   256→  const [deliveryCharge, setDeliveryCharge] = useState('')
+   257→  const [taxAmount, setTaxAmount] = useState('')
+   258→  const [taxLabel, setTaxLabel] = useState('')
+   259→
+   260→  // Validation errors — keyed by Zod issue path (joined with '.')
+   261→  const [errors, setErrors] = useState<Record<string, string>>({})
+   262→
+   263→  // Section refs for scrolling to the first error on submit
+   264→  const customerSectionRef = useRef<HTMLDivElement | null>(null)
+   265→  const itemsSectionRef = useRef<HTMLDivElement | null>(null)
+   266→  const paymentSectionRef = useRef<HTMLDivElement | null>(null)
+   267→  const variantOptionsRef = useRef<VariantOption[]>([])
+   268→
+   269→  // Track in-flight post-creation upload so we can render a "Saving proof…"
+   270→  // state on the submit button.
+   271→  const [uploadingProof, setUploadingProof] = useState(false)
+   272→
+   273→  // Idempotency key for order creation — generated once per form session.
+   274→  // Prevents duplicate orders from rapid double-clicks. Regenerated on
+   275→  // component remount (new useRef initialization).
+   276→  const idempotencyKeyRef = useRef<string>(crypto.randomUUID())
+   277→
+   278→  // Track whether the order creation itself is in-flight (separate from
+   279→  // uploadingProof which tracks the post-creation payment proof upload).
+   280→  const [submittingOrder, setSubmittingOrder] = useState(false)
+   281→
+   282→  // ── Phase 5: Booking failure state for inline Retry UI ──
+   283→  // When auto-booking fails after order creation, the order is still saved
+   284→  // but we stay on the create page to show an inline banner with a Retry
+   285→  // button. This is SEPARATE from the order-created success toast.
+   286→  const [bookingFailure, setBookingFailure] = useState<{
+   287→    orderId: string
+   288→    orderNumber: string
+   289→    error: string
+   290→  } | null>(null)
+   291→  const [retryingBooking, setRetryingBooking] = useState(false)
+   292→
+   293→  // ── Form Guard: dirty-state tracking + save-draft + guard hook ─────────
+   294→  const [hasChanges, setHasChanges] = useState(false)
+   295→  const markDirty = useCallback(() => { if (!hasChanges) setHasChanges(true) }, [hasChanges])
+   296→  const [draftId, setDraftId] = useState<string | undefined>(initialDraftId)
+   297→
+   298→  // Load draft data on mount if a draftId was passed (from the Drafts list "Resume" button)
+   299→  useEffect(() => {
+   300→    if (!initialDraftId) return
+   301→    let cancelled = false
+   302→    ;(async () => {
+   303→      try {
+   304→        const draft = await api.get<{ id: string; draftData: string; draftType: string }>(`/api/drafts?id=${initialDraftId}`)
+   305→        if (cancelled || !draft) return
+   306→        const data = JSON.parse(draft.draftData) as Record<string, unknown>
+   307→        // Pre-fill form fields from draft data
+   308→        if (typeof data.recipientName === 'string') setRecipientName(data.recipientName)
+   309→        if (typeof data.deliveryAddress === 'string') setDeliveryAddress(data.deliveryAddress)
+   310→        if (typeof data.deliveryCity === 'string') setDeliveryCity(data.deliveryCity)
+   311→        if (typeof data.courierName === 'string') setCourierName(data.courierName)
+   312→        if (typeof data.dispatchLocationId === 'string') setDispatchLocationId(data.dispatchLocationId)
+   313→        if (typeof data.notesForCourier === 'string') setNotesForCourier(data.notesForCourier)
+   314→        if (typeof data.discountAmount === 'string') setDiscountAmount(data.discountAmount)
+   315→        if (typeof data.discountReason === 'string') setDiscountReason(data.discountReason)
+   316→        if (typeof data.paymentType === 'string') setPaymentType(data.paymentType as PaymentType)
+   317→        if (typeof data.advanceAmount === 'string') setAdvanceAmount(data.advanceAmount)
+   318→        if (typeof data.advancePaymentMethod === 'string') setAdvancePaymentMethod(data.advancePaymentMethod)
+   319→        if (typeof data.advancePaymentReference === 'string') setAdvancePaymentReference(data.advancePaymentReference)
+   320→        if (typeof data.usedCustomerAddressId === 'string') setUsedCustomerAddressId(data.usedCustomerAddressId)
+   321→        if (typeof data.usedCustomerPhoneId === 'string') setUsedCustomerPhoneId(data.usedCustomerPhoneId)
+   322→        if (typeof data.saveAddressForNextTime === 'boolean') setSaveAddressForNextTime(data.saveAddressForNextTime)
+   323→        // Restore cart items
+   324→        if (Array.isArray(data.cart)) {
+   325→          const restoredCart = (data.cart as Array<{ variantId: string; quantity: number; unitPrice: number }>).map((c) => {
+   326→            // Find the variant in the loaded products to get full details
+   327→            const variant = variantOptionsRef.current?.find((v) => v.variantId === c.variantId)
+   328→            return {
+   329→              variantId: c.variantId,
+   330→              sku: variant?.sku ?? '',
+   331→              productTitle: variant?.productTitle ?? 'Unknown Product',
+   332→              primaryImage: variant?.primaryImage ?? null,
+   333→              unitPrice: c.unitPrice,
+   334→              quantity: c.quantity,
+   335→              fulfillmentType: variant?.fulfillmentType ?? 'stock_based',
+   336→            }
+   337→          })
+   338→          setCart(restoredCart)
+   339→        }
+   340→        toast.info('Draft loaded — continue editing.')
+   341→      } catch {
+   342→        if (!cancelled) toast.error('Failed to load draft.')
+   343→      }
+   344→    })()
+   345→    return () => { cancelled = true }
+   346→    // eslint-disable-next-line react-hooks/exhaustive-deps
+   347→  }, [initialDraftId])
+   348→  const [savingDraft, setSavingDraft] = useState(false)
+   349→
+   350→  const saveDraft = useCallback(async () => {
+   351→    setSavingDraft(true)
+   352→    try {
+   353→      const result = await api.post<{ draftId: string }>('/api/orders/drafts', {
+   354→        draftId,
+   355→        draftData: {
+   356→          selectedCustomer: selectedCustomer?.id ?? null,
+   357→          usedCustomerAddressId,
+   358→          usedCustomerPhoneId,
+   359→          recipientName,
+   360→          cart: cart.map((c) => ({ variantId: c.variantId, quantity: c.quantity, unitPrice: c.unitPrice })),
+   361→          paymentType,
+   362→          advanceAmount,
+   363→          advancePaymentMethod,
+   364→          advancePaymentReference,
+   365→          deliveryAddress,
+   366→          deliveryCity,
+   367→          courierName,
+   368→          dispatchLocationId,
+   369→          notesForCourier,
+   370→          discountAmount,
+   371→          discountReason,
+   372→        },
+   373→        draftTitle: `Order draft — ${selectedCustomer?.name ?? 'No customer'}`,
+   374→      })
+   375→      if (result.draftId) setDraftId(result.draftId)
+   376→      setHasChanges(false) // Reset guard — just saved
+   377→    } finally {
+   378→      setSavingDraft(false)
+   379→    }
+   380→  }, [draftId, selectedCustomer, usedCustomerAddressId, usedCustomerPhoneId,
+   381→      recipientName, cart, paymentType, advanceAmount, advancePaymentMethod,
+   382→      advancePaymentReference, deliveryAddress, deliveryCity, courierName,
+   383→      dispatchLocationId, notesForCourier, discountAmount, discountReason])
+   384→
+   385→  const { ConfirmModal: formGuardModal, attemptNavigation: guardedNavigate } = useFormGuard({
+   386→    isDirty: hasChanges && !uploadingProof,
+   387→    onSaveDraft: saveDraft,
+   388→  })
+   389→
+   390→  // ── Data queries ──────────────────────────────────────────────────────────
+   391→  const locationsQuery = useQuery<LocationsResponse>({
+   392→    queryKey: ['locations'],
+   393→    queryFn: () => api.get<LocationsResponse>('/api/inventory-locations'),
+   394→    staleTime: 30_000,
+   395→  })
+   396→
+   397→  // Fetch connected courier integrations for the courier dropdown
+   398→  const couriersQuery = useQuery<{
+   399→    integrations: Array<{
+   400→      id: string
+   401→      connectionName: string
+   402→      isActive: boolean
+   403→      provider: { providerKey: string; providerName: string }
+   404→    }>
+   405→  }>({
+   406→    queryKey: ['integrations', 'courier'],
+   407→    queryFn: () => api.get('/api/integrations?category=courier'),
+   408→    staleTime: 60_000,
+   409→  })
+   410→  const courierIntegrations = (couriersQuery.data?.integrations ?? []).filter((i) => i.isActive)
+   411→
+   412→  // Fetch order settings to get default courier
+   413→  const orderSettingsQuery = useQuery<{
+   414→    settings: {
+   415→      defaultCourierCompanyIntegrationId: string | null
+   416→      courierBookingMode: string
+   417→    }
+   418→  }>({
+   419→    queryKey: ['order-settings'],
+   420→    queryFn: () => api.get('/api/order-settings'),
+   421→    staleTime: 60_000,
+   422→  })
+   423→
+   424→  // Set default courier from settings when data loads
+   425→  useEffect(() => {
+   426→    if (orderSettingsQuery.data?.settings?.defaultCourierCompanyIntegrationId && !courierIntegrationId) {
+   427→      setCourierIntegrationId(orderSettingsQuery.data.settings.defaultCourierCompanyIntegrationId)
+   428→    }
+   429→  }, [orderSettingsQuery.data, courierIntegrationId])
+   430→
+   431→  // Fetch pickup addresses for the selected courier integration.
+   432→  // Used to populate the per-order pickup address override dropdown.
+   433→  interface PickupAddressOption {
+   434→    id: string
+   435→    label: string
+   436→    address: string
+   437→    cityName: string
+   438→    isDefault: boolean
+   439→  }
+   440→  const pickupAddressesQuery = useQuery<{ addresses: PickupAddressOption[] }>({
+   441→    queryKey: ['pickup-addresses', courierIntegrationId],
+   442→    queryFn: () => api.get(`/api/integrations/${courierIntegrationId}/pickup-addresses`),
+   443→    enabled: !!courierIntegrationId,
+   444→    staleTime: 30_000,
+   445→  })
+   446→  const pickupAddresses = pickupAddressesQuery.data?.addresses ?? []
+   447→
+   448→  // Auto-compute order detail from cart items (moved after variantOptions declaration)
+   449→  const productsQuery = useQuery<ProductsResponse>({
+   450→    queryKey: ['products', 'for-order-create'],
+   451→    queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100'),
+   452→    staleTime: 60_000,
+   453→  })
+   454→
+   455→  // ── Variant options (flatten products → variants) ─────────────────────────
+   456→  const variantOptions: VariantOption[] = useMemo(() => {
+   457→    const list: VariantOption[] = []
+   458→    for (const p of productsQuery.data?.products ?? []) {
+   459→      for (const v of p.variants) {
+   460→        list.push({
+   461→          variantId: v.id,
+   462→          sku: v.sku,
+   463→          productTitle: p.title,
+   464→          costPrice: v.costPrice,
+   465→          salePrice: v.salePrice,
+   466→          fulfillmentType: v.fulfillmentType,
+   467→          primaryImage: p.primaryImage,
+   468→          attributeValues: v.attributeValues ?? {},
+   469→        })
+   470→      }
+   471→    }
+   472→    return list
+   473→  }, [productsQuery.data])
+   474→
+   475→  // Keep ref in sync so the draft-loading effect can access variant details
+   476→  useEffect(() => {
+   477→    variantOptionsRef.current = variantOptions
+   478→  }, [variantOptions])
+   479→
+   480→  // Track whether the user has manually edited the Order Detail field.
+   481→  // If they have, we DON'T clobber their edit when the cart changes —
+   482→  // the auto-computed preview only writes to the field while it remains
+   483→  // untouched. On submit, if the user hasn't edited, we send `undefined`
+   484→  // so the server generates the canonical version (same format, sourced
+   485→  // from the DB — guarantees consistency even if the products list is stale).
+   486→  const [orderDetailUserEdited, setOrderDetailUserEdited] = useState(false)
+   487→
+   488→  // Auto-compute order detail preview from cart items.
+   489→  // Format mirrors the server's canonical version:
+   490→  //   "Product Title (SKU-001, Size: M, Color: Blue) ×2, ..."
+   491→  useEffect(() => {
+   492→    if (orderDetailUserEdited) return // don't clobber manual edits
+   493→    if (cart.length > 0) {
+   494→      const details = cart.map((i) => {
+   495→        const variant = variantOptions.find((v) => v.variantId === i.variantId)
+   496→        const sku = variant?.sku ?? ''
+   497→        const title = variant?.productTitle ?? ''
+   498→        const attrs = variant?.attributeValues ?? {}
+   499→        const attrParts = Object.entries(attrs)
+   500→          .filter(([, v]) => v)
+   501→          .map(([k, v]) => `${k}: ${v}`)
+   502→        const inner = [sku, ...attrParts].filter(Boolean).join(', ')
+   503→        return `${title}${inner ? ` (${inner})` : ''} ×${i.quantity}`
+   504→      })
+   505→      setOrderDetail(details.join(', '))
+   506→    } else {
+   507→      setOrderDetail('')
+   508→    }
+   509→  }, [cart, variantOptions, orderDetailUserEdited])
+   510→
+   511→  const variantSearchResults = useMemo(() => {
+   512→    if (!variantSearch.trim()) return []
+   513→    const q = variantSearch.toLowerCase()
+   514→    return variantOptions
+   515→      .filter(
+   516→        (v) => v.sku.toLowerCase().includes(q) || v.productTitle.toLowerCase().includes(q),
+   517→      )
+   518→      .slice(0, 8)
+   519→  }, [variantOptions, variantSearch])
+   520→
+   521→  // ── Computed totals ───────────────────────────────────────────────────────
+   522→  const subtotal = useMemo(
+   523→    () => cart.reduce((s, i) => s + i.unitPrice * i.quantity, 0),
+   524→    [cart],
+   525→  )
+   526→  const discount = parsePrice(discountAmount)
+   527→  const delivery = parsePrice(deliveryCharge)
+   528→  const tax = parsePrice(taxAmount)
+   529→  const total = Math.max(0, subtotal + delivery + tax - discount)
+   530→
+   531→  const remainingCod =
+   532→    paymentType === 'fully_prepaid'
+   533→      ? 0
+   534→      : paymentType === 'partial_advance'
+   535→        ? Math.max(0, total - parsePrice(advanceAmount))
+   536→        : total
+   537→
+   538→  // ── Auto-select default dispatch location ─────────────────────────────────
+   539→  useEffect(() => {
+   540→    if (!dispatchLocationId && locationsQuery.data?.locations.length) {
+   541→      const def = locationsQuery.data.locations.find((l) => l.isDefault)
+   542→      setDispatchLocationId(def?.id ?? locationsQuery.data.locations[0].id)
+   543→    }
+   544→  }, [dispatchLocationId, locationsQuery.data])
+   545→
+   546→  // ── Item manipulation ─────────────────────────────────────────────────────
+   547→  const addVariant = (v: VariantOption) => {
+   548→    setCart((prev) => {
+   549→      if (prev.some((i) => i.variantId === v.variantId)) {
+   550→        toast.info('That variant is already in the cart.')
+   551→        return prev
+   552→      }
+   553→      const unitPrice = v.salePrice ?? v.costPrice
+   554→      return [
+   555→        ...prev,
+   556→        {
+   557→          variantId: v.variantId,
+   558→          sku: v.sku,
+   559→          productTitle: v.productTitle,
+   560→          primaryImage: v.primaryImage,
+   561→          unitPrice,
+   562→          quantity: 1,
+   563→          fulfillmentType: v.fulfillmentType,
+   564→        },
+   565→      ]
+   566→    })
+   567→    setVariantSearch('')
+   568→    markDirty()
+   569→  }
+   570→
+   571→  const removeItem = (variantId: string) => {
+   572→    setCart((prev) => prev.filter((i) => i.variantId !== variantId))
+   573→    markDirty()
+   574→  }
+   575→
+   576→  const updateItem = (variantId: string, patch: Partial<CartItem>) => {
+   577→    setCart((prev) =>
+   578→      prev.map((i) => (i.variantId === variantId ? { ...i, ...patch } : i)),
+   579→    )
+   580→  }
+   581→
+   582→  // ── Payment proof file handling ───────────────────────────────────────────
+   583→  function handleProofFile(file: File) {
+   584→    setProofError(null)
+   585→    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+   586→      setProofError('Only JPG, PNG, and WebP images are allowed.')
+   587→      return
+   588→    }
+   589→    if (file.size > 5 * 1024 * 1024) {
+   590→      setProofError('File too large. Maximum 5 MB.')
+   591→      return
+   592→    }
+   593→    if (paymentProofPreview) URL.revokeObjectURL(paymentProofPreview)
+   594→    setPaymentProofFile(file)
+   595→    setPaymentProofPreview(URL.createObjectURL(file))
+   596→  }
+   597→
+   598→  function clearProofFile() {
+   599→    setProofError(null)
+   600→    if (paymentProofPreview) URL.revokeObjectURL(paymentProofPreview)
+   601→    setPaymentProofFile(null)
+   602→    setPaymentProofPreview('')
+   603→  }
+   604→
+   605→  // Cleanup object URL on unmount
+   606→  useEffect(() => {
+   607→    return () => {
+   608→      if (paymentProofPreview) URL.revokeObjectURL(paymentProofPreview)
+   609→    }
+   610→  }, [paymentProofPreview])
+   611→
+   612→  // ── Customer selection handlers ───────────────────────────────────────────
+   613→  // When a customer is picked from the autocomplete (either an existing match
+   614→  // or just-created via CreateCustomerForm), pre-select the primary phone,
+   615→  // the default address, and default recipient_name to the customer's name.
+   616→  function handleSelectCustomer(c: SelectedCustomer) {
+   617→    setSelectedCustomer(c)
+   618→    setShowCreateForm(false)
+   619→
+   620→    const primaryPhone = c.phones.find((p) => p.isPrimary) ?? c.phones[0] ?? null
+   621→    setUsedCustomerPhoneId(primaryPhone?.id ?? null)
+   622→
+   623→    const defaultAddr = c.addresses.find((a) => a.isDefault) ?? c.addresses[0] ?? null
+   624→    setUsedCustomerAddressId(defaultAddr?.id ?? null)
+   625→    setDeliveryAddress(defaultAddr?.address ?? '')
+   626→    setDeliveryCity(defaultAddr?.city ?? '')
+   627→
+   628→    setRecipientName(c.name)
+   629→    setSaveAddressForNextTime(false)
+   630→    markDirty()
+   631→  }
+   632→
+   633→  function handleDeselectCustomer() {
+   634→    setSelectedCustomer(null)
+   635→    setShowCreateForm(false)
+   636→    setUsedCustomerAddressId(null)
+   637→    setUsedCustomerPhoneId(null)
+   638→    setRecipientName('')
+   639→    setSaveAddressForNextTime(false)
+   640→    setDeliveryAddress('')
+   641→    setDeliveryCity('')
+   642→  }
+   643→
+   644→  // When the user clicks "+ Create New Customer" in the autocomplete dropdown,
+   645→  // reveal the inline <CreateCustomerForm />. Its onCreated callback receives
+   646→  // the new customer ID; we then fetch the full record so we can populate
+   647→  // selectedCustomer exactly like a picked search result.
+   648→  async function handleCustomerCreated(customerId: string) {
+   649→    try {
+   650→      const detail = await api.get<CustomerDetail>(`/api/customers/${customerId}`)
+   651→      // Map the detail shape → SelectedCustomer shape (the search-result
+   652→      // customer carries a slightly smaller field set than the full detail).
+   653→      const c: SelectedCustomer = {
+   654→        id: detail.id,
+   655→        name: detail.name,
+   656→        email: detail.email,
+   657→        totalOrdersCount: detail.totalOrdersCount,
+   658→        totalRtoCount: detail.totalRtoCount,
+   659→        isFlagged: detail.isFlagged,
+   660→        flaggedReason: detail.flaggedReason,
+   661→        phones: detail.phones,
+   662→        addresses: detail.addresses,
+   663→      }
+   664→      handleSelectCustomer(c)
+   665→      void queryClient.invalidateQueries({ queryKey: ['customers'] })
+   666→    } catch (err) {
+   667→      toast.error(getErrorMessage(err))
+   668→    }
+   669→  }
+   670→
+   671→  // ── Build the create-order payload ────────────────────────────────────────
+   672→  function buildPayload(): Record<string, unknown> {
+   673→    const payload: Record<string, unknown> = {
+   674→      items: cart.map((i) => ({
+   675→        org_variant_id: i.variantId,
+   676→        quantity: i.quantity,
+   677→        unit_price: i.unitPrice,
+   678→      })),
+   679→      payment_type: paymentType,
+   680→      delivery_address: deliveryAddress.trim(),
+   681→      delivery_city: deliveryCity.trim(),
+   682→      courier_name: courierName.trim() || undefined,
+   683→      courier_company_integration_id: courierIntegrationId || undefined,
+   684→      dispatch_location_id: dispatchLocationId,
+   685→      // Per-order pickup address override (null = use integration default)
+   686→      pickup_address_id: pickupAddressId || undefined,
+   687→      notes_for_courier: notesForCourier.trim() || undefined,
+   688→      // orderRefNumber (universal courier reference, migration 015):
+   689→      // only send if the user typed a custom value — otherwise the server
+   690→      // defaults to the freshly-generated ORD-YYYY-NNNNN flowopsOrderNumber.
+   691→      order_ref_number: orderRefNumber.trim() || undefined,
+   692→      // orderDetail: only send if the user manually edited the auto-computed
+   693→      // preview. If they didn't, let the server generate the canonical
+   694→      // version (same format, sourced from the DB so it's always accurate).
+   695→      order_detail: orderDetailUserEdited ? (orderDetail.trim() || undefined) : undefined,
+   696→      discount_amount: discount > 0 ? discount : undefined,
+   697→      discount_reason: discountReason.trim() || undefined,
+   698→      estimated_delivery_charge: delivery > 0 ? delivery : undefined,
+   699→      tax_amount: tax > 0 ? tax : undefined,
+   700→      tax_label: taxLabel.trim() || undefined,
+   701→    }
+   702→
+   703→    if (paymentType === 'partial_advance' || paymentType === 'fully_prepaid') {
+   704→      payload.advance_amount =
+   705→        paymentType === 'fully_prepaid' ? total : parsePrice(advanceAmount)
+   706→      payload.advance_payment_method = advancePaymentMethod || undefined
+   707→      payload.advance_payment_reference = advancePaymentReference.trim() || undefined
+   708→      // NOTE: payment proof screenshot URL is intentionally NOT set here.
+   709→      // The file is uploaded and persisted AFTER the order is created
+   710→      // (see handleSubmit).
+   711→    }
+   712→
+   713→    // Customer linkage — by the time the user submits they MUST have a
+   714→    // selectedCustomer (existing or just-created). The new schema sends
+   715→    // customer_id + the saved address/phone selection + recipient_name +
+   716→    // save_address_for_next_time, instead of the old inline `customer` object.
+   717→    if (selectedCustomer) {
+   718→      payload.customer_id = selectedCustomer.id
+   719→      payload.used_customer_address_id = usedCustomerAddressId ?? undefined
+   720→      payload.used_customer_phone_id = usedCustomerPhoneId ?? undefined
+   721→      payload.recipient_name = recipientName.trim() || undefined
+   722→      payload.save_address_for_next_time = saveAddressForNextTime
+   723→    }
+   724→
+   725→    return payload
+   726→  }
+   727→
+   728→  // ── Validate the full form using the Zod schema ───────────────────────────
+   729→  function validate(): Record<string, string> {
+   730→    const errs: Record<string, string> = {}
+   731→    const payload = buildPayload()
+   732→    const result = createManualOrderSchema.safeParse(payload)
+   733→    if (!result.success) {
+   734→      for (const issue of result.error.issues) {
+   735→        const key = issue.path.join('.')
+   736→        if (!errs[key]) errs[key] = issue.message
+   737→      }
+   738→    }
+   739→    return errs
+   740→  }
+   741→
+   742→  // ── Upload payment proof + persist URL to the order ───────────────────────
+   743→  // Returns true on success, false on any failure. NEVER throws.
+   744→  async function uploadPaymentProof(orderId: string): Promise<boolean> {
+   745→    if (!paymentProofFile) return true
+   746→
+   747→    setUploadingProof(true)
+   748→    try {
+   749→      const fd = new FormData()
+   750→      fd.append('file', paymentProofFile)
+   751→      const uploadRes = await fetch(
+   752→        `/api/upload?type=payment-proofs&id=${orderId}`,
+   753→        { method: 'POST', body: fd, credentials: 'include', headers: getSessionToken() ? { Authorization: `Bearer ${getSessionToken()}` } : {} },
+   754→      )
+   755→      const uploadText = await uploadRes.text()
+   756→      let uploadBody: unknown = null
+   757→      if (uploadText) {
+   758→        try {
+   759→          uploadBody = JSON.parse(uploadText)
+   760→        } catch {
+   761→          uploadBody = uploadText
+   762→        }
+   763→      }
+   764→      if (!uploadRes.ok) {
+   765→        const msg =
+   766→          uploadBody && typeof uploadBody === 'object' && 'error' in uploadBody
+   767→            ? String((uploadBody as { error: unknown }).error)
+   768→            : typeof uploadBody === 'string'
+   769→              ? uploadBody
+   770→              : `Upload failed (HTTP ${uploadRes.status})`
+   771→        throw new Error(msg)
+   772→      }
+   773→      const { url } = uploadBody as { url: string }
+   774→
+   775→      await api.post(`/api/orders/${orderId}/payment-proof`, {
+   776→        advance_payment_screenshot_url: url,
+   777→      })
+   778→      return true
+   779→    } catch {
+   780→      return false
+   781→    } finally {
+   782→      setUploadingProof(false)
+   783→    }
+   784→  }
+   785→
+   786→  // ── Permission gate (after all hooks) ─────────────────────────────────────
+   787→  if (!canCreate) {
+   788→    return (
+   789→      <div className="space-y-6">
+   790→        <PageHeader
+   791→          title="Create Order"
+   792→          description="Manually create a customer order"
+   793→          actions={
+   794→            <Button variant="outline" size="sm" onClick={onBack}>
+   795→              <ArrowLeft className="h-4 w-4" /> Back to Orders
+   796→            </Button>
+   797→          }
+   798→        />
+   799→        <Card>
+   800→          <CardContent className="p-10 text-center">
+   801→            <AlertCircle className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
+   802→            <p className="text-sm text-muted-foreground">
+   803→              You don&apos;t have permission to create orders.
+   804→            </p>
+   805→          </CardContent>
+   806→        </Card>
+   807→      </div>
+   808→    )
+   809→  }
+   810→
+   811→  // ── Submit handler ────────────────────────────────────────────────────────
+   812→  const handleSubmit = async () => {
+   813→    const errs = validate()
+   814→    setErrors(errs)
+   815→    if (Object.keys(errs).length > 0) {
+   816→      toast.error('Please complete all required fields before creating the order.')
+   817→      const firstErrPath = Object.keys(errs)[0]
+   818→      const section = sectionForErrorPath(firstErrPath)
+   819→      const ref =
+   820→        section === 'customer'
+   821→          ? customerSectionRef.current
+   822→          : section === 'items'
+   823→            ? itemsSectionRef.current
+   824→            : paymentSectionRef.current
+   825→      ref?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+   826→      return
+   827→    }
+   828→
+   829→    const payload = buildPayload()
+   830→
+   831→    setSubmittingOrder(true)
+   832→    try {
+   833→      const data = await api.post<CreateOrderResponse>('/api/orders', payload, {
+   834→        'Idempotency-Key': idempotencyKeyRef.current,
+   835→      })
+   836→
+   837→      // ── Order creation is ALWAYS successful at this point ──
+   838→      toast.success(`Order ${data.flowopsOrderNumber} created successfully.`)
+   839→
+   840→      // Auto-booking now runs ASYNCHRONOUSLY in the background (PostEx API
+   841→      // can take 50-100s). The order is created with courierBookingStatus=
+   842→      // 'not_booked', and the background task updates it when PostEx responds.
+   843→      // We navigate to the order detail page immediately — the user will see
+   844→      // the booking status update live as the background task completes.
+   845→      if (data.bookingAttempted) {
+   846→        toast.info('Courier booking is in progress… You can track the status on the order detail page.', { duration: 6000 })
+   847→      }
+   848→
+   849→      setHasChanges(false)
+   850→      if (draftId) {
+   851→        await api.delete(`/api/drafts?id=${draftId}`).catch(() => {})
+   852→        setDraftId(undefined)
+   853→      }
+   854→      // Invalidate ALL relevant query keys
+   855→      void queryClient.invalidateQueries({ queryKey: ['orders'] })
+   856→      void queryClient.invalidateQueries({ queryKey: ['booking-workbench-bookable'] })
+   857→      void queryClient.invalidateQueries({ queryKey: ['booking-workbench-activity'] })
+   858→
+   859→      if (paymentProofFile) {
+   860→        const ok = await uploadPaymentProof(data.orderId)
+   861→        if (!ok) {
+   862→          toast.warning(
+   863→            'Order created successfully, but the payment proof image failed to upload — you can add it from the order detail page.',
+   864→          )
+   865→        }
+   866→      }
+   867→
+   868→      // Navigate to the order detail page immediately. The booking status
+   869→      // will update live as the background task completes (the order detail
+   870→      // page polls or refetches).
+   871→      navigate({ name: 'order-detail', id: data.orderId })
+   872→    } catch (err) {
+   873→      toast.error(getErrorMessage(err))
+   874→    } finally {
+   875→      setSubmittingOrder(false)
+   876→    }
+   877→  }
+   878→
+   879→  // ── Phase 5: Retry booking handler (uses state declared at top of component) ──
+   880→  async function handleRetryBooking() {
+   881→    if (!bookingFailure) return
+   882→    setRetryingBooking(true)
+   883→    try {
+   884→      const result = await api.post<{ success: boolean; trackingNumber?: string; error?: string }>(
+   885→        '/api/booking-workbench/book',
+   886→        {
+   887→          orderId: bookingFailure.orderId,
+   888→          companyIntegrationId: courierIntegrationId,
+   889→        },
+   890→      )
+   891→      if (result.success && result.trackingNumber) {
+   892→        toast.success(`Booking successful! Tracking #: ${result.trackingNumber}`)
+   893→        setBookingFailure(null)
+   894→        void queryClient.invalidateQueries({ queryKey: ['orders'] })
+   895→        void queryClient.invalidateQueries({ queryKey: ['booking-workbench-bookable'] })
+   896→        navigate({ name: 'order-detail', id: bookingFailure.orderId })
+   897→      } else {
+   898→        toast.error(`Retry failed: ${result.error ?? 'Unknown error'}`)
+   899→      }
+   900→    } catch (err) {
+   901→      toast.error(getErrorMessage(err))
+   902→    } finally {
+   903→      setRetryingBooking(false)
+   904→    }
+   905→  }
+   906→
+   907→  // Helper: which section does an error path belong to?
+   908→  function sectionForErrorPath(path: string): 'customer' | 'items' | 'payment' {
+   909→    if (path.startsWith('customer') || path === 'customer' || path === 'customer_id') return 'customer'
+   910→    if (path.startsWith('items')) return 'items'
+   911→    return 'payment'
+   912→  }
+   913→
+   914→  // Convenience error getter
+   915→  const fieldError = (...paths: string[]) => {
+   916→    for (const p of paths) if (errors[p]) return errors[p]
+   917→    return undefined
+   918→  }
+   919→
+   920→  const isSubmitting = uploadingProof || submittingOrder
+   921→
+   922→  // The AddressSelector manages {usedCustomerAddressId, deliveryAddress,
+   923→  // deliveryCity, saveAddressForNextTime} as a single value object.
+   924→  const addressSelectorValue: AddressSelectorValue = {
+   925→    usedCustomerAddressId,
+   926→    deliveryAddress,
+   927→    deliveryCity,
+   928→    saveAddressForNextTime,
+   929→  }
+   930→  const handleAddressSelectorChange = (v: AddressSelectorValue) => {
+   931→    setUsedCustomerAddressId(v.usedCustomerAddressId)
+   932→    setDeliveryAddress(v.deliveryAddress)
+   933→    setDeliveryCity(v.deliveryCity)
+   934→    setSaveAddressForNextTime(v.saveAddressForNextTime)
+   935→  }
+   936→
+   937→  return (
+   938→    <div className="space-y-6">
+   939→      <PageHeader
+   940→        title="Create Order"
+   941→        description="Fill in customer, items, payment — then submit"
+   942→        actions={
+   943→          <Button variant="outline" size="sm" onClick={() => guardedNavigate(onBack)}>
+   944→            <ArrowLeft className="h-4 w-4" /> Back to Orders
+   945→          </Button>
+   946→        }
+   947→      />
+   948→
+   949→      <div className="grid gap-6 lg:grid-cols-3">
+   950→        {/* ── Left column: form sections (stacked, scrollable) ─────────────── */}
+   951→        <div className="lg:col-span-2 space-y-6">
+   952→          {/* SECTION 1: Customer + Delivery (merged) */}
+   953→          <div ref={customerSectionRef}>
+   954→            <CustomerSection
+   955→              selectedCustomer={selectedCustomer}
+   956→              showCreateForm={showCreateForm}
+   957→              onShowCreateForm={() => setShowCreateForm(true)}
+   958→              onCancelCreateForm={() => setShowCreateForm(false)}
+   959→              onSelectCustomer={handleSelectCustomer}
+   960→              onDeselectCustomer={handleDeselectCustomer}
+   961→              onCustomerCreated={handleCustomerCreated}
+   962→              usedCustomerAddressId={usedCustomerAddressId}
+   963→              usedCustomerPhoneId={usedCustomerPhoneId}
+   964→              setUsedCustomerPhoneId={setUsedCustomerPhoneId}
+   965→              recipientName={recipientName}
+   966→              setRecipientName={setRecipientName}
+   967→              addressSelectorValue={addressSelectorValue}
+   968→              onAddressSelectorChange={handleAddressSelectorChange}
+   969→              courierProviderKey={
+   970→                courierIntegrations.find((c) => c.id === courierIntegrationId)?.provider?.providerKey ?? ''
+   971→              }
+   972→              courierName={courierName}
+   973→              setCourierName={setCourierName}
+   974→              courierIntegrationId={courierIntegrationId}
+   975→              setCourierIntegrationId={setCourierIntegrationId}
+   976→              courierIntegrations={courierIntegrations}
+   977→              pickupAddressId={pickupAddressId}
+   978→              setPickupAddressId={setPickupAddressId}
+   979→              pickupAddresses={pickupAddresses}
+   980→              pickupAddressesLoading={pickupAddressesQuery.isLoading}
+   981→              dispatchLocationId={dispatchLocationId}
+   982→              setDispatchLocationId={setDispatchLocationId}
+   983→              notesForCourier={notesForCourier}
+   984→              setNotesForCourier={setNotesForCourier}
+   985→              orderRefNumber={orderRefNumber}
+   986→              setOrderRefNumber={setOrderRefNumber}
+   987→              orderDetail={orderDetail}
+   988→              setOrderDetail={(v) => {
+   989→                setOrderDetail(v)
+   990→                setOrderDetailUserEdited(true)
+   991→              }}
+   992→              discountAmount={discountAmount}
+   993→              setDiscountAmount={setDiscountAmount}
+   994→              discountReason={discountReason}
+   995→              setDiscountReason={setDiscountReason}
+   996→              locations={locationsQuery.data?.locations ?? []}
+   997→              isLoadingLocations={locationsQuery.isLoading}
+   998→              fieldError={fieldError}
+   999→            />
+  1000→          </div>
+  1001→
+  1002→          {/* SECTION 2: Items */}
+  1003→          <div ref={itemsSectionRef}>
+  1004→            <ItemsSection
+  1005→              cart={cart}
+  1006→              variantSearch={variantSearch}
+  1007→              setVariantSearch={setVariantSearch}
+  1008→              variantSearchResults={variantSearchResults}
+  1009→              addVariant={addVariant}
+  1010→              removeItem={removeItem}
+  1011→              updateItem={updateItem}
+  1012→              isLoadingProducts={productsQuery.isLoading}
+  1013→              subtotal={subtotal}
+  1014→              itemsError={fieldError('items')}
+  1015→            />
+  1016→          </div>
+  1017→
+  1018→          {/* SECTION 3: Payment */}
+  1019→          <div ref={paymentSectionRef}>
+  1020→            <PaymentSection
+  1021→              paymentType={paymentType}
+  1022→              setPaymentType={setPaymentType}
+  1023→              advanceAmount={advanceAmount}
+  1024→              setAdvanceAmount={setAdvanceAmount}
+  1025→              advancePaymentMethod={advancePaymentMethod}
+  1026→              setAdvancePaymentMethod={setAdvancePaymentMethod}
+  1027→              advancePaymentReference={advancePaymentReference}
+  1028→              setAdvancePaymentReference={setAdvancePaymentReference}
+  1029→              subtotal={subtotal}
+  1030→              total={total}
+  1031→              discount={discount}
+  1032→              deliveryCharge={deliveryCharge}
+  1033→              setDeliveryCharge={setDeliveryCharge}
+  1034→              taxAmount={taxAmount}
+  1035→              setTaxAmount={setTaxAmount}
+  1036→              taxLabel={taxLabel}
+  1037→              setTaxLabel={setTaxLabel}
+  1038→              remainingCod={remainingCod}
+  1039→              paymentProofFile={paymentProofFile}
+  1040→              paymentProofPreview={paymentProofPreview}
+  1041→              proofError={proofError}
+  1042→              onProofFile={handleProofFile}
+  1043→              onClearProof={clearProofFile}
+  1044→              fieldError={fieldError}
+  1045→            />
+  1046→          </div>
+  1047→        </div>
+  1048→
+  1049→        {/* ── Right column: sticky summary + create button ─────────────────── */}
+  1050→        <div className="lg:col-span-1">
+  1051→          <div className="lg:sticky lg:top-6 space-y-4">
+  1052→            <SummarySection
+  1053→              cart={cart}
+  1054→              subtotal={subtotal}
+  1055→              discount={discount}
+  1056→              discountReason={discountReason}
+  1057→              total={total}
+  1058→              paymentType={paymentType}
+  1059→              advanceAmount={parsePrice(advanceAmount)}
+  1060→              remainingCod={remainingCod}
+  1061→            />
+  1062→
+  1063→            <Card>
+  1064→              <CardContent className="p-4 space-y-3">
+  1065→                <Button
+  1066→                  size="lg"
+  1067→                  className="w-full"
+  1068→                  onClick={handleSubmit}
+  1069→                  disabled={isSubmitting}
+  1070→                >
+  1071→                  {isSubmitting ? (
+  1072→                    <>
+  1073→                      <Loader2 className="h-4 w-4 animate-spin" /> Saving proof…
+  1074→                    </>
+  1075→                  ) : (
+  1076→                    <>
+  1077→                      <CheckCircle2 className="h-4 w-4" /> Create Order
+  1078→                    </>
+  1079→                  )}
+  1080→                </Button>
+  1081→                <Button
+  1082→                  variant="outline"
+  1083→                  className="w-full"
+  1084→                  onClick={async () => {
+  1085→                    try { await saveDraft(); toast.success('Draft saved.') }
+  1086→                    catch { toast.error('Failed to save draft.') }
+  1087→                  }}
+  1088→                  disabled={isSubmitting || savingDraft}
+  1089→                >
+  1090→                  {savingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+  1091→                  Save as Draft
+  1092→                </Button>
+  1093→                <Button
+  1094→                  variant="outline"
+  1095→                  className="w-full"
+  1096→                  onClick={() => guardedNavigate(onBack)}
+  1097→                  disabled={isSubmitting}
+  1098→                >
+  1099→                  Cancel
+  1100→                </Button>
+  1101→                {Object.keys(errors).length > 0 && (
+  1102→                  <p className="text-xs text-destructive text-center">
+  1103→                    {Object.keys(errors).length} field
+  1104→                    {Object.keys(errors).length === 1 ? '' : 's'} need
+  1105→                    {Object.keys(errors).length === 1 ? 's' : ''} attention above.
+  1106→                  </p>
+  1107→                )}
+  1108→              </CardContent>
+  1109→            </Card>
+  1110→          </div>
+  1111→        </div>
+  1112→      </div>
+  1113→
+  1114→      {/* ── Phase 5: Inline booking-failure banner with Retry button ── */}
+  1115→      {bookingFailure && (
+  1116→        <Card className="border-amber-300 bg-amber-50">
+  1117→          <CardContent className="p-4">
+  1118→            <div className="flex items-start gap-3">
+  1119→              <AlertCircle className="h-5 w-5 text-amber-600 shrink-0 mt-0.5" />
+  1120→              <div className="flex-1 min-w-0">
+  1121→                <p className="text-sm font-medium text-amber-900">
+  1122→                  Order {bookingFailure.orderNumber} created, but courier booking failed
+  1123→                </p>
+  1124→                <p className="text-xs text-amber-700 mt-1">
+  1125→                  The order itself is saved and confirmed. You can retry booking now,
+  1126→                  or fix the issue and book manually from the Booking Workbench.
+  1127→                </p>
+  1128→                <p className="text-xs text-amber-800 mt-1.5 font-mono bg-amber-100 rounded px-2 py-1">
+  1129→                  {bookingFailure.error}
+  1130→                </p>
+  1131→                <div className="flex gap-2 mt-3">
+  1132→                  <Button
+  1133→                    size="sm"
+  1134→                    onClick={handleRetryBooking}
+  1135→                    disabled={retryingBooking || !courierIntegrationId}
+  1136→                  >
+  1137→                    {retryingBooking ? (
+  1138→                      <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Retrying…</>
+  1139→                    ) : (
+  1140→                      <><RotateCcw className="h-3.5 w-3.5" /> Retry Booking</>
+  1141→                    )}
+  1142→                  </Button>
+  1143→                  <Button
+  1144→                    size="sm"
+  1145→                    variant="outline"
+  1146→                    onClick={() => navigate({ name: 'order-detail', id: bookingFailure.orderId })}
+  1147→                  >
+  1148→                    View Order
+  1149→                  </Button>
+  1150→                  <Button
+  1151→                    size="sm"
+  1152→                    variant="ghost"
+  1153→                    onClick={() => setBookingFailure(null)}
+  1154→                  >
+  1155→                    Dismiss
+  1156→                  </Button>
+  1157→                </div>
+  1158→              </div>
+  1159→            </div>
+  1160→          </CardContent>
+  1161→        </Card>
+  1162→      )}
+  1163→
+  1164→      {formGuardModal}
+  1165→    </div>
+  1166→  )
+  1167→}
+  1168→
+  1169→// ─────────────────────────────────────────────────────────────────────────────
+  1170→// SECTION 1: Customer (merged with Delivery & Discount)
+  1171→// ─────────────────────────────────────────────────────────────────────────────
+  1172→
+  1173→function CustomerSection({
+  1174→  selectedCustomer,
+  1175→  showCreateForm,
+  1176→  onShowCreateForm,
+  1177→  onCancelCreateForm,
+  1178→  onSelectCustomer,
+  1179→  onDeselectCustomer,
+  1180→  onCustomerCreated,
+  1181→  usedCustomerAddressId,
+  1182→  usedCustomerPhoneId,
+  1183→  setUsedCustomerPhoneId,
+  1184→  recipientName,
+  1185→  setRecipientName,
+  1186→  addressSelectorValue,
+  1187→  onAddressSelectorChange,
+  1188→  courierProviderKey,
+  1189→  courierName,
+  1190→  setCourierName,
+  1191→  courierIntegrationId,
+  1192→  setCourierIntegrationId,
+  1193→  courierIntegrations,
+  1194→  pickupAddressId,
+  1195→  setPickupAddressId,
+  1196→  pickupAddresses,
+  1197→  pickupAddressesLoading,
+  1198→  dispatchLocationId,
+  1199→  setDispatchLocationId,
+  1200→  notesForCourier,
+  1201→  setNotesForCourier,
+  1202→  orderRefNumber,
+  1203→  setOrderRefNumber,
+  1204→  orderDetail,
+  1205→  setOrderDetail,
+  1206→  discountAmount,
+  1207→  setDiscountAmount,
+  1208→  discountReason,
+  1209→  setDiscountReason,
+  1210→  locations,
+  1211→  isLoadingLocations,
+  1212→  fieldError,
+  1213→}: {
+  1214→  selectedCustomer: SelectedCustomer | null
+  1215→  showCreateForm: boolean
+  1216→  onShowCreateForm: () => void
+  1217→  onCancelCreateForm: () => void
+  1218→  onSelectCustomer: (c: SelectedCustomer) => void
+  1219→  onDeselectCustomer: () => void
+  1220→  onCustomerCreated: (customerId: string) => void
+  1221→  usedCustomerAddressId: string | null
+  1222→  usedCustomerPhoneId: string | null
+  1223→  setUsedCustomerPhoneId: (id: string | null) => void
+  1224→  recipientName: string
+  1225→  setRecipientName: (v: string) => void
+  1226→  addressSelectorValue: AddressSelectorValue
+  1227→  onAddressSelectorChange: (v: AddressSelectorValue) => void
+  1228→  /** Optional: drives CityAutocomplete in AddressSelector (empty = plain text) */
+  1229→  courierProviderKey?: string
+  1230→  courierName: string
+  1231→  setCourierName: (v: string) => void
+  1232→  courierIntegrationId: string
+  1233→  setCourierIntegrationId: (v: string) => void
+  1234→  courierIntegrations: Array<{ id: string; connectionName: string; provider: { providerKey: string; providerName: string } }>
+  1235→  pickupAddressId: string
+  1236→  setPickupAddressId: (v: string) => void
+  1237→  pickupAddresses: Array<{ id: string; label: string; address: string; cityName: string; isDefault: boolean }>
+  1238→  pickupAddressesLoading: boolean
+  1239→  dispatchLocationId: string
+  1240→  setDispatchLocationId: (v: string) => void
+  1241→  notesForCourier: string
+  1242→  setNotesForCourier: (v: string) => void
+  1243→  orderRefNumber: string
+  1244→  setOrderRefNumber: (v: string) => void
+  1245→  orderDetail: string
+  1246→  setOrderDetail: (v: string) => void
+  1247→  discountAmount: string
+  1248→  setDiscountAmount: (v: string) => void
+  1249→  discountReason: string
+  1250→  setDiscountReason: (v: string) => void
+  1251→  locations: InventoryLocation[]
+  1252→  isLoadingLocations: boolean
+  1253→  fieldError: (...paths: string[]) => string | undefined
+  1254→}) {
+  1255→  return (
+  1256→    <Card>
+  1257→      <CardHeader>
+  1258→        <CardTitle className="text-base flex items-center gap-2">
+  1259→          <User className="h-4 w-4" /> 1 · Customer
+  1260→        </CardTitle>
+  1261→      </CardHeader>
+  1262→      <CardContent className="space-y-4">
+  1263→        {/* ── SEARCH MODE (no customer selected) ──────────────────────────── */}
+  1264→        {!selectedCustomer && !showCreateForm && (
+  1265→          <div className="space-y-3">
+  1266→            <div className="flex flex-col sm:flex-row gap-2">
+  1267→              <CustomerSearchAutocomplete
+  1268→                onSelect={onSelectCustomer}
+  1269→                onCreateNew={onShowCreateForm}
+  1270→                autoFocus
+  1271→                className="flex-1"
+  1272→              />
+  1273→              <Button
+  1274→                type="button"
+  1275→                variant="default"
+  1276→                onClick={onShowCreateForm}
+  1277→                className="sm:shrink-0"
+  1278→              >
+  1279→                <Plus className="h-4 w-4" /> Create New Customer
+  1280→              </Button>
+  1281→            </div>
+  1282→            <p className="text-xs text-muted-foreground text-center">
+  1283→              Search by phone or name to find an existing customer, or click{' '}
+  1284→              <span className="font-medium text-foreground">Create New Customer</span>{' '}
+  1285→              to add a brand-new one.
+  1286→            </p>
+  1287→          </div>
+  1288→        )}
+  1289→
+  1290→        {/* ── INLINE CREATE MODE (no customer selected + showCreateForm) ──── */}
+  1291→        {!selectedCustomer && showCreateForm && (
+  1292→          <div className="space-y-3">
+  1293→            <div className="flex items-center justify-between">
+  1294→              <p className="text-sm font-medium flex items-center gap-1.5">
+  1295→                <Plus className="h-4 w-4 text-muted-foreground" /> New Customer
+  1296→              </p>
+  1297→              <Button
+  1298→                size="sm"
+  1299→                variant="ghost"
+  1300→                onClick={onCancelCreateForm}
+  1301→                className="h-7 text-xs"
+  1302→              >
+  1303→                <RotateCcw className="h-3.5 w-3.5" /> Back to search
+  1304→              </Button>
+  1305→            </div>
+  1306→            <CreateCustomerForm
+  1307→              compact
+  1308→              onCreated={onCustomerCreated}
+  1309→              submitLabel="Create Customer"
+  1310→            />
+  1311→          </div>
+  1312→        )}
+  1313→
+  1314→        {/* ── SELECTED MODE (customer selected) ──────────────────────────── */}
+  1315→        {selectedCustomer && (
+  1316→          <div className="space-y-4">
+  1317→            {/* Customer info card + CRM stats + address selector + phone + recipient */}
+  1318→            <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-3 space-y-3">
+  1319→              <div className="flex items-start justify-between gap-2">
+  1320→                <div className="flex items-start gap-2.5 min-w-0">
+  1321→                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
+  1322→                    <User className="h-4 w-4" />
+  1323→                  </div>
+  1324→                  <div className="min-w-0">
+  1325→                    <div className="flex items-center gap-2">
+  1326→                      <p className="text-sm font-semibold truncate">{selectedCustomer.name}</p>
+  1327→                      {selectedCustomer.isFlagged && (
+  1328→                        <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
+  1329→                          Flagged
+  1330→                        </Badge>
+  1331→                      )}
+  1332→                    </div>
+  1333→                    {selectedCustomer.phones[0] && (
+  1334→                      <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
+  1335→                        <Phone className="h-2.5 w-2.5" /> {selectedCustomer.phones[0].phoneRaw}
+  1336→                        {selectedCustomer.phones[0].isValidFormat === false && (
+  1337→                          <span className="text-amber-600 font-sans font-medium ml-1">
+  1338→                            (invalid format — please correct in CRM)
+  1339→                          </span>
+  1340→                        )}
+  1341→                      </p>
+  1342→                    )}
+  1343→                  </div>
+  1344→                </div>
+  1345→                <Button size="sm" variant="ghost" onClick={onDeselectCustomer}>
+  1346→                  <RotateCcw className="h-3.5 w-3.5" /> Change
+  1347→                </Button>
+  1348→              </div>
+  1349→
+  1350→              {/* Phone format warning — shown when the customer's primary phone
+  1351→                  has isValidFormat=false (e.g., from an external platform with
+  1352→                  an unformatted phone). Does NOT block order creation, but
+  1353→                  surfaces the issue so the user can correct it in CRM. */}
+  1354→              {selectedCustomer.phones.some((p) => p.isPrimary && p.isValidFormat === false) && (
+  1355→                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2.5">
+  1356→                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
+  1357→                  <div className="flex-1">
+  1358→                    <p className="text-xs font-medium text-amber-900">
+  1359→                      This customer's phone number may be invalid.
+  1360→                    </p>
+  1361→                    <p className="text-[11px] text-amber-700 mt-0.5">
+  1362→                      The phone was imported from an external platform and may not be in the correct format.
+  1363→                      Please correct it in the customer's CRM profile before booking a courier shipment.
+  1364→                    </p>
+  1365→                  </div>
+  1366→                </div>
+  1367→              )}
+  1368→
+  1369→              {/* Compact CRM stats (informational only) */}
+  1370→              <CrmStatsWidget customer={selectedCustomer} />
+  1371→
+  1372→              <Separator />
+  1373→
+  1374→              {/* Phone selector + Recipient name */}
+  1375→              <div className="grid sm:grid-cols-2 gap-3">
+  1376→                {selectedCustomer.phones.length > 1 && (
+  1377→                  <div className="space-y-1">
+  1378→                    <Label className="text-xs flex items-center gap-1">
+  1379→                      <Phone className="h-3 w-3" /> Contact Phone
+  1380→                    </Label>
+  1381→                    <Select
+  1382→                      value={usedCustomerPhoneId ?? undefined}
+  1383→                      onValueChange={(v) => setUsedCustomerPhoneId(v)}
+  1384→                    >
+  1385→                      <SelectTrigger className="text-sm">
+  1386→                        <SelectValue placeholder="Select phone" />
+  1387→                      </SelectTrigger>
+  1388→                      <SelectContent>
+  1389→                        {selectedCustomer.phones.map((p) => (
+  1390→                          <SelectItem key={p.id} value={p.id}>
+  1391→                            <span className="font-mono">{p.phoneRaw}</span>
+  1392→                            {p.isPrimary && (
+  1393→                              <Badge variant="outline" className="ml-2 text-[10px] bg-primary/10 text-primary border-primary/20">
+  1394→                                Primary
+  1395→                              </Badge>
+  1396→                            )}
+  1397→                            {p.label && (
+  1398→                              <span className="text-xs text-muted-foreground ml-1">· {p.label}</span>
+  1399→                            )}
+  1400→                          </SelectItem>
+  1401→                        ))}
+  1402→                      </SelectContent>
+  1403→                    </Select>
+  1404→                  </div>
+  1405→                )}
+  1406→
+  1407→                <div className="space-y-1">
+  1408→                  <Label className="text-xs flex items-center gap-1">
+  1409→                    <User className="h-3 w-3" /> Recipient Name
+  1410→                  </Label>
+  1411→                  <Input
+  1412→                    placeholder="Who is receiving this order?"
+  1413→                    value={recipientName}
+  1414→                    onChange={(e) => setRecipientName(e.target.value)}
+  1415→                    className="text-sm"
+  1416→                  />
+  1417→                  <p className="text-[10px] text-muted-foreground">
+  1418→                    Defaults to the customer name — edit if someone else is receiving.
+  1419→                  </p>
+  1420→                </div>
+  1421→              </div>
+  1422→
+  1423→              {/* ── Address selector (REPLACES the empty address/city inputs) ── */}
+  1424→              <AddressSelector
+  1425→                addresses={selectedCustomer.addresses}
+  1426→                value={addressSelectorValue}
+  1427→                onChange={onAddressSelectorChange}
+  1428→                addressError={fieldError('delivery_address')}
+  1429→                cityError={fieldError('delivery_city')}
+  1430→                courierProviderKey={courierProviderKey}
+  1431→              />
+  1432→            </div>
+  1433→
+  1434→            {/* ── Delivery Logistics (courier, dispatch, discount — NO address fields here) ── */}
+  1435→            <div className="space-y-3">
+  1436→              <p className="text-sm font-medium flex items-center gap-1.5">
+  1437→                <Truck className="h-4 w-4 text-muted-foreground" /> Delivery Logistics
+  1438→              </p>
+  1439→              <div className="grid sm:grid-cols-2 gap-3">
+  1440→                <div className="space-y-1">
+  1441→                  <Label className="text-xs">Courier</Label>
+  1442→                  <Select
+  1443→                    value={courierIntegrationId || '__none__'}
+  1444→                    onValueChange={(v) => {
+  1445→                      if (v === '__none__') {
+  1446→                        setCourierIntegrationId('')
+  1447→                        setCourierName('')
+  1448→                        setPickupAddressId('')
+  1449→                      } else {
+  1450→                        setCourierIntegrationId(v)
+  1451→                        setPickupAddressId('') // reset pickup address when courier changes
+  1452→                        const ci = courierIntegrations.find((c) => c.id === v)
+  1453→                        if (ci) setCourierName(ci.provider.providerName)
+  1454→                      }
+  1455→                    }}
+  1456→                  >
+  1457→                    <SelectTrigger><SelectValue placeholder="Select courier" /></SelectTrigger>
+  1458→                    <SelectContent>
+  1459→                      <SelectItem value="__none__">No courier</SelectItem>
+  1460→                      {courierIntegrations.map((ci) => (
+  1461→                        <SelectItem key={ci.id} value={ci.id}>
+  1462→                          {ci.provider.providerName} — {ci.connectionName}
+  1463→                        </SelectItem>
+  1464→                      ))}
+  1465→                    </SelectContent>
+  1466→                  </Select>
+  1467→                  {courierIntegrations.length === 0 && (
+  1468→                    <p className="text-[10px] text-amber-700">
+  1469→                      No couriers connected. Connect one in Settings → Integrations.
+  1470→                    </p>
+  1471→                  )}
+  1472→                </div>
+  1473→                {/* Pickup address override — only shown when a courier is selected.
+  1474→                    Defaults to the integration's default address (marked with ★).
+  1475→                    User can override to use a different address for this order. */}
+  1476→                {courierIntegrationId && (
+  1477→                  <div className="space-y-1">
+  1478→                    <Label className="text-xs">Pickup / Return Address</Label>
+  1479→                    {pickupAddressesLoading ? (
+  1480→                      <Skeleton className="h-9" />
+  1481→                    ) : pickupAddresses.length === 0 ? (
+  1482→                      <p className="text-[10px] text-amber-700">
+  1483→                        No pickup addresses synced. Go to Integrations → PostEx →
+  1484→                        Sync to import addresses from the courier.
+  1485→                      </p>
+  1486→                    ) : (
+  1487→                      <Select
+  1488→                        value={pickupAddressId || '__default__'}
+  1489→                        onValueChange={(v) => setPickupAddressId(v === '__default__' ? '' : v)}
+  1490→                      >
+  1491→                        <SelectTrigger><SelectValue placeholder="Default (from courier settings)" /></SelectTrigger>
+  1492→                        <SelectContent>
+  1493→                          <SelectItem value="__default__">
+  1494→                            Default (use courier&apos;s default address)
+  1495→                          </SelectItem>
+  1496→                          {pickupAddresses.map((addr) => (
+  1497→                            <SelectItem key={addr.id} value={addr.id}>
+  1498→                              {addr.label} — {addr.cityName}
+  1499→                              {addr.isDefault ? ' ★' : ''}
+  1500→                            </SelectItem>
+  1501→                          ))}
+  1502→                        </SelectContent>
+  1503→                      </Select>
+  1504→                    )}
+  1505→                    <p className="text-[10px] text-muted-foreground">
+  1506→                      Overrides the pickup/return address for this order. Leave as
+  1507→                      &quot;Default&quot; to use the courier&apos;s default address.
+  1508→                    </p>
+  1509→                  </div>
+  1510→                )}
+  1511→                <div className="space-y-1">
+  1512→                  <Label className="text-xs">Dispatch Location *</Label>
+  1513→                  {isLoadingLocations ? (
+  1514→                    <Skeleton className="h-9" />
+  1515→                  ) : (
+  1516→                    <Select value={dispatchLocationId} onValueChange={setDispatchLocationId}>
+  1517→                      <SelectTrigger><SelectValue placeholder="Select location" /></SelectTrigger>
+  1518→                      <SelectContent>
+  1519→                        {locations.map((l) => (
+  1520→                          <SelectItem key={l.id} value={l.id}>
+  1521→                            {l.name}{l.isDefault ? ' (default)' : ''}
+  1522→                          </SelectItem>
+  1523→                        ))}
+  1524→                      </SelectContent>
+  1525→                    </Select>
+  1526→                  )}
+  1527→                  {fieldError('dispatch_location_id') && (
+  1528→                    <p className="text-xs text-destructive">{fieldError('dispatch_location_id')}</p>
+  1529→                  )}
+  1530→                </div>
+  1531→                <div className="space-y-1 sm:col-span-2">
+  1532→                  <Label className="text-xs">Transaction Notes (for courier)</Label>
+  1533→                  <Input
+  1534→                    placeholder="Optional notes for the courier"
+  1535→                    value={notesForCourier}
+  1536→                    onChange={(e) => setNotesForCourier(e.target.value)}
+  1537→                  />
+  1538→                </div>
+  1539→                <div className="space-y-1">
+  1540→                  <Label className="text-xs">Order Reference (for courier)</Label>
+  1541→                  <Input
+  1542→                    placeholder="Defaults to ORD-YYYY-NNNNN — type to override"
+  1543→                    value={orderRefNumber}
+  1544→                    onChange={(e) => setOrderRefNumber(e.target.value)}
+  1545→                  />
+  1546→                  <p className="text-[10px] text-muted-foreground">
+  1547→                    Universal courier reference field. Almost every courier
+  1548→                    (PostEx, TCS, Leopard…) has a reference field — we map
+  1549→                    this to the courier's own field at booking time. Leave
+  1550→                    blank to use the auto-generated FlowOps order number.
+  1551→                  </p>
+  1552→                </div>
+  1553→                <div className="space-y-1">
+  1554→                  <Label className="text-xs">Order Detail (item summary)</Label>
+  1555→                  <Input
+  1556→                    placeholder="Auto-filled from cart items"
+  1557→                    value={orderDetail}
+  1558→                    onChange={(e) => setOrderDetail(e.target.value)}
+  1559→                  />
+  1560→                  <p className="text-[10px] text-muted-foreground">
+  1561→                    Auto-generated from selected products (title + SKU +
+  1562→                    variant attributes + qty). Edit to override — otherwise
+  1563→                    the canonical version is generated server-side at submit.
+  1564→                  </p>
+  1565→                </div>
+  1566→              </div>
+  1567→
+  1568→              {/* Discount (compact, within logistics section) */}
+  1569→              <div className="grid sm:grid-cols-2 gap-3">
+  1570→                <div className="space-y-1">
+  1571→                  <Label className="text-xs">Discount (Rs.)</Label>
+  1572→                  <Input
+  1573→                    type="number"
+  1574→                    min="0"
+  1575→                    step="0.01"
+  1576→                    placeholder="0"
+  1577→                    value={discountAmount}
+  1578→                    onChange={(e) => setDiscountAmount(e.target.value)}
+  1579→                  />
+  1580→                </div>
+  1581→                <div className="space-y-1">
+  1582→                  <Label className="text-xs">Discount reason</Label>
+  1583→                  <Input
+  1584→                    placeholder="Optional"
+  1585→                    value={discountReason}
+  1586→                    onChange={(e) => setDiscountReason(e.target.value)}
+  1587→                  />
+  1588→                </div>
+  1589→              </div>
+  1590→            </div>
+  1591→          </div>
+  1592→        )}
+  1593→      </CardContent>
+  1594→    </Card>
+  1595→  )
+  1596→}
+  1597→
+  1598→// ─────────────────────────────────────────────────────────────────────────────
+  1599→// CRM Stats widget — shows when a customer is selected
+  1600→// ─────────────────────────────────────────────────────────────────────────────
+  1601→
+  1602→function CrmStatsWidget({ customer }: { customer: SelectedCustomer }) {
+  1603→  const totalOrders = customer.totalOrdersCount
+  1604→  const totalRto = customer.totalRtoCount
+  1605→  // Derive a delivery rate from the cached totals (returned orders / total).
+  1606→  // This is informational — not the source of truth (the live query is).
+  1607→  const deliveryRate =
+  1608→    totalOrders > 0 ? ((totalOrders - totalRto) / totalOrders) * 100 : 100
+  1609→  const rtoRate = totalOrders > 0 ? (totalRto / totalOrders) * 100 : 0
+  1610→  const deliveredCount = Math.max(0, totalOrders - totalRto)
+  1611→
+  1612→  return (
+  1613→    <div className="space-y-3">
+  1614→      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+  1615→        <StatCell label="Total Orders" value={String(totalOrders)} />
+  1616→        <StatCell
+  1617→          label="Delivered"
+  1618→          value={String(deliveredCount)}
+  1619→          sub={`${deliveryRate.toFixed(1)}%`}
+  1620→          tone="emerald"
+  1621→        />
+  1622→        <StatCell
+  1623→          label="Returned"
+  1624→          value={String(totalRto)}
+  1625→          sub={`${rtoRate.toFixed(1)}%`}
+  1626→          tone="rose"
+  1627→        />
+  1628→        <StatCell
+  1629→          label="Delivery Rate"
+  1630→          value={`${deliveryRate.toFixed(1)}%`}
+  1631→          tone="emerald"
+  1632→        />
+  1633→      </div>
+  1634→
+  1635→      {totalOrders > 0 && (
+  1636→        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+  1637→          <History className="h-3 w-3" />
+  1638→          Returning customer — verify address before dispatch.
+  1639→        </p>
+  1640→      )}
+  1641→
+  1642→      {/* Saved address history (from customer.addresses[] with lastUsedAt) */}
+  1643→      {customer.addresses.length > 0 && (
+  1644→        <div className="space-y-1.5">
+  1645→          <p className="text-[10px] uppercase tracking-wide text-muted-foreground flex items-center gap-1">
+  1646→            <MapPin className="h-3 w-3" /> Saved addresses
+  1647→          </p>
+  1648→          <ul className="space-y-1 max-h-32 overflow-y-auto pr-1 scrollbar-thin">
+  1649→            {customer.addresses.slice(0, 5).map((a) => (
+  1650→              <li
+  1651→                key={a.id}
+  1652→                className="text-xs flex items-center justify-between gap-2 rounded bg-background/60 px-2 py-1"
+  1653→              >
+  1654→                <span className="truncate">
+  1655→                  {a.address || '—'} · {a.city}
+  1656→                </span>
+  1657→                <div className="flex items-center gap-1 shrink-0">
+  1658→                  {a.isDefault && (
+  1659→                    <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20">
+  1660→                      Default
+  1661→                    </Badge>
+  1662→                  )}
+  1663→                  <Badge variant="outline" className="text-[10px]">
+  1664→                    {formatLastUsedShort(a.lastUsedAt)}
+  1665→                  </Badge>
+  1666→                </div>
+  1667→              </li>
+  1668→            ))}
+  1669→          </ul>
+  1670→        </div>
+  1671→      )}
+  1672→    </div>
+  1673→  )
+  1674→}
+  1675→
+  1676→/** Compact relative-time formatter for the inline address list. */
+  1677→function formatLastUsedShort(iso: string | null): string {
+  1678→  if (!iso) return 'Never used'
+  1679→  const date = new Date(iso)
+  1680→  const now = new Date()
+  1681→  const diffMs = now.getTime() - date.getTime()
+  1682→  const diffDays = Math.floor(diffMs / 86_400_000)
+  1683→  if (diffDays < 1) return 'Today'
+  1684→  if (diffDays === 1) return '1 day ago'
+  1685→  if (diffDays < 30) return `${diffDays} days ago`
+  1686→  return date.toLocaleDateString('en-PK', { day: '2-digit', month: 'short' })
+  1687→}
+  1688→
+  1689→const StatCell = memo(function StatCell({
+  1690→  label,
+  1691→  value,
+  1692→  sub,
+  1693→  tone = 'default',
+  1694→}: {
+  1695→  label: string
+  1696→  value: string
+  1697→  sub?: string
+  1698→  tone?: 'default' | 'emerald' | 'rose'
+  1699→}) {
+  1700→  const valueClass =
+  1701→    tone === 'emerald'
+  1702→      ? 'text-emerald-700'
+  1703→      : tone === 'rose'
+  1704→        ? 'text-rose-700'
+  1705→        : ''
+  1706→  return (
+  1707→    <div className="rounded-md bg-background p-2.5">
+  1708→      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+  1709→      <p className={cn('text-lg font-semibold tabular-nums', valueClass)}>{value}</p>
+  1710→      {sub && (
+  1711→        <p className="text-[10px] text-muted-foreground tabular-nums">{sub}</p>
+  1712→      )}
+  1713→    </div>
+  1714→  )
+  1715→})
+  1716→
+  1717→// ─────────────────────────────────────────────────────────────────────────────
+  1718→// SECTION 2: Items
+  1719→// ─────────────────────────────────────────────────────────────────────────────
+  1720→
+  1721→function ItemsSection({
+  1722→  cart,
+  1723→  variantSearch,
+  1724→  setVariantSearch,
+  1725→  variantSearchResults,
+  1726→  addVariant,
+  1727→  removeItem,
+  1728→  updateItem,
+  1729→  isLoadingProducts,
+  1730→  subtotal,
+  1731→  itemsError,
+  1732→}: {
+  1733→  cart: CartItem[]
+  1734→  variantSearch: string
+  1735→  setVariantSearch: (v: string) => void
+  1736→  variantSearchResults: VariantOption[]
+  1737→  addVariant: (v: VariantOption) => void
+  1738→  removeItem: (id: string) => void
+  1739→  updateItem: (id: string, patch: Partial<CartItem>) => void
+  1740→  isLoadingProducts: boolean
+  1741→  subtotal: number
+  1742→  itemsError: string | undefined
+  1743→}) {
+  1744→  return (
+  1745→    <Card>
+  1746→      <CardHeader>
+  1747→        <CardTitle className="text-base flex items-center gap-2">
+  1748→          <Package className="h-4 w-4" /> 2 · Items
+  1749→          {cart.length > 0 && (
+  1750→            <Badge variant="secondary" className="text-[10px]">
+  1751→              {cart.length} item{cart.length === 1 ? '' : 's'}
+  1752→            </Badge>
+  1753→          )}
+  1754→        </CardTitle>
+  1755→      </CardHeader>
+  1756→      <CardContent className="space-y-4">
+  1757→        {/* Variant search */}
+  1758→        <div className="space-y-1.5">
+  1759→          <Label htmlFor="variant-search">Search products / variants</Label>
+  1760→          <div className="relative">
+  1761→            <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+  1762→            <Input
+  1763→              id="variant-search"
+  1764→              placeholder="Search by SKU or product title…"
+  1765→              className="pl-9"
+  1766→              value={variantSearch}
+  1767→              onChange={(e) => setVariantSearch(e.target.value)}
+  1768→              disabled={isLoadingProducts}
+  1769→            />
+  1770→            {isLoadingProducts && (
+  1771→              <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+  1772→            )}
+  1773→          </div>
+  1774→        </div>
+  1775→
+  1776→        {/* Search results as cards */}
+  1777→        {variantSearch.trim() && (
+  1778→          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+  1779→            {isLoadingProducts ? (
+  1780→              Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-16" />)
+  1781→            ) : variantSearchResults.length === 0 ? (
+  1782→              <div className="rounded-md border-2 border-dashed p-6 text-center text-sm text-muted-foreground">
+  1783→                No variants match &ldquo;{variantSearch}&rdquo;.
+  1784→              </div>
+  1785→            ) : (
+  1786→              variantSearchResults.map((v) => {
+  1787→                const badge = stockBadgeFor(v.fulfillmentType)
+  1788→                return (
+  1789→                  <button
+  1790→                    key={v.variantId}
+  1791→                    type="button"
+  1792→                    onClick={() => addVariant(v)}
+  1793→                    className="w-full text-left rounded-lg border p-3 hover:border-primary/40 hover:bg-muted/40 transition-colors flex items-center justify-between gap-3"
+  1794→                  >
+  1795→                    <div className="flex items-start gap-3 min-w-0 flex-1">
+  1796→                      <VariantThumbnail url={v.primaryImage} title={v.productTitle} />
+  1797→                      <div className="min-w-0 flex-1">
+  1798→                        <p className="text-sm font-medium truncate">{v.productTitle}</p>
+  1799→                        <p className="text-xs text-muted-foreground font-mono">{v.sku}</p>
+  1800→                        <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
+  1801→                          {badge.label}
+  1802→                        </Badge>
+  1803→                      </div>
+  1804→                    </div>
+  1805→                    <div className="flex items-center gap-2 shrink-0">
+  1806→                      <span className="text-sm font-medium tabular-nums">
+  1807→                        {v.salePrice ? formatPKR(v.salePrice) : formatPKR(v.costPrice)}
+  1808→                      </span>
+  1809→                      <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
+  1810→                        <Plus className="h-4 w-4" />
+  1811→                      </div>
+  1812→                    </div>
+  1813→                  </button>
+  1814→                )
+  1815→              })
+  1816→            )}
+  1817→          </div>
+  1818→        )}
+  1819→
+  1820→        {/* Cart list with thumbnail / qty / price / line-total / remove */}
+  1821→        {cart.length === 0 ? (
+  1822→          <div className="rounded-md border-2 border-dashed p-6 text-center">
+  1823→            <ShoppingBag className="h-7 w-7 mx-auto text-muted-foreground/40 mb-2" />
+  1824→            <p className="text-sm font-medium">Cart is empty</p>
+  1825→            <p className="text-xs text-muted-foreground mt-1">
+  1826→              Search for a product above to add variants.
+  1827→            </p>
+  1828→            {itemsError && <p className="text-xs text-destructive mt-2">{itemsError}</p>}
+  1829→          </div>
+  1830→        ) : (
+  1831→          <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+  1832→            {cart.map((item) => {
+  1833→              const badge = stockBadgeFor(item.fulfillmentType)
+  1834→              return (
+  1835→                <div key={item.variantId} className="rounded-md border p-3 space-y-2">
+  1836→                  <div className="flex items-start gap-3">
+  1837→                    <VariantThumbnail url={item.primaryImage} title={item.productTitle} />
+  1838→                    <div className="min-w-0 flex-1">
+  1839→                      <p className="text-sm font-medium truncate">{item.productTitle}</p>
+  1840→                      <p className="text-xs text-muted-foreground font-mono">{item.sku}</p>
+  1841→                      <Badge variant="outline" className={cn('mt-1 text-[10px]', badge.className)}>
+  1842→                        {badge.label}
+  1843→                      </Badge>
+  1844→                    </div>
+  1845→                    <Button
+  1846→                      size="icon"
+  1847→                      variant="ghost"
+  1848→                      className="h-7 w-7 text-rose-600 hover:bg-rose-50 shrink-0"
+  1849→                      onClick={() => removeItem(item.variantId)}
+  1850→                      aria-label={`Remove ${item.sku}`}
+  1851→                    >
+  1852→                      <Trash2 className="h-3.5 w-3.5" />
+  1853→                    </Button>
+  1854→                  </div>
+  1855→                  <div className="grid grid-cols-2 gap-2">
+  1856→                    <div>
+  1857→                      <Label className="text-[10px] text-muted-foreground">Qty</Label>
+  1858→                      <Input
+  1859→                        type="number"
+  1860→                        min="1"
+  1861→                        step="1"
+  1862→                        className="h-8 text-sm tabular-nums"
+  1863→                        value={item.quantity}
+  1864→                        onChange={(e) =>
+  1865→                          updateItem(item.variantId, { quantity: parseQty(e.target.value) })
+  1866→                        }
+  1867→                      />
+  1868→                    </div>
+  1869→                    <div>
+  1870→                      <Label className="text-[10px] text-muted-foreground">Unit Price</Label>
+  1871→                      <Input
+  1872→                        type="number"
+  1873→                        min="0"
+  1874→                        step="0.01"
+  1875→                        className="h-8 text-sm tabular-nums"
+  1876→                        value={item.unitPrice}
+  1877→                        onChange={(e) =>
+  1878→                          updateItem(item.variantId, {
+  1879→                            unitPrice: parsePrice(e.target.value),
+  1880→                          })
+  1881→                        }
+  1882→                      />
+  1883→                    </div>
+  1884→                  </div>
+  1885→                  <div className="flex items-center justify-between text-xs">
+  1886→                    <span className="text-muted-foreground">Line total</span>
+  1887→                    <span className="font-medium tabular-nums">
+  1888→                      {formatPKR(item.quantity * item.unitPrice)}
+  1889→                    </span>
+  1890→                  </div>
+  1891→                </div>
+  1892→              )
+  1893→            })}
+  1894→            <Separator />
+  1895→            <div className="flex items-center justify-between pt-1">
+  1896→              <span className="text-sm font-medium">Subtotal</span>
+  1897→              <span className="text-lg font-bold tabular-nums">{formatPKR(subtotal)}</span>
+  1898→            </div>
+  1899→            {itemsError && <p className="text-xs text-destructive">{itemsError}</p>}
+  1900→          </div>
+  1901→        )}
+  1902→      </CardContent>
+  1903→    </Card>
+  1904→  )
+  1905→}
+  1906→
+  1907→const VariantThumbnail = memo(function VariantThumbnail({ url, title }: { url: string | null; title: string }) {
+  1908→  if (url) {
+  1909→    return (
+  1910→       
+  1911→      <img
+  1912→        src={url}
+  1913→        alt={title}
+  1914→        className="h-12 w-12 rounded-md border object-cover shrink-0"
+  1915→      />
+  1916→    )
+  1917→  }
+  1918→  return (
+  1919→    <div className="h-12 w-12 rounded-md border bg-muted flex items-center justify-center shrink-0">
+  1920→      <Package className="h-5 w-5 text-muted-foreground/50" />
+  1921→    </div>
+  1922→  )
+  1923→})
+  1924→
+  1925→// ─────────────────────────────────────────────────────────────────────────────
+  1926→// SECTION 3: Payment
+  1927→// ─────────────────────────────────────────────────────────────────────────────
+  1928→
+  1929→function PaymentSection({
+  1930→  paymentType,
+  1931→  setPaymentType,
+  1932→  advanceAmount,
+  1933→  setAdvanceAmount,
+  1934→  advancePaymentMethod,
+  1935→  setAdvancePaymentMethod,
+  1936→  advancePaymentReference,
+  1937→  setAdvancePaymentReference,
+  1938→  subtotal,
+  1939→  total,
+  1940→  discount,
+  1941→  deliveryCharge,
+  1942→  setDeliveryCharge,
+  1943→  taxAmount,
+  1944→  setTaxAmount,
+  1945→  taxLabel,
+  1946→  setTaxLabel,
+  1947→  remainingCod,
+  1948→  paymentProofFile,
+  1949→  paymentProofPreview,
+  1950→  proofError,
+  1951→  onProofFile,
+  1952→  onClearProof,
+  1953→  fieldError,
+  1954→}: {
+  1955→  paymentType: PaymentType
+  1956→  setPaymentType: (p: PaymentType) => void
+  1957→  advanceAmount: string
+  1958→  setAdvanceAmount: (v: string) => void
+  1959→  advancePaymentMethod: string
+  1960→  setAdvancePaymentMethod: (v: string) => void
+  1961→  advancePaymentReference: string
+  1962→  setAdvancePaymentReference: (v: string) => void
+  1963→  subtotal: number
+  1964→  total: number
+  1965→  discount: number
+  1966→  deliveryCharge: string
+  1967→  setDeliveryCharge: (v: string) => void
+  1968→  taxAmount: string
+  1969→  setTaxAmount: (v: string) => void
+  1970→  taxLabel: string
+  1971→  setTaxLabel: (v: string) => void
+  1972→  remainingCod: number
+  1973→  paymentProofFile: File | null
+  1974→  paymentProofPreview: string
+  1975→  proofError: string | null
+  1976→  onProofFile: (file: File) => void
+  1977→  onClearProof: () => void
+  1978→  fieldError: (...paths: string[]) => string | undefined
+  1979→}) {
+  1980→  const fileInputRef = useRef<HTMLInputElement>(null)
+  1981→
+  1982→  return (
+  1983→    <Card>
+  1984→      <CardHeader>
+  1985→        <CardTitle className="text-base flex items-center gap-2">
+  1986→          <CreditCard className="h-4 w-4" /> 3 · Payment
+  1987→        </CardTitle>
+  1988→      </CardHeader>
+  1989→      <CardContent className="space-y-5">
+  1990→        {/* Selectable payment type cards */}
+  1991→        <div className="grid gap-3">
+  1992→          <PaymentTypeCard
+  1993→            active={paymentType === 'full_cod'}
+  1994→            onClick={() => setPaymentType('full_cod')}
+  1995→            title="Full COD"
+  1996→            description="Customer pays the full amount in cash on delivery."
+  1997→            badge="Cash on Delivery"
+  1998→            tone="amber"
+  1999→          />
+  2000→          <PaymentTypeCard
+
+[showing lines 1-2000 of 2429; use offset=2001 with limit to continue reading]

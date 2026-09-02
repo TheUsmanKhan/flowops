@@ -1,0 +1,867 @@
+     1→'use client'
+     2→
+     3→/**
+     4→ * BookingWorkbenchView
+     5→ * ---------------------
+     6→ * Bulk booking workbench for external-platform orders that have NOT yet been
+     7→ * booked with a courier (i.e. courierCompanyIntegrationId === null).
+     8→ *
+     9→ * Fetches confirmed/processing orders via:
+    10→ *   GET /api/orders?statuses=confirmed,processing&limit=100
+    11→ *
+    12→ * Then client-side filters to orders where courierCompanyIntegrationId is null
+    13→ * (the API doesn't yet expose this as a query param — adding it would require
+    14→ * a /lib change which is out-of-scope for this task).
+    15→ *
+    16→ * Each row exposes editable inputs for customer name / phone / address,
+    17→ * a CityAutocomplete (providerKey from the batch-level courier dropdown),
+    18→ * COD amount, and an order type dropdown (Normal/Overland/Replacement —
+    19→ * pre-computed client-side via the same logic as the PostEx adapter for
+    20→ * convenience, but editable so the operator can override).
+    21→ *
+    22→ * The top toolbar has:
+    23→ *   - Courier integration dropdown (drives the CityAutocomplete providerKey)
+    24→ *   - "Select All" / "Select None"
+    25→ *   - "Upload Booking" button — fires POST /api/booking-workbench/book for
+    26→ *     each CHECKED row independently. Failures do NOT block other rows.
+    27→ *
+    28→ * Per-row result: ✅ tracking number, or ❌ error message.
+    29→ */
+    30→
+    31→import { useMemo, useState } from 'react'
+    32→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+    33→import { toast } from 'sonner'
+    34→import { api, FetchError } from '@/lib/api-client'
+    35→import { PageHeader } from '@/components/layout/dashboard-shell'
+    36→import { Button } from '@/components/ui/button'
+    37→import { Input } from '@/components/ui/input'
+    38→import { Label } from '@/components/ui/label'
+    39→import { Badge } from '@/components/ui/badge'
+    40→import { Checkbox } from '@/components/ui/checkbox'
+    41→import { Card, CardContent } from '@/components/ui/card'
+    42→import {
+    43→  Select,
+    44→  SelectContent,
+    45→  SelectItem,
+    46→  SelectTrigger,
+    47→  SelectValue,
+    48→} from '@/components/ui/select'
+    49→import {
+    50→  Table,
+    51→  TableBody,
+    52→  TableCell,
+    53→  TableHead,
+    54→  TableHeader,
+    55→  TableRow,
+    56→} from '@/components/ui/table'
+    57→import {
+    58→  Truck,
+    59→  RefreshCw,
+    60→  Loader2,
+    61→  CheckCircle2,
+    62→  XCircle,
+    63→  Upload,
+    64→  Inbox,
+    65→  AlertCircle,
+    66→  Search,
+    67→} from 'lucide-react'
+    68→import { cn } from '@/lib/utils'
+    69→import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
+    70→import { formatPKR, formatDate, getErrorMessage } from './_shared'
+    71→
+    72→// ─────────────────────────────────────────────────────────────────────────────
+    73→// Types — match GET /api/orders response
+    74→// ─────────────────────────────────────────────────────────────────────────────
+    75→
+    76→interface OrderRow {
+    77→  id: string
+    78→  flowopsOrderNumber: string
+    79→  externalOrderReference: string | null
+    80→  orderSource: string
+    81→  status: string
+    82→  paymentType: string
+    83→  totalOrderValue: number
+    84→  remainingCodAmount: number | null
+    85→  courierCompanyIntegrationId: string | null
+    86→  customerId: string
+    87→  deliveryAddress: string | null
+    88→  deliveryCity: string | null
+    89→  customerName: string
+    90→  customerPhone: string | null
+    91→  itemCount: number
+    92→  createdAt: string
+    93→}
+    94→
+    95→interface OrdersListResponse {
+    96→  orders: OrderRow[]
+    97→  total: number
+    98→}
+    99→
+   100→// ─────────────────────────────────────────────────────────────────────────────
+   101→// Types — integrations
+   102→// ─────────────────────────────────────────────────────────────────────────────
+   103→
+   104→interface IntegrationProvider {
+   105→  id: string
+   106→  providerKey: string
+   107→  providerName: string
+   108→  category: string
+   109→  logoUrl: string | null
+   110→}
+   111→
+   112→interface CompanyIntegration {
+   113→  id: string
+   114→  connectionName: string
+   115→  isActive: boolean
+   116→  provider: IntegrationProvider
+   117→}
+   118→
+   119→interface IntegrationsResponse {
+   120→  providers: IntegrationProvider[]
+   121→  integrations: CompanyIntegration[]
+   122→}
+   123→
+   124→// ─────────────────────────────────────────────────────────────────────────────
+   125→// Types — booking workbench book endpoint
+   126→// ─────────────────────────────────────────────────────────────────────────────
+   127→
+   128→interface BookRequest {
+   129→  orderId: string
+   130→  companyIntegrationId: string
+   131→  customerName?: string
+   132→  customerPhone?: string
+   133→  deliveryAddress?: string
+   134→  deliveryCity?: string
+   135→  codAmount?: number
+   136→  orderType?: string
+   137→}
+   138→
+   139→interface BookSuccess {
+   140→  success: true
+   141→  trackingNumber: string
+   142→  orderType: string
+   143→  providerStatus: string | null
+   144→}
+   145→
+   146→type BookResult =
+   147→  | { ok: true; trackingNumber: string; orderType: string }
+   148→  | { ok: false; error: string }
+   149→
+   150→// ─────────────────────────────────────────────────────────────────────────────
+   151→// Row state (editable overrides)
+   152→// ─────────────────────────────────────────────────────────────────────────────
+   153→
+   154→interface RowState {
+   155→  customerName: string
+   156→  customerPhone: string
+   157→  deliveryAddress: string
+   158→  deliveryCity: string
+   159→  codAmount: string
+   160→  orderType: 'Normal' | 'Overland' | 'Replacement'
+   161→  checked: boolean
+   162→  // Per-row booking result (cleared on edit)
+   163→  result: BookResult | null
+   164→  isBooking: boolean
+   165→}
+   166→
+   167→type OrderType = 'Normal' | 'Overland' | 'Replacement'
+   168→
+   169→const ORDER_TYPES: { value: OrderType; label: string; desc: string }[] = [
+   170→  { value: 'Normal', label: 'Normal', desc: 'Standard delivery (≤1kg)' },
+   171→  { value: 'Overland', label: 'Overland', desc: 'Heavy/oversized (>1kg)' },
+   172→  { value: 'Replacement', label: 'Replacement', desc: 'Exchange replacement' },
+   173→]
+   174→
+   175→const SOURCE_BADGE: Record<string, string> = {
+   176→  shopify: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+   177→  daraz: 'bg-orange-50 text-orange-700 border-orange-200',
+   178→  manual: 'bg-gray-100 text-gray-700 border-gray-200',
+   179→  instagram: 'bg-pink-50 text-pink-700 border-pink-200',
+   180→}
+   181→
+   182→// ─────────────────────────────────────────────────────────────────────────────
+   183→// Main component
+   184→// ─────────────────────────────────────────────────────────────────────────────
+   185→
+   186→export function BookingWorkbenchView() {
+   187→  const queryClient = useQueryClient()
+   188→
+   189→  // Batch-level state
+   190→  const [companyIntegrationId, setCompanyIntegrationId] = useState<string>('')
+   191→  const [search, setSearch] = useState('')
+   192→
+   193→  // Per-row editable state keyed by order id
+   194→  const [rowStates, setRowStates] = useState<Record<string, RowState>>({})
+   195→
+   196→  // ── Data: orders ────────────────────────────────────────────────────────
+   197→  const ordersQuery = useQuery<OrdersListResponse>({
+   198→    queryKey: ['orders', 'booking-workbench'],
+   199→    queryFn: () =>
+   200→      api.get<OrdersListResponse>(
+   201→        '/api/orders?statuses=confirmed,processing&limit=100',
+   202→      ),
+   203→    staleTime: 15_000,
+   204→  })
+   205→
+   206→  // Client-side filter: only unbooked orders (no courier integration)
+   207→  const unbookedOrders = useMemo(() => {
+   208→    if (!ordersQuery.data?.orders) return []
+   209→    return ordersQuery.data.orders.filter(
+   210→      (o) => !o.courierCompanyIntegrationId,
+   211→    )
+   212→  }, [ordersQuery.data])
+   213→
+   214→  // Apply search filter (order # / customer / phone)
+   215→  const filteredOrders = useMemo(() => {
+   216→    if (!search.trim()) return unbookedOrders
+   217→    const q = search.trim().toLowerCase()
+   218→    return unbookedOrders.filter(
+   219→      (o) =>
+   220→        o.flowopsOrderNumber.toLowerCase().includes(q) ||
+   221→        o.externalOrderReference?.toLowerCase().includes(q) ||
+   222→        o.customerName.toLowerCase().includes(q) ||
+   223→        o.customerPhone?.toLowerCase().includes(q),
+   224→    )
+   225→  }, [unbookedOrders, search])
+   226→
+   227→  // ── Data: courier integrations ──────────────────────────────────────────
+   228→  const integrationsQuery = useQuery<IntegrationsResponse>({
+   229→    queryKey: ['integrations', 'courier'],
+   230→    queryFn: () => api.get<IntegrationsResponse>('/api/integrations?category=courier'),
+   231→    staleTime: 30_000,
+   232→  })
+   233→
+   234→  const courierIntegrations = useMemo(
+   235→    () =>
+   236→      (integrationsQuery.data?.integrations ?? []).filter(
+   237→        (i) => i.isActive && i.provider?.category === 'courier',
+   238→      ),
+   239→    [integrationsQuery.data],
+   240→  )
+   241→
+   242→  const selectedIntegration = useMemo(
+   243→    () => courierIntegrations.find((i) => i.id === companyIntegrationId),
+   244→    [courierIntegrations, companyIntegrationId],
+   245→  )
+   246→  const selectedProviderKey = selectedIntegration?.provider?.providerKey ?? ''
+   247→
+   248→  // ── Row state helpers ───────────────────────────────────────────────────
+   249→  function getRowState(order: OrderRow): RowState {
+   250→    if (rowStates[order.id]) return rowStates[order.id]
+   251→    return {
+   252→      customerName: order.customerName ?? '',
+   253→      customerPhone: order.customerPhone ?? '',
+   254→      deliveryAddress: order.deliveryAddress ?? '',
+   255→      deliveryCity: order.deliveryCity ?? '',
+   256→      codAmount: String(
+   257→        order.remainingCodAmount ?? order.totalOrderValue ?? 0,
+   258→      ),
+   259→      orderType: 'Normal',
+   260→      checked: false,
+   261→      result: null,
+   262→      isBooking: false,
+   263→    }
+   264→  }
+   265→
+   266→  function patchRow(orderId: string, patch: Partial<RowState>) {
+   267→    setRowStates((prev) => ({
+   268→      ...prev,
+   269→      [orderId]: {
+   270→        ...(prev[orderId] ?? getRowStateLookup(orderId)),
+   271→        ...patch,
+   272→        // Clear any previous result when the user edits a field
+   273→        result:
+   274→          patch.result !== undefined ? patch.result : null,
+   275→      },
+   276→    }))
+   277→  }
+   278→
+   279→  // Lookup that doesn't depend on filteredOrders (for patchRow safety)
+   280→  function getRowStateLookup(orderId: string): RowState {
+   281→    if (rowStates[orderId]) return rowStates[orderId]
+   282→    const order = ordersQuery.data?.orders?.find((o) => o.id === orderId)
+   283→    if (order) {
+   284→      return {
+   285→        customerName: order.customerName ?? '',
+   286→        customerPhone: order.customerPhone ?? '',
+   287→        deliveryAddress: order.deliveryAddress ?? '',
+   288→        deliveryCity: order.deliveryCity ?? '',
+   289→        codAmount: String(
+   290→          order.remainingCodAmount ?? order.totalOrderValue ?? 0,
+   291→        ),
+   292→        orderType: 'Normal' as const,
+   293→        checked: false,
+   294→        result: null,
+   295→        isBooking: false,
+   296→      }
+   297→    }
+   298→    return {
+   299→      customerName: '',
+   300→      customerPhone: '',
+   301→      deliveryAddress: '',
+   302→      deliveryCity: '',
+   303→      codAmount: '0',
+   304→      orderType: 'Normal' as const,
+   305→      checked: false,
+   306→      result: null,
+   307→      isBooking: false,
+   308→    }
+   309→  }
+   310→
+   311→  // ── Select-all helpers ──────────────────────────────────────────────────
+   312→  const checkedCount = filteredOrders.filter(
+   313→    (o) => getRowState(o).checked,
+   314→  ).length
+   315→  const allChecked =
+   316→    filteredOrders.length > 0 && checkedCount === filteredOrders.length
+   317→
+   318→  function toggleSelectAll() {
+   319→    const next: Record<string, RowState> = { ...rowStates }
+   320→    const target = !allChecked
+   321→    for (const o of filteredOrders) {
+   322→      const cur = next[o.id] ?? getRowState(o)
+   323→      next[o.id] = { ...cur, checked: target }
+   324→    }
+   325→    setRowStates(next)
+   326→  }
+   327→
+   328→  // ── Booking mutation (per-row) ──────────────────────────────────────────
+   329→  const bookMutation = useMutation({
+   330→    mutationFn: async (input: {
+   331→      orderId: string
+   332→      body: BookRequest
+   333→    }): Promise<BookSuccess> => {
+   334→      return api.post<BookSuccess>('/api/booking-workbench/book', input.body)
+   335→    },
+   336→    // We handle success/failure in the batchSubmit loop below, not here.
+   337→  })
+   338→
+   339→  // ── Batch submit ────────────────────────────────────────────────────────
+   340→  async function handleUploadBooking() {
+   341→    if (!companyIntegrationId) {
+   342→      toast.error('Select a courier integration first.')
+   343→      return
+   344→    }
+   345→    const checkedRows = filteredOrders.filter((o) => {
+   346→      const s = getRowState(o)
+   347→      return s.checked && !s.isBooking
+   348→    })
+   349→    if (checkedRows.length === 0) {
+   350→      toast.error('No rows selected. Tick the checkbox on at least one order.')
+   351→      return
+   352→    }
+   353→
+   354→    toast.info(`Booking ${checkedRows.length} order(s) with ${selectedIntegration?.provider?.providerName ?? 'courier'}…`)
+   355→
+   356→    let successCount = 0
+   357→    let failureCount = 0
+   358→
+   359→    // Fire requests sequentially — booking calls external courier APIs which
+   360→    // typically don't tolerate parallel hits well, and per-row errors must
+   361→    // not block other rows.
+   362→    for (const order of checkedRows) {
+   363→      const state = getRowState(order)
+   364→      const body: BookRequest = {
+   365→        orderId: order.id,
+   366→        companyIntegrationId,
+   367→        customerName: state.customerName.trim() || undefined,
+   368→        customerPhone: state.customerPhone.trim() || undefined,
+   369→        deliveryAddress: state.deliveryAddress.trim() || undefined,
+   370→        deliveryCity: state.deliveryCity.trim() || undefined,
+   371→        codAmount: Number(state.codAmount) || 0,
+   372→        orderType: state.orderType,
+   373→      }
+   374→
+   375→      // Mark as booking in progress
+   376→      patchRow(order.id, { isBooking: true, result: null })
+   377→
+   378→      try {
+   379→        const result = await bookMutation.mutateAsync({
+   380→          orderId: order.id,
+   381→          body,
+   382→        })
+   383→        successCount++
+   384→        patchRow(order.id, {
+   385→          isBooking: false,
+   386→          checked: false,
+   387→          result: {
+   388→            ok: true,
+   389→            trackingNumber: result.trackingNumber,
+   390→            orderType: result.orderType,
+   391→          },
+   392→        })
+   393→      } catch (err) {
+   394→        failureCount++
+   395→        const message =
+   396→          err instanceof FetchError
+   397→            ? err.message
+   398→            : err instanceof Error
+   399→              ? err.message
+   400→              : 'Booking failed'
+   401→        patchRow(order.id, {
+   402→          isBooking: false,
+   403→          result: { ok: false, error: message },
+   404→        })
+   405→      }
+   406→    }
+   407→
+   408→    // Final toast + invalidate orders list so successfully booked rows
+   409→    // disappear (they now have courierCompanyIntegrationId set).
+   410→    if (successCount > 0 && failureCount === 0) {
+   411→      toast.success(
+   412→        `All ${successCount} order(s) booked successfully.`,
+   413→      )
+   414→    } else if (successCount > 0 && failureCount > 0) {
+   415→      toast.warning(
+   416→        `${successCount} booked, ${failureCount} failed. See per-row status.`,
+   417→      )
+   418→    } else {
+   419→      toast.error(`All ${failureCount} booking(s) failed. See per-row errors.`)
+   420→    }
+   421→
+   422→    if (successCount > 0) {
+   423→      queryClient.invalidateQueries({ queryKey: ['orders', 'booking-workbench'] })
+   424→      queryClient.invalidateQueries({ queryKey: ['orders'] })
+   425→    }
+   426→  }
+   427→
+   428→  // ── Render: loading / error / empty ─────────────────────────────────────
+   429→  if (ordersQuery.isLoading) {
+   430→    return (
+   431→      <div className="space-y-4">
+   432→        <PageHeader
+   433→          title="Booking Workbench"
+   434→          description="Bulk-book external-platform orders with a courier."
+   435→        />
+   436→        <Card>
+   437→          <CardContent className="p-10 text-center">
+   438→            <Loader2 className="h-6 w-6 animate-spin mx-auto text-muted-foreground" />
+   439→            <p className="text-sm text-muted-foreground mt-2">
+   440→              Loading unbooked orders…
+   441→            </p>
+   442→          </CardContent>
+   443→        </Card>
+   444→      </div>
+   445→    )
+   446→  }
+   447→
+   448→  if (ordersQuery.isError) {
+   449→    return (
+   450→      <div className="space-y-4">
+   451→        <PageHeader
+   452→          title="Booking Workbench"
+   453→          description="Bulk-book external-platform orders with a courier."
+   454→        />
+   455→        <Card className="border-rose-200">
+   456→          <CardContent className="p-10 text-center space-y-3">
+   457→            <AlertCircle className="h-6 w-6 mx-auto text-rose-600" />
+   458→            <p className="text-sm text-rose-700">
+   459→              {getErrorMessage(ordersQuery.error)}
+   460→            </p>
+   461→            <Button
+   462→              variant="outline"
+   463→              size="sm"
+   464→              onClick={() => ordersQuery.refetch()}
+   465→            >
+   466→              <RefreshCw className="h-3.5 w-3.5" /> Retry
+   467→            </Button>
+   468→          </CardContent>
+   469→        </Card>
+   470→      </div>
+   471→    )
+   472→  }
+   473→
+   474→  return (
+   475→    <div className="space-y-4">
+   476→      <PageHeader
+   477→        title="Booking Workbench"
+   478→        description="Bulk-book confirmed external-platform orders that haven't yet been booked with a courier."
+   479→        actions={
+   480→          <Button
+   481→            variant="outline"
+   482→            size="sm"
+   483→            onClick={() => ordersQuery.refetch()}
+   484→            disabled={ordersQuery.isFetching}
+   485→          >
+   486→            <RefreshCw
+   487→              className={cn(
+   488→                'h-3.5 w-3.5',
+   489→                ordersQuery.isFetching && 'animate-spin',
+   490→              )}
+   491→            />
+   492→            Refresh
+   493→          </Button>
+   494→        }
+   495→      />
+   496→
+   497→      {/* Batch toolbar */}
+   498→      <Card>
+   499→        <CardContent className="p-4 space-y-3">
+   500→          <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto] md:items-end">
+   501→            {/* Courier integration */}
+   502→            <div className="space-y-1.5">
+   503→              <Label className="text-xs flex items-center gap-1">
+   504→                <Truck className="h-3 w-3" /> Courier Integration
+   505→              </Label>
+   506→              <Select
+   507→                value={companyIntegrationId}
+   508→                onValueChange={(v) => {
+   509→                  setCompanyIntegrationId(v)
+   510→                  // City provider changes — clear per-row city overrides so
+   511→                  // they re-query against the new courier's operational cities.
+   512→                  const next: Record<string, RowState> = {}
+   513→                  for (const [id, s] of Object.entries(rowStates)) {
+   514→                    next[id] = { ...s, deliveryCity: '', result: null }
+   515→                  }
+   516→                  setRowStates(next)
+   517→                }}
+   518→                disabled={integrationsQuery.isLoading}
+   519→              >
+   520→                <SelectTrigger>
+   521→                  <SelectValue
+   522→                    placeholder={
+   523→                      integrationsQuery.isLoading
+   524→                        ? 'Loading…'
+   525→                        : courierIntegrations.length === 0
+   526→                          ? 'No courier integrations'
+   527→                          : 'Select courier'
+   528→                    }
+   529→                  />
+   530→                </SelectTrigger>
+   531→                <SelectContent>
+   532→                  {courierIntegrations.map((i) => (
+   533→                    <SelectItem key={i.id} value={i.id}>
+   534→                      <span className="flex items-center gap-2">
+   535→                        <span className="font-medium">
+   536→                          {i.provider.providerName}
+   537→                        </span>
+   538→                        <span className="text-xs text-muted-foreground">
+   539→                          ({i.connectionName})
+   540→                        </span>
+   541→                      </span>
+   542→                    </SelectItem>
+   543→                  ))}
+   544→                </SelectContent>
+   545→              </Select>
+   546→            </div>
+   547→
+   548→            {/* Search */}
+   549→            <div className="space-y-1.5">
+   550→              <Label className="text-xs flex items-center gap-1">
+   551→                <Search className="h-3 w-3" /> Search
+   552→              </Label>
+   553→              <Input
+   554→                placeholder="Order #, customer, phone…"
+   555→                value={search}
+   556→                onChange={(e) => setSearch(e.target.value)}
+   557→              />
+   558→            </div>
+   559→
+   560→            {/* Upload button */}
+   561→            <Button
+   562→              onClick={handleUploadBooking}
+   563→              disabled={
+   564→                !companyIntegrationId ||
+   565→                checkedCount === 0 ||
+   566→                bookMutation.isPending
+   567→              }
+   568→              className="md:w-auto"
+   569→            >
+   570→              {bookMutation.isPending ? (
+   571→                <>
+   572→                  <Loader2 className="h-4 w-4 animate-spin" /> Booking…
+   573→                </>
+   574→              ) : (
+   575→                <>
+   576→                  <Upload className="h-4 w-4" /> Upload Booking ({checkedCount})
+   577→                </>
+   578→              )}
+   579→            </Button>
+   580→          </div>
+   581→
+   582→          {/* Helper text */}
+   583→          {courierIntegrations.length === 0 && !integrationsQuery.isLoading && (
+   584→            <p className="text-xs text-amber-700 flex items-center gap-1">
+   585→              <AlertCircle className="h-3 w-3" /> No courier integrations
+   586→              connected. Connect one in Settings → Integrations before booking.
+   587→            </p>
+   588→          )}
+   589→          {companyIntegrationId && (
+   590→            <p className="text-xs text-muted-foreground">
+   591→              Using{' '}
+   592→              <strong className="text-foreground">
+   593→                {selectedIntegration?.provider?.providerName}
+   594→              </strong>{' '}
+   595→              — city dropdown is filtered to this courier's operational cities.
+   596→            </p>
+   597→          )}
+   598→        </CardContent>
+   599→      </Card>
+   600→
+   601→      {/* Orders table */}
+   602→      <Card>
+   603→        <CardContent className="p-0">
+   604→          {filteredOrders.length === 0 ? (
+   605→            <div className="p-10 text-center space-y-2">
+   606→              <Inbox className="h-8 w-8 mx-auto text-muted-foreground" />
+   607→              <p className="text-sm font-medium">
+   608→                {unbookedOrders.length === 0
+   609→                  ? 'All caught up!'
+   610→                  : 'No matching orders'}
+   611→              </p>
+   612→              <p className="text-xs text-muted-foreground">
+   613→                {unbookedOrders.length === 0
+   614→                  ? 'No confirmed/processing orders are awaiting courier booking.'
+   615→                  : 'Try a different search term.'}
+   616→              </p>
+   617→            </div>
+   618→          ) : (
+   619→            <div className="overflow-x-auto">
+   620→              <Table>
+   621→                <TableHeader>
+   622→                  <TableRow>
+   623→                    <TableHead className="w-10">
+   624→                      <Checkbox
+   625→                        checked={allChecked}
+   626→                        onCheckedChange={toggleSelectAll}
+   627→                        aria-label="Select all rows"
+   628→                      />
+   629→                    </TableHead>
+   630→                    <TableHead className="min-w-[140px]">Order</TableHead>
+   631→                    <TableHead className="min-w-[160px]">Customer Name</TableHead>
+   632→                    <TableHead className="min-w-[140px]">Phone</TableHead>
+   633→                    <TableHead className="min-w-[200px]">Address</TableHead>
+   634→                    <TableHead className="min-w-[180px]">City</TableHead>
+   635→                    <TableHead className="min-w-[110px]">COD (Rs.)</TableHead>
+   636→                    <TableHead className="min-w-[130px]">Type</TableHead>
+   637→                    <TableHead className="min-w-[180px]">Status / Result</TableHead>
+   638→                  </TableRow>
+   639→                </TableHeader>
+   640→                <TableBody>
+   641→                  {filteredOrders.map((order) => {
+   642→                    const s = getRowState(order)
+   643→                    const sourceBadge =
+   644→                      SOURCE_BADGE[order.orderSource] ??
+   645→                      'bg-gray-100 text-gray-700 border-gray-200'
+   646→                    return (
+   647→                      <TableRow
+   648→                        key={order.id}
+   649→                        className={cn(
+   650→                          s.result?.ok && 'bg-emerald-50/40',
+   651→                          s.result && !s.result.ok && 'bg-rose-50/40',
+   652→                        )}
+   653→                      >
+   654→                        {/* Select */}
+   655→                        <TableCell>
+   656→                          <Checkbox
+   657→                            checked={s.checked}
+   658→                            onCheckedChange={(v) =>
+   659→                              patchRow(order.id, {
+   660→                                checked: v === true,
+   661→                                result: null,
+   662→                              })
+   663→                            }
+   664→                            disabled={s.isBooking || s.result?.ok === true}
+   665→                            aria-label={`Select order ${order.flowopsOrderNumber}`}
+   666→                          />
+   667→                        </TableCell>
+   668→
+   669→                        {/* Order # + source */}
+   670→                        <TableCell>
+   671→                          <div className="space-y-1">
+   672→                            <p className="font-mono text-xs font-medium">
+   673→                              {order.flowopsOrderNumber}
+   674→                            </p>
+   675→                            {order.externalOrderReference && (
+   676→                              <p className="text-[10px] text-muted-foreground font-mono">
+   677→                                ext: {order.externalOrderReference}
+   678→                              </p>
+   679→                            )}
+   680→                            <div className="flex items-center gap-1">
+   681→                              <Badge
+   682→                                variant="outline"
+   683→                                className={cn('text-[9px] px-1', sourceBadge)}
+   684→                              >
+   685→                                {order.orderSource}
+   686→                              </Badge>
+   687→                              <span className="text-[10px] text-muted-foreground">
+   688→                                {order.itemCount} item{order.itemCount === 1 ? '' : 's'}
+   689→                              </span>
+   690→                            </div>
+   691→                            <p className="text-[10px] text-muted-foreground">
+   692→                              {formatDate(order.createdAt)}
+   693→                            </p>
+   694→                          </div>
+   695→                        </TableCell>
+   696→
+   697→                        {/* Customer name (editable) */}
+   698→                        <TableCell>
+   699→                          <Input
+   700→                            value={s.customerName}
+   701→                            onChange={(e) =>
+   702→                              patchRow(order.id, { customerName: e.target.value })
+   703→                            }
+   704→                            disabled={s.isBooking || s.result?.ok === true}
+   705→                            className="h-8 text-xs"
+   706→                            placeholder="Customer name"
+   707→                          />
+   708→                        </TableCell>
+   709→
+   710→                        {/* Phone (editable) */}
+   711→                        <TableCell>
+   712→                          <Input
+   713→                            value={s.customerPhone}
+   714→                            onChange={(e) =>
+   715→                              patchRow(order.id, { customerPhone: e.target.value })
+   716→                            }
+   717→                            disabled={s.isBooking || s.result?.ok === true}
+   718→                            className="h-8 text-xs font-mono"
+   719→                            placeholder="03001234567"
+   720→                          />
+   721→                        </TableCell>
+   722→
+   723→                        {/* Address (editable) */}
+   724→                        <TableCell>
+   725→                          <Input
+   726→                            value={s.deliveryAddress}
+   727→                            onChange={(e) =>
+   728→                              patchRow(order.id, {
+   729→                                deliveryAddress: e.target.value,
+   730→                              })
+   731→                            }
+   732→                            disabled={s.isBooking || s.result?.ok === true}
+   733→                            className="h-8 text-xs"
+   734→                            placeholder="House #, street, area"
+   735→                          />
+   736→                        </TableCell>
+   737→
+   738→                        {/* City (autocomplete using selected courier's providerKey) */}
+   739→                        <TableCell>
+   740→                          <CityAutocomplete
+   741→                            providerKey={selectedProviderKey || 'postex'}
+   742→                            value={s.deliveryCity}
+   743→                            onChange={(city) =>
+   744→                              patchRow(order.id, { deliveryCity: city })
+   745→                            }
+   746→                            disabled={
+   747→                              s.isBooking ||
+   748→                              s.result?.ok === true ||
+   749→                              !selectedProviderKey
+   750→                            }
+   751→                            placeholder={
+   752→                              selectedProviderKey
+   753→                                ? 'Search city…'
+   754→                                : 'Select courier first'
+   755→                            }
+   756→                            className="text-xs"
+   757→                          />
+   758→                        </TableCell>
+   759→
+   760→                        {/* COD amount */}
+   761→                        <TableCell>
+   762→                          <Input
+   763→                            type="number"
+   764→                            min="0"
+   765→                            value={s.codAmount}
+   766→                            onChange={(e) =>
+   767→                              patchRow(order.id, { codAmount: e.target.value })
+   768→                            }
+   769→                            disabled={s.isBooking || s.result?.ok === true}
+   770→                            className="h-8 text-xs tabular-nums"
+   771→                          />
+   772→                          <p className="text-[10px] text-muted-foreground mt-0.5">
+   773→                            {formatPKR(Number(s.codAmount) || 0)}
+   774→                          </p>
+   775→                        </TableCell>
+   776→
+   777→                        {/* Order type */}
+   778→                        <TableCell>
+   779→                          <Select
+   780→                            value={s.orderType}
+   781→                            onValueChange={(v) =>
+   782→                              patchRow(order.id, { orderType: v as OrderType })
+   783→                            }
+   784→                            disabled={s.isBooking || s.result?.ok === true}
+   785→                          >
+   786→                            <SelectTrigger className="h-8 text-xs">
+   787→                              <SelectValue />
+   788→                            </SelectTrigger>
+   789→                            <SelectContent>
+   790→                              {ORDER_TYPES.map((t) => (
+   791→                                <SelectItem key={t.value} value={t.value}>
+   792→                                  <span className="flex flex-col">
+   793→                                    <span>{t.label}</span>
+   794→                                    <span className="text-[10px] text-muted-foreground">
+   795→                                      {t.desc}
+   796→                                    </span>
+   797→                                  </span>
+   798→                                </SelectItem>
+   799→                              ))}
+   800→                            </SelectContent>
+   801→                          </Select>
+   802→                        </TableCell>
+   803→
+   804→                        {/* Status / Result */}
+   805→                        <TableCell>
+   806→                          {s.isBooking ? (
+   807→                            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+   808→                              <Loader2 className="h-3 w-3 animate-spin" />
+   809→                              <span>Booking…</span>
+   810→                            </div>
+   811→                          ) : s.result?.ok ? (
+   812→                            <div className="space-y-1">
+   813→                              <div className="flex items-center gap-1.5 text-xs text-emerald-700">
+   814→                                <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+   815→                                <span className="font-medium">Booked</span>
+   816→                              </div>
+   817→                              <p className="font-mono text-[10px] truncate max-w-[160px]">
+   818→                                {s.result.trackingNumber}
+   819→                              </p>
+   820→                              <Badge
+   821→                                variant="outline"
+   822→                                className="text-[9px] bg-emerald-50 text-emerald-700 border-emerald-200"
+   823→                              >
+   824→                                {s.result.orderType}
+   825→                              </Badge>
+   826→                            </div>
+   827→                          ) : s.result && !s.result.ok ? (
+   828→                            <div className="space-y-1">
+   829→                              <div className="flex items-center gap-1.5 text-xs text-rose-700">
+   830→                                <XCircle className="h-3.5 w-3.5 shrink-0" />
+   831→                                <span className="font-medium">Failed</span>
+   832→                              </div>
+   833→                              <p
+   834→                                className="text-[10px] text-rose-700 line-clamp-3 max-w-[200px]"
+   835→                                title={s.result.error}
+   836→                              >
+   837→                                {s.result.error}
+   838→                              </p>
+   839→                            </div>
+   840→                          ) : (
+   841→                            <span className="text-xs text-muted-foreground italic">
+   842→                              Pending
+   843→                            </span>
+   844→                          )}
+   845→                        </TableCell>
+   846→                      </TableRow>
+   847→                    )
+   848→                  })}
+   849→                </TableBody>
+   850→              </Table>
+   851→            </div>
+   852→          )}
+   853→        </CardContent>
+   854→      </Card>
+   855→
+   856→      {/* Footer count */}
+   857→      {filteredOrders.length > 0 && (
+   858→        <p className="text-xs text-muted-foreground text-center">
+   859→          Showing {filteredOrders.length} of {unbookedOrders.length} unbooked{' '}
+   860→          order{unbookedOrders.length === 1 ? '' : 's'} · {checkedCount}{' '}
+   861→          selected
+   862→        </p>
+   863→      )}
+   864→    </div>
+   865→  )
+   866→}
+   867→
