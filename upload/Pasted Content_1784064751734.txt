@@ -1,0 +1,847 @@
+You are an Expert Enterprise Software Architect building the complete
+Inventory, Warehouse, Purchase Order, and Supplier system for FlowOps
+— a multi-tenant SaaS ERP for Pakistani e-commerce businesses.
+
+The Product Catalog system (organizations, companies, employees, RBAC,
+org_products, org_product_variants, categories, brands, attributes,
+company_product_settings, company_variant_pricing) is already built
+and working, including Shopify-compatible variant fields and the
+stitched/unstitched (made_to_order vs stock_based) fulfillment logic.
+
+DO NOT modify Sprint 1 (auth/org/company/employee) tables.
+DO NOT rewrite the existing product tables — only ADD new columns
+where explicitly specified in Part 4 of this prompt.
+Write 100% production-ready SQL for a live Supabase instance. No mock
+data, no placeholders.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BUSINESS CONTEXT — READ CAREFULLY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. SHARED PRODUCT CATALOG, SHARED INVENTORY POOL
+   Products can be shared across companies within an organization
+   (product_scope = organization/selective). When shared, inventory
+   is ONE POOL per variant per location — never duplicated per
+   company. Every stock movement records which company caused it
+   (for cost attribution / COGS), but the stock count itself is
+   singular and shared.
+
+2. WEIGHTED AVERAGE COST (WAC) — ALREADY WORKING IN PRODUCT SYSTEM
+   Every location maintains its own average cost per variant (costs
+   can differ by location — e.g. Karachi stock may have cost more
+   due to transfer/logistics). New purchases recalculate the average:
+   new_avg = (existing_qty × old_avg + new_qty × new_cost) / total_qty
+   Cost is LOCKED at the moment of each transaction — never
+   retroactively recalculated for past transactions.
+
+3. LOCATIONS CAN BE ORG-LEVEL (SHARED) OR COMPANY-LEVEL (PRIVATE)
+   A location with company_id = NULL is a shared organization
+   warehouse any company in the org can use (typically for shared
+   org-scope products). A location with company_id set belongs
+   privately to one company only.
+
+4. STITCHED VS UNSTITCHED — TWO FULFILLMENT MODES ALREADY EXIST
+   Variants have fulfillment_type: 'stock_based' (normal tracked
+   inventory) or 'made_to_order' (no stock held; produced when an
+   order arrives, consuming fabric from a linked stock_based variant).
+
+5. RETURNED MADE-TO-ORDER ITEMS JOIN THE SAME INVENTORY SYSTEM
+   There is NO separate table for returned stitched items. When a
+   made-to-order item is returned in sellable condition, the system
+   creates or updates a NORMAL inventory_pools row for that variant
+   at the receiving location, using the same process_inventory_
+   transaction() function as any other stock movement. A boolean
+   track_inventory flag on the variant flips from FALSE to TRUE the
+   first time this happens, and STAYS TRUE permanently afterward —
+   it never flips back to FALSE, even if the pool empties to zero.
+   This keeps the variant's inventory history consistent and
+   queryable through the exact same tables as stock_based variants,
+   rather than a parallel system.
+
+   On every new order for a made_to_order variant, the fulfillment
+   logic must first check if inventory_pools.available > 0 for that
+   variant (across relevant locations). If yes, fulfill from existing
+   stock (normal reserve/dispatch, no stitching cost incurred). If
+   available = 0, trigger a production order (fresh fabric consumption
+   and stitching) as normal made-to-order behavior.
+
+6. FABRIC CONSUMPTION FOR MADE-TO-ORDER PRODUCTION
+   Each made_to_order variant is linked to a specific stock_based
+   "fabric source" variant (e.g. Stitched Size M draws fabric from
+   Unstitched). When a production order starts, one unit of fabric
+   is consumed from the fabric source variant's stock at a chosen
+   location — this is a normal inventory_transaction, just with a
+   distinct type so it's traceable.
+
+7. TRANSPORT/LOGISTICS COST ON TRANSFERS IS NOT MERGED INTO WAC
+   When stock is transferred between locations, any transport cost
+   incurred is tracked as a SEPARATE logistics expense record — it
+   does NOT get added into the receiving location's average cost.
+   The transferred stock arrives at the receiving location using the
+   exact cost_per_unit it had at the sending location.
+
+8. PURCHASE ORDERS ARE A TWO-STEP PROCESS
+   Placing an order with a supplier (creates "incoming" stock
+   visibility) is separate from actually receiving the goods (which
+   is when WAC recalculates and on_hand actually changes). Partial
+   deliveries, quantity discrepancies, and price differences between
+   the ordered cost and the actually-invoiced cost must all be
+   supported.
+
+9. SUPPLIER RETURNS ARE A SEPARATE FLOW FROM CUSTOMER RETURNS
+   When defective/wrong/excess stock is sent BACK to a supplier, this
+   reduces on_hand at whatever cost it was carried at (no WAC
+   recalculation — the average moves because quantity decreases, but
+   using the existing average cost, not a new cost). Resolution can
+   be a refund, replacement (a fresh purchase_received event), or a
+   credit note (tracked as a running balance against the supplier for
+   future purchase orders).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 1: WAREHOUSE / LOCATION TABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Create migration: /supabase/migrations/006_inventory_core_schema.sql
+
+─────────────────────────────
+TABLE: inventory_locations
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  organization_id       UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE
+  company_id            UUID REFERENCES companies(id) ON DELETE CASCADE
+  -- NULL = org-level shared location; set = private to one company
+
+  name                  TEXT NOT NULL
+  location_type         TEXT NOT NULL DEFAULT 'warehouse'
+                        CHECK (location_type IN
+                          ('warehouse','dispatch_hub','retail_store',
+                           'transit','damaged_hold'))
+
+  address               JSONB
+  city                  TEXT NOT NULL DEFAULT 'Lahore'
+  province              TEXT NOT NULL DEFAULT 'Punjab'
+  country_code          TEXT NOT NULL DEFAULT 'PK'
+  postal_code           TEXT
+
+  contact_person        TEXT
+  contact_phone          TEXT
+
+  is_default            BOOLEAN DEFAULT FALSE
+  -- one default per company, used for order fulfillment suggestions
+
+  is_active             BOOLEAN DEFAULT TRUE
+
+  created_by            UUID REFERENCES employees(id)
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+  updated_at            TIMESTAMPTZ DEFAULT NOW()
+
+  -- Enforce only one default location per company via a partial
+  -- unique index: UNIQUE(company_id) WHERE is_default = TRUE
+  -- (org-level shared locations with company_id NULL are excluded
+  --  from this uniqueness check by definition)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 2: SUPPLIER TABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─────────────────────────────
+TABLE: suppliers
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  organization_id       UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE
+  company_id            UUID REFERENCES companies(id) ON DELETE CASCADE
+  -- NULL = shared supplier across org, set = company-specific supplier
+
+  name                  TEXT NOT NULL
+  contact_person        TEXT
+  phone                 TEXT
+  email                 TEXT
+  address               JSONB
+
+  payment_terms         TEXT DEFAULT 'immediate'
+                        CHECK (payment_terms IN
+                          ('immediate','net_15','net_30','net_45','net_60'))
+
+  credit_balance        NUMERIC(12,2) DEFAULT 0
+  -- running credit owed BY supplier TO us (from credit-note returns)
+  -- increases when a supplier_return resolves as 'credit_note'
+  -- decreases when applied against a new purchase_order
+
+  is_active             BOOLEAN DEFAULT TRUE
+  created_by            UUID REFERENCES employees(id)
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+  updated_at            TIMESTAMPTZ DEFAULT NOW()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 3: CORE INVENTORY TABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─────────────────────────────
+TABLE: inventory_pools
+─────────────────────────────
+THE single source of truth for stock levels. One row per variant per
+location. Never duplicated per company — company attribution lives in
+inventory_transactions instead.
+
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  org_variant_id        UUID NOT NULL REFERENCES org_product_variants(id) ON DELETE CASCADE
+  location_id           UUID NOT NULL REFERENCES inventory_locations(id) ON DELETE CASCADE
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+
+  on_hand               INT NOT NULL DEFAULT 0 CHECK (on_hand >= 0)
+  reserved              INT NOT NULL DEFAULT 0 CHECK (reserved >= 0)
+  available             INT GENERATED ALWAYS AS (on_hand - reserved) STORED
+  incoming              INT NOT NULL DEFAULT 0 CHECK (incoming >= 0)
+  -- incoming = sum of undelivered quantity across open purchase_order_items
+  --   targeting this variant + location
+
+  avg_cost              NUMERIC(12,4) NOT NULL DEFAULT 0
+  total_stock_value     NUMERIC(16,2) GENERATED ALWAYS AS (on_hand * avg_cost) STORED
+
+  reorder_point         INT DEFAULT 0
+  reorder_quantity      INT DEFAULT 0
+
+  last_received_at      TIMESTAMPTZ
+  last_sold_at          TIMESTAMPTZ
+  last_counted_at       TIMESTAMPTZ
+
+  updated_at            TIMESTAMPTZ DEFAULT NOW()
+
+  UNIQUE(org_variant_id, location_id)
+  INDEX on (organization_id, org_variant_id)
+  INDEX on (location_id)
+
+─────────────────────────────
+TABLE: inventory_transactions
+─────────────────────────────
+APPEND-ONLY ledger. Never update or delete rows. This is the source
+of truth for COGS, cost history, and every KPI built later.
+
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  org_variant_id        UUID NOT NULL REFERENCES org_product_variants(id)
+  location_id           UUID NOT NULL REFERENCES inventory_locations(id)
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+
+  company_id            UUID REFERENCES companies(id)
+  -- NULL for org-level events (rare); set for company-attributed events
+  -- (sales, returns, adjustments caused by a specific company)
+
+  employee_id           UUID REFERENCES employees(id)
+
+  transaction_type      TEXT NOT NULL
+                        CHECK (transaction_type IN (
+                          'opening_stock',
+                          'purchase_received',
+                          'sale_dispatched',
+                          'order_reserved',
+                          'order_unreserved',
+                          'return_resellable',
+                          'return_damaged',
+                          'return_stitched_received',
+                          'transfer_out',
+                          'transfer_in',
+                          'cycle_count_adjust',
+                          'damage_writeoff',
+                          'theft_writeoff',
+                          'missing_writeoff',
+                          'transit_loss',
+                          'supplier_return',
+                          'fabric_consumed_for_stitching'
+                        ))
+
+  quantity              INT NOT NULL     -- positive = in, negative = out
+  cost_per_unit         NUMERIC(12,4) NOT NULL DEFAULT 0
+  total_cost_value      NUMERIC(16,2) GENERATED ALWAYS AS
+                        (ABS(quantity) * cost_per_unit) STORED
+
+  avg_cost_before       NUMERIC(12,4)
+  avg_cost_after        NUMERIC(12,4)
+
+  reference_type        TEXT
+                        CHECK (reference_type IN (
+                          'order','purchase_order','transfer',
+                          'cycle_count','stock_loss','manual',
+                          'opening','production_order',
+                          'supplier_return'
+                        ))
+  reference_id          UUID
+
+  notes                 TEXT
+  metadata              JSONB DEFAULT '{}'
+
+  recorded_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+
+  INDEX on (org_variant_id, recorded_at DESC)
+  INDEX on (company_id, transaction_type, recorded_at DESC)
+  INDEX on (organization_id, transaction_type, recorded_at DESC)
+  INDEX on (reference_type, reference_id)
+
+─────────────────────────────
+TABLE: avg_cost_history
+─────────────────────────────
+Audit trail of every average-cost change.
+
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  org_variant_id        UUID NOT NULL REFERENCES org_product_variants(id)
+  location_id           UUID NOT NULL REFERENCES inventory_locations(id)
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+  avg_cost_before       NUMERIC(12,4) NOT NULL
+  avg_cost_after        NUMERIC(12,4) NOT NULL
+  triggered_by_txn_id   UUID NOT NULL REFERENCES inventory_transactions(id)
+  trigger_reason        TEXT
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 4: STOCK TRANSFER (LOGISTICS COST TRACKED SEPARATELY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─────────────────────────────
+TABLE: stock_transfers
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+  org_variant_id        UUID NOT NULL REFERENCES org_product_variants(id)
+
+  from_location_id      UUID NOT NULL REFERENCES inventory_locations(id)
+  to_location_id        UUID NOT NULL REFERENCES inventory_locations(id)
+
+  quantity              INT NOT NULL CHECK (quantity > 0)
+  cost_per_unit_at_transfer NUMERIC(12,4) NOT NULL
+  -- the sending location's avg_cost at the moment of transfer —
+  -- this exact value is what arrives at the destination, unmodified
+
+  logistics_cost        NUMERIC(12,2) DEFAULT 0
+  -- transport/courier cost for this movement — tracked as a separate
+  -- operational expense, NEVER merged into the destination's avg_cost
+
+  status                TEXT NOT NULL DEFAULT 'completed'
+                        CHECK (status IN ('completed','in_transit','cancelled'))
+  -- 'in_transit' supported for future use if transfers need a delay
+  -- window; for now most transfers can complete immediately
+
+  notes                 TEXT
+  initiated_by           UUID REFERENCES employees(id)
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+
+  -- Each stock_transfer row, once completed, produces exactly two
+  -- inventory_transactions: one 'transfer_out' at from_location_id
+  -- and one 'transfer_in' at to_location_id, both referencing this
+  -- row's id via reference_type='transfer', reference_id=this.id
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 5: PURCHASE ORDER TABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─────────────────────────────
+TABLE: purchase_orders
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+  company_id            UUID NOT NULL REFERENCES companies(id)
+  supplier_id           UUID NOT NULL REFERENCES suppliers(id)
+
+  po_number             TEXT NOT NULL UNIQUE
+  -- auto-generated, e.g. PO-2026-045 — format: PO-{year}-{sequence}
+
+  status                TEXT NOT NULL DEFAULT 'draft'
+                        CHECK (status IN
+                          ('draft','ordered','partially_received',
+                           'received','cancelled'))
+
+  order_date            DATE NOT NULL DEFAULT CURRENT_DATE
+  expected_delivery_date DATE
+  delivery_location_id  UUID NOT NULL REFERENCES inventory_locations(id)
+
+  advance_payment       NUMERIC(12,2) DEFAULT 0
+  payment_method        TEXT
+  -- balance_due is computed at query time as
+  -- (sum of purchase_order_items totals) - advance_payment
+
+  notes                 TEXT
+
+  created_by            UUID NOT NULL REFERENCES employees(id)
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+  updated_at            TIMESTAMPTZ DEFAULT NOW()
+  cancelled_at          TIMESTAMPTZ
+  cancelled_by          UUID REFERENCES employees(id)
+  cancellation_reason   TEXT
+
+─────────────────────────────
+TABLE: purchase_order_items
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  purchase_order_id     UUID NOT NULL REFERENCES purchase_orders(id) ON DELETE CASCADE
+  org_variant_id        UUID NOT NULL REFERENCES org_product_variants(id)
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+
+  ordered_quantity      INT NOT NULL CHECK (ordered_quantity > 0)
+  received_quantity     INT NOT NULL DEFAULT 0
+  -- running total across all receiving events for this line item
+
+  cost_per_unit         NUMERIC(12,4) NOT NULL
+  -- as agreed/estimated at order time
+
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+  updated_at            TIMESTAMPTZ DEFAULT NOW()
+
+─────────────────────────────
+TABLE: purchase_order_receipts
+─────────────────────────────
+Records each individual receiving EVENT against a PO (supports
+partial deliveries arriving on different days).
+
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  purchase_order_id     UUID NOT NULL REFERENCES purchase_orders(id)
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+  received_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  received_by           UUID NOT NULL REFERENCES employees(id)
+  notes                 TEXT
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+
+─────────────────────────────
+TABLE: purchase_order_receipt_items
+─────────────────────────────
+Line items within one receiving event — the ACTUAL quantity and cost
+that arrived, which may differ from what was ordered.
+
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  purchase_order_receipt_id UUID NOT NULL REFERENCES purchase_order_receipts(id) ON DELETE CASCADE
+  purchase_order_item_id UUID NOT NULL REFERENCES purchase_order_items(id)
+  org_variant_id        UUID NOT NULL REFERENCES org_product_variants(id)
+
+  received_quantity     INT NOT NULL CHECK (received_quantity >= 0)
+  actual_cost_per_unit  NUMERIC(12,4) NOT NULL
+  -- the real invoiced cost — may differ from purchase_order_items.cost_per_unit
+
+  shortage_quantity     INT DEFAULT 0
+  shortage_reason       TEXT
+
+  inventory_txn_id      UUID REFERENCES inventory_transactions(id)
+  -- the resulting purchase_received transaction
+
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 6: SUPPLIER RETURN TABLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─────────────────────────────
+TABLE: supplier_returns
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+  company_id            UUID NOT NULL REFERENCES companies(id)
+  purchase_order_id     UUID REFERENCES purchase_orders(id)
+  -- nullable — a return can happen even without a directly linked PO
+  supplier_id           UUID NOT NULL REFERENCES suppliers(id)
+  org_variant_id        UUID NOT NULL REFERENCES org_product_variants(id)
+  location_id           UUID NOT NULL REFERENCES inventory_locations(id)
+
+  quantity              INT NOT NULL CHECK (quantity > 0)
+  cost_per_unit         NUMERIC(12,4) NOT NULL
+  total_value           NUMERIC(16,2) GENERATED ALWAYS AS
+                        (quantity * cost_per_unit) STORED
+
+  reason                TEXT NOT NULL
+                        CHECK (reason IN
+                          ('defective','wrong_item','quality_issue',
+                           'excess_quantity','other'))
+
+  status                TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN
+                          ('pending','sent_to_supplier','refunded',
+                           'replaced','credit_note','disputed','rejected'))
+
+  resolution_type       TEXT
+                        CHECK (resolution_type IN
+                          ('refund','replacement','credit_note'))
+  resolution_amount     NUMERIC(12,2)
+  replacement_po_id     UUID REFERENCES purchase_orders(id)
+
+  photos                JSONB DEFAULT '[]'
+  notes                 TEXT
+
+  inventory_txn_id      UUID REFERENCES inventory_transactions(id)
+  -- the resulting supplier_return stock-reduction transaction
+
+  reported_by           UUID NOT NULL REFERENCES employees(id)
+  resolved_by            UUID REFERENCES employees(id)
+  created_at            TIMESTAMPTZ DEFAULT NOW()
+  resolved_at            TIMESTAMPTZ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 7: STOCK LOSS TABLE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─────────────────────────────
+TABLE: stock_loss_records
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+  company_id            UUID NOT NULL REFERENCES companies(id)
+  org_variant_id        UUID NOT NULL REFERENCES org_product_variants(id)
+  location_id           UUID NOT NULL REFERENCES inventory_locations(id)
+
+  loss_type             TEXT NOT NULL
+                        CHECK (loss_type IN
+                          ('damaged','theft','missing','transit_loss'))
+  sub_type              TEXT
+                        CHECK (sub_type IN
+                          ('confirmed','suspected','admin_error','manufacturing'))
+  damage_type           TEXT
+                        CHECK (damage_type IN
+                          ('water_moisture','physical_impact',
+                           'manufacturing_defect','transit_damage',
+                           'storage_damage','other'))
+
+  quantity              INT NOT NULL
+  cost_per_unit         NUMERIC(12,4) NOT NULL
+  total_loss_value       NUMERIC(16,2) GENERATED ALWAYS AS
+                        (quantity * cost_per_unit) STORED
+
+  investigation_status   TEXT NOT NULL DEFAULT 'none'
+                        CHECK (investigation_status IN ('none','open','closed'))
+  resolution             TEXT
+                        CHECK (resolution IN
+                          ('written_off','recovered','error_corrected',
+                           'claim_accepted','claim_rejected'))
+
+  responsible_party      TEXT
+                        CHECK (responsible_party IN
+                          ('warehouse','courier','customer','employee','unknown'))
+  police_report_ref      TEXT
+  insurance_claim_ref    TEXT
+  insurance_recovered    NUMERIC(12,2) DEFAULT 0
+  courier_claim_ref      TEXT
+  courier_claim_status   TEXT
+                        CHECK (courier_claim_status IN
+                          ('not_filed','filed','accepted','rejected'))
+  courier_recovered      NUMERIC(12,2) DEFAULT 0
+
+  evidence_urls          JSONB DEFAULT '[]'
+  notes                  TEXT
+
+  reported_by            UUID NOT NULL REFERENCES employees(id)
+  approved_by             UUID REFERENCES employees(id)
+  resolved_by             UUID REFERENCES employees(id)
+
+  inventory_txn_id       UUID REFERENCES inventory_transactions(id)
+  order_reference_id     UUID  -- will reference orders table in future sprint
+
+  created_at             TIMESTAMPTZ DEFAULT NOW()
+  updated_at             TIMESTAMPTZ DEFAULT NOW()
+  resolved_at             TIMESTAMPTZ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 8: CYCLE COUNT TABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─────────────────────────────
+TABLE: cycle_counts
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+  company_id            UUID NOT NULL REFERENCES companies(id)
+  location_id           UUID NOT NULL REFERENCES inventory_locations(id)
+
+  count_name            TEXT NOT NULL
+  count_type            TEXT NOT NULL DEFAULT 'full'
+                        CHECK (count_type IN ('full','partial','spot'))
+  status                TEXT NOT NULL DEFAULT 'scheduled'
+                        CHECK (status IN
+                          ('scheduled','in_progress','pending_review',
+                           'approved','cancelled'))
+
+  scheduled_at           TIMESTAMPTZ NOT NULL
+  started_at             TIMESTAMPTZ
+  completed_at           TIMESTAMPTZ
+  approved_at             TIMESTAMPTZ
+
+  assigned_to            UUID REFERENCES employees(id)
+  created_by             UUID NOT NULL REFERENCES employees(id)
+  approved_by             UUID REFERENCES employees(id)
+
+  notes                  TEXT
+  total_discrepancies    INT DEFAULT 0
+  total_variance_value   NUMERIC(16,2) DEFAULT 0
+
+  created_at             TIMESTAMPTZ DEFAULT NOW()
+  updated_at             TIMESTAMPTZ DEFAULT NOW()
+
+─────────────────────────────
+TABLE: cycle_count_items
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  cycle_count_id         UUID NOT NULL REFERENCES cycle_counts(id) ON DELETE CASCADE
+  org_variant_id         UUID NOT NULL REFERENCES org_product_variants(id)
+  organization_id        UUID NOT NULL REFERENCES organizations(id)
+
+  system_quantity        INT NOT NULL
+  counted_quantity       INT
+  discrepancy            INT GENERATED ALWAYS AS
+                        (COALESCE(counted_quantity, 0) - system_quantity) STORED
+  discrepancy_value       NUMERIC(16,2)
+
+  discrepancy_reason      TEXT
+                        CHECK (discrepancy_reason IN
+                          ('recording_error','theft_suspected',
+                           'damage_not_recorded','transfer_not_recorded',
+                           'unknown','no_discrepancy'))
+
+  adjustment_approved     BOOLEAN DEFAULT FALSE
+  inventory_txn_id        UUID REFERENCES inventory_transactions(id)
+
+  counted_by              UUID REFERENCES employees(id)
+  counted_at              TIMESTAMPTZ
+  notes                   TEXT
+  created_at              TIMESTAMPTZ DEFAULT NOW()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 9: PRODUCTION ORDER TABLE (MADE-TO-ORDER FABRIC TRACKING)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+─────────────────────────────
+TABLE: production_orders
+─────────────────────────────
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  organization_id       UUID NOT NULL REFERENCES organizations(id)
+  company_id            UUID NOT NULL REFERENCES companies(id)
+
+  stitched_variant_id    UUID NOT NULL REFERENCES org_product_variants(id)
+  fabric_variant_id      UUID NOT NULL REFERENCES org_product_variants(id)
+  fabric_location_id     UUID NOT NULL REFERENCES inventory_locations(id)
+
+  quantity               INT NOT NULL DEFAULT 1
+
+  status                 TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN
+                          ('pending','fabric_reserved','in_production',
+                           'completed','dispatched','cancelled'))
+
+  stitching_cost          NUMERIC(12,2) NOT NULL DEFAULT 0
+  fabric_cost             NUMERIC(12,2) NOT NULL DEFAULT 0
+  total_cost               NUMERIC(16,2) GENERATED ALWAYS AS
+                        (stitching_cost + fabric_cost) STORED
+
+  assigned_tailor         TEXT
+  estimated_completion_date DATE
+  actual_completion_date   DATE
+
+  reference_type          TEXT DEFAULT 'order'
+  reference_id             UUID  -- will link to orders table in future sprint
+
+  fabric_txn_id            UUID REFERENCES inventory_transactions(id)
+  -- the fabric_consumed_for_stitching transaction this order triggered
+
+  created_by               UUID NOT NULL REFERENCES employees(id)
+  created_at               TIMESTAMPTZ DEFAULT NOW()
+  updated_at               TIMESTAMPTZ DEFAULT NOW()
+  cancelled_at              TIMESTAMPTZ
+  cancellation_reason       TEXT
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 10: PRODUCT SYSTEM SCHEMA CHANGES (ADD-ONLY)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Add these columns to the EXISTING org_product_variants table via
+this same migration — do not recreate the table, use ALTER TABLE:
+
+  ALTER TABLE org_product_variants
+    ADD COLUMN track_inventory BOOLEAN NOT NULL DEFAULT TRUE;
+    -- TRUE by default for stock_based variants
+    -- FALSE by default should be set explicitly when creating
+    --   made_to_order variants (handled in Step 2's server action)
+    -- Once flipped to TRUE for a made_to_order variant (on first
+    --   return), it must NEVER be flipped back to FALSE by any
+    --   application code — this is a one-way transition
+
+  ALTER TABLE org_product_variants
+    ADD COLUMN fabric_source_variant_id UUID
+      REFERENCES org_product_variants(id);
+    -- nullable; only meaningful when fulfillment_type = 'made_to_order'
+    -- points to the stock_based variant fabric is drawn from during
+    -- production_orders
+
+Add a CHECK constraint (or trigger, whichever is cleaner in Postgres)
+ensuring: fulfillment_type = 'made_to_order' variants may have
+track_inventory as TRUE or FALSE (both valid depending on return
+history), but stock_based variants must always have track_inventory
+= TRUE — a stock_based variant with track_inventory = FALSE is an
+invalid state.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 11: POSTGRESQL FUNCTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+FUNCTION 1: calculate_new_avg_cost(p_variant_id, p_location_id,
+  p_new_quantity, p_new_unit_cost) RETURNS NUMERIC
+  Standard WAC formula, as already used in the product system.
+
+FUNCTION 2: process_inventory_transaction(...) — THE CORE FUNCTION
+  Parameters: org_variant_id, location_id, organization_id, company_id
+  (nullable), employee_id, transaction_type, quantity, cost_per_unit
+  (nullable — uses current avg_cost if not provided), reference_type,
+  reference_id, notes, metadata
+
+  Logic:
+    1. Lock the inventory_pools row (SELECT ... FOR UPDATE). If no row
+       exists yet for this variant+location, create one first with
+       on_hand=0, avg_cost=0 (this happens automatically on the FIRST
+       transaction ever for that variant+location pair — including
+       the very first return of a made_to_order variant).
+    2. Validate: if this is an OUT-direction transaction type
+       (sale_dispatched, transfer_out, damage_writeoff, theft_writeoff,
+       missing_writeoff, transit_loss, supplier_return,
+       fabric_consumed_for_stitching), check available >= ABS(quantity).
+       If not, return an error 'INSUFFICIENT_STOCK' — do not proceed.
+    3. If transaction_type = 'purchase_received' or
+       'return_stitched_received' or 'transfer_in' or 'opening_stock':
+       compute new_avg via calculate_new_avg_cost(); use it as
+       cost_per_unit if not explicitly passed; update inventory_pools
+       .avg_cost to the new value.
+    4. If transaction_type = 'transfer_in': cost_per_unit is passed in
+       explicitly (the sending location's cost at time of transfer)
+       — do NOT let logistics_cost affect this value (see Part 4 rule).
+    5. Update inventory_pools.on_hand and/or .reserved based on
+       transaction_type per the mapping table below.
+    6. If this transaction touches a made_to_order variant with
+       track_inventory currently FALSE and the type is
+       'return_stitched_received': set track_inventory = TRUE on the
+       variant record as part of this same call.
+    7. Insert the inventory_transactions row with avg_cost_before/after.
+    8. If avg_cost changed: insert avg_cost_history row.
+    9. Return { success, transaction_id, new_pool_state }.
+
+  TRANSACTION TYPE → POOL UPDATE MAPPING:
+    opening_stock              → on_hand += qty
+    purchase_received          → on_hand += qty, incoming -= qty (if PO-linked)
+    sale_dispatched            → on_hand -= qty, reserved -= qty
+    order_reserved             → reserved += qty
+    order_unreserved           → reserved -= qty
+    return_resellable          → on_hand += qty
+    return_stitched_received    → on_hand += qty (creates pool if needed)
+    return_damaged              → no pool change (goes straight to stock_loss_records)
+    transfer_out                 → on_hand -= qty
+    transfer_in                   → on_hand += qty
+    cycle_count_adjust            → on_hand = system_quantity + discrepancy (set directly)
+    damage_writeoff/theft_writeoff/missing_writeoff/transit_loss → on_hand -= qty
+    supplier_return                → on_hand -= qty
+    fabric_consumed_for_stitching   → on_hand -= qty (on the FABRIC variant, not the stitched one)
+
+FUNCTION 3: check_returned_stock_availability(p_variant_id)
+  Returns TABLE(location_id, available, avg_cost) for a made_to_order
+  variant — used by fulfillment logic to decide whether to use
+  existing stock or trigger a fresh production order.
+
+FUNCTION 4: get_product_inventory_summary(p_product_id)
+  Returns a JSONB combining, per variant: total on_hand/reserved/
+  available across all locations, per-location breakdown, incoming
+  quantity (from open POs), and — if made_to_order — whether any
+  returned stock currently exists. This powers the product detail
+  page's Inventory tab.
+
+FUNCTION 5: generate_po_number(p_organization_id) RETURNS TEXT
+  Generates the next PO-{year}-{sequence} number, sequence resets
+  per calendar year per organization.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 12: ROW LEVEL SECURITY POLICIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Use existing helper functions: get_active_company_id(),
+get_active_org_id(), is_elevated_employee(company_id),
+has_permission(company_id, key).
+
+inventory_locations:
+  SELECT: organization_id = get_active_org_id()
+          AND (company_id IS NULL OR company_id = get_active_company_id())
+  INSERT/UPDATE: has_permission(get_active_company_id(), 'inventory.manage_locations')
+  DELETE: DISABLED (use is_active = FALSE)
+
+suppliers:
+  SELECT: organization_id = get_active_org_id()
+          AND (company_id IS NULL OR company_id = get_active_company_id())
+  INSERT/UPDATE: has_permission(get_active_company_id(), 'inventory.manage_suppliers')
+  DELETE: DISABLED (use is_active = FALSE)
+
+inventory_pools:
+  SELECT: organization_id = get_active_org_id()
+  INSERT/UPDATE/DELETE: DISABLED from client — only process_inventory_transaction()
+    (a SECURITY DEFINER function) may write to this table
+
+inventory_transactions, avg_cost_history:
+  SELECT: organization_id = get_active_org_id()
+          AND (company_id IS NULL OR company_id = get_active_company_id()
+               OR is_elevated_employee(get_active_company_id()))
+  INSERT/UPDATE/DELETE: DISABLED from client (immutable, function-only writes)
+
+stock_transfers:
+  SELECT: organization_id = get_active_org_id()
+  INSERT: has_permission(get_active_company_id(), 'inventory.transfer')
+  UPDATE/DELETE: DISABLED
+
+purchase_orders, purchase_order_items:
+  SELECT: company_id = get_active_company_id()
+  INSERT/UPDATE: has_permission(get_active_company_id(), 'inventory.manage_purchase_orders')
+  DELETE: DISABLED (use status = 'cancelled')
+
+purchase_order_receipts, purchase_order_receipt_items:
+  SELECT: organization_id = get_active_org_id()
+  INSERT: has_permission(get_active_company_id(), 'inventory.receive')
+  UPDATE/DELETE: DISABLED
+
+supplier_returns:
+  SELECT: company_id = get_active_company_id()
+  INSERT: has_permission(get_active_company_id(), 'inventory.manage_supplier_returns')
+  UPDATE: same permission
+  DELETE: DISABLED
+
+stock_loss_records:
+  SELECT: company_id = get_active_company_id()
+  INSERT: has_permission(get_active_company_id(), 'inventory.report_loss')
+  UPDATE: has_permission(get_active_company_id(), 'inventory.manage_loss')
+  DELETE: DISABLED
+
+cycle_counts, cycle_count_items:
+  SELECT: company_id = get_active_company_id()
+  INSERT/UPDATE: has_permission(get_active_company_id(), 'inventory.cycle_count')
+  DELETE: DISABLED
+
+production_orders:
+  SELECT: company_id = get_active_company_id()
+  INSERT/UPDATE: has_permission(get_active_company_id(), 'inventory.manage_production')
+  DELETE: DISABLED (use status = 'cancelled')
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. inventory_pools must NEVER be written to directly from a server
+   action — only through process_inventory_transaction(). This is
+   the single point of truth guaranteeing the ledger and pool always
+   agree.
+
+2. track_inventory on a made_to_order variant is a ONE-WAY flag:
+   FALSE → TRUE is allowed automatically on first return; TRUE → FALSE
+   must never happen through any code path in this system.
+
+3. Transport/logistics cost on transfers is tracked in
+   stock_transfers.logistics_cost and NEVER added into the receiving
+   location's avg_cost calculation — the transferred stock keeps its
+   original cost_per_unit exactly.
+
+4. Every table that represents a financial ledger
+   (inventory_transactions, avg_cost_history) is immutable — no
+   UPDATE or DELETE policies exist for these under any role.
+
+5. Never hard-delete locations, suppliers, purchase orders, or
+   production orders — always use status/is_active flags.
+
+6. This is an ADD-ON to the existing product schema — org_products,
+   org_product_variants (aside from the two new columns above),
+   company_product_settings, company_variant_pricing, categories,
+   brands, and attributes must not be altered beyond what's
+   explicitly specified in Part 10.
+
+BEGIN: Write the complete migration file covering Parts 1–12 now.

@@ -1,0 +1,803 @@
+You are an Expert Enterprise Software Architect and Senior Full-Stack Engineer.
+You are building Sprint 1 of FlowOps — a production-grade, multi-tenant SaaS 
+ERP platform targeting Pakistani e-commerce businesses. This system will 
+eventually handle inventory, orders, CRM, courier dispatch, warehouse 
+management, KPIs, ad performance tracking, and third-party integrations 
+(Shopify, TCS, Leopard, Trax, Meta Ads, Google Ads, JazzCash, Easypaisa).
+
+DO NOT write mock, demo, placeholder, or tutorial-style code.
+DO NOT use any hardcoded data.
+Write 100% production-ready code as if this is going live today.
+Every decision must be future-proof for the complex modules described below.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+TECH STACK — USE EXACTLY THESE, NO SUBSTITUTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Framework         : Next.js 15 (App Router, Server Actions only — no API routes)
+Language          : TypeScript (strict mode, no "any" types)
+Database          : Supabase (PostgreSQL)
+Auth              : Supabase Auth (built-in)
+UI Components     : shadcn/ui (Radix UI primitives)
+Styling           : Tailwind CSS v4
+Form Handling     : React Hook Form + Zod validation
+State Management  : Zustand (for client-side workspace/context state)
+Server State      : TanStack Query v5 (for data fetching and cache)
+Email             : Supabase Auth email templates (password reset OTP)
+Icons             : Lucide React
+Notifications     : Sonner (toast notifications)
+Date Handling     : date-fns
+Utility           : clsx, tailwind-merge
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 1: COMPLETE DATABASE SCHEMA
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Create the following PostgreSQL schema in Supabase. Every table must have
+RLS enabled. Write all SQL as a single migration file.
+
+─────────────────────────────
+TABLE 1: profiles
+─────────────────────────────
+Extends Supabase auth.users. Created automatically via trigger on signup.
+
+  id                  UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE
+  full_name           TEXT NOT NULL
+  email               TEXT NOT NULL UNIQUE
+  avatar_url          TEXT
+  phone               TEXT
+  is_onboarded        BOOLEAN DEFAULT FALSE
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
+
+Trigger: after INSERT on auth.users → auto-create profiles row.
+
+─────────────────────────────
+TABLE 2: organizations
+─────────────────────────────
+Top-level tenant. A holding umbrella. No employees live here.
+
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  name                TEXT NOT NULL
+  slug                TEXT NOT NULL UNIQUE
+  logo_url            TEXT
+  owner_id            UUID NOT NULL REFERENCES profiles(id)
+  subscription_plan   TEXT NOT NULL DEFAULT 'free'
+                      CHECK (subscription_plan IN ('free','starter','growth','enterprise'))
+  subscription_status TEXT NOT NULL DEFAULT 'active'
+                      CHECK (subscription_status IN ('active','past_due','cancelled','trialing'))
+  is_active           BOOLEAN DEFAULT TRUE
+  metadata            JSONB DEFAULT '{}'
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
+
+─────────────────────────────
+TABLE 3: companies
+─────────────────────────────
+Legal operating entity under an Organization. All business data lives here.
+
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  organization_id     UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE
+  name                TEXT NOT NULL
+  legal_name          TEXT
+  slug                TEXT NOT NULL UNIQUE
+  logo_url            TEXT
+  base_currency       TEXT NOT NULL DEFAULT 'PKR'
+  country_code        TEXT NOT NULL DEFAULT 'PK'
+  tax_id              TEXT          -- NTN or STRN for Pakistan
+  tax_id_type         TEXT          -- 'NTN' | 'STRN'
+  address             JSONB         -- { street, city, province, postal_code, country }
+  phone               TEXT
+  email               TEXT
+  website             TEXT
+  timezone            TEXT NOT NULL DEFAULT 'Asia/Karachi'
+  fiscal_year_start   INT  NOT NULL DEFAULT 1   -- month number
+  is_active           BOOLEAN DEFAULT TRUE
+  metadata            JSONB DEFAULT '{}'
+  created_by          UUID NOT NULL REFERENCES profiles(id)
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
+
+─────────────────────────────
+TABLE 4: roles
+─────────────────────────────
+Fully custom, company-scoped roles. No hardcoded role names in code.
+
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  company_id          UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE
+  name                TEXT NOT NULL               -- e.g. "Warehouse Manager"
+  description         TEXT
+  role_tier           TEXT NOT NULL DEFAULT 'standard'
+                      CHECK (role_tier IN ('elevated','standard'))
+  -- elevated = Owner, Founder, Co-Founder, Investor (bypass all permission checks)
+  -- standard = regular custom roles
+  is_system_role      BOOLEAN DEFAULT FALSE
+  -- system roles: owner, founder, co_founder, investor — cannot be deleted
+  system_role_key     TEXT UNIQUE
+  -- 'owner' | 'founder' | 'co_founder' | 'investor' | NULL
+  is_active           BOOLEAN DEFAULT TRUE
+  created_by          UUID REFERENCES profiles(id)
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
+
+  UNIQUE(company_id, name)
+
+─────────────────────────────
+TABLE 5: role_permissions
+─────────────────────────────
+Permission keys attached to standard roles. Elevated roles bypass this entirely.
+
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  role_id             UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE
+  company_id          UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE
+  permission_key      TEXT NOT NULL
+  -- dot-notation format: "module.action"
+  -- Examples:
+  --   inventory.view, inventory.adjust, inventory.create
+  --   orders.view, orders.create, orders.fulfill, orders.cancel
+  --   employees.view, employees.invite, employees.terminate
+  --   reports.view, reports.export
+  --   settings.company.view, settings.company.edit
+  --   integrations.view, integrations.manage
+  --   kpi.view, kpi.manage
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+
+  UNIQUE(role_id, permission_key)
+
+─────────────────────────────
+TABLE 6: employees
+─────────────────────────────
+The core of the Employment System. Merges HR + system access.
+One user can have multiple employee records (one per company).
+
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  company_id          UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE
+  user_id             UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE
+  role_id             UUID NOT NULL REFERENCES roles(id)
+  employee_code       TEXT               -- internal HR code e.g. "EMP-001"
+  department          TEXT
+  designation         TEXT               -- display title e.g. "Senior Sales Executive"
+  direct_manager_id   UUID REFERENCES employees(id)
+  status              TEXT NOT NULL DEFAULT 'active'
+                      CHECK (status IN ('active','suspended','terminated','on_leave'))
+  joined_at           TIMESTAMPTZ DEFAULT NOW()
+  terminated_at       TIMESTAMPTZ
+  terminated_by       UUID REFERENCES profiles(id)
+  termination_reason  TEXT
+  invited_by          UUID REFERENCES profiles(id)
+  metadata            JSONB DEFAULT '{}'
+  -- Future KPI tags will reference employee_id from other tables
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
+
+  UNIQUE(company_id, user_id)   -- one employee record per company per user
+
+─────────────────────────────
+TABLE 7: invitations
+─────────────────────────────
+Token-based email invitations. Works whether user exists or not.
+
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  company_id          UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE
+  organization_id     UUID NOT NULL REFERENCES organizations(id)
+  invited_email       TEXT NOT NULL
+  invited_by          UUID NOT NULL REFERENCES profiles(id)
+  role_id             UUID NOT NULL REFERENCES roles(id)
+  token               TEXT NOT NULL UNIQUE DEFAULT encode(gen_random_bytes(32), 'hex')
+  status              TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending','accepted','expired','revoked'))
+  accepted_by         UUID REFERENCES profiles(id)
+  accepted_at         TIMESTAMPTZ
+  expires_at          TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '7 days')
+  message             TEXT         -- optional personal message from inviter
+  metadata            JSONB DEFAULT '{}'
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+
+─────────────────────────────
+TABLE 8: user_settings
+─────────────────────────────
+Stores active workspace context. Core of the RLS isolation system.
+
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  user_id             UUID NOT NULL UNIQUE REFERENCES profiles(id) ON DELETE CASCADE
+  active_company_id   UUID REFERENCES companies(id) ON DELETE SET NULL
+  active_org_id       UUID REFERENCES organizations(id) ON DELETE SET NULL
+  theme               TEXT DEFAULT 'system'
+                      CHECK (theme IN ('light','dark','system'))
+  language            TEXT DEFAULT 'en'
+  notification_prefs  JSONB DEFAULT '{}'
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+  updated_at          TIMESTAMPTZ DEFAULT NOW()
+
+Trigger: after INSERT on profiles → auto-create user_settings row.
+
+─────────────────────────────
+TABLE 9: audit_logs
+─────────────────────────────
+Immutable event log. Foundation for KPI system. Never update or delete rows.
+Append-only table. All modules will INSERT here.
+
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  company_id          UUID REFERENCES companies(id) ON DELETE SET NULL
+  organization_id     UUID REFERENCES organizations(id) ON DELETE SET NULL
+  user_id             UUID REFERENCES profiles(id) ON DELETE SET NULL
+  employee_id         UUID REFERENCES employees(id) ON DELETE SET NULL
+  action              TEXT NOT NULL
+  -- dot-notation: "employee.invited", "company.created", "order.fulfilled"
+  entity_type         TEXT NOT NULL
+  -- "employee" | "company" | "organization" | "order" | "product" | "shipment"
+  entity_id           UUID
+  ip_address          INET
+  user_agent          TEXT
+  old_values          JSONB   -- before state (for updates)
+  new_values          JSONB   -- after state
+  metadata            JSONB DEFAULT '{}'
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+
+─────────────────────────────
+TABLE 10: metric_events
+─────────────────────────────
+Raw numeric events. Future KPI dashboards aggregate from this table.
+Every measurable thing in the system feeds into this table.
+
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid()
+  company_id          UUID NOT NULL REFERENCES companies(id) ON DELETE CASCADE
+  entity_type         TEXT NOT NULL
+  -- "employee" | "product" | "order" | "campaign" | "courier" | "warehouse"
+  entity_id           UUID NOT NULL
+  metric_key          TEXT NOT NULL
+  -- e.g. "order.fulfilled", "ad.spend", "return.processed", "stock.adjusted"
+  numeric_value       NUMERIC(20, 4) NOT NULL
+  currency            TEXT
+  dimensions          JSONB DEFAULT '{}'
+  -- flexible context: { platform: "meta", campaign_id: "x", warehouse_id: "y" }
+  recorded_at         TIMESTAMPTZ NOT NULL   -- when event actually happened
+  created_at          TIMESTAMPTZ DEFAULT NOW()
+
+  INDEX on (company_id, entity_type, metric_key, recorded_at)
+  -- This index is critical for time-series KPI queries
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 2: HELPER FUNCTIONS & TRIGGERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Create the following PostgreSQL functions:
+
+1. get_active_company_id() RETURNS UUID
+   Reads user_settings.active_company_id for the current auth.uid().
+   Used in ALL RLS policies. Must be SECURITY DEFINER, STABLE.
+
+2. get_active_org_id() RETURNS UUID
+   Reads user_settings.active_org_id for the current auth.uid().
+
+3. is_elevated_employee(p_company_id UUID) RETURNS BOOLEAN
+   Checks if current user's employee record for p_company_id has a role
+   with role_tier = 'elevated'. Used in admin-only RLS policies.
+
+4. has_permission(p_company_id UUID, p_permission_key TEXT) RETURNS BOOLEAN
+   Checks role_permissions for current user's role in p_company_id.
+   If the user's role_tier = 'elevated', return TRUE immediately (bypass).
+   Otherwise check role_permissions table.
+
+5. handle_new_user() — TRIGGER FUNCTION
+   After INSERT on auth.users:
+   - Creates profiles row
+   - Creates user_settings row
+   - Marks is_onboarded = FALSE
+
+6. update_updated_at() — TRIGGER FUNCTION
+   Updates the updated_at column to NOW() before any UPDATE.
+   Apply this trigger to: profiles, organizations, companies, employees,
+   roles, user_settings.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 3: ROW LEVEL SECURITY (RLS) POLICIES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Enable RLS on ALL tables. Write explicit policies for each.
+
+profiles:
+  SELECT: auth.uid() = id
+  UPDATE: auth.uid() = id
+
+organizations:
+  SELECT: owner_id = auth.uid()
+          OR EXISTS (SELECT 1 FROM employees e 
+                     JOIN companies c ON c.id = e.company_id 
+                     WHERE c.organization_id = organizations.id 
+                     AND e.user_id = auth.uid() 
+                     AND e.status = 'active')
+  INSERT: auth.uid() IS NOT NULL (any logged in user can create an org)
+  UPDATE: owner_id = auth.uid()
+  DELETE: owner_id = auth.uid()
+
+companies:
+  SELECT: company_id = get_active_company_id()
+          AND EXISTS (SELECT 1 FROM employees 
+                      WHERE company_id = companies.id 
+                      AND user_id = auth.uid() 
+                      AND status = 'active')
+  INSERT: organization owner can create companies
+  UPDATE: is_elevated_employee(id) = TRUE
+  DELETE: DISABLED (use is_active = FALSE instead)
+
+employees:
+  SELECT: company_id = get_active_company_id()
+          AND company_id IN (SELECT company_id FROM employees 
+                              WHERE user_id = auth.uid() 
+                              AND status = 'active')
+  INSERT: has_permission(company_id, 'employees.invite') = TRUE
+  UPDATE: is_elevated_employee(company_id) = TRUE
+          OR (auth.uid() = user_id AND -- employee can update own limited fields
+              -- Only allow updating: avatar, phone on own profile)
+  DELETE: DISABLED (use status = 'terminated' instead)
+
+roles:
+  SELECT: company_id = get_active_company_id()
+  INSERT: has_permission(company_id, 'settings.roles.manage') = TRUE
+  UPDATE: has_permission(company_id, 'settings.roles.manage') = TRUE
+          AND is_system_role = FALSE
+  DELETE: has_permission(company_id, 'settings.roles.manage') = TRUE
+          AND is_system_role = FALSE
+
+role_permissions:
+  SELECT: company_id = get_active_company_id()
+  INSERT: is_elevated_employee(company_id) = TRUE
+  DELETE: is_elevated_employee(company_id) = TRUE
+
+invitations:
+  SELECT: invited_by = auth.uid()
+          OR invited_email = (SELECT email FROM profiles WHERE id = auth.uid())
+  INSERT: has_permission(company_id, 'employees.invite') = TRUE
+  UPDATE: token IS NOT NULL (accepting via token — public but token-gated)
+
+user_settings:
+  SELECT: user_id = auth.uid()
+  INSERT: user_id = auth.uid()
+  UPDATE: user_id = auth.uid()
+
+audit_logs:
+  SELECT: company_id = get_active_company_id()
+          AND is_elevated_employee(company_id) = TRUE
+  INSERT: auth.uid() IS NOT NULL
+  UPDATE: DISABLED (immutable — no updates ever)
+  DELETE: DISABLED (immutable — no deletes ever)
+
+metric_events:
+  SELECT: company_id = get_active_company_id()
+  INSERT: auth.uid() IS NOT NULL
+  UPDATE: DISABLED
+  DELETE: DISABLED
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 4: FOLDER STRUCTURE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Create the following exact folder and file structure:
+
+src/
+├── app/
+│   ├── (auth)/
+│   │   ├── login/
+│   │   │   └── page.tsx
+│   │   ├── register/
+│   │   │   └── page.tsx
+│   │   ├── forgot-password/
+│   │   │   └── page.tsx
+│   │   ├── reset-password/
+│   │   │   └── page.tsx
+│   │   └── layout.tsx
+│   ├── (onboarding)/
+│   │   ├── onboarding/
+│   │   │   ├── page.tsx             -- Path selector: Create Org OR Accept Invite
+│   │   │   ├── create-company/
+│   │   │   │   └── page.tsx         -- Multi-step company creation wizard
+│   │   │   └── accept-invite/
+│   │   │       └── page.tsx         -- Accept invitation flow
+│   │   └── layout.tsx
+│   ├── (dashboard)/
+│   │   ├── layout.tsx               -- Main app shell with workspace switcher
+│   │   ├── dashboard/
+│   │   │   └── page.tsx             -- Company home dashboard
+│   │   ├── org/
+│   │   │   ├── [orgId]/
+│   │   │   │   ├── page.tsx         -- Organization overview
+│   │   │   │   ├── companies/
+│   │   │   │   │   └── page.tsx     -- All companies under this org
+│   │   │   │   └── settings/
+│   │   │   │       └── page.tsx     -- Org settings
+│   │   ├── company/
+│   │   │   ├── [companyId]/
+│   │   │   │   ├── page.tsx         -- Company overview
+│   │   │   │   └── settings/
+│   │   │   │       └── page.tsx     -- Company settings
+│   │   ├── employees/
+│   │   │   ├── page.tsx             -- Employee directory
+│   │   │   ├── invite/
+│   │   │   │   └── page.tsx         -- Invite employee form
+│   │   │   └── [employeeId]/
+│   │   │       └── page.tsx         -- Employee detail / edit
+│   │   ├── roles/
+│   │   │   ├── page.tsx             -- Roles & permissions management
+│   │   │   └── [roleId]/
+│   │   │       └── page.tsx         -- Edit role permissions
+│   │   └── settings/
+│   │       └── page.tsx             -- User personal settings
+│   └── api/
+│       └── auth/
+│           └── callback/
+│               └── route.ts         -- Supabase OAuth callback handler
+│
+├── components/
+│   ├── auth/
+│   │   ├── LoginForm.tsx
+│   │   ├── RegisterForm.tsx
+│   │   ├── ForgotPasswordForm.tsx
+│   │   └── ResetPasswordForm.tsx
+│   ├── onboarding/
+│   │   ├── OnboardingSelector.tsx
+│   │   ├── CreateCompanyWizard.tsx
+│   │   └── AcceptInviteCard.tsx
+│   ├── workspace/
+│   │   ├── WorkspaceSwitcher.tsx    -- Navbar dropdown to switch companies
+│   │   └── WorkspaceGuard.tsx       -- Redirects if no active company set
+│   ├── employees/
+│   │   ├── EmployeeTable.tsx
+│   │   ├── InviteEmployeeForm.tsx
+│   │   └── EmployeeStatusBadge.tsx
+│   ├── roles/
+│   │   ├── RoleCard.tsx
+│   │   ├── CreateRoleForm.tsx
+│   │   └── PermissionKeySelector.tsx
+│   ├── layout/
+│   │   ├── Sidebar.tsx
+│   │   ├── Navbar.tsx
+│   │   └── PageHeader.tsx
+│   └── ui/                          -- shadcn/ui components go here
+│
+├── lib/
+│   ├── supabase/
+│   │   ├── client.ts                -- Browser Supabase client (singleton)
+│   │   ├── server.ts                -- Server Supabase client (for Server Actions)
+│   │   └── middleware.ts            -- Supabase session refresh in Next.js middleware
+│   ├── actions/
+│   │   ├── auth.actions.ts          -- Server Actions: login, register, logout, reset
+│   │   ├── organization.actions.ts  -- Server Actions: create org, update org
+│   │   ├── company.actions.ts       -- Server Actions: create company, update company
+│   │   ├── employee.actions.ts      -- Server Actions: invite, terminate, update role
+│   │   ├── invitation.actions.ts    -- Server Actions: accept invite, revoke invite
+│   │   └── workspace.actions.ts     -- Server Actions: switch active company
+│   ├── validations/
+│   │   ├── auth.schemas.ts          -- Zod schemas for all auth forms
+│   │   ├── company.schemas.ts
+│   │   ├── employee.schemas.ts
+│   │   └── invitation.schemas.ts
+│   ├── stores/
+│   │   └── workspace.store.ts       -- Zustand: active company, org, user context
+│   ├── hooks/
+│   │   ├── useWorkspace.ts          -- Active company context hook
+│   │   ├── usePermission.ts         -- Check permission key for current user
+│   │   └── useEmployee.ts           -- Current user's employee record in active company
+│   ├── constants/
+│   │   └── permissions.ts           -- All permission key constants as typed enum
+│   └── utils/
+│       ├── audit.ts                 -- Helper: insertAuditLog(action, entity, metadata)
+│       ├── metrics.ts               -- Helper: insertMetricEvent(key, value, dimensions)
+│       └── slugify.ts               -- Generate URL-safe slugs for orgs and companies
+│
+├── middleware.ts                    -- Next.js middleware: session + onboarding guard
+└── types/
+    ├── database.types.ts            -- Auto-generated Supabase types
+    └── app.types.ts                 -- App-level TypeScript interfaces
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 5: AUTHENTICATION FLOWS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Implement all 6 flows using Supabase Auth + Next.js Server Actions:
+
+─────────────────────────────
+FLOW 1: REGISTRATION
+─────────────────────────────
+Form fields: full_name, email, password, confirm_password
+Zod validation: min 8 chars password, email format, passwords match
+Server Action:
+  1. supabase.auth.signUp({ email, password, options: { data: { full_name } } })
+  2. Supabase trigger auto-creates profiles + user_settings rows
+  3. Return success → redirect to /onboarding
+  4. Insert audit_log: action "auth.registered"
+
+─────────────────────────────
+FLOW 2: LOGIN
+─────────────────────────────
+Form fields: email, password
+Server Action:
+  1. supabase.auth.signInWithPassword({ email, password })
+  2. Check if profiles.is_onboarded = TRUE
+  3. Check if user has pending invitations for their email
+  4. If is_onboarded = FALSE → redirect to /onboarding (pass pending invites)
+  5. If is_onboarded = TRUE → check user_settings.active_company_id
+  6. If active_company_id is NULL → redirect to /onboarding
+  7. Else → redirect to /dashboard
+  8. Insert audit_log: action "auth.login"
+
+─────────────────────────────
+FLOW 3: LOGOUT
+─────────────────────────────
+Server Action:
+  1. supabase.auth.signOut()
+  2. Clear Zustand workspace store
+  3. Redirect to /login
+  4. Insert audit_log before sign out: action "auth.logout"
+
+─────────────────────────────
+FLOW 4: FORGOT PASSWORD (OTP Code Flow)
+─────────────────────────────
+This is a 3-step flow:
+
+STEP 1 — /forgot-password
+  Form: email input
+  Server Action:
+    supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: process.env.NEXT_PUBLIC_APP_URL + '/reset-password'
+    })
+  UI: Show "Check your email. We sent a 6-digit code." message.
+  Note: Supabase sends an email with a magic link that contains a token.
+
+STEP 2 — /reset-password (user arrives via email link)
+  The email link brings user to /reset-password?token_hash=xxx&type=recovery
+  Server Action in route:
+    1. Exchange token hash for session:
+       supabase.auth.verifyOtp({ token_hash, type: 'recovery' })
+    2. On success: show "Create New Password" form
+
+STEP 3 — New Password Form
+  Form fields: new_password, confirm_password
+  Zod validation: min 8 chars, passwords must match
+  Server Action:
+    1. supabase.auth.updateUser({ password: new_password })
+    2. Sign out all other sessions for security
+    3. Redirect to /login with success toast
+    4. Insert audit_log: action "auth.password_reset"
+
+─────────────────────────────
+FLOW 5: SESSION MANAGEMENT (Middleware)
+─────────────────────────────
+In middleware.ts:
+  1. Refresh Supabase session on every request (prevent token expiry)
+  2. If no session → redirect to /login (except for auth routes)
+  3. If session exists + is_onboarded = FALSE → redirect to /onboarding
+  4. Protect all /dashboard/* and /employees/* and /roles/* routes
+  5. Allow /login, /register, /forgot-password, /reset-password without auth
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 6: ONBOARDING FLOW
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/onboarding page logic:
+  1. On load: fetch pending invitations WHERE invited_email = user.email AND status = 'pending'
+  2. If pending invitations exist → show AcceptInviteCard prominently at top
+  3. Show two paths side by side:
+     PATH A: "Create My Company" button → /onboarding/create-company
+     PATH B: "Accept Invitation" (if invites exist, show invite details)
+
+─────────────────────────────
+PATH A: CREATE COMPANY WIZARD
+─────────────────────────────
+3-step wizard using shadcn/ui Stepper or manual step state:
+
+STEP 1 — Organization Details:
+  Fields: org_name (auto-generates slug), logo upload (optional)
+  
+STEP 2 — Company Details:
+  Fields: company_name, legal_name, tax_id (NTN/STRN), 
+          base_currency (default PKR), country (default PK),
+          province, city, address
+          
+STEP 3 — Review & Create:
+  Show summary, confirm button
+
+Server Action on submit:
+  1. Create organizations row (owner_id = current user)
+  2. Create companies row (organization_id = new org, created_by = current user)
+  3. Create 4 system roles for this company:
+     - { name: 'Owner', system_role_key: 'owner', role_tier: 'elevated', is_system_role: true }
+     - { name: 'Founder', system_role_key: 'founder', role_tier: 'elevated', is_system_role: true }
+     - { name: 'Co-Founder', system_role_key: 'co_founder', role_tier: 'elevated', is_system_role: true }
+     - { name: 'Investor', system_role_key: 'investor', role_tier: 'elevated', is_system_role: true }
+  4. Create employees row: { user_id, company_id, role_id: owner_role.id, status: 'active' }
+  5. Update user_settings: { active_company_id: new company, active_org_id: new org }
+  6. Update profiles: { is_onboarded: TRUE }
+  7. Insert audit_log: action "company.created" + "organization.created"
+  8. Redirect to /dashboard
+
+─────────────────────────────
+PATH B: ACCEPT INVITATION
+─────────────────────────────
+Server Action:
+  1. Validate invitation: token not expired, status = 'pending', email matches
+  2. Create employees row: { user_id, company_id, role_id, status: 'active', invited_by }
+  3. Update invitation: { status: 'accepted', accepted_by, accepted_at }
+  4. Update user_settings: { active_company_id: invitation.company_id }
+  5. Update profiles: { is_onboarded: TRUE } (if not already)
+  6. Insert audit_log: action "invitation.accepted" + "employee.joined"
+  7. Redirect to /dashboard
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 7: WORKSPACE SWITCHER
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WorkspaceSwitcher component in Navbar:
+  1. Fetch all companies where current user has an active employees record
+  2. Show as dropdown with company logo + name
+  3. Highlight currently active company
+  4. On select:
+     Server Action: update user_settings.active_company_id = selected_id
+     Clear TanStack Query cache (all company-scoped queries are now stale)
+     Full page reload (router.refresh()) to re-evaluate all RLS policies
+  5. Zustand store updates immediately for optimistic UI
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 8: EMPLOYEE MANAGEMENT DASHBOARD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/employees page features:
+
+EMPLOYEE TABLE:
+  Columns: Avatar, Name, Email, Role (badge), Department, Status (colored badge),
+           Joined Date, Actions menu
+  Filter: by status, by role, by department
+  Search: by name or email
+
+INVITE EMPLOYEE:
+  Form fields: email, role_id (dropdown of company roles), 
+               department (optional), personal message (optional)
+  Server Action:
+    1. Check if user with email already exists in profiles
+    2. Create invitations row with generated token
+    3. Send invitation email via Supabase (custom email template)
+    4. If user already exists: they see invite on next login
+    5. If user doesn't exist: invite waits, user sees it when they sign up
+    6. Insert audit_log: action "employee.invited"
+
+EMPLOYEE ACTIONS (per row):
+  - View Profile (navigate to /employees/[id])
+  - Change Role (modal with role dropdown — elevated users only)
+  - Suspend (set status = 'suspended' — elevated users only)
+  - Terminate (confirmation modal → set status = 'terminated',
+               record terminated_by + terminated_at + reason)
+  All actions guarded by has_permission() or is_elevated_employee() check
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 9: ROLES & PERMISSIONS MANAGEMENT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+/roles page features:
+
+ROLES LIST:
+  Show all company roles as cards
+  System roles (Owner, Founder, Co-Founder, Investor) shown with lock icon
+  Custom roles shown with edit/delete actions
+
+CREATE CUSTOM ROLE:
+  Form: name, description
+  Permission Key Selector: grouped checkboxes by module
+    Group: Inventory → inventory.view, inventory.create, inventory.adjust, inventory.delete
+    Group: Orders → orders.view, orders.create, orders.fulfill, orders.cancel
+    Group: Employees → employees.view, employees.invite, employees.terminate
+    Group: Finance → finance.view, finance.manage
+    Group: Reports → reports.view, reports.export
+    Group: Settings → settings.company.view, settings.company.edit, settings.roles.manage
+    Group: Integrations → integrations.view, integrations.manage
+    Group: KPI → kpi.view, kpi.manage
+  (More groups will be added as modules are built — structure supports it)
+
+  All permission keys must be typed constants in /lib/constants/permissions.ts
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 10: AUDIT & METRIC HELPERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Create these two utility functions. Every Server Action in the system
+MUST call these — they are non-optional infrastructure, not optional logging.
+
+/lib/utils/audit.ts
+  export async function insertAuditLog({
+    supabase,        // server supabase client
+    action,          // e.g. "employee.invited"
+    entity_type,     // e.g. "employee"
+    entity_id,       // UUID of the affected record
+    company_id,
+    organization_id,
+    old_values?,     // optional: state before change
+    new_values?,     // optional: state after change
+    metadata?
+  })
+
+/lib/utils/metrics.ts
+  export async function insertMetricEvent({
+    supabase,
+    company_id,
+    entity_type,
+    entity_id,
+    metric_key,
+    numeric_value,
+    currency?,
+    dimensions?,
+    recorded_at?    // defaults to NOW()
+  })
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PART 11: CRITICAL RULES — DO NOT VIOLATE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. NEVER use "any" TypeScript type. Use generated Supabase types everywhere.
+
+2. NEVER expose service_role key on client side. 
+   Server Supabase client is only used in Server Actions and middleware.
+
+3. NEVER write WHERE company_id = X filters in Next.js code.
+   RLS handles all data isolation. Trust the database.
+
+4. NEVER delete employees records. Set status = 'terminated' only.
+
+5. NEVER delete audit_logs or metric_events rows. These are immutable.
+
+6. NEVER hardcode permission strings in components.
+   Always import from /lib/constants/permissions.ts
+
+7. EVERY Server Action must:
+   a. Validate input with Zod before any database operation
+   b. Use the server Supabase client (never browser client)
+   c. Return typed { success: boolean, data?: T, error?: string }
+   d. Call insertAuditLog at the end on success
+
+8. All company-scoped data tables that will be built in future modules 
+   (orders, products, inventory, shipments, returns) MUST include:
+   - company_id UUID NOT NULL
+   - created_by_employee_id UUID REFERENCES employees(id)
+   - created_at TIMESTAMPTZ DEFAULT NOW()
+   - updated_at TIMESTAMPTZ DEFAULT NOW()
+   This ensures KPI system can always track who did what.
+
+9. Password reset must use the OTP/token flow via Supabase's 
+   verifyOtp method — NOT a custom code system.
+
+10. All forms must show proper loading states, disabled buttons during 
+    submission, and error messages using Sonner toasts.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+BEGIN IMPLEMENTATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Start with this exact order:
+
+1. /supabase/migrations/001_initial_schema.sql
+   — All tables, indexes, triggers, functions, RLS policies
+
+2. /lib/supabase/client.ts and server.ts and middleware.ts
+
+3. /types/database.types.ts (generate from Supabase or write manually)
+
+4. /middleware.ts (session refresh + route protection)
+
+5. /lib/constants/permissions.ts
+
+6. /lib/utils/audit.ts and metrics.ts
+
+7. All auth Server Actions (/lib/actions/auth.actions.ts)
+
+8. Auth UI pages: login, register, forgot-password, reset-password
+
+9. Onboarding flow: /onboarding, /onboarding/create-company, 
+   /onboarding/accept-invite
+
+10. Dashboard shell: layout with Sidebar, Navbar, WorkspaceSwitcher
+
+11. Employee management: /employees page and all sub-pages
+
+12. Roles management: /roles page
+
+13. Organization settings: /org/[orgId]/settings
+
+14. Company settings: /company/[companyId]/settings
