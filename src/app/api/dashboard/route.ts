@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { handleError, getWorkspace, hasPermission } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -8,14 +8,14 @@ export const dynamic = 'force-dynamic'
 /** Dashboard overview for the active company: counts + recent activity. */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
+    const ctx = await getWorkspace()
+    const companyId = ctx.company.id
+    const orgId = ctx.company.organizationId
 
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
-
-    const orgId = settings.activeOrgId
+    // Phase 2: Only fetch the audit log feed if the caller has audit.view.
+    // Employees without the permission still see the KPI cards + metrics —
+    // the recentActivity array is returned empty for them.
+    const canViewAudit = await hasPermission(ctx, PERMISSIONS.AUDIT_VIEW)
 
     const [employeeCount, roleCount, pendingInvites, auditRecent, metrics7d] =
       await Promise.all([
@@ -24,12 +24,14 @@ export async function GET() {
         db.invitation.count({
           where: { companyId, status: 'pending' },
         }),
-        db.auditLog.findMany({
-          where: { companyId },
-          orderBy: { createdAt: 'desc' },
-          take: 6,
-          include: { user: { select: { id: true, fullName: true, email: true } } },
-        }),
+        canViewAudit
+          ? db.auditLog.findMany({
+              where: { companyId },
+              orderBy: { createdAt: 'desc' },
+              take: 6,
+              include: { user: { select: { id: true, fullName: true, email: true } } },
+            })
+          : Promise.resolve([]),
         db.metricEvent.findMany({
           where: {
             companyId,

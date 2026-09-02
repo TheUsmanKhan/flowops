@@ -31,6 +31,7 @@ export type TransactionType =
   | 'transfer_out'
   | 'transfer_in'
   | 'cycle_count_adjust'
+  | 'manual_adjustment_in'
   | 'damage_writeoff'
   | 'theft_writeoff'
   | 'missing_writeoff'
@@ -231,6 +232,11 @@ export async function processInventoryTransaction(
         // Set on_hand directly to counted value
         // quantity here represents the NEW on_hand value (positive)
         newOnHand = absQty
+        break
+      case 'manual_adjustment_in':
+        // Manual positive adjustment — INCREMENT on_hand by the quantity
+        // (unlike cycle_count_adjust which SETS on_hand to the quantity)
+        newOnHand += absQty
         break
       case 'damage_writeoff':
       case 'theft_writeoff':

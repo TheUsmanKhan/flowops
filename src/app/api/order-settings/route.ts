@@ -15,6 +15,7 @@ const updateSchema = z.object({
   courier_booking_mode: z.enum(['automatic', 'semi_manual']).optional(),
   default_courier_company_integration_id: z.string().optional().or(z.literal('')),
   deduct_delivery_charge_from_refund: z.boolean().optional(),
+  order_number_prefix: z.string().max(10).optional().or(z.literal('')),
 })
 
 /** Get the active company's order workflow settings. */
@@ -40,6 +41,7 @@ export async function GET() {
         courierBookingMode: settings.courierBookingMode,
         defaultCourierCompanyIntegrationId: settings.defaultCourierCompanyIntegrationId,
         deductDeliveryChargeFromRefund: settings.deductDeliveryChargeFromRefund,
+        orderNumberPrefix: settings.orderNumberPrefix,
         updatedAt: settings.updatedAt.toISOString(),
       },
     })
@@ -91,6 +93,10 @@ export async function PUT(req: Request) {
     }
     if (d.deduct_delivery_charge_from_refund !== undefined) {
       updateData.deductDeliveryChargeFromRefund = d.deduct_delivery_charge_from_refund
+    }
+    if (d.order_number_prefix !== undefined) {
+      const cleanPrefix = d.order_number_prefix.toUpperCase().replace(/[^A-Z0-9]/g, '')
+      updateData.orderNumberPrefix = cleanPrefix || null
     }
 
     await db.companyOrderSetting.update({

@@ -34,6 +34,7 @@ import {
   User,
   Phone,
   RefreshCw,
+  Download,
 } from 'lucide-react'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 import { getErrorMessage } from '@/components/orders/_shared'
@@ -62,6 +63,8 @@ export function PickupAddressesSection({
 }: PickupAddressesSectionProps) {
   const queryClient = useQueryClient()
   const [showAddDialog, setShowAddDialog] = useState(false)
+  const [showImportDialog, setShowImportDialog] = useState(false)
+  const [importShipmentId, setImportShipmentId] = useState('')
 
   const query = useQuery<{ addresses: PickupAddress[] }>({
     queryKey: ['pickup-addresses', companyIntegrationId],
@@ -107,6 +110,21 @@ export function PickupAddressesSection({
     onError: (err) => toast.error(getErrorMessage(err)),
   })
 
+  const importMutation = useMutation({
+    mutationFn: (shipmentId: string) =>
+      api.post<{ addressId: string; providerAddressCode: string; label: string }>(
+        `/api/integrations/${companyIntegrationId}/pickup-addresses/import-by-id`,
+        { shipment_id: shipmentId },
+      ),
+    onSuccess: (data) => {
+      toast.success(`Shipper imported: ${data.label}`)
+      setShowImportDialog(false)
+      setImportShipmentId('')
+      invalidate()
+    },
+    onError: (err) => toast.error(getErrorMessage(err)),
+  })
+
   const addresses = query.data?.addresses ?? []
 
   return (
@@ -139,6 +157,16 @@ export function PickupAddressesSection({
           >
             <Plus className="h-3 w-3" /> Add
           </Button>
+          {providerKey === 'leopard' && (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 text-[10px] px-2"
+              onClick={() => setShowImportDialog(true)}
+            >
+              <Download className="h-3 w-3" /> Import
+            </Button>
+          )}
         </div>
       </div>
 
@@ -227,6 +255,53 @@ export function PickupAddressesSection({
             invalidate()
           }}
         />
+      )}
+
+      {showImportDialog && (
+        <Dialog open={showImportDialog} onOpenChange={setShowImportDialog}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Import Shipper by ID</DialogTitle>
+              <DialogDescription>
+                Enter the Leopard shipment_id of the shipper you want to import.
+                We&apos;ll fetch their details from Leopard and add them to your address book.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-3 py-2">
+              <div className="space-y-1.5">
+                <Label>Shipment ID</Label>
+                <Input
+                  placeholder="e.g. 2549202"
+                  value={importShipmentId}
+                  onChange={(e) => setImportShipmentId(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && importShipmentId.trim() && !importMutation.isPending) {
+                      importMutation.mutate(importShipmentId.trim())
+                    }
+                  }}
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Find the shipment_id in your Leopard merchant dashboard.
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setShowImportDialog(false)}>
+                Cancel
+              </Button>
+              <Button
+                onClick={() => importMutation.mutate(importShipmentId.trim())}
+                disabled={!importShipmentId.trim() || importMutation.isPending}
+              >
+                {importMutation.isPending ? (
+                  <><Loader2 className="h-4 w-4 animate-spin" /> Importing...</>
+                ) : (
+                  <><Download className="h-4 w-4" /> Import</>
+                )}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       )}
     </div>
   )

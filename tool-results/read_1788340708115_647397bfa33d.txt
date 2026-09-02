@@ -1,0 +1,1756 @@
+     1→/**
+     2→ * Customer Management System — server actions.
+     3→ *
+     4→ * This is the standalone Customer Management System (Step 2). It owns all
+     5→ * CRUD for customers / phones / addresses, the cross-platform identity
+     6→ * matching wrapper, cached-stats recomputation with auto-flagging, and the
+     7→ * listing/detail endpoints.
+     8→ *
+     9→ * The Order system (order.actions.ts) CONSUMES this module's data and the
+    10→ * `markAddressAsUsed` / `updateCustomerStats` helpers — it does not touch
+    11→ * customer_phones / customer_addresses / customer_external_identities
+    12→ * directly.
+    13→ *
+    14→ * DESIGN RULES (enforced throughout):
+    15→ *  1. Phone normalization is ALWAYS done via the normalize_phone() SQL
+    16→ *     function (single source of truth). Raw phone strings are never
+    17→ *     compared directly.
+    18→ *  2. A customer must always have >= 1 phone and >= 1 address. The
+    19→ *     remove-actions refuse to delete the last remaining phone/address.
+    20→ *  3. At most one is_primary phone and one is_default address per customer
+    21→ *     (DB partial unique indexes + action-layer unsetting).
+    22→ *  4. Every mutation calls insertAuditLog() and returns { success, data?, error? }.
+    23→ *  5. All reads are organization-scoped via getWorkspace().
+    24→ */
+    25→
+    26→import { db } from '@/lib/db'
+    27→import { getWorkspace, requirePermission, ApiError, getOrdersDataScope } from '@/lib/workspace'
+    28→import { insertAuditLog } from '@/lib/audit'
+    29→import { insertMetricEvent } from '@/lib/metrics'
+    30→import { PERMISSIONS } from '@/lib/permissions'
+    31→import { validateAndNormalizePhone, isValidPhoneFormat } from '@/lib/phone-validation'
+    32→// No countryNameToCode import needed — country is stored as alpha-2 code directly.
+    33→import {
+    34→  createCustomerSchema,
+    35→  updateCustomerSchema,
+    36→  addressInputSchema,
+    37→  phoneInputSchema,
+    38→  matchExternalCustomerSchema,
+    39→  type CreateCustomerInput,
+    40→  type UpdateCustomerInput,
+    41→  type AddressInput,
+    42→  type PhoneInput,
+    43→  type MatchExternalCustomerInput,
+    44→} from '@/lib/validations/customer.schemas'
+    45→import type { Prisma } from '@prisma/client'
+    46→
+    47→// ──────────────────────────────────────────────────────────────
+    48→// Types
+    49→// ──────────────────────────────────────────────────────────────
+    50→
+    51→interface ActionResult<T = unknown> {
+    52→  success: boolean
+    53→  data?: T
+    54→  error?: string
+    55→}
+    56→
+    57→/** A customer's phone row, shaped for API responses. */
+    58→interface PhoneDTO {
+    59→  id: string
+    60→  phoneRaw: string
+    61→  phoneNormalized: string
+    62→  label: string | null
+    63→  isPrimary: boolean
+    64→  createdAt: Date
+    65→}
+    66→
+    67→/** A customer's address row, shaped for API responses. */
+    68→interface AddressDTO {
+    69→  id: string
+    70→  label: string | null
+    71→  address: string
+    72→  city: string
+    73→  isDefault: boolean
+    74→  lastUsedAt: Date | null
+    75→  createdAt: Date
+    76→  updatedAt: Date
+    77→  // City validation (Phase 7 — early warning, not blocking)
+    78→  cityMatchedCouriers: string[]
+    79→  cityValidatedAt: Date | null
+    80→}
+    81→
+    82→interface CustomerSummaryDTO {
+    83→  id: string
+    84→  name: string
+    85→  email: string | null
+    86→  primaryPhone: string | null
+    87→  defaultAddress: { address: string; city: string; country: string | null } | null
+    88→  totalOrdersCount: number
+    89→  totalOrderValue: number
+    90→  totalRtoCount: number
+    91→  isFlagged: boolean
+    92→  flaggedReason: string | null
+    93→  createdAt: Date
+    94→}
+    95→
+    96→interface CustomerDetailDTO {
+    97→  id: string
+    98→  name: string
+    99→  email: string | null
+   100→  totalOrdersCount: number
+   101→  totalOrderValue: number
+   102→  totalRtoCount: number
+   103→  // Live-computed rates (not cached — derived from actual order statuses).
+   104→  // rtoRate = rto / dispatched-or-later orders * 100
+   105→  // deliveryRate = delivered / dispatched-or-later orders * 100
+   106→  // where "dispatched-or-later" = status IN ('dispatched','delivered','rto')
+   107→  rtoRate: number
+   108→  deliveryRate: number
+   109→  isFlagged: boolean
+   110→  flaggedReason: string | null
+   111→  flaggedAt: Date | null
+   112→  createdAt: Date
+   113→  updatedAt: Date
+   114→  phones: PhoneDTO[]
+   115→  addresses: AddressDTO[]
+   116→  externalIdentities: Array<{
+   117→    id: string
+   118→    platform: string
+   119→    externalCustomerId: string
+   120→    matchedVia: string
+   121→    createdAt: Date
+   122→  }>
+   123→  recentOrders: Array<{
+   124→    id: string
+   125→    flowopsOrderNumber: string
+   126→    status: string
+   127→    totalOrderValue: number
+   128→    createdAt: Date
+   129→    recipientName: string | null
+   130→    deliveryAddress: string | null
+   131→    deliveryCity: string | null
+   132→    usedCustomerAddressId: string | null
+   133→    usedCustomerPhoneId: string | null
+   134→  }>
+   135→}
+   136→
+   137→// ──────────────────────────────────────────────────────────────
+   138→// Helper: normalize_phone via the DB function (single source of truth)
+   139→// ──────────────────────────────────────────────────────────────
+   140→
+   141→/**
+   142→ * Call the normalize_phone() SQL function. Returns the E.164 canonical form
+   143→ * (e.g. "+923001234567") or null for empty/invalid input.
+   144→ *
+   145→ * Why a DB call instead of a TS port: the SQL function is the authoritative
+   146→ * normalizer used by customer_phones indexes, match_or_create_customer(),
+   147→ * and all matching logic. Keeping a single implementation guarantees the
+   148→ * client debounce-preview and the server agree on what "matches".
+   149→ */
+   150→async function normalizePhone(raw: string): Promise<string | null> {
+   151→  const rows = await db.$queryRaw<{ normalized: string | null }[]>`
+   152→    SELECT normalize_phone(${raw}::TEXT) AS normalized
+   153→  `
+   154→  return rows[0]?.normalized ?? null
+   155→}
+   156→
+   157→/**
+   158→ * Format a Prisma customer_phones row into a PhoneDTO.
+   159→ */
+   160→function toPhoneDTO(p: {
+   161→  id: string
+   162→  phoneRaw: string
+   163→  phoneNormalized: string
+   164→  label: string | null
+   165→  isPrimary: boolean
+   166→  createdAt: Date
+   167→}): PhoneDTO {
+   168→  return {
+   169→    id: p.id,
+   170→    phoneRaw: p.phoneRaw,
+   171→    phoneNormalized: p.phoneNormalized,
+   172→    label: p.label,
+   173→    isPrimary: p.isPrimary,
+   174→    createdAt: p.createdAt,
+   175→  }
+   176→}
+   177→
+   178→/**
+   179→ * Format a Prisma customer_addresses row into an AddressDTO.
+   180→ */
+   181→function toAddressDTO(a: {
+   182→  id: string
+   183→  label: string | null
+   184→  address: string
+   185→  city: string
+   186→  country?: string | null
+   187→  isDefault: boolean
+   188→  lastUsedAt: Date | null
+   189→  createdAt: Date
+   190→  updatedAt: Date
+   191→  cityMatchedCouriers?: string[]
+   192→  cityValidatedAt?: Date | null
+   193→}): AddressDTO {
+   194→  return {
+   195→    id: a.id,
+   196→    label: a.label,
+   197→    address: a.address,
+   198→    city: a.city,
+   199→    country: a.country ?? null,
+   200→    isDefault: a.isDefault,
+   201→    lastUsedAt: a.lastUsedAt,
+   202→    createdAt: a.createdAt,
+   203→    updatedAt: a.updatedAt,
+   204→    cityMatchedCouriers: a.cityMatchedCouriers ?? [],
+   205→    cityValidatedAt: a.cityValidatedAt ?? null,
+   206→  }
+   207→}
+   208→
+   209→// ══════════════════════════════════════════════════════════════
+   210→// PART 2 — CORE CUSTOMER SERVER ACTIONS
+   211→// ══════════════════════════════════════════════════════════════
+   212→
+   213→// ──────────────────────────────────────────────────────────────
+   214→// searchCustomerByPhone
+   215→// ──────────────────────────────────────────────────────────────
+   216→/**
+   217→ * Used by the Order creation page's live search. Normalizes the input via
+   218→ * the SQL function, then looks up customer_phones within the active org.
+   219→ *
+   220→ * If found, returns the FULL customer record with ALL their phones and
+   221→ * ALL their addresses (so the order form can populate the address dropdown
+   222→ * and let the user pick which saved address to ship to).
+   223→ *
+   224→ * Returns { found: false } when no match — the caller decides whether to
+   225→ * show an inline "create new customer" form.
+   226→ */
+   227→export async function searchCustomerByPhone(
+   228→  phone: string,
+   229→): Promise<ActionResult<{
+   230→  found: boolean
+   231→  customer?: {
+   232→    id: string
+   233→    name: string
+   234→    email: string | null
+   235→    totalOrdersCount: number
+   236→    totalRtoCount: number
+   237→    isFlagged: boolean
+   238→    flaggedReason: string | null
+   239→    phones: PhoneDTO[]
+   240→    addresses: AddressDTO[]
+   241→  }
+   242→}>> {
+   243→  try {
+   244→    const ctx = await getWorkspace()
+   245→
+   246→    if (!phone || !phone.trim()) {
+   247→      return { success: true, data: { found: false } }
+   248→    }
+   249→
+   250→    const normalized = await normalizePhone(phone.trim())
+   251→    if (!normalized) {
+   252→      return { success: true, data: { found: false } }
+   253→    }
+   254→
+   255→    // Find the customer_phones row for this normalized phone in this org.
+   256→    const phoneRow = await db.customerPhone.findFirst({
+   257→      where: {
+   258→        organizationId: ctx.company.organizationId,
+   259→        phoneNormalized: normalized,
+   260→      },
+   261→      select: { customerId: true },
+   262→    })
+   263→
+   264→    if (!phoneRow) {
+   265→      return { success: true, data: { found: false } }
+   266→    }
+   267→
+   268→    // Fetch the full customer + all phones + all addresses.
+   269→    const customer = await db.customer.findFirst({
+   270→      where: {
+   271→        id: phoneRow.customerId,
+   272→        organizationId: ctx.company.organizationId,
+   273→      },
+   274→      include: {
+   275→        phones: { orderBy: { isPrimary: 'desc' } },
+   276→        addresses: {
+   277→          orderBy: [
+   278→            { isDefault: 'desc' },
+   279→            { lastUsedAt: { sort: 'desc', nulls: 'last' } },
+   280→          ],
+   281→        },
+   282→      },
+   283→    })
+   284→
+   285→    if (!customer) {
+   286→      return { success: true, data: { found: false } }
+   287→    }
+   288→
+   289→    return {
+   290→      success: true,
+   291→      data: {
+   292→        found: true,
+   293→        customer: {
+   294→          id: customer.id,
+   295→          name: customer.name,
+   296→          email: customer.email,
+   297→          totalOrdersCount: customer.totalOrdersCount,
+   298→          totalRtoCount: customer.totalRtoCount,
+   299→          isFlagged: customer.isFlagged,
+   300→          flaggedReason: customer.flaggedReason,
+   301→          phones: customer.phones.map(toPhoneDTO),
+   302→          addresses: customer.addresses.map(toAddressDTO),
+   303→        },
+   304→      },
+   305→    }
+   306→  } catch (err) {
+   307→    return {
+   308→      success: false,
+   309→      error: err instanceof Error ? err.message : 'Failed to search customer by phone',
+   310→    }
+   311→  }
+   312→}
+   313→
+   314→// ──────────────────────────────────────────────────────────────
+   315→// createCustomer
+   316→// ──────────────────────────────────────────────────────────────
+   317→/**
+   318→ * Create a new customer with at least one phone and one address.
+   319→ *
+   320→ * Before inserting, normalizes each phone and checks for org-wide
+   321→ * phone_normalized conflicts. If any phone already belongs to another
+   322→ * customer, returns a clear error suggesting the caller search for the
+   323→ * existing customer instead of creating a duplicate.
+   324→ *
+   325→ * All inserts run in a single transaction so a partial failure (e.g. an
+   326→ * address insert fails) rolls back the customer + phones too.
+   327→ */
+   328→export async function createCustomer(
+   329→  input: CreateCustomerInput,
+   330→): Promise<ActionResult<{ customerId: string }>> {
+   331→  try {
+   332→    const ctx = await getWorkspace()
+   333→    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+   334→    // Delegate to the internal variant that skips the (now-redundant)
+   335→    // getWorkspace + requirePermission resolution.
+   336→    return createCustomerInternal(ctx, input)
+   337→  } catch (err) {
+   338→    return {
+   339→      success: false,
+   340→      error: err instanceof Error ? err.message : 'Failed to create customer',
+   341→    }
+   342→  }
+   343→}
+   344→
+   345→/**
+   346→ * Internal customer-creation variant that accepts a PRE-RESOLVED workspace
+   347→ * context. Used by createManualOrder() which has already called
+   348→ * getWorkspace() + requirePermission() — calling the public createCustomer()
+   349→ * from there would redundantly re-resolve the context + re-check permissions
+   350→ * (~3 extra DB round-trips on the new-customer order path).
+   351→ *
+   352→ * Returns the created customerId PLUS the default address + primary phone IDs
+   353→ * so the caller (createManualOrder) can set usedCustomerAddressId /
+   354→ * usedCustomerPhoneId WITHOUT two extra findFirst queries.
+   355→ *
+   356→ * Behavior is IDENTICAL to createCustomer() minus the redundant resolution.
+   357→ */
+   358→export async function createCustomerInternal(
+   359→  ctx: { company: { id: string; organizationId: string }; user: { id: string }; employee: { id: string } },
+   360→  input: CreateCustomerInput,
+   361→): Promise<ActionResult<{ customerId: string; defaultAddressId: string | null; primaryPhoneId: string | null }>> {
+   362→  try {
+   363→    const parsed = createCustomerSchema.safeParse(input)
+   364→    if (!parsed.success) {
+   365→      return {
+   366→        success: false,
+   367→        error: parsed.error.issues[0]?.message ?? 'Invalid customer data',
+   368→      }
+   369→    }
+   370→    const d = parsed.data
+   371→
+   372→    // Phone validation country hint (Phase 3 — Country System): use the
+   373→    // customer's default (or first) address's country as the defaultCountry
+   374→    // for interpreting AMBIGUOUS phone numbers (those without a + prefix).
+   375→    // This is a HINT only — numbers WITH a + prefix are always validated
+   376→    // internationally regardless of this setting (libphonenumber-js's
+   377→    // defaultCountry only applies to no-+-prefix numbers). So a Pakistani
+   378→    // phone (+92...) on a UK-delivery order still validates fine, and a UK
+   379→    // local number (no +) on a UK address validates against UK rules.
+   380→    // Falls back to 'PK' (the existing default) when no address/country.
+   381→    // NOTE: country is now stored as an alpha-2 code directly — no
+   382→    // name→code translation needed.
+   383→    const phoneHintAddress = d.addresses.find((a) => a.is_default) ?? d.addresses[0]
+   384→    const phoneCountryCode = phoneHintAddress?.country || 'PK'
+   385→
+   386→    // 1. Validate + normalize every phone using libphonenumber-js (international).
+   387→    // This replaces the SQL normalize_phone() for the application-layer path.
+   388→    // The SQL function remains for DB-level triggers/matching.
+   389→    const phonesWithNormalized: Array<{
+   390→      phoneRaw: string
+   391→      phoneNormalized: string
+   392→      label: string | null
+   393→      isPrimary: boolean
+   394→    }> = []
+   395→    for (const p of d.phones) {
+   396→      const { isValid, normalized } = validateAndNormalizePhone(p.phone.trim(), phoneCountryCode)
+   397→      if (!isValid || !normalized) {
+   398→        return {
+   399→          success: false,
+   400→          error: `Phone "${p.phone}" is not a valid phone number. Use format like 03001234567 or +923001234567.`,
+   401→        }
+   402→      }
+   403→      phonesWithNormalized.push({
+   404→        phoneRaw: p.phone.trim(),
+   405→        phoneNormalized: normalized,
+   406→        label: p.label?.trim() || null,
+   407→        isPrimary: p.is_primary,
+   408→      })
+   409→    }
+   410→
+   411→    // 2. Check for org-wide phone conflicts BEFORE inserting.
+   412→    //    A normalized phone maps to exactly one customer per org (DB unique
+   413→    //    constraint). If any of the provided phones already belongs to
+   414→    //    another customer, we refuse and point the caller to that customer.
+   415→    if (phonesWithNormalized.length > 0) {
+   416→      const conflicts = await db.customerPhone.findMany({
+   417→        where: {
+   418→          organizationId: ctx.company.organizationId,
+   419→          phoneNormalized: { in: phonesWithNormalized.map((p) => p.phoneNormalized) },
+   420→        },
+   421→        select: {
+   422→          phoneNormalized: true,
+   423→          customerId: true,
+   424→          customer: { select: { name: true } },
+   425→        },
+   426→      })
+   427→      if (conflicts.length > 0) {
+   428→        const c = conflicts[0]
+   429→        return {
+   430→          success: false,
+   431→          error: `Phone ${c.phoneNormalized} already belongs to customer "${c.customer.name}". Use search to find this existing customer instead of creating a duplicate.`,
+   432→        }
+   433→      }
+   434→    }
+   435→
+   436→    // 3. Normalize addresses (no province — only address + city + country).
+   437→    const addressesData = d.addresses.map((a) => ({
+   438→      label: a.label?.trim() || null,
+   439→      address: a.address.trim(),
+   440→      city: a.city.trim(),
+   441→      // Country (Phase: Country System). Defaults to "PK" when the
+   442→      // caller didn't send one (addressInputSchema default).
+   443→      country: a.country?.trim() || 'PK',
+   444→      isDefault: a.is_default,
+   445→      lastUsedAt: null,
+   446→    }))
+   447→
+   448→    // 4. Insert customer + phones + addresses in a single transaction.
+   449→    //    Uses createManyAndReturn so we capture the created row IDs
+   450→    //    (default address + primary phone) WITHOUT two extra findFirst
+   451→    //    queries afterward — createManualOrder needs these IDs to set
+   452→    //    usedCustomerAddressId / usedCustomerPhoneId on the order.
+   453→    const { customer, defaultAddressId, primaryPhoneId } = await db.$transaction(async (tx) => {
+   454→      const created = await tx.customer.create({
+   455→        data: {
+   456→          organizationId: ctx.company.organizationId,
+   457→          name: d.name.trim(),
+   458→          email: d.email?.trim() || null,
+   459→          createdBy: ctx.employee.id,
+   460→        },
+   461→      })
+   462→
+   463→      const phones = await tx.customerPhone.createManyAndReturn({
+   464→        data: phonesWithNormalized.map((p) => ({
+   465→          customerId: created.id,
+   466→          organizationId: ctx.company.organizationId,
+   467→          phoneRaw: p.phoneRaw,
+   468→          phoneNormalized: p.phoneNormalized,
+   469→          label: p.label,
+   470→          isPrimary: p.isPrimary,
+   471→        })),
+   472→        select: { id: true, isPrimary: true },
+   473→      })
+   474→
+   475→      const addresses = await tx.customerAddress.createManyAndReturn({
+   476→        data: addressesData.map((a) => ({
+   477→          customerId: created.id,
+   478→          organizationId: ctx.company.organizationId,
+   479→          label: a.label,
+   480→          address: a.address,
+   481→          city: a.city,
+   482→          country: a.country,
+   483→          isDefault: a.isDefault,
+   484→          lastUsedAt: a.lastUsedAt,
+   485→        })),
+   486→        select: { id: true, isDefault: true },
+   487→      })
+   488→
+   489→      const defaultAddrId = addresses.find((a) => a.isDefault)?.id ?? null
+   490→      const primaryPhId = phones.find((p) => p.isPrimary)?.id ?? null
+   491→
+   492→      return { customer: created, defaultAddressId: defaultAddrId, primaryPhoneId: primaryPhId }
+   493→    })
+   494→
+   495→    // 5. Audit log.
+   496→    insertAuditLog({
+   497→      action: 'customer.created',
+   498→      entityType: 'customer',
+   499→      entityId: customer.id,
+   500→      companyId: ctx.company.id,
+   501→      organizationId: ctx.company.organizationId,
+   502→      userId: ctx.user.id,
+   503→      employeeId: ctx.employee.id,
+   504→      newValues: {
+   505→        name: customer.name,
+   506→        email: customer.email,
+   507→        phoneCount: phonesWithNormalized.length,
+   508→        addressCount: addressesData.length,
+   509→      },
+   510→    })
+   511→
+   512→    return { success: true, data: { customerId: customer.id, defaultAddressId, primaryPhoneId } }
+   513→  } catch (err) {
+   514→    return {
+   515→      success: false,
+   516→      error: err instanceof Error ? err.message : 'Failed to create customer',
+   517→    }
+   518→  }
+   519→}
+   520→
+   521→// ──────────────────────────────────────────────────────────────
+   522→// updateCustomer — name/email only
+   523→// ──────────────────────────────────────────────────────────────
+   524→export async function updateCustomer(
+   525→  input: UpdateCustomerInput,
+   526→): Promise<ActionResult<{ customerId: string }>> {
+   527→  try {
+   528→    const ctx = await getWorkspace()
+   529→    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+   530→
+   531→    const parsed = updateCustomerSchema.safeParse(input)
+   532→    if (!parsed.success) {
+   533→      return {
+   534→        success: false,
+   535→        error: parsed.error.issues[0]?.message ?? 'Invalid customer data',
+   536→      }
+   537→    }
+   538→    const d = parsed.data
+   539→
+   540→    const existing = await db.customer.findFirst({
+   541→      where: { id: d.customer_id, organizationId: ctx.company.organizationId },
+   542→    })
+   543→    if (!existing) return { success: false, error: 'Customer not found' }
+   544→
+   545→    const updateData: Prisma.CustomerUncheckedUpdateInput = {}
+   546→    if (d.name !== undefined && d.name.trim() !== existing.name) {
+   547→      updateData.name = d.name.trim()
+   548→    }
+   549→    if (d.email !== undefined) {
+   550→      const newEmail = d.email.trim() || null
+   551→      if (newEmail !== existing.email) updateData.email = newEmail
+   552→    }
+   553→
+   554→    if (Object.keys(updateData).length === 0) {
+   555→      return { success: true, data: { customerId: existing.id } }
+   556→    }
+   557→
+   558→    await db.customer.update({ where: { id: existing.id }, data: updateData })
+   559→
+   560→    insertAuditLog({
+   561→      action: 'customer.updated',
+   562→      entityType: 'customer',
+   563→      entityId: existing.id,
+   564→      companyId: ctx.company.id,
+   565→      organizationId: ctx.company.organizationId,
+   566→      userId: ctx.user.id,
+   567→      employeeId: ctx.employee.id,
+   568→      oldValues: { name: existing.name, email: existing.email },
+   569→      newValues: updateData,
+   570→    })
+   571→
+   572→    return { success: true, data: { customerId: existing.id } }
+   573→  } catch (err) {
+   574→    return {
+   575→      success: false,
+   576→      error: err instanceof Error ? err.message : 'Failed to update customer',
+   577→    }
+   578→  }
+   579→}
+   580→
+   581→// ──────────────────────────────────────────────────────────────
+   582→// addCustomerPhone
+   583→// ──────────────────────────────────────────────────────────────
+   584→export async function addCustomerPhone(
+   585→  customerId: string,
+   586→  input: PhoneInput,
+   587→): Promise<ActionResult<{ phoneId: string }>> {
+   588→  try {
+   589→    const ctx = await getWorkspace()
+   590→    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+   591→
+   592→    const parsed = phoneInputSchema.safeParse(input)
+   593→    if (!parsed.success) {
+   594→      return {
+   595→        success: false,
+   596→        error: parsed.error.issues[0]?.message ?? 'Invalid phone data',
+   597→      }
+   598→    }
+   599→    const d = parsed.data
+   600→
+   601→    const customer = await db.customer.findFirst({
+   602→      where: { id: customerId, organizationId: ctx.company.organizationId },
+   603→    })
+   604→    if (!customer) return { success: false, error: 'Customer not found' }
+   605→
+   606→    const normalized = await normalizePhone(d.phone.trim())
+   607→    if (!normalized) {
+   608→      return {
+   609→        success: false,
+   610→        error: `Could not normalize phone "${d.phone}" — please enter a valid phone number`,
+   611→      }
+   612→    }
+   613→
+   614→    // Org-wide uniqueness: a normalized phone maps to exactly one customer.
+   615→    const conflict = await db.customerPhone.findFirst({
+   616→      where: {
+   617→        organizationId: ctx.company.organizationId,
+   618→        phoneNormalized: normalized,
+   619→        customerId: { not: customerId },
+   620→      },
+   621→      select: { customer: { select: { name: true } } },
+   622→    })
+   623→    if (conflict) {
+   624→      return {
+   625→        success: false,
+   626→        error: `Phone ${normalized} already belongs to customer "${conflict.customer.name}".`,
+   627→      }
+   628→    }
+   629→
+   630→    // If this new phone is primary, unset any existing primary first.
+   631→    const phone = await db.$transaction(async (tx) => {
+   632→      if (d.is_primary) {
+   633→        await tx.customerPhone.updateMany({
+   634→          where: { customerId, isPrimary: true },
+   635→          data: { isPrimary: false },
+   636→        })
+   637→      }
+   638→      return tx.customerPhone.create({
+   639→        data: {
+   640→          customerId,
+   641→          organizationId: ctx.company.organizationId,
+   642→          phoneRaw: d.phone.trim(),
+   643→          phoneNormalized: normalized,
+   644→          label: d.label?.trim() || null,
+   645→          isPrimary: d.is_primary,
+   646→        },
+   647→      })
+   648→    })
+   649→
+   650→    insertAuditLog({
+   651→      action: 'customer.phone_added',
+   652→      entityType: 'customer',
+   653→      entityId: customerId,
+   654→      companyId: ctx.company.id,
+   655→      organizationId: ctx.company.organizationId,
+   656→      userId: ctx.user.id,
+   657→      employeeId: ctx.employee.id,
+   658→      newValues: { phoneId: phone.id, phoneNormalized: normalized, isPrimary: d.is_primary },
+   659→    })
+   660→
+   661→    return { success: true, data: { phoneId: phone.id } }
+   662→  } catch (err) {
+   663→    return {
+   664→      success: false,
+   665→      error: err instanceof Error ? err.message : 'Failed to add customer phone',
+   666→    }
+   667→  }
+   668→}
+   669→
+   670→// ──────────────────────────────────────────────────────────────
+   671→// removeCustomerPhone
+   672→// ──────────────────────────────────────────────────────────────
+   673→/**
+   674→ * Remove a phone from a customer. Refuses to delete the LAST remaining
+   675→ * phone — a customer must always have at least one phone.
+   676→ */
+   677→export async function removeCustomerPhone(phoneId: string): Promise<ActionResult> {
+   678→  try {
+   679→    const ctx = await getWorkspace()
+   680→    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+   681→
+   682→    const phone = await db.customerPhone.findUnique({
+   683→      where: { id: phoneId },
+   684→      include: { customer: { select: { organizationId: true } } },
+   685→    })
+   686→    if (!phone || phone.customer.organizationId !== ctx.company.organizationId) {
+   687→      return { success: false, error: 'Phone not found' }
+   688→    }
+   689→
+   690→    // Count this customer's phones — refuse to delete the last one.
+   691→    const phoneCount = await db.customerPhone.count({
+   692→      where: { customerId: phone.customerId },
+   693→    })
+   694→    if (phoneCount <= 1) {
+   695→      return {
+   696→        success: false,
+   697→        error: 'A customer must always have at least one phone number. Add another phone before removing this one.',
+   698→      }
+   699→    }
+   700→
+   701→    await db.customerPhone.delete({ where: { id: phoneId } })
+   702→
+   703→    insertAuditLog({
+   704→      action: 'customer.phone_removed',
+   705→      entityType: 'customer',
+   706→      entityId: phone.customerId,
+   707→      companyId: ctx.company.id,
+   708→      organizationId: ctx.company.organizationId,
+   709→      userId: ctx.user.id,
+   710→      employeeId: ctx.employee.id,
+   711→      oldValues: { phoneId, phoneNormalized: phone.phoneNormalized },
+   712→    })
+   713→
+   714→    return { success: true }
+   715→  } catch (err) {
+   716→    return {
+   717→      success: false,
+   718→      error: err instanceof Error ? err.message : 'Failed to remove customer phone',
+   719→    }
+   720→  }
+   721→}
+   722→
+   723→// ──────────────────────────────────────────────────────────────
+   724→// Phase 7: validateCustomerAddressCity — non-blocking early warning
+   725→// ──────────────────────────────────────────────────────────────
+   726→/**
+   727→ * Check a customer address's city against ALL of the company's connected
+   728→ * courier integrations' cached operational cities. Updates the
+   729→ * `cityMatchedCouriers` array and `cityValidatedAt` timestamp on the
+   730→ * CustomerAddress row.
+   731→ *
+   732→ * This is INFORMATIONAL ONLY — an early warning mechanism, NOT a guarantee.
+   733→ * The authoritative check always remains `revalidateCityAtBookingTime()` at
+   734→ * booking time (with its live-fallback + staleness protection).
+   735→ *
+   736→ * Uses exact case-insensitive match only — no fuzzy matching here (this is a
+   737→ * background check, not an interactive resolution flow).
+   738→ *
+   739→ * Non-blocking: called fire-and-forget after address create/update. If the
+   740→ * city matches zero couriers, the address is still saved successfully — the
+   741→ * empty `cityMatchedCouriers` array surfaces a soft warning in the UI.
+   742→ */
+   743→async function validateCustomerAddressCity(
+   744→  addressId: string,
+   745→  city: string,
+   746→  companyId: string,
+   747→  country?: string,
+   748→): Promise<void> {
+   749→  if (!city.trim()) return
+   750→
+   751→  // ── Country guard (Phase 3): skip for non-Pakistan addresses ──
+   752→  // courier_operational_cities is 100% Pakistan-sourced (PostEx/TCS/Leopard
+   753→  // only operate in Pakistan). A foreign city will never match, and running
+   754→  // the check would just set an empty cityMatchedCouriers array + a misleading
+   755→  // cityValidatedAt timestamp. For non-Pakistan, leave the cached fields
+   756→  // untouched (they default to empty/null) — the UI treats the city as plain
+   757→  // free text with no courier-matching UI either.
+   758→  if (country && country !== 'PK') {
+   759→    return
+   760→  }
+   761→
+   762→  // Fetch all active courier integrations for this company
+   763→  const integrations = await db.companyIntegration.findMany({
+   764→    where: { companyId, isActive: true, provider: { category: 'courier' } },
+   765→    select: { provider: { select: { providerKey: true } } },
+   766→  })
+   767→  const providerKeys = [...new Set(integrations.map((i) => i.provider.providerKey))]
+   768→
+   769→  if (providerKeys.length === 0) {
+   770→    // No couriers connected — set empty array + timestamp
+   771→    await db.customerAddress.update({
+   772→      where: { id: addressId },
+   773→      data: { cityMatchedCouriers: [], cityValidatedAt: new Date() },
+   774→    })
+   775→    return
+   776→  }
+   777→
+   778→  // Check each provider's cached cities for an exact case-insensitive match
+   779→  const matchedProviders: string[] = []
+   780→  for (const providerKey of providerKeys) {
+   781→    const matched = await db.courierOperationalCity.findFirst({
+   782→      where: {
+   783→        providerKey,
+   784→        cityName: { equals: city, mode: 'insensitive' },
+   785→        isDeliveryCity: true,
+   786→      },
+   787→      select: { id: true },
+   788→    })
+   789→    if (matched) {
+   790→      matchedProviders.push(providerKey)
+   791→    }
+   792→  }
+   793→
+   794→  await db.customerAddress.update({
+   795→    where: { id: addressId },
+   796→    data: { cityMatchedCouriers: matchedProviders, cityValidatedAt: new Date() },
+   797→  })
+   798→}
+   799→
+   800→// ──────────────────────────────────────────────────────────────
+   801→// addCustomerAddress
+   802→// ──────────────────────────────────────────────────────────────
+   803→export async function addCustomerAddress(
+   804→  customerId: string,
+   805→  input: AddressInput,
+   806→): Promise<ActionResult<{ addressId: string }>> {
+   807→  try {
+   808→    const ctx = await getWorkspace()
+   809→    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+   810→
+   811→    const parsed = addressInputSchema.safeParse(input)
+   812→    if (!parsed.success) {
+   813→      return {
+   814→        success: false,
+   815→        error: parsed.error.issues[0]?.message ?? 'Invalid address data',
+   816→      }
+   817→    }
+   818→    const d = parsed.data
+   819→
+   820→    const customer = await db.customer.findFirst({
+   821→      where: { id: customerId, organizationId: ctx.company.organizationId },
+   822→    })
+   823→    if (!customer) return { success: false, error: 'Customer not found' }
+   824→
+   825→    // If this new address is default, unset any existing default first.
+   826→    const address = await db.$transaction(async (tx) => {
+   827→      if (d.is_default) {
+   828→        await tx.customerAddress.updateMany({
+   829→          where: { customerId, isDefault: true },
+   830→          data: { isDefault: false },
+   831→        })
+   832→      }
+   833→      return tx.customerAddress.create({
+   834→        data: {
+   835→          customerId,
+   836→          organizationId: ctx.company.organizationId,
+   837→          label: d.label?.trim() || null,
+   838→          address: d.address.trim(),
+   839→          city: d.city.trim(),
+   840→          // Country (Phase: Country System). Defaults to "Pakistan" when
+   841→          // absent — mirrors the addressInputSchema default.
+   842→          country: d.country?.trim() || 'Pakistan',
+   843→          isDefault: d.is_default,
+   844→        },
+   845→      })
+   846→    })
+   847→
+   848→    insertAuditLog({
+   849→      action: 'customer.address_added',
+   850→      entityType: 'customer',
+   851→      entityId: customerId,
+   852→      companyId: ctx.company.id,
+   853→      organizationId: ctx.company.organizationId,
+   854→      userId: ctx.user.id,
+   855→      employeeId: ctx.employee.id,
+   856→      newValues: { addressId: address.id, city: address.city, isDefault: d.is_default },
+   857→    })
+   858→
+   859→    // ── Phase 7: City validation (non-blocking early warning) ──
+   860→    // Check the city against ALL connected couriers' cached operational cities.
+   861→    // This is INFORMATIONAL — the authoritative check remains
+   862→    // revalidateCityAtBookingTime() at booking time. Non-blocking: if zero
+   863→    // couriers match, the address is still saved successfully.
+   864→    validateCustomerAddressCity(address.id, d.city.trim(), ctx.company.id, d.country).catch(() => {})
+   865→
+   866→    return { success: true, data: { addressId: address.id } }
+   867→  } catch (err) {
+   868→    return {
+   869→      success: false,
+   870→      error: err instanceof Error ? err.message : 'Failed to add customer address',
+   871→    }
+   872→  }
+   873→}
+   874→
+   875→// ──────────────────────────────────────────────────────────────
+   876→// updateCustomerAddress
+   877→// ──────────────────────────────────────────────────────────────
+   878→export async function updateCustomerAddress(
+   879→  addressId: string,
+   880→  input: AddressInput,
+   881→): Promise<ActionResult<{ addressId: string }>> {
+   882→  try {
+   883→    const ctx = await getWorkspace()
+   884→    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+   885→
+   886→    const parsed = addressInputSchema.safeParse(input)
+   887→    if (!parsed.success) {
+   888→      return {
+   889→        success: false,
+   890→        error: parsed.error.issues[0]?.message ?? 'Invalid address data',
+   891→      }
+   892→    }
+   893→    const d = parsed.data
+   894→
+   895→    const address = await db.customerAddress.findUnique({
+   896→      where: { id: addressId },
+   897→      include: { customer: { select: { organizationId: true } } },
+   898→    })
+   899→    if (!address || address.customer.organizationId !== ctx.company.organizationId) {
+   900→      return { success: false, error: 'Address not found' }
+   901→    }
+   902→
+   903→    // If promoting to default, unset any existing default first.
+   904→    const updated = await db.$transaction(async (tx) => {
+   905→      if (d.is_default && !address.isDefault) {
+   906→        await tx.customerAddress.updateMany({
+   907→          where: { customerId: address.customerId, isDefault: true },
+   908→          data: { isDefault: false },
+   909→        })
+   910→      }
+   911→      return tx.customerAddress.update({
+   912→        where: { id: addressId },
+   913→        data: {
+   914→          label: d.label?.trim() || null,
+   915→          address: d.address.trim(),
+   916→          city: d.city.trim(),
+   917→          // Country (Phase: Country System). Defaults to "Pakistan" when
+   918→          // absent — same pattern as addCustomerAddress.
+   919→          country: d.country?.trim() || 'Pakistan',
+   920→          isDefault: d.is_default,
+   921→        },
+   922→      })
+   923→    })
+   924→
+   925→    insertAuditLog({
+   926→      action: 'customer.address_updated',
+   927→      entityType: 'customer',
+   928→      entityId: address.customerId,
+   929→      companyId: ctx.company.id,
+   930→      organizationId: ctx.company.organizationId,
+   931→      userId: ctx.user.id,
+   932→      employeeId: ctx.employee.id,
+   933→      oldValues: {
+   934→        label: address.label,
+   935→        address: address.address,
+   936→        city: address.city,
+   937→        country: address.country,
+   938→        isDefault: address.isDefault,
+   939→      },
+   940→      newValues: {
+   941→        label: updated.label,
+   942→        address: updated.address,
+   943→        city: updated.city,
+   944→        country: updated.country,
+   945→        isDefault: updated.isDefault,
+   946→      },
+   947→    })
+   948→
+   949→    // ── Phase 7: City validation (non-blocking early warning) ──
+   950→    // Re-validate the city if it changed. Non-blocking.
+   951→    if (updated.city !== address.city) {
+   952→      validateCustomerAddressCity(updated.id, updated.city, ctx.company.id, d.country).catch(() => {})
+   953→    }
+   954→
+   955→    return { success: true, data: { addressId: updated.id } }
+   956→  } catch (err) {
+   957→    return {
+   958→      success: false,
+   959→      error: err instanceof Error ? err.message : 'Failed to update customer address',
+   960→    }
+   961→  }
+   962→}
+   963→
+   964→// ──────────────────────────────────────────────────────────────
+   965→// removeCustomerAddress
+   966→// ──────────────────────────────────────────────────────────────
+   967→/**
+   968→ * Remove an address from a customer. Refuses to delete the LAST remaining
+   969→ * address — a customer must always have at least one address.
+   970→ */
+   971→export async function removeCustomerAddress(addressId: string): Promise<ActionResult> {
+   972→  try {
+   973→    const ctx = await getWorkspace()
+   974→    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+   975→
+   976→    const address = await db.customerAddress.findUnique({
+   977→      where: { id: addressId },
+   978→      include: { customer: { select: { organizationId: true } } },
+   979→    })
+   980→    if (!address || address.customer.organizationId !== ctx.company.organizationId) {
+   981→      return { success: false, error: 'Address not found' }
+   982→    }
+   983→
+   984→    const addressCount = await db.customerAddress.count({
+   985→      where: { customerId: address.customerId },
+   986→    })
+   987→    if (addressCount <= 1) {
+   988→      return {
+   989→        success: false,
+   990→        error: 'A customer must always have at least one address. Add another address before removing this one.',
+   991→      }
+   992→    }
+   993→
+   994→    await db.customerAddress.delete({ where: { id: addressId } })
+   995→
+   996→    insertAuditLog({
+   997→      action: 'customer.address_removed',
+   998→      entityType: 'customer',
+   999→      entityId: address.customerId,
+  1000→      companyId: ctx.company.id,
+  1001→      organizationId: ctx.company.organizationId,
+  1002→      userId: ctx.user.id,
+  1003→      employeeId: ctx.employee.id,
+  1004→      oldValues: { addressId, address: address.address, city: address.city },
+  1005→    })
+  1006→
+  1007→    return { success: true }
+  1008→  } catch (err) {
+  1009→    return {
+  1010→      success: false,
+  1011→      error: err instanceof Error ? err.message : 'Failed to remove customer address',
+  1012→    }
+  1013→  }
+  1014→}
+  1015→
+  1016→// ──────────────────────────────────────────────────────────────
+  1017→// markAddressAsUsed — internal helper (called by order creation flow)
+  1018→// ──────────────────────────────────────────────────────────────
+  1019→/**
+  1020→ * Bump `lastUsedAt` on a customer_addresses row to NOW(). Called from the
+  1021→ * Order creation flow when an order is submitted using that address, so the
+  1022→ * UI can sort saved addresses by recency.
+  1023→ */
+  1024→export async function markAddressAsUsed(addressId: string): Promise<ActionResult> {
+  1025→  try {
+  1026→    await db.customerAddress.update({
+  1027→      where: { id: addressId },
+  1028→      data: { lastUsedAt: new Date() },
+  1029→    })
+  1030→    return { success: true }
+  1031→  } catch (err) {
+  1032→    // Non-fatal — never block order creation on this.
+  1033→    console.error('[customer] markAddressAsUsed failed:', err)
+  1034→    return {
+  1035→      success: false,
+  1036→      error: err instanceof Error ? err.message : 'Failed to mark address as used',
+  1037→    }
+  1038→  }
+  1039→}
+  1040→
+  1041→// ══════════════════════════════════════════════════════════════
+  1042→// PART 3 — CROSS-PLATFORM MATCHING
+  1043→// ══════════════════════════════════════════════════════════════
+  1044→
+  1045→// ──────────────────────────────────────────────────────────────
+  1046→// matchOrCreateExternalCustomer
+  1047→// ──────────────────────────────────────────────────────────────
+  1048→/**
+  1049→ * Thin wrapper around the match_or_create_customer() SQL function built in
+  1050→ * Step 1. Implements the layered matching strategy:
+  1051→ *   1. exact_identity  — existing (org, platform, external_customer_id) mapping
+  1052→ *   2. phone_match     — normalize phone, match customer_phones
+  1053→ *   3. email_match     — match Customer.email within org
+  1054→ *   4. create          — create new customer + primary phone + external identity
+  1055→ *
+  1056→ * A future Shopify/Daraz/Instagram webhook handler will call this directly.
+  1057→ * No live webhook exists in this step — this is built so integration work
+  1058→ * later is a drop-in call rather than new logic.
+  1059→ *
+  1060→ * NOTE: this function does NOT require a workspace session — it's intended
+  1061→ * to be called from a webhook context where there's no logged-in user.
+  1062→ * The SQL function is SECURITY DEFINER so it can insert into Customer /
+  1063→ * customer_phones / customer_external_identities regardless of caller
+  1064→ * permissions. The caller MUST supply organizationId (resolved from the
+  1065→ * webhook's target company).
+  1066→ */
+  1067→export async function matchOrCreateExternalCustomer(
+  1068→  input: MatchExternalCustomerInput & { organizationId: string },
+  1069→): Promise<ActionResult<{
+  1070→  customerId: string
+  1071→  wasNewlyCreated: boolean
+  1072→  matchedVia: string
+  1073→}>> {
+  1074→  try {
+  1075→    const parsed = matchExternalCustomerSchema.safeParse(input)
+  1076→    if (!parsed.success) {
+  1077→      return {
+  1078→        success: false,
+  1079→        error: parsed.error.issues[0]?.message ?? 'Invalid external customer input',
+  1080→      }
+  1081→    }
+  1082→    const d = parsed.data
+  1083→
+  1084→    // ── Pre-normalize international phones (Phase: Country System) ──
+  1085→    // normalize_phone() (SQL) historically mangled international numbers by
+  1086→    // blindly prepending +92 (e.g. +447911123456 → +92447911123456). The SQL
+  1087→    // function now passes through + prefixed non-Pakistani numbers unchanged,
+  1088→    // BUT it doesn't validate/canonicalize them. For a phone like "+44 7911
+  1089→    // 123456" (with spaces) or "+44(0)7911112345", the SQL function would
+  1090→    // pass the raw string through with spaces intact — which wouldn't match
+  1091→    // a stored "+447911123456" for dedup.
+  1092→    //
+  1093→    // So: if the phone looks international (+ prefix that isn't +92, OR a
+  1094→    // local-format number that validateAndNormalizePhone can parse with a
+  1095→    // non-PK country hint), normalize it HERE via libphonenumber-js to a
+  1096→    // clean E.164 string BEFORE passing to the SQL function. The SQL function
+  1097→    // then passes it through (it sees a + non-92 prefix) and stores/matches
+  1098→    // the canonical E.164 value. Pakistani-shaped numbers (0300..., +92...)
+  1099→    // are passed through to the SQL function's normalize_phone() unchanged —
+  1100→    // no behavior change for the working case.
+  1101→    let phoneForSql = d.phone || null
+  1102→    if (phoneForSql) {
+  1103→      const trimmed = phoneForSql.trim()
+  1104→      const looksInternational = trimmed.startsWith('+') && !trimmed.startsWith('+92')
+  1105→      if (looksInternational) {
+  1106→        const { normalized } = validateAndNormalizePhone(trimmed, 'GB')
+  1107→        // Use the libphonenumber-js E.164 output if it parsed successfully.
+  1108→        // If it didn't parse (truly invalid number), fall back to the raw
+  1109→        // trimmed input — the SQL function's pass-through will store it as-is,
+  1110→        // and the isValidFormat flagging below will mark it for correction.
+  1111→        phoneForSql = normalized ?? trimmed
+  1112→      }
+  1113→      // Pakistani-shaped numbers (+92... or 0300... or 10-11 digit local)
+  1114→      // are left as-is — the SQL function's normalize_phone() handles them
+  1115→      // correctly (proven by existing behavior).
+  1116→    }
+  1117→
+  1118→    // Check whether an external identity mapping already exists BEFORE
+  1119→    // calling the SQL function, so we can report wasNewlyCreated accurately.
+  1120→    const existingMapping = await db.customerExternalIdentity.findUnique({
+  1121→      where: {
+  1122→        organizationId_platform_externalCustomerId: {
+  1123→          organizationId: input.organizationId,
+  1124→          platform: d.platform,
+  1125→          externalCustomerId: d.external_customer_id,
+  1126→        },
+  1127→      },
+  1128→      select: { customerId: true, matchedVia: true },
+  1129→    })
+  1130→
+  1131→    // Call the SQL function — it handles all 4 layers race-safely.
+  1132→    // phoneForSql is pre-normalized for international numbers (E.164) so
+  1133→    // normalize_phone()'s pass-through stores/matches the canonical value.
+  1134→    // d.country (alpha-2 code, optional) is passed through so the SQL function
+  1135→    // can persist it onto the customer_addresses row for newly-created customers.
+  1136→    // Defaults to 'PK' if absent.
+  1137→    const countryForSql = d.country?.trim() || 'PK'
+  1138→    const rows = await db.$queryRaw<{ customer_id: string }[]>`
+  1139→      SELECT match_or_create_customer(
+  1140→        ${input.organizationId}::TEXT,
+  1141→        ${d.platform}::TEXT,
+  1142→        ${d.external_customer_id}::TEXT,
+  1143→        ${phoneForSql}::TEXT,
+  1144→        ${d.email || null}::TEXT,
+  1145→        ${d.name || null}::TEXT,
+  1146→        ${countryForSql}::TEXT
+  1147→      ) AS customer_id
+  1148→    `
+  1149→    const customerId = rows[0]?.customer_id
+  1150→    if (!customerId) {
+  1151→      return { success: false, error: 'match_or_create_customer() returned no customer_id' }
+  1152→    }
+  1153→
+  1154→    const wasNewlyCreated = !existingMapping
+  1155→    const matchedVia = existingMapping?.matchedVia ?? 'exact_identity'
+  1156→
+  1157→    // If this customer was newly created AND a phone was provided, check if
+  1158→    // the phone is valid. If not, flag the CustomerPhone row with
+  1159→    // isValidFormat=false so it can be surfaced for correction later.
+  1160→    // We do NOT block creation — external platforms may send unformatted
+  1161→    // or invalid phones, and the customer still needs to be importable.
+  1162→    //
+  1163→    // Phase: Country System — use the pre-normalized phone (phoneForSql) for
+  1164→    // the validity check. For international numbers, isValidPhoneFormat is
+  1165→    // called with the default PK country but libphonenumber-js validates +
+  1166→    // prefixed numbers internationally regardless of defaultCountry, so a
+  1167→    // valid +44... number passes. For Pakistani local numbers, the default
+  1168→    // PK country is correct. The phoneRaw match uses phoneForSql (the
+  1169→    // pre-normalized value the SQL function stored as phoneRaw) — note the
+  1170→    // SQL function stores p_phone (the raw arg) as phoneRaw, which is now
+  1171→    // the pre-normalized E.164 value for international numbers.
+  1172→    if (wasNewlyCreated && phoneForSql) {
+  1173→      const phoneValid = isValidPhoneFormat(phoneForSql)
+  1174→      if (!phoneValid) {
+  1175→        // Find the phone row that was just created by the SQL function and
+  1176→        // flag it. This is fire-and-forget — the customer is already created.
+  1177→        db.customerPhone.updateMany({
+  1178→          where: {
+  1179→            customerId,
+  1180→            phoneRaw: phoneForSql,
+  1181→          },
+  1182→          data: { isValidFormat: false },
+  1183→        }).catch(() => {
+  1184→          // Non-fatal: if the update fails, the customer is still created.
+  1185→          // The phone will default to isValidFormat=true, which is the
+  1186→          // less-restrictive option (won't block future orders).
+  1187→        })
+  1188→      }
+  1189→    }
+  1190→
+  1191→    return {
+  1192→      success: true,
+  1193→      data: { customerId, wasNewlyCreated, matchedVia },
+  1194→    }
+  1195→  } catch (err) {
+  1196→    return {
+  1197→      success: false,
+  1198→      error: err instanceof Error ? err.message : 'Failed to match or create external customer',
+  1199→    }
+  1200→  }
+  1201→}
+  1202→
+  1203→// ──────────────────────────────────────────────────────────────
+  1204→// getCustomerExternalIdentities
+  1205→// ──────────────────────────────────────────────────────────────
+  1206→/**
+  1207→ * List all platform mappings for a customer (for display on their profile —
+  1208→ * e.g. "Linked to Shopify Customer #7891234567").
+  1209→ */
+  1210→export async function getCustomerExternalIdentities(
+  1211→  customerId: string,
+  1212→): Promise<ActionResult<{
+  1213→  identities: Array<{
+  1214→    id: string
+  1215→    platform: string
+  1216→    externalCustomerId: string
+  1217→    matchedVia: string
+  1218→    createdAt: Date
+  1219→  }>
+  1220→}>> {
+  1221→  try {
+  1222→    const ctx = await getWorkspace()
+  1223→
+  1224→    const customer = await db.customer.findFirst({
+  1225→      where: { id: customerId, organizationId: ctx.company.organizationId },
+  1226→      select: { id: true },
+  1227→    })
+  1228→    if (!customer) return { success: false, error: 'Customer not found' }
+  1229→
+  1230→    const identities = await db.customerExternalIdentity.findMany({
+  1231→      where: { customerId },
+  1232→      orderBy: { createdAt: 'desc' },
+  1233→      select: {
+  1234→        id: true,
+  1235→        platform: true,
+  1236→        externalCustomerId: true,
+  1237→        matchedVia: true,
+  1238→        createdAt: true,
+  1239→      },
+  1240→    })
+  1241→
+  1242→    return { success: true, data: { identities } }
+  1243→  } catch (err) {
+  1244→    return {
+  1245→      success: false,
+  1246→      error: err instanceof Error ? err.message : 'Failed to get external identities',
+  1247→    }
+  1248→  }
+  1249→}
+  1250→
+  1251→// ══════════════════════════════════════════════════════════════
+  1252→// PART 4 — CACHED STATS RECOMPUTATION + FLAGGING
+  1253→// ══════════════════════════════════════════════════════════════
+  1254→
+  1255→// ──────────────────────────────────────────────────────────────
+  1256→// updateCustomerStats — recomputes cached counts from the orders table
+  1257→// ──────────────────────────────────────────────────────────────
+  1258→/**
+  1259→ * Recompute total_orders_count, total_order_value (sum of delivered orders'
+  1260→ * total_order_value), and total_rto_count from the orders table for this
+  1261→ * customer, then persist them to the customer row.
+  1262→ *
+  1263→ * Auto-flagging: if total_rto_count >= 3 AND the customer is not already
+  1264→ * flagged for the high-RTO reason, call flagCustomer() with reason
+  1265→ * 'High RTO rate (3+ returns)'. Idempotent — won't re-flag if already
+  1266→ * flagged for this exact reason.
+  1267→ *
+  1268→ * This function is called after every order creation and every order status
+  1269→ * change (delivered / rto / cancelled) to keep the cached counts current.
+  1270→ */
+  1271→export async function updateCustomerStats(customerId: string): Promise<ActionResult> {
+  1272→  try {
+  1273→    // Note: this is an internal helper often called from order.actions.ts
+  1274→    // which already has a workspace context. We fetch orders without a
+  1275→    // workspace check here (the caller is trusted internal code). The
+  1276→    // cached stats are org-scoped by virtue of the customer row itself
+  1277→    // being org-scoped.
+  1278→    //
+  1279→    // DEFINITIONS (applied consistently between cached writes here and
+  1280→    // the read-time percentage calculations in customer-detail-view.tsx):
+  1281→    //   total_orders_count = COUNT of non-cancelled orders
+  1282→    //   total_order_value  = SUM(total_order_value) for delivered + dispatched
+  1283→    //                        (orders that have left the warehouse — excludes
+  1284→    //                        cancelled, refunded, pending, confirmed, processing)
+  1285→    //   total_rto_count    = COUNT where status = 'rto'
+  1286→    //   rto_rate / delivery_rate = computed at read-time in the frontend from
+  1287→    //                        these cached values (no separate cached columns)
+  1288→    const orders = await db.order.findMany({
+  1289→      where: { customerId, status: { not: 'cancelled' } },
+  1290→      select: { totalOrderValue: true, status: true, deliveryCountry: true },
+  1291→    })
+  1292→
+  1293→    const totalOrdersCount = orders.length
+  1294→    // total_order_value = sum of delivered + dispatched orders' total_order_value
+  1295→    // (orders that have actually shipped — reflects real revenue, excludes
+  1296→    // pending/confirmed orders that may still be cancelled)
+  1297→    // Phase F1: use the shared currency-aware revenue function.
+  1298→    const revenueOrders = orders
+  1299→      .filter((o) => o.status === 'delivered' || o.status === 'dispatched')
+  1300→      .map((o) => ({ totalOrderValue: Number(o.totalOrderValue), deliveryCountry: o.deliveryCountry }))
+  1301→
+  1302→    // Fetch the customer's companyId for market resolution
+  1303→    const customerRow = await db.customer.findUnique({
+  1304→      where: { id: customerId },
+  1305→      select: { organizationId: true },
+  1306→    })
+  1307→    // Find a company in this org that has this customer's orders
+  1308→    const firstOrder = await db.order.findFirst({
+  1309→      where: { customerId },
+  1310→      select: { companyId: true },
+  1311→    })
+  1312→    const companyForRevenue = firstOrder?.companyId
+  1313→    const companyForBaseCurrency = companyForRevenue
+  1314→      ? await db.company.findUnique({ where: { id: companyForRevenue }, select: { baseCurrency: true } })
+  1315→      : null
+  1316→
+  1317→    let totalOrderValue: number
+  1318→    if (companyForRevenue && companyForBaseCurrency) {
+  1319→      const { computeRevenueWithCurrencies } = await import('@/lib/analytics/revenue')
+  1320→      const revenueResult = await computeRevenueWithCurrencies(
+  1321→        companyForRevenue,
+  1322→        revenueOrders,
+  1323→        companyForBaseCurrency.baseCurrency,
+  1324→      )
+  1325→      totalOrderValue = revenueResult.estimatedTotalBase ?? 0
+  1326→    } else {
+  1327→      // Fallback: no company found (shouldn't happen — all orders belong to a company)
+  1328→      totalOrderValue = revenueOrders.reduce((sum, o) => sum + o.totalOrderValue, 0)
+  1329→    }
+  1330→
+  1331→    const totalRtoCount = orders.filter((o) => o.status === 'rto').length
+  1332→
+  1333→    await db.customer.update({
+  1334→      where: { id: customerId },
+  1335→      data: { totalOrdersCount, totalOrderValue, totalRtoCount },
+  1336→    })
+  1337→
+  1338→    // Auto-flag at 3+ RTO (idempotent — only flags if not already flagged
+  1339→    // for the high-RTO reason).
+  1340→    const RTO_FLAG_REASON = 'High RTO rate (3+ returns)'
+  1341→    if (totalRtoCount >= 3) {
+  1342→      const customer = await db.customer.findUnique({
+  1343→        where: { id: customerId },
+  1344→        select: { isFlagged: true, flaggedReason: true },
+  1345→      })
+  1346→      if (customer && (!customer.isFlagged || customer.flaggedReason !== RTO_FLAG_REASON)) {
+  1347→        await flagCustomerInternal(customerId, RTO_FLAG_REASON, /* auto */ true)
+  1348→      }
+  1349→    }
+  1350→
+  1351→    return { success: true }
+  1352→  } catch (err) {
+  1353→    // CRITICAL: never let a stats-update failure break the calling order
+  1354→    // action. Log and return failure — the caller continues regardless.
+  1355→    console.error('[customer] updateCustomerStats failed:', err)
+  1356→    return {
+  1357→      success: false,
+  1358→      error: err instanceof Error ? err.message : 'Failed to update customer stats',
+  1359→    }
+  1360→  }
+  1361→}
+  1362→
+  1363→// ──────────────────────────────────────────────────────────────
+  1364→// flagCustomer — manual flagging (requires orders.manage)
+  1365→// ──────────────────────────────────────────────────────────────
+  1366→export async function flagCustomer(
+  1367→  customerId: string,
+  1368→  reason: string,
+  1369→): Promise<ActionResult> {
+  1370→  try {
+  1371→    const ctx = await getWorkspace()
+  1372→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+  1373→    return flagCustomerInternal(customerId, reason, /* auto */ false, ctx)
+  1374→  } catch (err) {
+  1375→    return {
+  1376→      success: false,
+  1377→      error: err instanceof Error ? err.message : 'Failed to flag customer',
+  1378→    }
+  1379→  }
+  1380→}
+  1381→
+  1382→/**
+  1383→ * Internal flag helper shared by manual flagCustomer() and the auto-flag
+  1384→ * path in updateCustomerStats(). The auto path skips the permission check
+  1385→ * (it's triggered by an order status change, not a user action) and skips
+  1386→ * the metric event (to avoid metric spam during bulk recomputes).
+  1387→ */
+  1388→async function flagCustomerInternal(
+  1389→  customerId: string,
+  1390→  reason: string,
+  1391→  auto: boolean,
+  1392→  ctx?: {
+  1393→    company: { id: string; organizationId: string }
+  1394→    user: { id: string }
+  1395→    employee: { id: string }
+  1396→  },
+  1397→): Promise<ActionResult> {
+  1398→  const organizationId = ctx?.company.organizationId
+  1399→  const customer = ctx
+  1400→    ? await db.customer.findFirst({
+  1401→        where: { id: customerId, organizationId },
+  1402→      })
+  1403→    : await db.customer.findUnique({ where: { id: customerId } })
+  1404→  if (!customer) return { success: false, error: 'Customer not found' }
+  1405→
+  1406→  // Idempotent: skip if already flagged for this exact reason.
+  1407→  if (customer.isFlagged && customer.flaggedReason === reason) {
+  1408→    return { success: true }
+  1409→  }
+  1410→
+  1411→  await db.customer.update({
+  1412→    where: { id: customerId },
+  1413→    data: {
+  1414→      isFlagged: true,
+  1415→      flaggedReason: reason,
+  1416→      flaggedAt: new Date(),
+  1417→      flaggedBy: ctx?.employee.id ?? null,
+  1418→    },
+  1419→  })
+  1420→
+  1421→  if (ctx) {
+  1422→    insertAuditLog({
+  1423→      action: auto ? 'customer.auto_flagged' : 'customer.flagged',
+  1424→      entityType: 'customer',
+  1425→      entityId: customerId,
+  1426→      companyId: ctx.company.id,
+  1427→      organizationId: ctx.company.organizationId,
+  1428→      userId: ctx.user.id,
+  1429→      employeeId: ctx.employee.id,
+  1430→      newValues: { reason, auto },
+  1431→    })
+  1432→
+  1433→    if (!auto) {
+  1434→      insertMetricEvent({
+  1435→        companyId: ctx.company.id,
+  1436→        entityType: 'customer',
+  1437→        entityId: customerId,
+  1438→        metricKey: 'customer.flagged',
+  1439→        numericValue: 1,
+  1440→        dimensions: { reason },
+  1441→      })
+  1442→    }
+  1443→  }
+  1444→
+  1445→  return { success: true }
+  1446→}
+  1447→
+  1448→// ──────────────────────────────────────────────────────────────
+  1449→// unflagCustomer
+  1450→// ──────────────────────────────────────────────────────────────
+  1451→export async function unflagCustomer(customerId: string): Promise<ActionResult> {
+  1452→  try {
+  1453→    const ctx = await getWorkspace()
+  1454→    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+  1455→
+  1456→    const customer = await db.customer.findFirst({
+  1457→      where: { id: customerId, organizationId: ctx.company.organizationId },
+  1458→    })
+  1459→    if (!customer) return { success: false, error: 'Customer not found' }
+  1460→
+  1461→    await db.customer.update({
+  1462→      where: { id: customerId },
+  1463→      data: {
+  1464→        isFlagged: false,
+  1465→        flaggedReason: null,
+  1466→        flaggedAt: null,
+  1467→        flaggedBy: null,
+  1468→      },
+  1469→    })
+  1470→
+  1471→    insertAuditLog({
+  1472→      action: 'customer.unflagged',
+  1473→      entityType: 'customer',
+  1474→      entityId: customerId,
+  1475→      companyId: ctx.company.id,
+  1476→      organizationId: ctx.company.organizationId,
+  1477→      userId: ctx.user.id,
+  1478→      employeeId: ctx.employee.id,
+  1479→      oldValues: { reason: customer.flaggedReason },
+  1480→    })
+  1481→
+  1482→    return { success: true }
+  1483→  } catch (err) {
+  1484→    return {
+  1485→      success: false,
+  1486→      error: err instanceof Error ? err.message : 'Failed to unflag customer',
+  1487→    }
+  1488→  }
+  1489→}
+  1490→
+  1491→// ══════════════════════════════════════════════════════════════
+  1492→// PART 5 — LISTING & DETAIL
+  1493→// ══════════════════════════════════════════════════════════════
+  1494→
+  1495→// ──────────────────────────────────────────────────────────────
+  1496→// listCustomers
+  1497→// ──────────────────────────────────────────────────────────────
+  1498→/**
+  1499→ * Paginated customer list. `search` matches customer name OR any
+  1500→ * associated phone (raw or normalized). Each row includes the primary
+  1501→ * phone and default address summary joined in.
+  1502→ */
+  1503→export async function listCustomers(filters: {
+  1504→  search?: string
+  1505→  isFlagged?: boolean
+  1506→  dateFrom?: string
+  1507→  dateTo?: string
+  1508→  limit?: number
+  1509→  offset?: number
+  1510→} = {}): Promise<ActionResult<{ customers: CustomerSummaryDTO[]; total: number }>> {
+  1511→  try {
+  1512→    const ctx = await getWorkspace()
+  1513→    const limit = Math.min(filters.limit ?? 50, 100)
+  1514→    const offset = filters.offset ?? 0
+  1515→
+  1516→    const where: Prisma.CustomerWhereInput = {
+  1517→      organizationId: ctx.company.organizationId,
+  1518→    }
+  1519→    if (filters.isFlagged !== undefined) {
+  1520→      where.isFlagged = filters.isFlagged
+  1521→    }
+  1522→    if (filters.dateFrom || filters.dateTo) {
+  1523→      where.createdAt = {}
+  1524→      if (filters.dateFrom) where.createdAt.gte = new Date(filters.dateFrom)
+  1525→      if (filters.dateTo) where.createdAt.lte = new Date(filters.dateTo)
+  1526→    }
+  1527→
+  1528→    // Search across name + any associated phone (raw or normalized).
+  1529→    // We resolve matching customer IDs via a customer_phones query first,
+  1530→    // then OR them into the customer name search.
+  1531→    let searchCustomerIds: string[] | null = null
+  1532→    if (filters.search && filters.search.trim()) {
+  1533→      const q = filters.search.trim()
+  1534→      // Try normalizing the search term as a phone — if it normalizes to
+  1535→      // something, search customer_phones by the normalized form too.
+  1536→      const normalizedSearch = await normalizePhone(q)
+  1537→      const phoneWhere: Prisma.CustomerPhoneWhereInput = {
+  1538→        organizationId: ctx.company.organizationId,
+  1539→        OR: [
+  1540→          { phoneRaw: { contains: q, mode: 'insensitive' } },
+  1541→          ...(normalizedSearch ? [{ phoneNormalized: { contains: normalizedSearch } }] : []),
+  1542→        ],
+  1543→      }
+  1544→      const phoneMatches = await db.customerPhone.findMany({
+  1545→        where: phoneWhere,
+  1546→        select: { customerId: true },
+  1547→        distinct: ['customerId'],
+  1548→      })
+  1549→      searchCustomerIds = phoneMatches.map((p) => p.customerId)
+  1550→
+  1551→      where.OR = [
+  1552→        { name: { contains: q, mode: 'insensitive' } },
+  1553→        { email: { contains: q, mode: 'insensitive' } },
+  1554→        ...(searchCustomerIds.length > 0 ? [{ id: { in: searchCustomerIds } }] : []),
+  1555→      ]
+  1556→    }
+  1557→
+  1558→    const [customers, total] = await Promise.all([
+  1559→      db.customer.findMany({
+  1560→        where,
+  1561→        orderBy: { createdAt: 'desc' },
+  1562→        take: limit,
+  1563→        skip: offset,
+  1564→        include: {
+  1565→          phones: {
+  1566→            where: { isPrimary: true },
+  1567→            take: 1,
+  1568→          },
+  1569→          addresses: {
+  1570→            where: { isDefault: true },
+  1571→            take: 1,
+  1572→          },
+  1573→        },
+  1574→      }),
+  1575→      db.customer.count({ where }),
+  1576→    ])
+  1577→
+  1578→    const customerDTOs: CustomerSummaryDTO[] = customers.map((c) => ({
+  1579→      id: c.id,
+  1580→      name: c.name,
+  1581→      email: c.email,
+  1582→      primaryPhone: c.phones[0]?.phoneRaw ?? null,
+  1583→      defaultAddress: c.addresses[0]
+  1584→        ? { address: c.addresses[0].address, city: c.addresses[0].city, country: c.addresses[0].country }
+  1585→        : null,
+  1586→      totalOrdersCount: c.totalOrdersCount,
+  1587→      totalOrderValue: Number(c.totalOrderValue),
+  1588→      totalRtoCount: c.totalRtoCount,
+  1589→      isFlagged: c.isFlagged,
+  1590→      flaggedReason: c.flaggedReason,
+  1591→      createdAt: c.createdAt,
+  1592→    }))
+  1593→
+  1594→    return { success: true, data: { customers: customerDTOs, total } }
+  1595→  } catch (err) {
+  1596→    return {
+  1597→      success: false,
+  1598→      error: err instanceof Error ? err.message : 'Failed to list customers',
+  1599→    }
+  1600→  }
+  1601→}
+  1602→
+  1603→// ──────────────────────────────────────────────────────────────
+  1604→// getCustomerDetail
+  1605→// ──────────────────────────────────────────────────────────────
+  1606→/**
+  1607→ * Full customer record + all phones (primary first) + all addresses
+  1608→ * (default first, then by lastUsedAt desc) + external identities + recent
+  1609→ * order history (most recent first).
+  1610→ */
+  1611→export async function getCustomerDetail(
+  1612→  customerId: string,
+  1613→): Promise<ActionResult<CustomerDetailDTO>> {
+  1614→  try {
+  1615→    const ctx = await getWorkspace()
+  1616→
+  1617→    const customer = await db.customer.findFirst({
+  1618→      where: { id: customerId, organizationId: ctx.company.organizationId },
+  1619→      include: {
+  1620→        phones: { orderBy: { isPrimary: 'desc' } },
+  1621→        addresses: {
+  1622→          orderBy: [
+  1623→            { isDefault: 'desc' },
+  1624→            { lastUsedAt: { sort: 'desc', nulls: 'last' } },
+  1625→          ],
+  1626→        },
+  1627→        externalIdentities: { orderBy: { createdAt: 'desc' } },
+  1628→      },
+  1629→    })
+  1630→    if (!customer) return { success: false, error: 'Customer not found' }
+  1631→
+  1632→    // Live-compute RTO rate + delivery rate from actual order statuses.
+  1633→    // "Dispatched-or-later" = orders that have left the warehouse (dispatched,
+  1634→    // delivered, rto) — the denominator per the spec. Pending/confirmed/
+  1635→    // processing orders are excluded (they haven't shipped yet, so their
+  1636→    // outcome is unknown).
+  1637→    const statusCounts = await db.order.groupBy({
+  1638→      by: ['status'],
+  1639→      where: { customerId },
+  1640→      _count: { status: true },
+  1641→    })
+  1642→    const statusMap = new Map(statusCounts.map((s) => [s.status, s._count.status]))
+  1643→    const dispatchedOrLater =
+  1644→      (statusMap.get('dispatched') ?? 0) +
+  1645→      (statusMap.get('delivered') ?? 0) +
+  1646→      (statusMap.get('rto') ?? 0)
+  1647→    const deliveredCount = statusMap.get('delivered') ?? 0
+  1648→    const rtoCount = statusMap.get('rto') ?? 0
+  1649→    const rtoRate = dispatchedOrLater > 0 ? Math.round((rtoCount / dispatchedOrLater) * 100) : 0
+  1650→    const deliveryRate = dispatchedOrLater > 0 ? Math.round((deliveredCount / dispatchedOrLater) * 100) : 0
+  1651→
+  1652→    // Fetch ALL orders for this customer (not just 20) so the Orders tab
+  1653→    // matches the stat card's totalOrdersCount. The Orders tab renders a
+  1654→    // scrollable table (max-h-96 overflow-y-auto) so even 100+ orders are
+  1655→    // manageable in the UI.
+  1656→    //
+  1657→    // Phase 4 — Row-level scoping: includes salesEmployeeId so we can compute
+  1658→    // isOwnOrder per row. For rows where isOwnOrder is false AND the viewer's
+  1659→    // ordersDataScope is 'own', the response strips detail down to only
+  1660→    // {orderNumber, date, status} and OMITS salesEmployeeId/employee name
+  1661→    // entirely (not just hidden in the UI — not sent over the network).
+  1662→    const recentOrders = await db.order.findMany({
+  1663→      where: { customerId },
+  1664→      select: {
+  1665→        id: true,
+  1666→        flowopsOrderNumber: true,
+  1667→        status: true,
+  1668→        totalOrderValue: true,
+  1669→        createdAt: true,
+  1670→        recipientName: true,
+  1671→        deliveryAddress: true,
+  1672→        deliveryCity: true,
+  1673→        usedCustomerAddressId: true,
+  1674→        usedCustomerPhoneId: true,
+  1675→        salesEmployeeId: true,
+  1676→      },
+  1677→      orderBy: { createdAt: 'desc' },
+  1678→    })
+  1679→
+  1680→    // Resolve the viewer's orders data scope — determines row-level stripping.
+  1681→    // Elevated roles (Owner/Founder/etc.) always get 'all' (full detail on every row).
+  1682→    const viewerScope = getOrdersDataScope(ctx)
+  1683→    const viewerEmployeeId = ctx.employee.id
+  1684→
+  1685→    return {
+  1686→      success: true,
+  1687→      data: {
+  1688→        id: customer.id,
+  1689→        name: customer.name,
+  1690→        email: customer.email,
+  1691→        totalOrdersCount: customer.totalOrdersCount,
+  1692→        totalOrderValue: Number(customer.totalOrderValue),
+  1693→        totalRtoCount: customer.totalRtoCount,
+  1694→        rtoRate,
+  1695→        deliveryRate,
+  1696→        isFlagged: customer.isFlagged,
+  1697→        flaggedReason: customer.flaggedReason,
+  1698→        flaggedAt: customer.flaggedAt,
+  1699→        createdAt: customer.createdAt,
+  1700→        updatedAt: customer.updatedAt,
+  1701→        phones: customer.phones.map(toPhoneDTO),
+  1702→        addresses: customer.addresses.map(toAddressDTO),
+  1703→        externalIdentities: customer.externalIdentities.map((e) => ({
+  1704→          id: e.id,
+  1705→          platform: e.platform,
+  1706→          externalCustomerId: e.externalCustomerId,
+  1707→          matchedVia: e.matchedVia,
+  1708→          createdAt: e.createdAt,
+  1709→        })),
+  1710→        // Each order row gets isOwnOrder + is scoped down for non-own rows
+  1711→        // when the viewer's scope is 'own'. The salesEmployeeId/employee name
+  1712→        // is NEVER sent for non-own rows when scope='own'.
+  1713→        recentOrders: recentOrders.map((o) => {
+  1714→          const isOwnOrder = o.salesEmployeeId === viewerEmployeeId
+  1715→          // Full-detail rows: own orders OR viewer has 'all' scope
+  1716→          if (isOwnOrder || viewerScope === 'all') {
+  1717→            return {
+  1718→              id: o.id,
+  1719→              flowopsOrderNumber: o.flowopsOrderNumber,
+  1720→              status: o.status,
+  1721→              totalOrderValue: Number(o.totalOrderValue),
+  1722→              createdAt: o.createdAt,
+  1723→              recipientName: o.recipientName,
+  1724→              deliveryAddress: o.deliveryAddress,
+  1725→              deliveryCity: o.deliveryCity,
+  1726→              deliveryCountry: o.deliveryCountry,
+  1727→              usedCustomerAddressId: o.usedCustomerAddressId,
+  1728→              usedCustomerPhoneId: o.usedCustomerPhoneId,
+  1729→              salesEmployeeId: o.salesEmployeeId,
+  1730→              isOwnOrder,
+  1731→              isLimitedView: false,
+  1732→            }
+  1733→          }
+  1734→          // Limited-detail row: non-own order + viewer scope='own'.
+  1735→          // Strip to ONLY {orderNumber, date, status} — omit line items,
+  1736→          // payment, tracking, address, AND salesEmployeeId/employee name.
+  1737→          return {
+  1738→            id: o.id,
+  1739→            flowopsOrderNumber: o.flowopsOrderNumber,
+  1740→            status: o.status,
+  1741→            // createdAt kept as the date (needed for the summary row display)
+  1742→            createdAt: o.createdAt,
+  1743→            isOwnOrder,
+  1744→            isLimitedView: true,
+  1745→          }
+  1746→        }),
+  1747→      },
+  1748→    }
+  1749→  } catch (err) {
+  1750→    return {
+  1751→      success: false,
+  1752→      error: err instanceof Error ? err.message : 'Failed to get customer detail',
+  1753→    }
+  1754→  }
+  1755→}
+  1756→

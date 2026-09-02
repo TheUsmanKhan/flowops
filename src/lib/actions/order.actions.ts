@@ -85,7 +85,21 @@ async function generateOrderNumber(companyId: string): Promise<string> {
   const result = await db.$queryRaw<{ generate_order_number: string }[]>`
     SELECT generate_order_number(${companyId}::TEXT)
   `
-  return result[0].generate_order_number
+  const baseNumber = result[0].generate_order_number
+  // Apply per-company prefix if configured. The SQL function returns
+  // "ORD-YYYY-NNNNN" — we insert the prefix between "ORD-" and the year,
+  // producing "ORD-<PREFIX>-YYYY-NNNNN".
+  const settings = await db.companyOrderSetting.findUnique({
+    where: { companyId },
+    select: { orderNumberPrefix: true },
+  })
+  const prefix = settings?.orderNumberPrefix?.trim()
+  if (!prefix) return baseNumber
+  const match = baseNumber.match(/^(ORD-)(\d{4}-\d{5})$/)
+  if (match) {
+    return `${match[1]}${prefix}-${match[2]}`
+  }
+  return `${prefix}-${baseNumber}`
 }
 
 /**
@@ -347,7 +361,7 @@ export async function createManualOrder(
     const deliveryCountry = d.delivery_country?.trim() || 'PK'
 
     // ──────────────────────────────────────────────────────────────
-    // 2. PARALLEL GROUP 1 — all independent pre-create reads.
+    // 1. PARALLEL GROUP 1 — all independent pre-create reads.
     //    Previously these ran SEQUENTIALLY (customer → variants → settings →
     //    order-number → …), costing ~4× the per-query network latency.
     //    Now they run in a single Promise.all() batch. None of these depend
@@ -454,10 +468,10 @@ export async function createManualOrder(
           selectedSavedAddressId,
         }
       })(),
-      // ── Variant fetch — price resolved from CompanyVariantPricing ──
-      // Phase: Discount Rework. originalUnitPrice is resolved STRICTLY from
-      // CompanyVariantPricing for this company. If no CVP row exists, the
-      // order is rejected with a pricing error — no fallback to costPrice.
+      // ── Variant fetch — price resolved from CompanyVariantPricing (per-company) ──
+      // Simple per-company pricing: each company sets its own sale price for
+      // org-level variants via CompanyVariantPricing. No market system —
+      // the price is the same regardless of delivery country.
       db.orgProductVariant.findMany({
         where: { id: { in: variantIds }, organizationId: ctx.company.organizationId },
         include: {
@@ -1059,7 +1073,9 @@ export async function createOrderFromShopifyWebhook(
 
     const recipientName = shopifyCustomerName
 
-    // Resolve variants by SKU (price validation happens via companyPricing).
+    // Resolve variants by SKU — include companyPricing for per-company price
+    // resolution. No market gating: a variant is sellable as long as it's
+    // active AND has a CompanyVariantPricing row for this company.
     const skus = d.line_items.map((li) => li.sku).filter(Boolean) as string[]
     const variants = await db.orgProductVariant.findMany({
       where: { sku: { in: skus }, organizationId },
@@ -1069,12 +1085,15 @@ export async function createOrderFromShopifyWebhook(
       },
     })
 
-    // Compute subtotal + build order items with review flagging
+    // Compute subtotal + build order items with gate flagging
     let subtotal = 0
     const orderItemsData: Array<{
       orgVariantId: string
       quantity: number
       unitPrice: number
+      originalUnitPrice: number
+      discountType: string | null
+      discountValue: number | null
       fulfillmentTypeSnapshot: string
       needsReview: boolean
       needsReviewReason: string | null
@@ -1084,15 +1103,15 @@ export async function createOrderFromShopifyWebhook(
       const variant = variants.find((v) => v.sku === li.sku)
       if (!variant) continue // skip unmatched items for now
 
-      // ── Review-flag check (SOFT — flag, don't block) ──
+      // ── Gate check (SOFT — flag, don't block) ──
       let gateReason: string | null = null
       // Gate 1: variant isActive
       if (!variant.isActive) {
         gateReason = 'Not enabled for your company'
       }
-      // Gate 2: CompanyVariantPricing must exist (no price set)
+      // Gate 2: CompanyVariantPricing must exist for this variant
       else if (!variant.companyPricing[0]) {
-        gateReason = 'No price set for this variant'
+        gateReason = 'No price set for this company'
       }
 
       const needsReview = gateReason !== null
@@ -1650,6 +1669,20 @@ export async function cancelOrder(
       },
     })
     if (!order) return { success: false, error: 'Order not found' }
+
+    // Phase 2: Order ownership check — employees with role.ordersDataScope='own'
+    // can only cancel orders they created. Elevated roles + roles with
+    // ordersDataScope='all' can cancel any company order. Webhook path
+    // (injectedContext provided) already bypasses this — system-driven cancels
+    // use an elevated synthetic employee that fails the !isElevated guard.
+    if (
+      !injectedContext &&
+      !isElevated(ctx) &&
+      getOrdersDataScope(ctx) === 'own' &&
+      order.salesEmployeeId !== ctx.employee.id
+    ) {
+      return { success: false, error: 'You can only cancel orders you created.' }
+    }
 
     const nonCancellableStatuses = ['dispatched', 'delivered', 'rto', 'cancelled', 'refunded']
     if (nonCancellableStatuses.includes(order.status)) {
@@ -2510,8 +2543,24 @@ export async function markOrderPacked(orderId: string): Promise<ActionResult> {
 
     const order = await db.order.findFirst({
       where: { id: orderId, companyId: ctx.company.id },
+      select: {
+        id: true,
+        status: true,
+        salesEmployeeId: true,
+      },
     })
     if (!order) return { success: false, error: 'Order not found' }
+
+    // Phase 2: Order ownership check — employees with role.ordersDataScope='own'
+    // can only pack orders they created. Elevated roles + roles with
+    // ordersDataScope='all' can pack any company order.
+    if (
+      !isElevated(ctx) &&
+      getOrdersDataScope(ctx) === 'own' &&
+      order.salesEmployeeId !== ctx.employee.id
+    ) {
+      return { success: false, error: 'You can only pack orders you created.' }
+    }
 
     if (!['confirmed', 'partially_backordered', 'processing'].includes(order.status)) {
       return { success: false, error: `Order must be confirmed or processing to pack (current: ${order.status})` }

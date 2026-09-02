@@ -21,6 +21,10 @@ import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
 import { revalidateCityAtBookingTime } from '@/lib/integrations/city-matcher'
 import { determinePostExOrderType } from '@/lib/integrations/couriers/postex.order-type'
 import { calculateOrderWeightKg } from '@/lib/utils/order-weight'
+import {
+  parseLeopardPreferences,
+  buildLeopardSpecialInstructions,
+} from '@/lib/integrations/couriers/leopard-preferences'
 import type { BookShipmentInput, BookShipmentResult } from '@/lib/integrations/types'
 
 interface ActionResult<T = unknown> {
@@ -142,7 +146,7 @@ export async function bookOrderWithCourier(
         items: {
           include: {
             orgVariant: {
-              select: { id: true, sku: true, weightKg: true, product: { select: { title: true } } },
+              select: { id: true, sku: true, weightKg: true, attributeValues: true, product: { select: { title: true } } },
             },
           },
         },
@@ -175,6 +179,29 @@ export async function bookOrderWithCourier(
       order.items.map((i) => `${i.orgVariant.product.title} (${i.orgVariant.sku}) ×${i.quantity}`).join(', ')
     const transactionNotes =
       options.transactionNotes?.trim() || (order.notesForCourier && order.notesForCourier.trim()) || ''
+
+    // ── Leopard preferences: optionally append product details to transaction note ──
+    // The CompanyIntegration.preferencesJson column stores per-integration
+    // preferences (currently only Leopard transactionNote prefs). If this is a
+    // Leopard integration AND the user has enabled the auto-append feature,
+    // we build a combined special-instructions string from the order's line
+    // items and the existing user note.
+    let effectiveTransactionNotes = transactionNotes
+    if (providerKey === 'leopard' && integration.preferencesJson) {
+      const prefs = parseLeopardPreferences(integration.preferencesJson)
+      if (prefs.transactionNote.enabled) {
+        effectiveTransactionNotes = buildLeopardSpecialInstructions(
+          transactionNotes,
+          order.items.map((i) => ({
+            productTitle: i.orgVariant.product.title,
+            sku: i.orgVariant.sku,
+            attributeValues: i.orgVariant.attributeValues ?? null,
+            quantity: i.quantity,
+          })),
+          prefs.transactionNote,
+        )
+      }
+    }
 
     if (!deliveryCity) {
       const reason = 'Delivery city is required.'
@@ -319,7 +346,7 @@ export async function bookOrderWithCourier(
       pickupAddressCode,
       orderType,
       quantity: order.items.reduce((sum, i) => sum + i.quantity, 0),
-      transactionNotes,
+      transactionNotes: effectiveTransactionNotes,
     }
 
     // ── Call the courier adapter ──
@@ -644,79 +671,81 @@ export async function maybeAutoBookOrder(
   }
 }
 
-export interface BookExchangeShipmentOptions {
-  shipmentId: string
-  companyIntegrationId: string
-  customerName?: string
-  customerPhone?: string
-  deliveryAddress?: string
-  deliveryCity?: string
-  codAmount?: number
-  orderType?: string
-  transactionNotes?: string
-  itemDescription?: string
-  orderRefNumber?: string
-  pickupAddressCode?: string
-}
-
 /**
- * Book an exchange shipment with the selected courier.
+ * Book an exchange shipment with courier
  */
 export async function bookExchangeShipmentWithCourier(
-  options: BookExchangeShipmentOptions,
+  options: BookOrderOptions & { shipmentId: string }
 ): Promise<ActionResult<BookOrderResult>> {
-  const { shipmentId, companyIntegrationId } = options
-  if (!shipmentId || !companyIntegrationId) {
-    return { success: false, error: 'shipmentId and companyIntegrationId are required' }
-  }
-
   try {
     const ctx = await getWorkspace()
+    const shipment = await db.exchangeShipment.findFirst({
+      where: {
+        id: options.shipmentId,
+        orderExchange: { companyId: ctx.company.id },
+      },
+      include: {
+        orderExchange: {
+          include: {
+            order: {
+              include: {
+                customer: true,
+                shippingAddress: true,
+              },
+            },
+          },
+        },
+        newOrgVariant: {
+          include: {
+            product: true,
+          },
+        },
+        shippingAddress: true,
+      },
+    })
+
+    if (!shipment) {
+      return { success: false, error: 'Exchange shipment not found.' }
+    }
+
     const integration = await db.companyIntegration.findFirst({
-      where: { id: companyIntegrationId, companyId: ctx.company.id, isActive: true },
+      where: {
+        id: options.companyIntegrationId,
+        companyId: ctx.company.id,
+        isActive: true,
+      },
       include: { provider: true },
     })
+
     if (!integration) {
       return { success: false, error: 'Courier integration not found or inactive.' }
     }
 
     const providerKey = integration.provider.providerKey
-    const shipment = await db.exchangeShipment.findFirst({
-      where: { id: shipmentId, companyId: ctx.company.id },
-      include: {
-        customer: {
-          select: {
-            id: true,
-            name: true,
-            phones: { select: { id: true, phoneRaw: true, isPrimary: true }, orderBy: { isPrimary: 'desc' } },
-          },
-        },
-        shippingAddress: { select: { address: true, city: true, country: true } },
-        shippingPhone: { select: { phoneRaw: true } },
-        newOrgVariant: {
-          select: { id: true, sku: true, weightKg: true, product: { select: { title: true } } },
-        },
-        orderExchange: {
-          select: { id: true, exchangeMethod: true, originalOrder: { select: { flowopsOrderNumber: true } } },
-        },
-      },
-    })
-    if (!shipment) {
-      return { success: false, error: 'Exchange shipment not found.' }
-    }
 
-    const customerName = options.customerName?.trim() || shipment.customer?.name || 'Customer'
+    const customerName =
+      options.customerName?.trim() ||
+      shipment.shippingAddress?.name ||
+      shipment.orderExchange.order.customer?.name ||
+      'Customer'
     const customerPhone =
       options.customerPhone?.trim() ||
-      shipment.shippingPhone?.phoneRaw ||
-      shipment.customer?.phones.find((p) => p.isPrimary)?.phoneRaw ||
-      shipment.customer?.phones[0]?.phoneRaw || ''
-    const deliveryAddress = options.deliveryAddress?.trim() || shipment.shippingAddress?.address || ''
-    const deliveryCity = options.deliveryCity?.trim() || shipment.shippingAddress?.city || shipment.shippingCityOverride || ''
-    const codAmount = options.codAmount ?? Number(shipment.invoiceAmount)
+      shipment.shippingAddress?.phone ||
+      shipment.orderExchange.order.customer?.phone ||
+      ''
+    const deliveryAddress =
+      options.deliveryAddress?.trim() ||
+      shipment.shippingAddress?.address1 ||
+      shipment.orderExchange.order.shippingAddress?.address1 ||
+      ''
+    const deliveryCity =
+      options.deliveryCity?.trim() ||
+      shipment.shippingAddress?.city ||
+      shipment.orderExchange.order.shippingAddress?.city ||
+      ''
+    const codAmount = options.codAmount !== undefined ? options.codAmount : Number(shipment.codAmount || 0)
     const orderRefNumber =
       options.orderRefNumber?.trim() ||
-      (shipment.orderRefNumber && shipment.orderRefNumber.trim()) ||
       shipment.exchangeShipmentNumber
     const itemDescription =
       options.itemDescription?.trim() ||

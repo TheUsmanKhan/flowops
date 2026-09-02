@@ -9,7 +9,7 @@ import { PageHeader } from '@/components/layout/dashboard-shell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -28,6 +28,7 @@ import {
   MapPin,
   Truck,
   Settings,
+  Hash,
 } from 'lucide-react'
 import { getErrorMessage } from './_shared'
 
@@ -45,6 +46,7 @@ interface OrderSettings {
   courierBookingMode: string
   defaultCourierCompanyIntegrationId: string | null
   deductDeliveryChargeFromRefund?: boolean
+  orderNumberPrefix?: string | null
   updatedAt: string
 }
 
@@ -99,6 +101,7 @@ export function OrderWorkflowSettingsView() {
   const [courierBookingMode, setCourierBookingMode] = useState<'automatic' | 'semi_manual'>('semi_manual')
   const [defaultCourierIntegrationId, setDefaultCourierIntegrationId] = useState('')
   const [deductDeliveryFromRefund, setDeductDeliveryFromRefund] = useState(false)
+  const [orderNumberPrefix, setOrderNumberPrefix] = useState('')
   const [hydrated, setHydrated] = useState(false)
 
   // Hydrate local form state from the fetched settings
@@ -112,6 +115,7 @@ export function OrderWorkflowSettingsView() {
       setCourierBookingMode((s.courierBookingMode as 'automatic' | 'semi_manual') ?? 'semi_manual')
       setDefaultCourierIntegrationId(s.defaultCourierCompanyIntegrationId ?? '')
       setDeductDeliveryFromRefund(s.deductDeliveryChargeFromRefund ?? false)
+      setOrderNumberPrefix(s.orderNumberPrefix ?? '')
       setHydrated(true)
     }
   }, [settingsQuery.data, hydrated])
@@ -136,6 +140,7 @@ export function OrderWorkflowSettingsView() {
         courier_booking_mode: courierBookingMode,
         default_courier_company_integration_id: defaultCourierIntegrationId,
         deduct_delivery_charge_from_refund: deductDeliveryFromRefund,
+        order_number_prefix: orderNumberPrefix.trim(),
       }),
     onSuccess: () => {
       toast.success('Order workflow settings saved.')
@@ -503,6 +508,40 @@ export function OrderWorkflowSettingsView() {
                 onCheckedChange={setDeductDeliveryFromRefund}
                 disabled={mutation.isPending || !isElevated}
               />
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* ── Order Number Prefix ── Prevents mixups when multiple companies
+            share the same courier account (same api_key). */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Hash className="h-4 w-4" /> Order Number Prefix
+            </CardTitle>
+            <CardDescription>
+              Optional prefix to make order numbers unique across companies
+              sharing the same courier account.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="space-y-1.5">
+              <Label>Prefix</Label>
+              <Input
+                placeholder="e.g. SFS, MZ, KHI"
+                value={orderNumberPrefix}
+                onChange={(e) => setOrderNumberPrefix(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))}
+                disabled={mutation.isPending || !isElevated}
+                maxLength={10}
+              />
+              <p className="text-xs text-muted-foreground">
+                When set, new order numbers become{' '}
+                <code className="bg-muted px-1 rounded">
+                  ORD-{orderNumberPrefix || 'PREFIX'}-2026-00001
+                </code>{' '}
+                instead of <code className="bg-muted px-1 rounded">ORD-2026-00001</code>.
+                Leave empty for the default format.
+              </p>
             </div>
           </CardContent>
         </Card>

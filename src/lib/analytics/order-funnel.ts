@@ -119,9 +119,18 @@ export async function computeOrderFunnelStats(
   // Revenue = sum of totalOrderValue for delivered + dispatched orders
   // (same convention as updateCustomerStats — reflects real revenue, excludes
   // pending/confirmed/cancelled orders)
-  const revenueGenerated = orders
+  // Phase F1: use the shared currency-aware revenue function.
+  const revenueOrders = orders
     .filter((o) => o.status === 'delivered' || o.status === 'dispatched')
-    .reduce((sum, o) => sum + Number(o.totalOrderValue), 0)
+    .map((o) => ({ totalOrderValue: Number(o.totalOrderValue), deliveryCountry: o.deliveryCountry }))
+
+  const { computeRevenueWithCurrencies } = await import('@/lib/analytics/revenue')
+  const revenueResult = await computeRevenueWithCurrencies(
+    filter.companyId,
+    revenueOrders,
+    filter.baseCurrency || 'PKR',
+  )
+  const revenueGenerated = revenueResult.estimatedTotalBase ?? 0
 
   // Rates — guarded against division by zero (return 0, not NaN)
   const cancellationRate = totalOrders > 0 ? cancelledCount / totalOrders : 0

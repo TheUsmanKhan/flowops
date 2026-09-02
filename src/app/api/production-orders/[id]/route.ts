@@ -139,6 +139,85 @@ export async function PATCH(
       data: updateData,
     })
 
+    // ── Automation: when production order is marked "completed", add the
+    //    produced stock to inventory AND reserve it for the linked order item.
+    //    This closes the MTO cycle: production completes → stock exists →
+    //    order can be dispatched (performOrderDispatch will decrement onHand
+    //    and release reserved). Without this, dispatch would fail because no
+    //    inventory pool entry exists for the freshly-produced items.
+    if (body.status === 'completed' && oldValues.status !== 'completed' && order.orderItemId) {
+      try {
+        const { processInventoryTransaction } = await import('@/lib/inventory')
+
+        // Fetch the linked order item + order to get the dispatch location
+        const orderItem = await db.orderItem.findUnique({
+          where: { id: order.orderItemId },
+          include: {
+            order: { select: { id: true, dispatchLocationId: true, organizationId: true, companyId: true } },
+            orgVariant: { select: { id: true, sku: true } },
+          },
+        })
+
+        if (orderItem && orderItem.order.dispatchLocationId) {
+          const locationId = orderItem.order.dispatchLocationId
+          const orgVariantId = orderItem.orgVariantId
+          const organizationId = orderItem.order.organizationId
+          const companyId = orderItem.order.companyId
+          const quantity = orderItem.quantity
+
+          // Step 1: Add the produced stock to inventory (opening_stock increments onHand)
+          const addResult = await processInventoryTransaction({
+            orgVariantId,
+            locationId,
+            organizationId,
+            companyId,
+            employeeId: caller.id,
+            transactionType: 'opening_stock',
+            quantity,
+            referenceType: 'production_order',
+            referenceId: id,
+            notes: `Stock added from completed production order ${id}`,
+          })
+
+          if (addResult.success) {
+            // Step 2: Reserve the stock for the order (order_reserved increments reserved)
+            const reserveResult = await processInventoryTransaction({
+              orgVariantId,
+              locationId,
+              organizationId,
+              companyId,
+              employeeId: caller.id,
+              transactionType: 'order_reserved',
+              quantity,
+              referenceType: 'order',
+              referenceId: orderItem.order.id,
+              notes: `Reserved for order after production completion`,
+            })
+
+            if (reserveResult.success) {
+              // Step 3: Set reservedLocationId on the order item (if not already set)
+              // so performOrderDispatch knows where to dispatch from
+              if (!orderItem.reservedLocationId) {
+                await db.orderItem.update({
+                  where: { id: orderItem.id },
+                  data: { reservedLocationId: locationId },
+                })
+              }
+              console.log(`[production-orders] Auto-stocked + reserved ${quantity} units of ${orderItem.orgVariant.sku} for order ${orderItem.order.id} after production completion`)
+            } else {
+              console.error(`[production-orders] Failed to reserve stock after production completion: ${reserveResult.error}`)
+            }
+          } else {
+            console.error(`[production-orders] Failed to add stock after production completion: ${addResult.error}`)
+          }
+        }
+      } catch (automationErr) {
+        // Non-fatal — the production order status was already updated.
+        // Log the error so it can be investigated, but don't fail the PATCH.
+        console.error(`[production-orders] Post-completion automation failed:`, automationErr instanceof Error ? automationErr.message : automationErr)
+      }
+    }
+
     insertAuditLog({
       action: 'production_order.updated',
       entityType: 'production_order',

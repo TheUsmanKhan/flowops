@@ -1,6 +1,12 @@
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import {
+  ApiError,
+  handleError,
+  readBody,
+  getWorkspace,
+  requirePermission,
+} from '@/lib/workspace'
 import { updateCompanySchema } from '@/lib/validations/company'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -12,14 +18,13 @@ export const dynamic = 'force-dynamic'
 /** Fetch the active company's full profile. */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({
-      where: { userId: user.id },
-      include: { activeCompany: true },
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.SETTINGS_COMPANY_VIEW)
+
+    const company = await db.company.findUnique({
+      where: { id: ctx.company.id },
     })
-    const company = settings?.activeCompany
-    if (!company) throw new ApiError(403, 'No active company')
+    if (!company) throw new ApiError(404, 'Company not found')
 
     const org = await db.organization.findUnique({
       where: { id: company.organizationId },

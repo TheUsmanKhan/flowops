@@ -1,6 +1,12 @@
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import {
+  ApiError,
+  handleError,
+  readBody,
+  getWorkspace,
+  requirePermission,
+} from '@/lib/workspace'
 import { createRoleSchema } from '@/lib/validations/invitation'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -11,14 +17,11 @@ export const dynamic = 'force-dynamic'
 /** List all roles in the active company with their permission keys. */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.SETTINGS_ROLES_MANAGE)
 
     const roles = await db.role.findMany({
-      where: { companyId },
+      where: { companyId: ctx.company.id },
       include: {
         rolePermissions: { select: { permissionKey: true } },
         _count: { select: { employees: { where: { status: 'active' } } } },

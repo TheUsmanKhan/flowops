@@ -1,6 +1,12 @@
 import { db } from '@/lib/db'
-import { ApiError, handleError } from '@/lib/workspace'
-import { getWorkspace } from '@/lib/workspace'
+import {
+  ApiError,
+  handleError,
+  getWorkspace,
+  requirePermission,
+  getOrdersDataScope,
+} from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -16,10 +22,20 @@ export async function GET(
 ) {
   try {
     const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_VIEW)
     const { id } = await params
 
+    // Phase 2: Order ownership scoping — employees with role.ordersDataScope='own'
+    // can only fetch orders they created (salesEmployeeId === ctx.employee.id).
+    // Elevated roles + roles with ordersDataScope='all' see every company order.
+    const ownScope = getOrdersDataScope(ctx) === 'own'
+
     const order = await db.order.findFirst({
-      where: { id, companyId: ctx.company.id },
+      where: {
+        id,
+        companyId: ctx.company.id,
+        ...(ownScope ? { salesEmployeeId: ctx.employee.id } : {}),
+      },
       include: {
         customer: {
           select: {
@@ -111,6 +127,8 @@ export async function GET(
         // Self-fulfilled channel (Phase B1)
         fulfillmentChannel: order.fulfillmentChannel,
         selfFulfilledReferenceNumber: order.selfFulfilledReferenceNumber,
+        // Phase D3: market resolution issue (external orders)
+        marketResolutionIssue: order.marketResolutionIssue,
         courierName: order.courierName,
         trackingNumber: order.trackingNumber,
         courierCompanyIntegrationId: order.courierCompanyIntegrationId,

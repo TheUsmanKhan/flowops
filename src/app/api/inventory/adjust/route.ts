@@ -70,14 +70,14 @@ export async function POST(req: Request) {
     // withIdempotency() (prevents duplicate adjustment submissions).
     const adjustStock = async () => {
       if (isPositive) {
-        // Adding stock — use cycle_count_adjust (sets on_hand)
+        // Adding stock — use manual_adjustment_in (increments on_hand)
         const txnResult = await processInventoryTransaction({
           orgVariantId: d.org_variant_id,
           locationId: d.location_id,
           organizationId: orgId,
           companyId: company.id,
           employeeId: caller.id,
-          transactionType: 'cycle_count_adjust',
+          transactionType: 'manual_adjustment_in',
           quantity: absQty,
           referenceType: 'manual',
           notes: `Manual adjustment: ${d.reason}. ${d.notes || ''}`,

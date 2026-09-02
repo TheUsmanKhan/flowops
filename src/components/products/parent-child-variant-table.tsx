@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, FetchError } from '@/lib/api-client'
 import { useCan } from '@/stores/app-store'
 import { PERMISSIONS } from '@/lib/permissions'
@@ -38,7 +38,6 @@ import {
   AlertCircle,
   Check,
   Pencil,
-  Star,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { ParentGroupInputs } from '@/components/products/variant-table-parts'
@@ -390,7 +389,7 @@ function GroupCard({
       // Cascade sale + compare to their respective synced children
       const saleRes = await api.post<{ success: boolean; updated_count: number }>(
         `/api/products/${productId}/variant-groups/dummy/sale-price`,
-        { sale_price: sale, compare_price: compare, parent_attribute_name: parentAttributeName, parent_value: group.parentValue },
+        { sale_price: sale, compare_price: compare, parent_attribute_name: parentAttributeName, parent_value: group.parentValue, },
       )
       saleCount = saleRes.updated_count
 
@@ -576,7 +575,7 @@ function ChildRow({
     if (isNaN(newSale) || newSale < 0) return
     setSaving(true)
     try {
-      await api.post(`/api/products/${productId}/variants/${child.variantId}/override-price`, { sale_price: newSale, compare_price: newCompare })
+      await api.post(`/api/products/${productId}/variants/${child.variantId}/override-price`, { sale_price: newSale, compare_price: newCompare, })
       toast.success('Price overridden — no longer synced with parent')
       queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
       queryClient.invalidateQueries({ queryKey: ['product', productId] })
@@ -602,7 +601,7 @@ function ChildRow({
   async function resyncPrice(field: 'sale_price' | 'compare_price') {
     setSaving(true)
     try {
-      await api.post(`/api/products/${productId}/variants/${child.variantId}/resync-price`, { field })
+      await api.post(`/api/products/${productId}/variants/${child.variantId}/resync-price`, { field, })
       toast.success(`Re-synced ${field === 'sale_price' ? 'sale price' : 'compare price'} with parent`)
       queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
       queryClient.invalidateQueries({ queryKey: ['product', productId] })
@@ -988,7 +987,7 @@ function FlatRow({
     const newSale = Number(saleValue)
     if (isNaN(newSale) || newSale < 0) return
     try {
-      await api.post(`/api/products/${productId}/variants/${child.variantId}/override-price`, { sale_price: newSale, compare_price: compareValue ? Number(compareValue) : null })
+      await api.post(`/api/products/${productId}/variants/${child.variantId}/override-price`, { sale_price: newSale, compare_price: compareValue ? Number(compareValue) : null, })
       toast.success('Price updated')
       queryClient.invalidateQueries({ queryKey: ['variant-groups', productId] })
     } catch (err) { toast.error(err instanceof FetchError ? err.message : 'Failed') }

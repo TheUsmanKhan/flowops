@@ -64,6 +64,7 @@ interface SessionRow {
   role_name: string
   role_tier: string
   role_system_role_key: string | null
+  role_orders_data_scope: string | null
   // RolePermission (one row per permission — grouped in JS)
   permission_key: string | null
 }
@@ -116,6 +117,7 @@ export async function buildSessionPayload(
       r.name            AS role_name,
       r."roleTier"      AS role_tier,
       r."systemRoleKey" AS role_system_role_key,
+      r."ordersDataScope" AS role_orders_data_scope,
 
       rp."permissionKey" AS permission_key
     FROM "Profile" p
@@ -186,6 +188,7 @@ export async function buildSessionPayload(
           name: row.role_name,
           roleTier: row.role_tier,
           systemRoleKey: row.role_system_role_key,
+          ordersDataScope: (row.role_orders_data_scope as 'own' | 'all') ?? 'all',
           permissions: [],
         },
       })
@@ -232,6 +235,7 @@ export async function buildSessionPayload(
         systemRoleKey: activeEmployee.role.systemRoleKey,
         permissions: activeEmployee.role.permissions,
         isElevated: activeEmployee.role.roleTier === 'elevated',
+        ordersDataScope: activeEmployee.role.ordersDataScope,
       }
     : null
 

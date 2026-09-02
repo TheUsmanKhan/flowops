@@ -9,7 +9,8 @@ import { NextRequest } from 'next/server'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** Set sale/compare price for an entire parent group (cascades to synced children only). */
+/** Set sale/compare price for an entire parent group (cascades to synced children only).
+ *  Uses CompanyVariantPricing (per-company pricing) — no market scoping. */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; parentValueId: string }> },
@@ -66,23 +67,24 @@ export async function POST(
       return Response.json({ success: true, updated_count: 0 })
     }
 
-    // Fetch existing pricing rows that are synced (for this company).
+    // Fetch existing CompanyVariantPricing rows that are synced (for this company).
     // Preserves the exact cascade logic: only synced children are updated;
     // detached children (salePriceSyncedWithParent=false) stay independent.
     const syncedPricing = await db.companyVariantPricing.findMany({
       where: {
         companyId: company.id,
-        variantId: { in: targetVariantIds },
+        orgVariantId: { in: targetVariantIds },
         salePriceSyncedWithParent: true,
       },
     })
 
     // Also find variants in the group that have NO CompanyVariantPricing row yet
-    // (e.g. a newly-added variant). These get UPSERTed with the cascade values +
-    // synced=true so the cascade works even on fresh variants. Detached variants
-    // (existing rows with salePriceSyncedWithParent=false) are NOT touched —
-    // preserving the "detached children stay independent" rule.
-    const existingVariantIds = new Set(syncedPricing.map((p) => p.variantId))
+    // (e.g. a new company that hasn't set prices, or a newly-added variant).
+    // These get UPSERTed with the cascade values + synced=true so the cascade
+    // works even on fresh companies. Detached variants (existing rows with
+    // salePriceSyncedWithParent=false) are NOT touched — preserving the
+    // "detached children stay independent" rule.
+    const existingVariantIds = new Set(syncedPricing.map((p) => p.orgVariantId))
     const missingVariantIds = targetVariantIds.filter((vid) => !existingVariantIds.has(vid))
 
     let updatedCount = 0
@@ -100,7 +102,7 @@ export async function POST(
         data: missingVariantIds.map((vid) => ({
           companyId: company.id,
           organizationId: orgId,
-          variantId: vid,
+          orgVariantId: vid,
           salePrice: body.sale_price!,
           comparePrice: body.compare_price ?? null,
           salePriceSyncedWithParent: true,

@@ -111,6 +111,7 @@ export async function listCompanyIntegrations(category?: 'courier' | 'ecommerce'
 }>> {
   try {
     const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_VIEW)
 
     const integrations = await db.companyIntegration.findMany({
       where: {

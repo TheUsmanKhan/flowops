@@ -47,45 +47,128 @@ export async function register() {
     return
   }
 
-  const POLL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes (matches vercel.json schedule)
-  const INITIAL_DELAY_MS = 60 * 1000 // 1 minute after server start (let the server warm up)
+  const POSTEX_POLL_INTERVAL_MS = 30 * 60 * 1000 // 30 minutes
+  const LEOPARD_POLL_INTERVAL_MS = 60 * 60 * 1000 // 60 minutes
+  const INITIAL_DELAY_MS = 60 * 1000 // 1 minute after server start
 
   // Dynamic import to avoid loading the polling code during build.
-  const startPoller = async () => {
+  const startPollers = async () => {
+    // ── PostEx poller (every 30 min) ──
     try {
       const { pollPostExOrderStatuses } = await import('@/lib/actions/postex-status-poll.actions')
       console.log('[instrumentation] Starting PostEx status poller (every 30 min)')
 
-      // Run the first poll after a short delay (let the server finish booting).
       setTimeout(async () => {
         try {
           const result = await pollPostExOrderStatuses()
           if (result.success && result.data) {
-            console.log(`[poller] Initial poll: ${result.data.polledOrders} orders, ${result.data.polledShipments} shipments, ${result.data.statusChanges} changes, ${result.data.errors.length} errors`)
+            console.log(`[poller:postex] Initial poll: ${result.data.polledOrders} orders, ${result.data.polledShipments} shipments, ${result.data.statusChanges} changes, ${result.data.errors.length} errors`)
           }
         } catch (err) {
-          console.error('[poller] Initial poll failed:', err instanceof Error ? err.message : err)
+          console.error('[poller:postex] Initial poll failed:', err instanceof Error ? err.message : err)
         }
       }, INITIAL_DELAY_MS)
 
-      // Schedule recurring polls every 30 minutes.
       setInterval(async () => {
         try {
           const result = await pollPostExOrderStatuses()
           if (result.success && result.data) {
             const { polledOrders, polledShipments, statusChanges, errors } = result.data
             if (polledOrders > 0 || polledShipments > 0 || statusChanges > 0 || errors.length > 0) {
-              console.log(`[poller] Poll: ${polledOrders} orders, ${polledShipments} shipments, ${statusChanges} changes, ${errors.length} errors`)
+              console.log(`[poller:postex] Poll: ${polledOrders} orders, ${polledShipments} shipments, ${statusChanges} changes, ${errors.length} errors`)
             }
           }
         } catch (err) {
-          console.error('[poller] Poll failed:', err instanceof Error ? err.message : err)
+          console.error('[poller:postex] Poll failed:', err instanceof Error ? err.message : err)
         }
-      }, POLL_INTERVAL_MS)
+      }, POSTEX_POLL_INTERVAL_MS)
     } catch (err) {
       console.error('[instrumentation] Failed to start PostEx poller:', err instanceof Error ? err.message : err)
     }
+
+    // ── Leopard safety-net poller (every 60 min) ──
+    try {
+      const { pollLeopardOrderStatuses } = await import('@/lib/actions/leopard-webhook.actions')
+      console.log('[instrumentation] Starting Leopard safety-net poller (every 60 min)')
+
+      setTimeout(async () => {
+        try {
+          const result = await pollLeopardOrderStatuses()
+          if (result.success && result.data) {
+            console.log(`[poller:leopard] Initial poll: ${result.data.polledOrders} orders, ${result.data.polledShipments} shipments, ${result.data.statusChanges} changes, ${result.data.errors.length} errors`)
+          }
+        } catch (err) {
+          console.error('[poller:leopard] Initial poll failed:', err instanceof Error ? err.message : err)
+        }
+      }, INITIAL_DELAY_MS + 30 * 1000)
+
+      setInterval(async () => {
+        try {
+          const result = await pollLeopardOrderStatuses()
+          if (result.success && result.data) {
+            const { polledOrders, polledShipments, statusChanges, errors } = result.data
+            if (polledOrders > 0 || polledShipments > 0 || statusChanges > 0 || errors.length > 0) {
+              console.log(`[poller:leopard] Poll: ${polledOrders} orders, ${polledShipments} shipments, ${statusChanges} changes, ${errors.length} errors`)
+            }
+          }
+        } catch (err) {
+          console.error('[poller:leopard] Poll failed:', err instanceof Error ? err.message : err)
+        }
+      }, LEOPARD_POLL_INTERVAL_MS)
+    } catch (err) {
+      console.error('[instrumentation] Failed to start Leopard poller:', err instanceof Error ? err.message : err)
+    }
   }
 
-  startPoller()
+  startPollers()
+
+  // ── Phase F1: in-process exchange rate refresh (daily) ──
+  // Same pattern as the PostEx poller above: env flag + setInterval + dynamic
+  // import. Gated by ENABLE_IN_PROCESS_FX_REFRESH (default 'true').
+  const enableFxRefresh = process.env.ENABLE_IN_PROCESS_FX_REFRESH !== 'false'
+  if (enableFxRefresh) {
+    const FX_INTERVAL_MS = 24 * 60 * 60 * 1000 // 24 hours (matches vercel.json schedule)
+    const FX_INITIAL_DELAY_MS = 5 * 60 * 1000   // 5 min (let server warm up)
+
+    const startFxRefresh = async () => {
+      try {
+        console.log('[instrumentation] Starting exchange rate refresh (every 24h)')
+        setTimeout(async () => {
+          try {
+            const { syncExchangeRates, getActiveCurrencies } = await import('@/lib/exchange-rates')
+            const { db } = await import('@/lib/db')
+            const allMarkets = await db.market.findMany({ where: { isActive: true }, select: { currency: true }, distinct: ['currency'] })
+            const currencies = allMarkets.map((m: { currency: string }) => m.currency)
+            if (currencies.length > 0) {
+              const result = await syncExchangeRates(currencies)
+              console.log(`[fx-refresh] Stored ${result.stored} rate snapshots. Errors: ${result.errors.length}`)
+            }
+          } catch (err) {
+            console.error('[fx-refresh] Refresh failed:', err instanceof Error ? err.message : err)
+          }
+        }, FX_INITIAL_DELAY_MS)
+
+        setInterval(async () => {
+          try {
+            const { syncExchangeRates, getActiveCurrencies } = await import('@/lib/exchange-rates')
+            const { db } = await import('@/lib/db')
+            const allMarkets = await db.market.findMany({ where: { isActive: true }, select: { currency: true }, distinct: ['currency'] })
+            const currencies = allMarkets.map((m: { currency: string }) => m.currency)
+            if (currencies.length > 0) {
+              const result = await syncExchangeRates(currencies)
+              console.log(`[fx-refresh] Stored ${result.stored} rate snapshots. Errors: ${result.errors.length}`)
+            }
+          } catch (err) {
+            console.error('[fx-refresh] Refresh failed:', err instanceof Error ? err.message : err)
+          }
+        }, FX_INTERVAL_MS)
+      } catch (err) {
+        console.error('[instrumentation] Failed to start FX refresh:', err instanceof Error ? err.message : err)
+      }
+    }
+
+    startFxRefresh()
+  } else {
+    console.log('[instrumentation] FX refresh DISABLED (ENABLE_IN_PROCESS_FX_REFRESH=false)')
+  }
 }

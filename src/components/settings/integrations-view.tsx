@@ -51,6 +51,7 @@ import {
 import { cn } from '@/lib/utils'
 import { getErrorMessage } from '@/components/orders/_shared'
 import { PickupAddressesSection } from '@/components/couriers/pickup-addresses-section'
+import { LeopardPreferencesSection } from '@/components/settings/leopard-preferences-section'
 
 // ──────────────────────────────────────────────────────────────
 // Types
@@ -504,6 +505,11 @@ function IntegrationsSection({
                       companyIntegrationId={i.id}
                       providerKey={i.provider.providerKey}
                     />
+                  )}
+
+                  {/* Leopard-specific preferences (transaction note builder) */}
+                  {i.provider.providerKey === 'leopard' && (
+                    <LeopardPreferencesSection integrationId={i.id} />
                   )}
                 </CardContent>
               </Card>

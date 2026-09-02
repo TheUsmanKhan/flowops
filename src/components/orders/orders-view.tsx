@@ -564,9 +564,19 @@ export function OrdersView() {
     enabled: canView,
   })
 
-  // Phase F1: revenue is computed client-side from the loaded orders list
-  // (sum of non-cancelled totalOrderValue). All orders are aggregated in
-  // their raw totalOrderValue.
+  // Phase F1: currency-aware revenue (per-currency breakdown + estimated total)
+  const { data: revenueData } = useQuery<{
+    perCurrency: Record<string, number>
+    estimatedTotalBase: number | null
+    baseCurrency: string
+    estimateComplete: boolean
+  }>({
+    queryKey: ['orders-revenue-summary', statsQueryString],
+    queryFn: () => api.get(`/api/orders/revenue-summary${statsQueryString}`),
+    staleTime: 30_000,
+    enabled: canView,
+  })
+
   const statsOrders = statsData?.orders ?? []
 
   // ── Stat-card values (4 activity-based, 2 current-state) ─────────────────
@@ -574,8 +584,9 @@ export function OrdersView() {
     const list = statsOrders
     const total = list.length
 
-    // Revenue = sum of non-cancelled orders' totalOrderValue.
-    const revenue = list
+    // Phase F1: revenue now comes from the currency-aware API endpoint.
+    // Fallback to the old client-side reduce while the API loads.
+    const revenue = revenueData?.estimatedTotalBase ?? list
       .filter((o) => o.status !== 'cancelled')
       .reduce((sum, o) => sum + o.totalOrderValue, 0)
 
@@ -600,7 +611,7 @@ export function OrdersView() {
       pendingCurrent,
       backorderedCurrent,
     }
-  }, [statsOrders, orders])
+  }, [statsOrders, revenueData, orders])
 
   // ── Drill-down chart data (computed client-side from the stats query) ────
   const chartData = useMemo<ChartPoint[]>(() => {
@@ -757,13 +768,14 @@ export function OrdersView() {
         />
         <StatCard
           label="Revenue"
-          sublabel="Non-cancelled orders"
+          sublabel={revenueData && !revenueData.estimateComplete ? 'Estimated (some rates missing)' : revenueData ? 'Estimated (currency-converted)' : 'Non-cancelled orders'}
           value={statsLoading ? undefined : formatCompactPKR(stats.revenue)}
           icon={<Banknote className="h-5 w-5" />}
           tone="sky"
           loading={statsLoading}
           active={activeChart === 'revenue'}
           onClick={() => handleCardClick('revenue')}
+          title={revenueData ? Object.entries(revenueData.perCurrency).map(([ccy, amt]) => `${ccy}: ${formatPKR(amt)}`).join('\n') : undefined}
         />
         <StatCard
           label="RTO Rate"

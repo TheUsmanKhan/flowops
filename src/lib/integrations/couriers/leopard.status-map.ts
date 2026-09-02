@@ -34,6 +34,8 @@ export interface LeopardStatusMapping {
   triggerDelivered: boolean
   /** True if this status should trigger processOrderReturn() / performExchangeShipmentRto(). */
   triggerRto: boolean
+  /** True if this status should trigger order cancellation (unreserve stock, mark cancelled). */
+  triggerCancel: boolean
   /** True if this status requires shipper advice (e.g. "Attempted", "Ready for Return"). */
   needsShipperAdvice: boolean
   /** True if the status string was not recognized — log a warning. */
@@ -71,6 +73,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: false,
         unrecognized: false,
       }
@@ -82,6 +85,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: true,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: false,
         unrecognized: false,
       }
@@ -93,6 +97,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: true,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: false,
         unrecognized: false,
       }
@@ -104,6 +109,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: false,
         unrecognized: false,
       }
@@ -115,6 +121,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: false,
         unrecognized: false,
       }
@@ -126,6 +133,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: true,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: false,
         unrecognized: false,
       }
@@ -138,6 +146,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: true,
         unrecognized: false,
       }
@@ -149,6 +158,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: false,
         unrecognized: false,
       }
@@ -161,6 +171,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: true,
         unrecognized: false,
       }
@@ -172,6 +183,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: true,
         unrecognized: false,
       }
@@ -187,6 +199,22 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: true,
+        triggerCancel: false,
+        needsShipperAdvice: false,
+        unrecognized: false,
+      }
+
+    case 'CANCELLED': // Cancelled (via dashboard or cancelBookedPackets API)
+      // Terminal cancellation — NOT an RTO. The order was cancelled before
+      // pickup, so stock is unreserved (not restocked) and the order is marked
+      // 'cancelled'. This is distinct from RW/DW/RS/DR which are returns.
+      return {
+        orderStatus: 'cancelled',
+        courierSubStatus: 'cancelled',
+        triggerDispatch: false,
+        triggerDelivered: false,
+        triggerRto: false,
+        triggerCancel: true,
         needsShipperAdvice: false,
         unrecognized: false,
       }
@@ -200,6 +228,7 @@ export function mapLeopardStatus(leopardStatus: string): LeopardStatusMapping {
         triggerDispatch: false,
         triggerDelivered: false,
         triggerRto: false,
+        triggerCancel: false,
         needsShipperAdvice: false,
         unrecognized: true,
       }
@@ -267,9 +296,9 @@ export function normalizeLeopardStatusString(statusString: string): string {
   if (lower.includes('returned') || lower.includes('rto') || lower.includes('return received')) {
     return 'RW'
   }
-  // Cancelled
+  // Cancelled (via dashboard or cancelBookedPackets API) — NOT an RTO
   if (lower.includes('cancel') || lower.includes('reject')) {
-    return 'RW' // treat as RTO
+    return 'CANCELLED'
   }
 
   // Unrecognized — return the original string so mapLeopardStatus flags it

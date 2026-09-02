@@ -10,7 +10,8 @@ import { NextRequest } from 'next/server'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** Re-sync a child's sale/compare price with its parent group. */
+/** Re-sync a child's sale/compare price with its parent group.
+ *  Uses CompanyVariantPricing (per-company pricing) — no market scoping. */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; variantId: string }> },
@@ -67,7 +68,11 @@ export async function POST(
     // Find a synced sibling's pricing (for this company)
     const siblings = await db.orgProductVariant.findMany({
       where: { productId, id: { not: variantId } },
-      select: { id: true, attributeValues: true, companyPricing: { where: { companyId: company.id } } },
+      select: {
+        id: true,
+        attributeValues: true,
+        companyPricing: { where: { companyId: company.id } },
+      },
     })
 
     const syncedSibling = siblings.find((s) => {

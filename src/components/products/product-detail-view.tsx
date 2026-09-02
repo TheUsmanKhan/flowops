@@ -372,10 +372,10 @@ export function ProductDetailView({ productId }: { productId: string }) {
           <InventoryTab productId={productId} variants={product.variants} isStitchable={product.isStitchable} />
         </TabsContent>
 
-        {/* Pricing (parent-child grouped pricing table) */}
+        {/* Pricing (per-company sale price via CompanyVariantPricing) */}
         {product.subscription && (
           <TabsContent value="pricing">
-            <PricingTab productId={productId} />
+            <ParentChildVariantTable productId={productId} mode="pricing" />
           </TabsContent>
         )}
       </Tabs>
@@ -472,19 +472,6 @@ function PromoteDialog({
           </div>
         </CardContent>
       </Card>
-    </div>
-  )
-}
-
-// ----------------------------------------------------------------------------
-// PricingTab — pricing tab.
-// Renders the ParentChildVariantTable in pricing mode. CompanyVariantPricing
-// is the single source of truth for per-variant sale/compare prices.
-// ----------------------------------------------------------------------------
-function PricingTab({ productId }: { productId: string }) {
-  return (
-    <div className="space-y-3">
-      <ParentChildVariantTable productId={productId} mode="pricing" />
     </div>
   )
 }

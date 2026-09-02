@@ -9,7 +9,8 @@ import { NextRequest } from 'next/server'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** Override a single child's sale/compare price (marks as not synced). */
+/** Override a single child's sale/compare price (marks as not synced).
+ *  Uses CompanyVariantPricing (per-company pricing) — no market scoping. */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; variantId: string }> },
@@ -40,9 +41,10 @@ export async function POST(
 
     const body = await readBody<{ sale_price?: number; compare_price?: number | null }>(req)
 
-    // UPSERT: if a CompanyVariantPricing row exists for this (company, variant),
-    // update it and detach (set synced=false). If no row exists yet (e.g. a new
-    // variant), create one with the override values + synced=false.
+    // UPSERT: if a CompanyVariantPricing row exists for (company, variant), update it
+    // and detach (set synced=false). If no row exists yet (e.g. a new variant or a
+    // company that hasn't set a price yet), create one with the override values +
+    // synced=false.
     const updateData: Record<string, unknown> = {}
     if (body.sale_price !== undefined) {
       updateData.salePrice = body.sale_price

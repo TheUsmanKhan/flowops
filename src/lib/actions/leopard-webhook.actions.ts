@@ -236,6 +236,80 @@ export async function processLeopardWebhookUpdates(
         }
       }
 
+      // triggerCancel: CANCELLED (via Leopard dashboard or cancelBookedPackets API)
+      // Distinct from RTO — this is a pre-pickup cancellation, so stock is
+      // UNRESERVED (not restocked). The order is marked 'cancelled', not 'rto'.
+      if (mapping.triggerCancel) {
+        try {
+          if (entityType === 'order') {
+            // Unreserve stock for reserved items
+            const reservedItems = await db.orderItem.findMany({
+              where: { orderId: entityId, fulfillmentStatus: 'reserved' },
+              select: { id: true, orgVariantId: true, quantity: true, reservedLocationId: true },
+            })
+            const orderForDispatch = await db.order.findUnique({
+              where: { id: entityId },
+              select: { dispatchLocationId: true },
+            })
+            const { unreserveStockForOrder } = await import('@/lib/inventory')
+            for (const item of reservedItems) {
+              const locationId = item.reservedLocationId ?? orderForDispatch?.dispatchLocationId
+              if (!locationId) continue
+              await unreserveStockForOrder({
+                orgVariantId: item.orgVariantId,
+                locationId,
+                organizationId,
+                companyId,
+                employeeId: '',
+                quantity: item.quantity,
+                orderId: entityId,
+              }).catch((e: unknown) => {
+                errors.push(`Unreserve failed for item ${item.id}: ${e instanceof Error ? e.message : String(e)}`)
+              })
+            }
+            // Mark order as cancelled
+            await db.order.update({
+              where: { id: entityId },
+              data: {
+                status: 'cancelled',
+                cancelledAt: now,
+                cancellationReason: `Leopard courier cancelled (${update.reason ?? rawStatus})`,
+                courierBookingStatus: 'cancelled',
+              },
+            })
+            // Audit log
+            insertAuditLog({
+              action: 'order.cancelled',
+              entityType: 'order',
+              entityId,
+              companyId,
+              organizationId,
+              newValues: {
+                reason: `Leopard courier cancelled (${update.reason ?? rawStatus})`,
+                trackingNumber,
+                source: 'leopard_webhook_or_poll',
+              },
+            })
+            // Update customer stats
+            const { updateCustomerStats } = await import('./customer.actions')
+            const orderForCustomer = await db.order.findUnique({
+              where: { id: entityId },
+              select: { customerId: true },
+            })
+            if (orderForCustomer?.customerId) {
+              updateCustomerStats(orderForCustomer.customerId).catch(() => {})
+            }
+          } else {
+            await db.exchangeShipment.update({
+              where: { id: entityId },
+              data: { status: 'cancelled', courierBookingStatus: 'cancelled' },
+            })
+          }
+        } catch (e) {
+          errors.push(`Cancel transition failed for ${entityType} ${entityId}: ${e instanceof Error ? e.message : String(e)}`)
+        }
+      }
+
       // ── Update courierSubStatus + flags + lastPolledAt ──
       if (entityType === 'order') {
         await db.order.update({
@@ -339,7 +413,7 @@ export async function pollLeopardOrderStatuses(): Promise<ActionResult<{
 
     // 12-hour staleness threshold — deliberately targets only records that
     // haven't been updated via webhook recently
-    const STALE_THRESHOLD_MS = 12 * 60 * 60 * 1000
+    const STALE_THRESHOLD_MS = 1 * 60 * 60 * 1000
     const staleThreshold = new Date(Date.now() - STALE_THRESHOLD_MS)
 
     for (const integration of leopardIntegrations) {

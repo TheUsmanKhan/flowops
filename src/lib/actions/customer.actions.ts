@@ -1287,16 +1287,46 @@ export async function updateCustomerStats(customerId: string): Promise<ActionRes
     //                        these cached values (no separate cached columns)
     const orders = await db.order.findMany({
       where: { customerId, status: { not: 'cancelled' } },
-      select: { totalOrderValue: true, status: true },
+      select: { totalOrderValue: true, status: true, deliveryCountry: true },
     })
 
     const totalOrdersCount = orders.length
     // total_order_value = sum of delivered + dispatched orders' total_order_value
     // (orders that have actually shipped — reflects real revenue, excludes
     // pending/confirmed orders that may still be cancelled)
-    const totalOrderValue = orders
+    // Phase F1: use the shared currency-aware revenue function.
+    const revenueOrders = orders
       .filter((o) => o.status === 'delivered' || o.status === 'dispatched')
-      .reduce((sum, o) => sum + Number(o.totalOrderValue), 0)
+      .map((o) => ({ totalOrderValue: Number(o.totalOrderValue), deliveryCountry: o.deliveryCountry }))
+
+    // Fetch the customer's companyId for revenue resolution
+    const customerRow = await db.customer.findUnique({
+      where: { id: customerId },
+      select: { organizationId: true },
+    })
+    // Find a company in this org that has this customer's orders
+    const firstOrder = await db.order.findFirst({
+      where: { customerId },
+      select: { companyId: true },
+    })
+    const companyForRevenue = firstOrder?.companyId
+    const companyForBaseCurrency = companyForRevenue
+      ? await db.company.findUnique({ where: { id: companyForRevenue }, select: { baseCurrency: true } })
+      : null
+
+    let totalOrderValue: number
+    if (companyForRevenue && companyForBaseCurrency) {
+      const { computeRevenueWithCurrencies } = await import('@/lib/analytics/revenue')
+      const revenueResult = await computeRevenueWithCurrencies(
+        companyForRevenue,
+        revenueOrders,
+        companyForBaseCurrency.baseCurrency,
+      )
+      totalOrderValue = revenueResult.estimatedTotalBase ?? 0
+    } else {
+      // Fallback: no company found (shouldn't happen — all orders belong to a company)
+      totalOrderValue = revenueOrders.reduce((sum, o) => sum + o.totalOrderValue, 0)
+    }
 
     const totalRtoCount = orders.filter((o) => o.status === 'rto').length
 
@@ -1480,6 +1510,7 @@ export async function listCustomers(filters: {
 } = {}): Promise<ActionResult<{ customers: CustomerSummaryDTO[]; total: number }>> {
   try {
     const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_VIEW)
     const limit = Math.min(filters.limit ?? 50, 100)
     const offset = filters.offset ?? 0
 

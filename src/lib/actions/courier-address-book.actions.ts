@@ -292,6 +292,125 @@ export async function fetchExistingPickupAddresses(
 }
 
 // ──────────────────────────────────────────────────────────────
+// importPickupAddressById — import a single shipper by shipment_id
+// (Leopard-specific: calls getShipperDetails with a specific shipment_id)
+// ──────────────────────────────────────────────────────────────
+
+export async function importPickupAddressById(
+  companyIntegrationId: string,
+  shipmentId: string,
+): Promise<ActionResult<{
+  addressId: string
+  providerAddressCode: string
+  label: string
+}>> {
+  try {
+    const ctx = await getWorkspace()
+    if (!isElevated(ctx)) {
+      return { success: false, error: 'Only elevated roles can import addresses.' }
+    }
+    const integration = await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+    const providerKey = integration.provider.providerKey
+
+    if (providerKey !== 'leopard') {
+      return { success: false, error: 'Import by ID is only supported for Leopard Courier.' }
+    }
+
+    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+    const adapter = getCourierAdapter(providerKey, credentials)
+
+    if (!adapter.fetchExistingPickupAddresses) {
+      return { success: false, error: 'Provider does not support fetching addresses.' }
+    }
+
+    // Fetch ALL shippers, then filter by shipment_id
+    // (Leopard's getShipperDetails doesn't support filtering by a single ID
+    // via the API — it returns all. We filter client-side.)
+    const allAddresses = await executeLoggedIntegrationAction<Array<{
+      providerAddressCode: string
+      label?: string
+      address: string
+      cityName: string
+      contactPersonName: string
+      phone1: string
+      phone2?: string
+    }>>({
+      companyIntegrationId,
+      organizationId: integration.organizationId,
+      actionType: 'fetch_existing_pickup_addresses',
+      direction: 'outbound',
+      fn: async () => adapter.fetchExistingPickupAddresses!(),
+    })
+
+    const found = allAddresses.find((a) => a.providerAddressCode === shipmentId)
+    if (!found) {
+      return { success: false, error: `No shipper found with shipment_id "${shipmentId}".` }
+    }
+
+    // Check if this address already exists
+    const existing = await db.courierPickupAddress.findFirst({
+      where: { companyIntegrationId, providerAddressCode: found.providerAddressCode },
+    })
+    if (existing) {
+      return {
+        success: false,
+        error: `A shipper with shipment_id "${shipmentId}" already exists in your address book.`,
+      }
+    }
+
+    // Resolve city name from courier_operational_cities (Leopard returns city_id, not name)
+    let cityName = found.cityName
+    const cityRecord = await db.courierOperationalCity.findFirst({
+      where: { providerKey, cityId: found.cityName },
+      select: { cityName: true },
+    })
+    if (cityRecord) {
+      cityName = cityRecord.cityName
+    }
+
+    // Create the pickup address
+    const address = await db.courierPickupAddress.create({
+      data: {
+        companyIntegrationId,
+        providerAddressCode: found.providerAddressCode,
+        label: found.label || `Shipper ${found.providerAddressCode}`,
+        address: found.address,
+        cityName,
+        contactPersonName: found.contactPersonName,
+        phone1: found.phone1,
+        phone2: found.phone2 ?? null,
+        isDefault: false,
+      },
+    })
+
+    insertAuditLog({
+      action: 'pickup_address.imported',
+      entityType: 'company_integration',
+      entityId: companyIntegrationId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      newValues: { shipmentId, label: address.label },
+    })
+
+    return {
+      success: true,
+      data: {
+        addressId: address.id,
+        providerAddressCode: address.providerAddressCode,
+        label: address.label,
+      },
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to import address',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
 // setDefaultPickupAddress
 // ──────────────────────────────────────────────────────────────
 

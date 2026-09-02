@@ -4,6 +4,8 @@ import {
   ApiError,
   handleError,
   readBody,
+  getWorkspace,
+  requirePermission,
 } from '@/lib/workspace'
 import {
   updateEmployeeSchema,
@@ -22,15 +24,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.EMPLOYEES_VIEW)
     const { id } = await params
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
 
     const employee = await db.employee.findFirst({
-      where: { id, companyId },
+      where: { id, companyId: ctx.company.id },
       include: {
         user: {
           select: { id: true, fullName: true, email: true, avatarUrl: true, phone: true, createdAt: true },

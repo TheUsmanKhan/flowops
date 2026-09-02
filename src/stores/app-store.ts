@@ -90,6 +90,7 @@ interface AppState {
     systemRoleKey: string | null
     permissions: string[]
     isElevated: boolean
+    ordersDataScope: 'own' | 'all'
   } | null
   hydrated: boolean
   loading: boolean

@@ -111,6 +111,9 @@ export async function POST(req: Request) {
       },
     })
 
+    // 5b. (Markets system removed — no Default market creation needed.
+    //     Pricing is per-company via CompanyVariantPricing.)
+
     // 6. Activate the new workspace + mark the user as onboarded.
     await db.userSetting.upsert({
       where: { userId: user.id },

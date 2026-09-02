@@ -34,9 +34,9 @@ export const orderItemInputSchema = z.object({
   quantity: z.number().int().positive('Quantity must be a positive integer'),
   // Per-item discount (Phase: Discount Rework). unit_price is NO LONGER
   // accepted from the client — the server resolves originalUnitPrice from
-  // CompanyVariantPricing, then applies the discount to compute the final
-  // unitPrice. Clients can only request a discount (percentage or fixed),
-  // never override the base price directly.
+  // CompanyVariantPricing for this company, then applies the discount
+  // to compute the final unitPrice. Clients can only request a discount
+  // (percentage or fixed), never override the base price directly.
   discount_type: z.enum(['percentage', 'fixed']).optional(),
   discount_value: z.number().min(0).optional(),
 }).refine((data) => {

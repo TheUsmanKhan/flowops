@@ -116,6 +116,7 @@ export interface SessionResponse {
     systemRoleKey: string | null
     permissions: string[]
     isElevated: boolean
+    ordersDataScope: 'own' | 'all'
   } | null
   sessionToken?: string
 }

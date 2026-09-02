@@ -48,7 +48,7 @@ interface NavItem {
   icon: LucideIcon
   permission?: string
   matchPrefixes?: string[]
-  children?: { route: AppRoute; label: string; icon: LucideIcon; matchPrefixes?: string[] }[]
+  children?: { route: AppRoute; label: string; icon: LucideIcon; matchPrefixes?: string[]; permission?: string; elevatedOnly?: boolean }[]
   elevatedOnly?: boolean
 }
 
@@ -109,16 +109,16 @@ const NAV: NavItem[] = [
       { route: { name: 'orders-cancelled' }, label: 'Cancelled', icon: XCircle, matchPrefixes: ['orders-cancelled'] },
     ],
   },
-  { route: { name: 'customers' }, label: 'Customers', icon: Users, permission: PERMISSIONS.ORDERS_VIEW, matchPrefixes: ['customers', 'customer-detail'] },
+  { route: { name: 'customers' }, label: 'Customers', icon: Users, permission: PERMISSIONS.CUSTOMERS_VIEW, matchPrefixes: ['customers', 'customer-detail'] },
   { route: { name: 'order-workflow-settings' }, label: 'Order Settings', icon: SlidersHorizontal, elevatedOnly: true, matchPrefixes: ['order-workflow'] },
   { route: { name: 'integrations' }, label: 'Integrations', icon: Plug, elevatedOnly: true, matchPrefixes: ['integrations'] },
   { route: { name: 'integration-logs' }, label: 'Integration Logs', icon: Webhook, elevatedOnly: true, matchPrefixes: ['integration-logs'] },
   { route: { name: 'employees' }, label: 'Employees', icon: Users, permission: PERMISSIONS.EMPLOYEES_VIEW, matchPrefixes: ['employees'] },
-  { route: { name: 'payroll' }, label: 'Payroll', icon: Receipt, permission: PERMISSIONS.PAYROLL_MANAGE, matchPrefixes: ['payroll'] },
+  { route: { name: 'payroll' }, label: 'Payroll', icon: Receipt, permission: PERMISSIONS.PAYROLL_VIEW_ALL, matchPrefixes: ['payroll'] },
   { route: { name: 'roles' }, label: 'Roles & Permissions', icon: ShieldCheck, permission: PERMISSIONS.SETTINGS_ROLES_MANAGE, matchPrefixes: ['roles'] },
   { route: { name: 'org-catalog' }, label: 'Org Catalog', icon: Globe, elevatedOnly: true, matchPrefixes: ['org-catalog'] },
-  { route: { name: 'organization' }, label: 'Organization', icon: Building2, matchPrefixes: ['organization', 'create-company'] },
-  { route: { name: 'company-settings' }, label: 'Company Settings', icon: Settings, matchPrefixes: ['company-settings'] },
+  { route: { name: 'organization' }, label: 'Organization', icon: Building2, elevatedOnly: true, matchPrefixes: ['organization', 'create-company'] },
+  { route: { name: 'company-settings' }, label: 'Company Settings', icon: Settings, permission: PERMISSIONS.SETTINGS_COMPANY_VIEW, matchPrefixes: ['company-settings'] },
   { route: { name: 'audit' }, label: 'Audit Log', icon: ScrollText, permission: PERMISSIONS.AUDIT_VIEW, matchPrefixes: ['audit'] },
   { route: { name: 'settings' }, label: 'Personal Settings', icon: Settings, matchPrefixes: ['settings'] },
 ]
@@ -185,6 +185,16 @@ export function Sidebar() {
           const active = isMatch(item)
           const isExpanded = expanded.has(item.label)
 
+          // Filter children by their specific permission/elevated gate
+          const visibleChildren = item.children?.filter((child) => {
+            if (child.elevatedOnly && !isElevated) return false
+            if (child.permission && !can(child.permission) && !isElevated) return false
+            return true
+          }) ?? []
+
+          // If item has children but none are visible, skip entirely
+          if (item.children && visibleChildren.length === 0) return null
+
           if (item.children) {
             return (
               <div key={item.label}>
@@ -208,7 +218,7 @@ export function Sidebar() {
                 </button>
                 {isExpanded && (
                   <div className="ml-4 mt-0.5 space-y-0.5 border-l border-sidebar-border pl-3">
-                    {item.children.map((child) => {
+                    {visibleChildren.map((child) => {
                       const ChildIcon = child.icon
                       const childActive = isMatch(child)
                       return (

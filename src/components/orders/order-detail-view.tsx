@@ -134,6 +134,7 @@ interface OrderDetail {
     deliveryCountry: string | null
     fulfillmentChannel: string
     selfFulfilledReferenceNumber: string | null
+    marketResolutionIssue: string | null
     courierName: string | null
     trackingNumber: string | null
     courierCompanyIntegrationId?: string | null
@@ -604,6 +605,18 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
           {statusBadge.label}
         </Badge>
 
+        {/* Phase D3: market resolution issue banner (external orders only) */}
+        {order.marketResolutionIssue && (
+          <div className="w-full mt-2 rounded-md border border-amber-300 bg-amber-50 p-3 flex items-start gap-2">
+            <AlertCircle className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-xs font-medium text-amber-900">{order.marketResolutionIssue}</p>
+              <p className="text-[10px] text-amber-700 mt-0.5">
+                This order was created from an external source (Shopify/Daraz). Items may have no price applied — resolve the market issue + review flagged items below.
+              </p>
+            </div>
+          </div>
+        )}
         {order.packedAt && order.status !== 'dispatched' && order.status !== 'delivered' && order.status !== 'rto' && order.status !== 'cancelled' && (
           <Badge variant="outline" className="bg-indigo-50 text-indigo-700 border-indigo-200">
             Packed
@@ -1187,7 +1200,9 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
                       ? 'Booked'
                       : order.courierBookingStatus === 'failed'
                         ? 'Failed'
-                        : 'Not booked'
+                        : order.courierBookingStatus === 'cancelled'
+                          ? 'Cancelled'
+                          : 'Not booked'
                   }
                 />
               )}

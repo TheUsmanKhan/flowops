@@ -23,7 +23,7 @@ export const dynamic = 'force-dynamic'
  * disagree on grouping.
  */
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
@@ -39,14 +39,12 @@ export async function GET(
     const product = await db.orgProduct.findFirst({ where: { id: productId, organizationId: orgId } })
     if (!product) throw new ApiError(404, 'Product not found.')
 
-    // Fetch all variants
+    // Fetch all variants — include CompanyVariantPricing scoped to the active
+    // company for per-company sale price resolution.
     const variants = await db.orgProductVariant.findMany({
       where: { productId },
       include: {
-        // Read CompanyVariantPricing (scoped by companyId when available).
-        // When companyId is null (shouldn't normally happen), the where
-        // clause yields no rows and pricing shows null.
-        companyPricing: { where: { companyId: companyId ?? undefined } },
+        companyPricing: { where: { companyId: companyId ?? '' } },
       },
       orderBy: { createdAt: 'asc' },
     })

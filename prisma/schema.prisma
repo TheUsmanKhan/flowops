@@ -116,9 +116,6 @@ model Organization {
   scanDailyReports        ScanDailyReport[]
   // Load Sheets back-relation (migration 020)
   loadSheets              LoadSheet[]
-
-  // Courier Status History back-relation (migration 023)
-  courierStatusHistories  CourierStatusHistory[]
 }
 
 /// Legal operating entity under an Organization. All business data lives here.
@@ -205,9 +202,6 @@ model Company {
 
   // HR / Payroll back-relation
   payrollRuns            PayrollRun[]
-
-  // Courier Status History back-relation (migration 023)
-  courierStatusHistories CourierStatusHistory[]
 }
 
 /// Company-scoped roles. System roles (Owner/Founder/Co-Founder/Investor) are
@@ -827,6 +821,20 @@ model CompanyVariantPricing {
 
   @@unique([companyId, orgVariantId])
   @@index([companyId])
+}
+
+/// Daily snapshot of exchange rates for currency conversion (Phase F1).
+/// Fetched by the /api/cron/refresh-exchange-rates cron job. Used ONLY for
+/// DISPLAY purposes (estimated revenue totals converted to the company's
+/// baseCurrency). Never influences stored order prices. If a rate is missing
+/// or stale, the per-currency breakdown displays correctly on its own.
+model ExchangeRateSnapshot {
+  id                 String   @id @default(cuid())
+  currency           String   // ISO 4217 code (e.g. "USD", "AED", "GBP")
+  rateToBaseCurrency Decimal  @db.Decimal(12, 6) // rate relative to a common base (USD)
+  fetchedAt          DateTime @default(now())
+
+  @@index([currency, fetchedAt])
 }
 
 /// Special pool for made-to-order items returned in sellable condition.
@@ -1780,6 +1788,10 @@ model CompanyIntegration {
   connectionStatus          String   @default("pending") // 'pending' | 'connected' | 'error' | 'expired' (CHECK in SQL)
   lastSyncAt                DateTime?
   lastError                 String?
+  // Per-integration JSON preferences blob. Currently used by Leopard (e.g.
+  // transactionNote prefs). Free-form JSON shape, parsed/validated at the
+  // boundary by parseLeopardPreferences() — see src/lib/integrations/couriers/leopard-preferences.ts.
+  preferencesJson           String?
 
   createdBy                 String?
   createdByEmployee         Employee? @relation("IntegrationCreator", fields: [createdBy], references: [id], onDelete: SetNull)
@@ -1883,6 +1895,12 @@ model CompanyOrderSetting {
   // Exchange refund setting (migration 014)
   deductDeliveryChargeFromRefund Boolean @default(false) // if true, delivery charge is deducted from customer refund
 
+  // Optional per-company prefix for FlowOps order numbers (ORD-YYYY-NNNNN).
+  // When set, the prefix is inserted between "ORD-" and the year, producing
+  // e.g. "ORD-SFS-2026-00001" for prefix "SFS". This guarantees uniqueness
+  // across companies that share the same courier account (same api_key).
+  orderNumberPrefix           String?
+
   updatedBy                   String?
   updatedByEmployee           Employee? @relation("CompanyOrderSettingsUpdater", fields: [updatedBy], references: [id])
   updatedAt                   DateTime @updatedAt
@@ -1915,6 +1933,14 @@ model Order {
   // existing orders + flows are unaffected.
   fulfillmentChannel          String   @default("courier") // courier | self_fulfilled
   selfFulfilledReferenceNumber String? @unique
+
+  // Phase D3: market resolution issue for external orders. Set when an
+  // external order's delivery country isn't assigned to any market. The
+  // order is still created (never blocked for external orders), but this
+  // flag surfaces a banner on order-detail-view prompting the merchant to
+  // assign the country to a market + set pricing. Null for manual orders
+  // (manual orders are blocked server-side; external orders are flagged).
+  marketResolutionIssue        String?
 
   customerId                  String
   customer                    Customer @relation(fields: [customerId], references: [id])
@@ -2091,18 +2117,6 @@ model Order {
   // from the courier's slip_link). NULL for couriers that don't provide a slip
   // or if the download failed (non-fatal — booking still succeeded).
   courierSlipStoragePath        String?
-
-  // ─── Leopard-specific fields (migration 022) ─────────────────────
-  returnAddressOverrideId       String?
-  returnAddressOverride         CourierPickupAddress? @relation("OrderReturnAddressOverride", fields: [returnAddressOverrideId], references: [id], onDelete: SetNull)
-  shipmentType                  String?
-
-  // ─── Proof of Delivery (migration 023) ────────────────────────────
-  proofOfDeliveryData           String?
-
-  // ─── Shipper Advice (migration 024) ──────────────────────────────
-  lastShipperAdviceSubmittedAt  DateTime?
-  lastShipperAdviceType         String?
 }
 
 /// Per-line-item fulfillment tracking. fulfillmentStatus is INDEPENDENT of
@@ -2122,10 +2136,9 @@ model OrderItem {
   // The final charged price per unit (after per-item discount if any).
   // lineTotal is GENERATED ALWAYS AS (quantity * unitPrice) STORED in the DB.
   unitPrice                   Decimal  @db.Decimal(12, 2)
-  // The system-resolved original price from CompanyVariantPricing. NEVER
-  // client-writable — resolved server-side only. If a per-item discount was
-  // applied, originalUnitPrice > unitPrice. Nullable because existing rows
-  // don't have it (added post-deployment).
+  // The system-resolved original price from MarketVariantPricing for the
+  // resolved market. NEVER client-writable — resolved server-side only.
+  // If a per-item discount was applied, originalUnitPrice > unitPrice.
   originalUnitPrice           Decimal? @db.Decimal(12, 2)
   // Per-item discount (Phase: Discount Rework). discountType: 'percentage' |
   // 'fixed' | null. discountValue: the percentage (0-100) or fixed amount.
@@ -2147,10 +2160,10 @@ model OrderItem {
 
   autoProcessedAsPerfect      Boolean  @default(false)
   needsReview                 Boolean  @default(false)
-  // When needsReview=true, the reason (e.g. "Not enabled for your company",
-  // "No price set for this variant"). Null when needsReview=false. Used by
-  // external order ingestion (Shopify) to flag items that fail the gate
-  // check without blocking order creation.
+  // Phase D3: when needsReview=true, the reason (e.g. "Not enabled for the
+  // UAE market", "No price set for UAE", "Country not in any market"). Null
+  // when needsReview=false. Used by external order ingestion (Shopify) to
+  // flag items that fail the 3-gate check without blocking order creation.
   needsReviewReason           String?
 
   reservedLocationId          String?
@@ -2241,10 +2254,6 @@ model CourierPickupAddress {
   ordersUsedIn          Order[] @relation("OrderPickupAddress")
   // Back-relation: load sheets generated for this pickup address
   loadSheets            LoadSheet[]
-  // Back-relation: orders that use this address as a return address override
-  ordersReturnOverrideIn        Order[] @relation("OrderReturnAddressOverride")
-  // Back-relation: exchange shipments that use this address as a return address override
-  exchangeShipmentsReturnOverrideIn ExchangeShipment[] @relation("ExchangeShipmentReturnAddressOverride")
 
   @@index([companyIntegrationId])
   @@map("courier_pickup_addresses")
@@ -2355,18 +2364,6 @@ model ExchangeShipment {
   // ─── Courier Slip (migration 021) ────────────────────────────────
   // Path to our own stored copy of the courier's booking slip PDF.
   courierSlipStoragePath        String?
-
-  // ─── Leopard-specific fields (migration 022) ─────────────────────
-  returnAddressOverrideId       String?
-  returnAddressOverride         CourierPickupAddress? @relation("ExchangeShipmentReturnAddressOverride", fields: [returnAddressOverrideId], references: [id], onDelete: SetNull)
-  shipmentType                  String?
-
-  // ─── Proof of Delivery (migration 023) ────────────────────────────
-  proofOfDeliveryData           String?
-
-  // ─── Shipper Advice (migration 024) ──────────────────────────────
-  lastShipperAdviceSubmittedAt  DateTime?
-  lastShipperAdviceType         String?
 
   @@map("exchange_shipments")
 }
@@ -2699,31 +2696,3 @@ model IdempotencyKey {
   @@index([companyId, actionType])
   @@index([createdAt])
 }
-
-// ============================================================================
-// Courier Status History (migration 023)
-// ============================================================================
-
-/// Append-only audit trail of every courier status update received
-model CourierStatusHistory {
-  id                  String    @id @default(cuid())
-  organizationId      String
-  organization        Organization @relation(fields: [organizationId], references: [id])
-  companyId           String
-  company             Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  entityType          String    // 'order' | 'exchange_shipment'
-  entityId            String
-  providerKey         String    // 'postex' | 'leopard' | 'tcs'
-  rawStatus           String?
-  courierSubStatus    String?
-  courierActivityDate DateTime?
-  receivedAt          DateTime  @default(now())
-  source              String    @default("poll") // 'webhook' | 'poll' | 'manual'
-  metadata            String?   @default("{}") // JSON string
-  createdAt           DateTime  @default(now())
-
-  @@index([entityType, entityId, receivedAt(sort: Desc)])
-  @@index([companyId, receivedAt(sort: Desc)])
-  @@map("courier_status_history")
-}
-

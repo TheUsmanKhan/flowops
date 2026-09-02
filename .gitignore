@@ -58,3 +58,5 @@ server.log
 
 # Local DB env (not production secrets, but keep out of git)
 .env.local-db
+*.tar
+*.zip

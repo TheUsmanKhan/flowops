@@ -909,10 +909,10 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
       // Auto-booking now runs ASYNCHRONOUSLY in the background (PostEx API
       // can take 50-100s). The order is created with courierBookingStatus=
       // 'not_booked', and the background task updates it when PostEx responds.
-      // We navigate to the order detail page immediately — the user will see
-      // the booking status update live as the background task completes.
+      // We navigate to the All Orders page immediately — the user will see
+      // the new order in the list without waiting for booking to finish.
       if (data.bookingAttempted) {
-        toast.info('Courier booking is in progress… You can track the status on the order detail page.', { duration: 6000 })
+        toast.info('Courier booking is in progress… You can track the status from the All Orders page.', { duration: 6000 })
       }
 
       setHasChanges(false)
@@ -920,24 +920,31 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
         await api.delete(`/api/drafts?id=${draftId}`).catch(() => {})
         setDraftId(undefined)
       }
-      // Invalidate ALL relevant query keys
+      // Invalidate ALL relevant query keys so the All Orders list refetches
+      // with the newly created order as soon as we land on that page.
       void queryClient.invalidateQueries({ queryKey: ['orders'] })
       void queryClient.invalidateQueries({ queryKey: ['booking-workbench-bookable'] })
       void queryClient.invalidateQueries({ queryKey: ['booking-workbench-activity'] })
 
-      if (paymentProofFile) {
-        const ok = await uploadPaymentProof(data.orderId)
-        if (!ok) {
-          toast.warning(
-            'Order created successfully, but the payment proof image failed to upload — you can add it from the order detail page.',
-          )
-        }
-      }
+      // ── Navigate FIRST, then upload the payment proof in the background. ──
+      // The order is already created + persisted at this point. Forcing the
+      // user to wait for the (potentially slow) image upload before seeing
+      // the All Orders page is unnecessary — the upload can finish async.
+      // If the upload fails, a warning toast is shown on the orders page.
+      navigate({ name: 'orders' })
 
-      // Navigate to the order detail page immediately. The booking status
-      // will update live as the background task completes (the order detail
-      // page polls or refetches).
-      navigate({ name: 'order-detail', id: data.orderId })
+      if (paymentProofFile) {
+        // Fire-and-forget: don't block navigation. The toast.warning surfaces
+        // globally if the upload fails, so the user is still informed.
+        void (async () => {
+          const ok = await uploadPaymentProof(data.orderId)
+          if (!ok) {
+            toast.warning(
+              'Order created successfully, but the payment proof image failed to upload — you can add it from the order detail page.',
+            )
+          }
+        })()
+      }
     } catch (err) {
       toast.error(getErrorMessage(err))
     } finally {
@@ -1040,38 +1047,11 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
               courierProviderKey={
                 courierIntegrations.find((c) => c.id === courierIntegrationId)?.provider?.providerKey ?? ''
               }
-              courierName={courierName}
-              setCourierName={setCourierName}
-              courierIntegrationId={courierIntegrationId}
-              setCourierIntegrationId={setCourierIntegrationId}
-              courierIntegrations={courierIntegrations}
-              pickupAddressId={pickupAddressId}
-              setPickupAddressId={setPickupAddressId}
-              pickupAddresses={pickupAddresses}
-              pickupAddressesLoading={pickupAddressesQuery.isLoading}
-              dispatchLocationId={dispatchLocationId}
-              setDispatchLocationId={setDispatchLocationId}
-              notesForCourier={notesForCourier}
-              setNotesForCourier={setNotesForCourier}
-              orderRefNumber={orderRefNumber}
-              setOrderRefNumber={setOrderRefNumber}
-              orderDetail={orderDetail}
-              setOrderDetail={(v) => {
-                setOrderDetail(v)
-                setOrderDetailUserEdited(true)
-              }}
               discountAmount={discountAmount}
               setDiscountAmount={setDiscountAmount}
               discountReason={discountReason}
               setDiscountReason={setDiscountReason}
-              locations={locationsQuery.data?.locations ?? []}
-              isLoadingLocations={locationsQuery.isLoading}
               fieldError={fieldError}
-              fulfillmentChannel={fulfillmentChannel}
-              setFulfillmentChannel={setFulfillmentChannel}
-              userPickedCourier={userPickedCourier}
-              setUserPickedCourier={setUserPickedCourier}
-              deliveryCountry={deliveryCountry}
             />
           </div>
 
@@ -1122,67 +1102,103 @@ export function OrderCreateView({ onBack, draftId: initialDraftId }: { onBack: (
           </div>
         </div>
 
-        {/* ── Right column: sticky summary + create button ─────────────────── */}
+        {/* ── Right column: delivery sidebar (always visible) + sticky summary + create button ── */}
         <div className="lg:col-span-1">
-          <div className="lg:sticky lg:top-6 space-y-4">
-            <SummarySection
-              cart={cart}
-              subtotal={subtotal}
-              discount={discount}
-              discountReason={discountReason}
-              total={total}
-              paymentType={paymentType}
-              advanceAmount={parsePrice(advanceAmount)}
-              remainingCod={remainingCod}
+          <div className="space-y-4">
+            <DeliverySidebar
+              courierName={courierName}
+              setCourierName={setCourierName}
+              courierIntegrationId={courierIntegrationId}
+              setCourierIntegrationId={setCourierIntegrationId}
+              courierIntegrations={courierIntegrations}
+              pickupAddressId={pickupAddressId}
+              setPickupAddressId={setPickupAddressId}
+              pickupAddresses={pickupAddresses}
+              pickupAddressesLoading={pickupAddressesQuery.isLoading}
+              dispatchLocationId={dispatchLocationId}
+              setDispatchLocationId={setDispatchLocationId}
+              notesForCourier={notesForCourier}
+              setNotesForCourier={setNotesForCourier}
+              orderRefNumber={orderRefNumber}
+              setOrderRefNumber={setOrderRefNumber}
+              orderDetail={orderDetail}
+              setOrderDetail={(v) => {
+                setOrderDetail(v)
+                setOrderDetailUserEdited(true)
+              }}
+              locations={locationsQuery.data?.locations ?? []}
+              isLoadingLocations={locationsQuery.isLoading}
+              fieldError={fieldError}
+              fulfillmentChannel={fulfillmentChannel}
+              setFulfillmentChannel={setFulfillmentChannel}
+              userPickedCourier={userPickedCourier}
+              setUserPickedCourier={setUserPickedCourier}
+              deliveryCountry={deliveryCountry}
+              courierProviderKey={
+                courierIntegrations.find((c) => c.id === courierIntegrationId)?.provider?.providerKey ?? ''
+              }
             />
 
-            <Card>
-              <CardContent className="p-4 space-y-3">
-                <Button
-                  size="lg"
-                  className="w-full"
-                  onClick={handleSubmit}
-                  disabled={isSubmitting}
-                >
-                  {isSubmitting ? (
-                    <>
-                      <Loader2 className="h-4 w-4 animate-spin" /> Saving proof…
-                    </>
-                  ) : (
-                    <>
-                      <CheckCircle2 className="h-4 w-4" /> Create Order
-                    </>
+            <div className="lg:sticky lg:top-6 space-y-4">
+              <SummarySection
+                cart={cart}
+                subtotal={subtotal}
+                discount={discount}
+                discountReason={discountReason}
+                total={total}
+                paymentType={paymentType}
+                advanceAmount={parsePrice(advanceAmount)}
+                remainingCod={remainingCod}
+              />
+
+              <Card>
+                <CardContent className="p-4 space-y-3">
+                  <Button
+                    size="lg"
+                    className="w-full"
+                    onClick={handleSubmit}
+                    disabled={isSubmitting}
+                  >
+                    {isSubmitting ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" /> Saving proof…
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="h-4 w-4" /> Create Order
+                      </>
+                    )}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={async () => {
+                      try { await saveDraft(); toast.success('Draft saved.') }
+                      catch { toast.error('Failed to save draft.') }
+                    }}
+                    disabled={isSubmitting || savingDraft}
+                  >
+                    {savingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                    Save as Draft
+                  </Button>
+                  <Button
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => guardedNavigate(onBack)}
+                    disabled={isSubmitting}
+                  >
+                    Cancel
+                  </Button>
+                  {Object.keys(errors).length > 0 && (
+                    <p className="text-xs text-destructive text-center">
+                      {Object.keys(errors).length} field
+                      {Object.keys(errors).length === 1 ? '' : 's'} need
+                      {Object.keys(errors).length === 1 ? 's' : ''} attention above.
+                    </p>
                   )}
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={async () => {
-                    try { await saveDraft(); toast.success('Draft saved.') }
-                    catch { toast.error('Failed to save draft.') }
-                  }}
-                  disabled={isSubmitting || savingDraft}
-                >
-                  {savingDraft ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                  Save as Draft
-                </Button>
-                <Button
-                  variant="outline"
-                  className="w-full"
-                  onClick={() => guardedNavigate(onBack)}
-                  disabled={isSubmitting}
-                >
-                  Cancel
-                </Button>
-                {Object.keys(errors).length > 0 && (
-                  <p className="text-xs text-destructive text-center">
-                    {Object.keys(errors).length} field
-                    {Object.keys(errors).length === 1 ? '' : 's'} need
-                    {Object.keys(errors).length === 1 ? 's' : ''} attention above.
-                  </p>
-                )}
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            </div>
           </div>
         </div>
       </div>
@@ -1262,35 +1278,11 @@ function CustomerSection({
   addressSelectorValue,
   onAddressSelectorChange,
   courierProviderKey,
-  courierName,
-  setCourierName,
-  courierIntegrationId,
-  setCourierIntegrationId,
-  courierIntegrations,
-  pickupAddressId,
-  setPickupAddressId,
-  pickupAddresses,
-  pickupAddressesLoading,
-  dispatchLocationId,
-  setDispatchLocationId,
-  notesForCourier,
-  setNotesForCourier,
-  orderRefNumber,
-  setOrderRefNumber,
-  orderDetail,
-  setOrderDetail,
   discountAmount,
   setDiscountAmount,
   discountReason,
   setDiscountReason,
-  locations,
-  isLoadingLocations,
   fieldError,
-  fulfillmentChannel,
-  setFulfillmentChannel,
-  userPickedCourier,
-  setUserPickedCourier,
-  deliveryCountry,
 }: {
   selectedCustomer: SelectedCustomer | null
   showCreateForm: boolean
@@ -1308,35 +1300,11 @@ function CustomerSection({
   onAddressSelectorChange: (v: AddressSelectorValue) => void
   /** Optional: drives CityAutocomplete in AddressSelector (empty = plain text) */
   courierProviderKey?: string
-  courierName: string
-  setCourierName: (v: string) => void
-  courierIntegrationId: string
-  setCourierIntegrationId: (v: string) => void
-  courierIntegrations: Array<{ id: string; connectionName: string; provider: { providerKey: string; providerName: string } }>
-  pickupAddressId: string
-  setPickupAddressId: (v: string) => void
-  pickupAddresses: Array<{ id: string; label: string; address: string; cityName: string; isDefault: boolean }>
-  pickupAddressesLoading: boolean
-  dispatchLocationId: string
-  setDispatchLocationId: (v: string) => void
-  notesForCourier: string
-  setNotesForCourier: (v: string) => void
-  orderRefNumber: string
-  setOrderRefNumber: (v: string) => void
-  orderDetail: string
-  setOrderDetail: (v: string) => void
   discountAmount: string
   setDiscountAmount: (v: string) => void
   discountReason: string
   setDiscountReason: (v: string) => void
-  locations: InventoryLocation[]
-  isLoadingLocations: boolean
   fieldError: (...paths: string[]) => string | undefined
-  fulfillmentChannel: 'courier' | 'self_fulfilled'
-  setFulfillmentChannel: (v: 'courier' | 'self_fulfilled') => void
-  userPickedCourier: boolean
-  setUserPickedCourier: (v: boolean) => void
-  deliveryCountry: string
 }) {
   return (
     <Card>
@@ -1517,215 +1485,11 @@ function CustomerSection({
               />
             </div>
 
-            {/* ── Delivery Logistics (fulfillment channel, courier, dispatch, discount) ── */}
+            {/* ── Discount (kept in CustomerSection; delivery logistics moved to DeliverySidebar) ── */}
             <div className="space-y-3">
               <p className="text-sm font-medium flex items-center gap-1.5">
-                <Truck className="h-4 w-4 text-muted-foreground" /> Delivery Logistics
+                <CreditCard className="h-4 w-4 text-muted-foreground" /> Discount
               </p>
-
-              {/* Fulfillment channel toggle (Phase B1). Always visible + overridable.
-                  Defaults to 'self_fulfilled' for non-PK addresses (auto-set above),
-                  'courier' for PK. When 'self_fulfilled', the courier dropdown below
-                  is hidden (no courier needed) + an SF-YYYY-NNNNN reference is generated. */}
-              <div className="space-y-1">
-                <Label className="text-xs">Fulfillment Channel</Label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFulfillmentChannel('courier')
-                      // Don't set userPickedCourier here — this is the channel toggle,
-                      // not a courier selection. The auto-default effect still runs.
-                    }}
-                    className={cn(
-                      'rounded-md border p-2 text-xs font-medium transition-colors text-left',
-                      fulfillmentChannel === 'courier'
-                        ? 'border-primary bg-primary/5 ring-1 ring-primary/20 text-primary'
-                        : 'border-border text-muted-foreground hover:bg-muted/40',
-                    )}
-                  >
-                    <Truck className="h-3.5 w-3.5 mb-1" />
-                    <div>Courier Delivery</div>
-                    <div className="text-[10px] font-normal text-muted-foreground mt-0.5">Booked via connected courier</div>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setFulfillmentChannel('self_fulfilled')
-                      // Clear any selected courier — self-fulfilled doesn't use one
-                      setCourierIntegrationId('')
-                      setCourierName('')
-                      setPickupAddressId('')
-                    }}
-                    className={cn(
-                      'rounded-md border p-2 text-xs font-medium transition-colors text-left',
-                      fulfillmentChannel === 'self_fulfilled'
-                        ? 'border-primary bg-primary/5 ring-1 ring-primary/20 text-primary'
-                        : 'border-border text-muted-foreground hover:bg-muted/40',
-                    )}
-                  >
-                    <PackageCheck className="h-3.5 w-3.5 mb-1" />
-                    <div>Self-Fulfilled</div>
-                    <div className="text-[10px] font-normal text-muted-foreground mt-0.5">Merchant handles delivery (SF-YYYY-NNNNN ref)</div>
-                  </button>
-                </div>
-                {fulfillmentChannel === 'self_fulfilled' && (
-                  <p className="text-[10px] text-emerald-700 flex items-center gap-1 pt-0.5">
-                    <PackageCheck className="h-3 w-3" />
-                    A self-fulfilled reference number (SF-YYYY-NNNNN) will be generated on order creation. No courier booking or city-matching will run.
-                  </p>
-                )}
-              </div>
-
-              {/* Courier dropdown — only shown for 'courier' channel. Hidden for
-                  'self_fulfilled' (no courier needed). */}
-              {fulfillmentChannel === 'courier' && (
-              <div className="grid sm:grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-xs">Courier</Label>
-                  <Select
-                    value={courierIntegrationId || '__none__'}
-                    onValueChange={(v) => {
-                      // Mark that the user has manually chosen — stops the
-                      // country-driven Self-Fulfilled auto-default from
-                      // overriding their explicit selection (Phase 3).
-                      setUserPickedCourier(true)
-                      if (v === '__none__') {
-                        setCourierIntegrationId('')
-                        setCourierName('')
-                        setPickupAddressId('')
-                      } else {
-                        setCourierIntegrationId(v)
-                        setPickupAddressId('') // reset pickup address when courier changes
-                        const ci = courierIntegrations.find((c) => c.id === v)
-                        if (ci) setCourierName(ci.provider.providerName)
-                      }
-                    }}
-                  >
-                    <SelectTrigger><SelectValue placeholder="Select courier" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">No courier</SelectItem>
-                      {courierIntegrations.map((ci) => (
-                        <SelectItem key={ci.id} value={ci.id}>
-                          {ci.provider.providerName} — {ci.connectionName}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {courierIntegrations.length === 0 && (
-                    <p className="text-[10px] text-amber-700">
-                      No couriers connected. Connect one in Settings → Integrations.
-                    </p>
-                  )}
-                  {/* Phase 3 (Country System): Self-Fulfilled hint for non-Pakistan
-                      deliveries. Shown when no courier is selected AND the address
-                      country isn't Pakistan — the courier was auto-cleared because
-                      the connected couriers are Pakistan-only. The user can still
-                      pick a courier manually if they have an international option. */}
-                  {courierIntegrationId === '' && deliveryCountry !== 'PK' && (
-                    <p className="text-[10px] text-emerald-700 flex items-center gap-1">
-                      <PackageCheck className="h-3 w-3" />
-                      Self-Fulfilled (international delivery — Pakistani couriers don&apos;t deliver abroad). Pick a courier only if you have an international option.
-                    </p>
-                  )}
-                </div>
-                {/* Pickup address override — only shown when a courier is selected.
-                    Defaults to the integration's default address (marked with ★).
-                    User can override to use a different address for this order. */}
-                {courierIntegrationId && (
-                  <div className="space-y-1">
-                    <Label className="text-xs">Pickup / Return Address</Label>
-                    {pickupAddressesLoading ? (
-                      <Skeleton className="h-9" />
-                    ) : pickupAddresses.length === 0 ? (
-                      <p className="text-[10px] text-amber-700">
-                        No pickup addresses synced. Go to Integrations → PostEx →
-                        Sync to import addresses from the courier.
-                      </p>
-                    ) : (
-                      <Select
-                        value={pickupAddressId || '__default__'}
-                        onValueChange={(v) => setPickupAddressId(v === '__default__' ? '' : v)}
-                      >
-                        <SelectTrigger><SelectValue placeholder="Default (from courier settings)" /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__default__">
-                            Default (use courier&apos;s default address)
-                          </SelectItem>
-                          {pickupAddresses.map((addr) => (
-                            <SelectItem key={addr.id} value={addr.id}>
-                              {addr.label} — {addr.cityName}
-                              {addr.isDefault ? ' ★' : ''}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    )}
-                    <p className="text-[10px] text-muted-foreground">
-                      Overrides the pickup/return address for this order. Leave as
-                      &quot;Default&quot; to use the courier&apos;s default address.
-                    </p>
-                  </div>
-                )}
-                <div className="space-y-1">
-                  <Label className="text-xs">Dispatch Location *</Label>
-                  {isLoadingLocations ? (
-                    <Skeleton className="h-9" />
-                  ) : (
-                    <Select value={dispatchLocationId} onValueChange={setDispatchLocationId}>
-                      <SelectTrigger><SelectValue placeholder="Select location" /></SelectTrigger>
-                      <SelectContent>
-                        {locations.map((l) => (
-                          <SelectItem key={l.id} value={l.id}>
-                            {l.name}{l.isDefault ? ' (default)' : ''}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  )}
-                  {fieldError('dispatch_location_id') && (
-                    <p className="text-xs text-destructive">{fieldError('dispatch_location_id')}</p>
-                  )}
-                </div>
-                <div className="space-y-1 sm:col-span-2">
-                  <Label className="text-xs">Transaction Notes (for courier)</Label>
-                  <Input
-                    placeholder="Optional notes for the courier"
-                    value={notesForCourier}
-                    onChange={(e) => setNotesForCourier(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Order Reference (for courier)</Label>
-                  <Input
-                    placeholder="Defaults to ORD-YYYY-NNNNN — type to override"
-                    value={orderRefNumber}
-                    onChange={(e) => setOrderRefNumber(e.target.value)}
-                  />
-                  <p className="text-[10px] text-muted-foreground">
-                    Universal courier reference field. Almost every courier
-                    (PostEx, TCS, Leopard…) has a reference field — we map
-                    this to the courier's own field at booking time. Leave
-                    blank to use the auto-generated FlowOps order number.
-                  </p>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Order Detail (item summary)</Label>
-                  <Input
-                    placeholder="Auto-filled from cart items"
-                    value={orderDetail}
-                    onChange={(e) => setOrderDetail(e.target.value)}
-                  />
-                  <p className="text-[10px] text-muted-foreground">
-                    Auto-generated from selected products (title + SKU +
-                    variant attributes + qty). Edit to override — otherwise
-                    the canonical version is generated server-side at submit.
-                  </p>
-                </div>
-              </div>
-              )} {/* end fulfillmentChannel === 'courier' conditional */}
-
-              {/* Discount (compact, within logistics section) */}
               <div className="grid sm:grid-cols-2 gap-3">
                 <div className="space-y-1">
                   <Label className="text-xs">Discount (Rs.)</Label>
@@ -1875,6 +1639,292 @@ const StatCell = memo(function StatCell({
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SECTION 1.5: Delivery Sidebar (right column, always visible)
+// All fulfillment/courier/dispatch/notes/ref/detail fields live here — moved
+// out of CustomerSection so they're visible from the start (not gated behind
+// customer selection). Leopard-specific: order_detail is hidden because the
+// backend auto-generates it from Leopard preferences; an info hint is shown
+// under Transaction Notes instead.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function DeliverySidebar({
+  courierName,
+  setCourierName,
+  courierIntegrationId,
+  setCourierIntegrationId,
+  courierIntegrations,
+  pickupAddressId,
+  setPickupAddressId,
+  pickupAddresses,
+  pickupAddressesLoading,
+  dispatchLocationId,
+  setDispatchLocationId,
+  notesForCourier,
+  setNotesForCourier,
+  orderRefNumber,
+  setOrderRefNumber,
+  orderDetail,
+  setOrderDetail,
+  locations,
+  isLoadingLocations,
+  fieldError,
+  fulfillmentChannel,
+  setFulfillmentChannel,
+  userPickedCourier,
+  setUserPickedCourier,
+  deliveryCountry,
+  courierProviderKey,
+}: {
+  courierName: string
+  setCourierName: (v: string) => void
+  courierIntegrationId: string
+  setCourierIntegrationId: (v: string) => void
+  courierIntegrations: Array<{ id: string; connectionName: string; provider: { providerKey: string; providerName: string } }>
+  pickupAddressId: string
+  setPickupAddressId: (v: string) => void
+  pickupAddresses: Array<{ id: string; label: string; address: string; cityName: string; isDefault: boolean }>
+  pickupAddressesLoading: boolean
+  dispatchLocationId: string
+  setDispatchLocationId: (v: string) => void
+  notesForCourier: string
+  setNotesForCourier: (v: string) => void
+  orderRefNumber: string
+  setOrderRefNumber: (v: string) => void
+  orderDetail: string
+  setOrderDetail: (v: string) => void
+  locations: InventoryLocation[]
+  isLoadingLocations: boolean
+  fieldError: (...paths: string[]) => string | undefined
+  fulfillmentChannel: 'courier' | 'self_fulfilled'
+  setFulfillmentChannel: (v: 'courier' | 'self_fulfilled') => void
+  userPickedCourier: boolean
+  setUserPickedCourier: (v: boolean) => void
+  deliveryCountry: string
+  courierProviderKey?: string
+}) {
+  const isLeopard = courierProviderKey === 'leopard'
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base flex items-center gap-2">
+          <Truck className="h-4 w-4" /> Delivery &amp; Logistics
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Fulfillment channel toggle (Phase B1). Always visible + overridable.
+            Defaults to 'self_fulfilled' for non-PK addresses (auto-set by parent),
+            'courier' for PK. When 'self_fulfilled', the courier dropdown below
+            is hidden (no courier needed) + an SF-YYYY-NNNNN reference is generated. */}
+        <div className="space-y-1">
+          <Label className="text-xs">Fulfillment Channel</Label>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setFulfillmentChannel('courier')
+                // Don't set userPickedCourier here — this is the channel toggle,
+                // not a courier selection. The auto-default effect still runs.
+              }}
+              className={cn(
+                'rounded-md border p-2 text-xs font-medium transition-colors text-left',
+                fulfillmentChannel === 'courier'
+                  ? 'border-primary bg-primary/5 ring-1 ring-primary/20 text-primary'
+                  : 'border-border text-muted-foreground hover:bg-muted/40',
+              )}
+            >
+              <Truck className="h-3.5 w-3.5 mb-1" />
+              <div>Courier Delivery</div>
+              <div className="text-[10px] font-normal text-muted-foreground mt-0.5">Booked via connected courier</div>
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setFulfillmentChannel('self_fulfilled')
+                // Clear any selected courier — self-fulfilled doesn't use one
+                setCourierIntegrationId('')
+                setCourierName('')
+                setPickupAddressId('')
+              }}
+              className={cn(
+                'rounded-md border p-2 text-xs font-medium transition-colors text-left',
+                fulfillmentChannel === 'self_fulfilled'
+                  ? 'border-primary bg-primary/5 ring-1 ring-primary/20 text-primary'
+                  : 'border-border text-muted-foreground hover:bg-muted/40',
+              )}
+            >
+              <PackageCheck className="h-3.5 w-3.5 mb-1" />
+              <div>Self-Fulfilled</div>
+              <div className="text-[10px] font-normal text-muted-foreground mt-0.5">Merchant handles delivery (SF-YYYY-NNNNN ref)</div>
+            </button>
+          </div>
+          {fulfillmentChannel === 'self_fulfilled' && (
+            <p className="text-[10px] text-emerald-700 flex items-center gap-1 pt-0.5">
+              <PackageCheck className="h-3 w-3" />
+              A self-fulfilled reference number (SF-YYYY-NNNNN) will be generated on order creation. No courier booking or city-matching will run.
+            </p>
+          )}
+        </div>
+
+        {/* Courier dropdown — only shown for 'courier' channel. Hidden for
+            'self_fulfilled' (no courier needed). */}
+        {fulfillmentChannel === 'courier' && (
+          <div className="grid sm:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label className="text-xs">Courier</Label>
+              <Select
+                value={courierIntegrationId || '__none__'}
+                onValueChange={(v) => {
+                  // Mark that the user has manually chosen — stops the
+                  // country-driven Self-Fulfilled auto-default from
+                  // overriding their explicit selection (Phase 3).
+                  setUserPickedCourier(true)
+                  if (v === '__none__') {
+                    setCourierIntegrationId('')
+                    setCourierName('')
+                    setPickupAddressId('')
+                  } else {
+                    setCourierIntegrationId(v)
+                    setPickupAddressId('') // reset pickup address when courier changes
+                    const ci = courierIntegrations.find((c) => c.id === v)
+                    if (ci) setCourierName(ci.provider.providerName)
+                  }
+                }}
+              >
+                <SelectTrigger><SelectValue placeholder="Select courier" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">No courier</SelectItem>
+                  {courierIntegrations.map((ci) => (
+                    <SelectItem key={ci.id} value={ci.id}>
+                      {ci.provider.providerName} — {ci.connectionName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {courierIntegrations.length === 0 && (
+                <p className="text-[10px] text-amber-700">
+                  No couriers connected. Connect one in Settings → Integrations.
+                </p>
+              )}
+              {/* Phase 3 (Country System): Self-Fulfilled hint for non-Pakistan
+                  deliveries. Shown when no courier is selected AND the address
+                  country isn't Pakistan — the courier was auto-cleared because
+                  the connected couriers are Pakistan-only. The user can still
+                  pick a courier manually if they have an international option. */}
+              {courierIntegrationId === '' && deliveryCountry !== 'PK' && (
+                <p className="text-[10px] text-emerald-700 flex items-center gap-1">
+                  <PackageCheck className="h-3 w-3" />
+                  Self-Fulfilled (international delivery — Pakistani couriers don&apos;t deliver abroad). Pick a courier only if you have an international option.
+                </p>
+              )}
+            </div>
+            {/* Pickup address override — only shown when a courier is selected.
+                Defaults to the integration's default address (marked with ★).
+                User can override to use a different address for this order. */}
+            {courierIntegrationId && (
+              <div className="space-y-1">
+                <Label className="text-xs">Pickup / Return Address</Label>
+                {pickupAddressesLoading ? (
+                  <Skeleton className="h-9" />
+                ) : pickupAddresses.length === 0 ? (
+                  <p className="text-[10px] text-amber-700">
+                    No pickup addresses synced. Go to Integrations → PostEx →
+                    Sync to import addresses from the courier.
+                  </p>
+                ) : (
+                  <Select
+                    value={pickupAddressId || '__default__'}
+                    onValueChange={(v) => setPickupAddressId(v === '__default__' ? '' : v)}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Default (from courier settings)" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">
+                        Default (use courier&apos;s default address)
+                      </SelectItem>
+                      {pickupAddresses.map((addr) => (
+                        <SelectItem key={addr.id} value={addr.id}>
+                          {addr.label} — {addr.cityName}
+                          {addr.isDefault ? ' ★' : ''}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+                <p className="text-[10px] text-muted-foreground">
+                  Overrides the pickup/return address for this order. Leave as
+                  &quot;Default&quot; to use the courier&apos;s default address.
+                </p>
+              </div>
+            )}
+            <div className="space-y-1">
+              <Label className="text-xs">Dispatch Location *</Label>
+              {isLoadingLocations ? (
+                <Skeleton className="h-9" />
+              ) : (
+                <Select value={dispatchLocationId} onValueChange={setDispatchLocationId}>
+                  <SelectTrigger><SelectValue placeholder="Select location" /></SelectTrigger>
+                  <SelectContent>
+                    {locations.map((l) => (
+                      <SelectItem key={l.id} value={l.id}>
+                        {l.name}{l.isDefault ? ' (default)' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              {fieldError('dispatch_location_id') && (
+                <p className="text-xs text-destructive">{fieldError('dispatch_location_id')}</p>
+              )}
+            </div>
+            <div className="space-y-1 sm:col-span-2">
+              <Label className="text-xs">Transaction Notes (for courier)</Label>
+              <Input
+                placeholder="Optional notes for the courier"
+                value={notesForCourier}
+                onChange={(e) => setNotesForCourier(e.target.value)}
+              />
+              {isLeopard && (
+                <p className="text-[10px] text-muted-foreground">
+                  For Leopard, product details (name/code/color) are automatically appended based on your Leopard preferences.
+                </p>
+              )}
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Order Reference (for courier)</Label>
+              <Input
+                placeholder="Defaults to ORD-YYYY-NNNNN — type to override"
+                value={orderRefNumber}
+                onChange={(e) => setOrderRefNumber(e.target.value)}
+              />
+              <p className="text-[10px] text-muted-foreground">
+                Universal courier reference field. Almost every courier
+                (PostEx, TCS, Leopard…) has a reference field — we map
+                this to the courier&apos;s own field at booking time. Leave
+                blank to use the auto-generated FlowOps order number.
+              </p>
+            </div>
+            {courierProviderKey !== 'leopard' && (
+              <div className="space-y-1">
+                <Label className="text-xs">Order Detail (item summary)</Label>
+                <Input
+                  placeholder="Auto-filled from cart items"
+                  value={orderDetail}
+                  onChange={(e) => setOrderDetail(e.target.value)}
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Auto-generated from selected products (title + SKU +
+                  variant attributes + qty). Edit to override — otherwise
+                  the canonical version is generated server-side at submit.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // SECTION 2: Items
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1945,10 +1995,9 @@ function ItemsSection({
             ) : (
               variantSearchResults.map((v) => {
                 const badge = stockBadgeFor(v.fulfillmentType)
-                // ── Variant gate check ──────────────────────────────────
-                // Show only the FIRST failing reason. Only the variant's
-                // isActive toggle is enforced client-side; price/enablement
-                // checks happen on the server at order-create time.
+                // ── Gate 1: variant isActive toggle ──
+                // Show only the failing reason (no market gating — products
+                // are priced per-company via CompanyVariantPricing now).
                 let gateReason: string | null = null
                 if (v.isActive === false) {
                   gateReason = 'Not enabled for your company'
@@ -2165,8 +2214,7 @@ function PaymentSection({
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-5">
-        {/* Selectable payment type cards. All three payment types are always
-            available. */}
+        {/* Selectable payment type cards — all three types are always available. */}
         <div className="grid gap-3">
           <PaymentTypeCard
             active={paymentType === 'full_cod'}
