@@ -118,6 +118,10 @@ function ScanStation() {
   const [sessionCount, setSessionCount] = useState(0)
   const [confirmCancel, setConfirmCancel] = useState<ScanResult['entity'] | null>(null)
   const [confirmUnpack, setConfirmUnpack] = useState<ScanResult['entity'] | null>(null)
+  const [confirmReturn, setConfirmReturn] = useState<ScanResult['entity'] | null>(null)
+  const [returnCondition, setReturnCondition] = useState<'perfect' | 'good' | 'damaged'>('perfect')
+  const [returnReason, setReturnReason] = useState('')
+  const [returnNotes, setReturnNotes] = useState('')
   const [isProcessing, setIsProcessing] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -128,7 +132,7 @@ function ScanStation() {
 
   useEffect(() => {
     refocus()
-  }, [refocus, scanMode, lastResult, confirmCancel, confirmUnpack])
+  }, [refocus, scanMode, lastResult, confirmCancel, confirmUnpack, confirmReturn])
 
   const scanMutation = useMutation({
     mutationFn: (data: { trackingNumber: string; scanMode: ScanMode; scanStationLabel?: string }) =>
@@ -144,6 +148,15 @@ function ScanStation() {
         // Invalidate so other tabs (order detail) reflect the change
         queryClient.invalidateQueries({ queryKey: ['orders'] })
         queryClient.invalidateQueries({ queryKey: ['order'] })
+        return
+      }
+
+      // If receive_return and success → show return confirmation (condition + reason)
+      if (data.scanResult === 'success' && data.entity && scanMode === 'receive_return') {
+        setConfirmReturn(data.entity)
+        setReturnCondition('perfect')
+        setReturnReason('')
+        setReturnNotes('')
         return
       }
 
@@ -213,6 +226,31 @@ function ScanStation() {
       refocus()
     },
     onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed to confirm'),
+  })
+
+  // Confirm return mutation — calls /api/scan/confirm-return which does
+  // RTO confirmation + optional damage recording in one go (no module-hopping).
+  const confirmReturnMutation = useMutation({
+    mutationFn: (data: {
+      orderId: string
+      condition: 'perfect' | 'good' | 'damaged'
+      returnReason: string
+      notes?: string
+    }) => api.post('/api/scan/confirm-return', data),
+    onSuccess: (data: { message?: string; wasDuplicate?: boolean }) => {
+      toast.success(data.message || 'Return confirmed.')
+      if (data.wasDuplicate) {
+        toast.info('Damage was already recorded for this order — no duplicate created.')
+      }
+      setConfirmReturn(null)
+      setReturnReason('')
+      setReturnNotes('')
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['order'] })
+      queryClient.invalidateQueries({ queryKey: ['stock-loss'] })
+      refocus()
+    },
+    onError: (err) => toast.error(err instanceof FetchError ? err.message : 'Failed to confirm return'),
   })
 
   return (
@@ -365,6 +403,105 @@ function ScanStation() {
               </Button>
               <Button size="sm" variant="ghost" onClick={() => { setConfirmUnpack(null); refocus() }}>
                 Dismiss
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Return confirmation — shown when receive_return mode scans successfully.
+          Lets the staff select the physical condition + return reason, then
+          confirms RTO + (if damaged) records the damage — all in one go.
+          This is the user's point #5: "when we scan a return, RTO confirmation
+          should happen in one go, AND damage options should be available right there." */}
+      {confirmReturn && (
+        <Card className="border-2 border-amber-300 bg-amber-50">
+          <CardContent className="p-4 space-y-3">
+            <p className="text-sm font-medium text-amber-900">Confirm Return</p>
+            <p className="text-xs text-amber-700">
+              Order <strong>{confirmReturn.flowopsOrderNumber ?? confirmReturn.exchangeShipmentNumber}</strong> for{' '}
+              <strong>{confirmReturn.customerName}</strong>. Select the physical condition + reason to confirm RTO.
+            </p>
+            {confirmReturn.items && confirmReturn.items.length > 0 && (
+              <div className="text-xs space-y-0.5">
+                {confirmReturn.items.map((item, i) => (
+                  <p key={i} className="font-mono">{item.sku} · {item.productTitle} ×{item.quantity}</p>
+                ))}
+              </div>
+            )}
+
+            {/* Condition selector */}
+            <div className="space-y-1.5">
+              <Label className="text-xs text-amber-900">Physical condition</Label>
+              <div className="grid grid-cols-3 gap-2">
+                {(['perfect', 'good', 'damaged'] as const).map((cond) => (
+                  <button
+                    key={cond}
+                    type="button"
+                    onClick={() => setReturnCondition(cond)}
+                    className={cn(
+                      'rounded-md border p-2 text-xs font-medium capitalize transition-colors',
+                      returnCondition === cond
+                        ? cond === 'damaged'
+                          ? 'border-rose-400 bg-rose-100 text-rose-900'
+                          : 'border-emerald-400 bg-emerald-100 text-emerald-900'
+                        : 'border-border bg-background hover:bg-muted/40',
+                    )}
+                  >
+                    {cond === 'perfect' ? '✓ Perfect' : cond === 'good' ? '✓ Good' : '⚠ Damaged'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Return reason */}
+            <div className="space-y-1.5">
+              <Label className="text-xs text-amber-900">Return reason *</Label>
+              <Input
+                placeholder="e.g. Customer refused delivery, Wrong size, Defective…"
+                value={returnReason}
+                onChange={(e) => setReturnReason(e.target.value)}
+                className="text-sm"
+                autoFocus
+              />
+            </div>
+
+            {/* Notes (optional) */}
+            <div className="space-y-1.5">
+              <Label className="text-xs text-amber-900">Notes (optional)</Label>
+              <Input
+                placeholder="Additional details…"
+                value={returnNotes}
+                onChange={(e) => setReturnNotes(e.target.value)}
+                className="text-sm"
+              />
+            </div>
+
+            {returnCondition === 'damaged' && (
+              <p className="text-[10px] text-rose-700 bg-rose-50 rounded p-2">
+                ⚠ Damaged condition: stock will be written off + a damage loss record will be created
+                (linked to this order). If damage was already recorded, it will be deduped (no duplicate).
+              </p>
+            )}
+
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                onClick={() =>
+                  confirmReturnMutation.mutate({
+                    orderId: confirmReturn.entityId,
+                    condition: returnCondition,
+                    returnReason: returnReason.trim(),
+                    notes: returnNotes.trim() || undefined,
+                  })
+                }
+                disabled={confirmReturnMutation.isPending || !returnReason.trim()}
+              >
+                {confirmReturnMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
+                {' '}Confirm Return
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => { setConfirmReturn(null); refocus() }}>
+                Cancel
               </Button>
             </div>
           </CardContent>
