@@ -52,7 +52,9 @@ export async function GET(
 
     if (providerKey === 'all') {
       // Union mode — search across ALL providers' delivery cities.
-      // Deduplicate by case-insensitive cityName, keeping the first match.
+      // Deduplicate by case-insensitive cityName, AGGREGATE all providers
+      // covering that city into a `providers: string[]` array so the
+      // frontend can show courier badges (e.g. "Leopard + PostEx").
       // live=true is NOT supported in 'all' mode (no single courier to fetch from).
       const allCities = await db.courierOperationalCity.findMany({
         where: {
@@ -68,25 +70,45 @@ export async function GET(
           providerKey: true,
         },
         orderBy: { cityName: 'asc' },
-        take: limit * 3, // over-fetch to allow dedup without losing results
+        take: limit * 10, // over-fetch to aggregate all providers per city
       })
-      const seen = new Set<string>()
-      const cities: Array<{
-        id: string
-        cityName: string
-        cityId: string | null
-        isPickupCity: boolean
-        isDeliveryCity: boolean
-        providerKey: string
-      }> = []
+
+      // Group by case-insensitive cityName, collecting all providers
+      const byName = new Map<
+        string,
+        {
+          id: string
+          cityName: string
+          cityId: string | null
+          isPickupCity: boolean
+          isDeliveryCity: boolean
+          providers: string[]
+        }
+      >()
       for (const c of allCities) {
         const key = c.cityName.toLowerCase()
-        if (!seen.has(key)) {
-          seen.add(key)
-          cities.push(c)
+        const existing = byName.get(key)
+        if (existing) {
+          // Aggregate: a city is a pickup/delivery city if ANY provider serves it as such
+          if (c.isPickupCity) existing.isPickupCity = true
+          if (c.isDeliveryCity) existing.isDeliveryCity = true
+          if (!existing.providers.includes(c.providerKey)) {
+            existing.providers.push(c.providerKey)
+          }
+        } else {
+          byName.set(key, {
+            id: c.id,
+            cityName: c.cityName,
+            cityId: c.cityId,
+            isPickupCity: c.isPickupCity,
+            isDeliveryCity: c.isDeliveryCity,
+            providers: [c.providerKey],
+          })
         }
-        if (cities.length >= limit) break
+        if (byName.size >= limit * 3) break // safety cap
       }
+
+      const cities = Array.from(byName.values()).slice(0, limit)
       return Response.json({ cities })
     }
 
@@ -132,7 +154,15 @@ export async function GET(
       })
     }
 
-    return Response.json({ cities })
+    // Single-provider mode: attach the providerKey as a single-element
+    // `providers` array so the frontend can use one consistent code path
+    // for rendering courier badges in both 'all' and single-provider modes.
+    const citiesWithProviders = cities.map((c) => ({
+      ...c,
+      providers: [providerKey],
+    }))
+
+    return Response.json({ cities: citiesWithProviders })
   } catch (err) {
     return handleError(err)
   }

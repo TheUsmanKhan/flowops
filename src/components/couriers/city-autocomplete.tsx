@@ -38,6 +38,7 @@ import { api } from '@/lib/api-client'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import { Loader2, MapPin, CloudOff } from 'lucide-react'
+import { CourierBadges } from '@/components/couriers/courier-badge'
 
 interface CityOption {
   id: string
@@ -45,6 +46,13 @@ interface CityOption {
   cityId: string | null
   isPickupCity: boolean
   isDeliveryCity: boolean
+  /**
+   * List of courier providerKeys that cover this city.
+   * In 'all' mode: all providers covering this city (may be >1).
+   * In single-provider mode: a single-element array with that provider.
+   * Used to render compact courier badges in the dropdown.
+   */
+  providers?: string[]
 }
 
 interface CitySearchResponse {
@@ -210,18 +218,7 @@ export function CityAutocomplete({
                 onClick={() => handleSelect(city)}
               >
                 <span className="font-medium">{city.cityName}</span>
-                <div className="flex items-center gap-1">
-                  {city.isPickupCity && (
-                    <span className="text-[9px] px-1 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200">
-                      Pickup
-                    </span>
-                  )}
-                  {city.isDeliveryCity && (
-                    <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
-                      Delivery
-                    </span>
-                  )}
-                </div>
+                <CourierBadges providers={city.providers ?? []} />
               </button>
             ))
           )}

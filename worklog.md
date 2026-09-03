@@ -11782,3 +11782,127 @@ Verification:
 Git commit: succeeded — `3cf33b5 Remove market system completely from all modules` (27 files changed, 2162 insertions(+), 2366 deletions(-)).
 
 No blockers for downstream tasks. The schema models (Market, MarketCountry, MarketProduct, MarketVariantPricing) remain in `prisma/schema.prisma` and can be removed in a separate step after verifying the application works end-to-end without markets.
+
+---
+Task ID: EXPLORE-CITY-BADGES
+Agent: Explore
+Task: Locate and report on the city autocomplete component(s) used in the customer-creation form (in order-create) and the customer module (customer create/edit form). Specifically find the city-autocomplete file, the current "pickup"/"delivery" badge rendering code, the data structure returned by the city API, the API route serving cities, the per-city `providerKey` availability, and any existing courier badge components (Leopard/PostEx logos or text badges).
+
+Work Log:
+- Read prior worklog sections (11,784 lines) for context — located Task IDs 3242, 3284, 3292, 9615, 11693 etc. that introduced and iterated on the city-autocomplete system. Confirmed the canonical component is `src/components/couriers/city-autocomplete.tsx`.
+- Read full `src/components/couriers/city-autocomplete.tsx` (233 lines) — confirmed it is the single reusable city-search component, with a controlled input + debounced react-query dropdown. Two-query strategy: cache-only first; live-fallback second (with `?live=true`) when cache returns zero.
+- Read full `src/app/api/couriers/[providerKey]/cities/route.ts` (139 lines) — confirmed API route behavior for both single-provider and `'all'` union modes.
+- Read full `src/components/customers/CreateCustomerForm.tsx` (367 lines) — confirmed the customer create/edit form uses `<CityAutocomplete providerKey="all">` for Pakistan addresses (line 298), plain Input for non-PK (line 306).
+- Read full `src/components/customers/AddressSelector.tsx` (287 lines) — confirmed the order-create customer section uses `<CityAutocomplete providerKey={courierProviderKey ?? 'all'}>` (lines 222-235) for Pakistan addresses.
+- Read full `src/components/couriers/city-mismatch-resolver.tsx` (157 lines) — confirmed it renders `<CityAutocomplete>` inside the manual-search fallback (line 125).
+- Read schema `prisma/schema.prisma` lines 1745-1764 (IntegrationProvider) and 2190-2210 (CourierOperationalCity) — confirmed per-provider row structure with `@@unique([providerKey, cityName])`.
+- Read `src/lib/integrations/city-matcher.ts` lines 236-348 (`ensureCityCached`) — confirmed the cache-miss → live-fetch → bulk-insert flow used by the `live=true` fallback.
+- Read `src/lib/integrations/registry.ts` (119 lines) — confirmed the three registered courier providerKeys: `postex`, `leopard`, `tcs` (TCS is framework_ready / stub).
+- Grepped all 6 usages of `CityAutocomplete` — found in: `CreateCustomerForm`, `AddressSelector`, `city-mismatch-resolver`, `pickup-addresses-section`, `send-exchange-shipment-modal`, `booking-workbench-view`.
+- Grepped for existing courier badge components — none exist as a reusable component. Closest patterns:
+  * `src/components/orders/customer-detail-view.tsx` lines 1200-1208: INLINE display-name mapping (`postex → PostEx`, `tcs → TCS`, `leopard → Leopard`) for the `cityMatchedCouriers` list under each address card.
+  * `src/components/orders/needs-shipper-advice-view.tsx` line 132: `<Badge variant="outline" className="text-[9px] capitalize">{item.providerKey}</Badge>` — uses raw providerKey + CSS capitalize (produces "Postex", "Tcs", "Leopard" — NOT properly cased).
+- Greps for `PROVIDER_LABELS`, `providerLabel`, `providerDisplayName`, `getCourierLabel`, `providerMetadata` — NO matches. No centralized providerKey→display-name helper exists.
+- Listed `/public` directory — NO courier logo assets exist (only `logo.svg`, scan-reports, slip PDFs, one company image). `IntegrationProvider.logoUrl` schema column exists but is not currently populated for any courier in `/public`.
+
+Findings (consolidated):
+
+1. **Exact file path of the city autocomplete component**:
+   `/home/z/my-project/src/components/couriers/city-autocomplete.tsx` (233 lines, the single reusable component used in 6 places across the codebase).
+
+2. **Current badge rendering code** (file: `src/components/couriers/city-autocomplete.tsx`, lines 205-227):
+   ```jsx
+   filteredSuggestions.map((city) => (
+     <button
+       key={city.id}
+       type="button"
+       className="w-full text-left px-3 py-2 text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2"
+       onClick={() => handleSelect(city)}
+     >
+       <span className="font-medium">{city.cityName}</span>
+       <div className="flex items-center gap-1">
+         {city.isPickupCity && (
+           <span className="text-[9px] px-1 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200">
+             Pickup
+           </span>
+         )}
+         {city.isDeliveryCity && (
+           <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+             Delivery
+           </span>
+         )}
+       </div>
+     </button>
+   ))
+   ```
+   - Badges are plain `<span>` elements (NOT the shared `<Badge>` shadcn component) with hardcoded color classes (sky-50/sky-700 for Pickup, emerald-50/emerald-700 for Delivery).
+   - Both badges can render simultaneously (a city can be both pickup AND delivery — OR'd across the three PostEx API calls per the worklog).
+
+3. **Data structure returned by the city API**:
+   - Single-provider mode (`providerKey != 'all'`): `{ id, cityName, cityId, isPickupCity, isDeliveryCity }` — `providerKey` is NOT included (implied by URL).
+   - `'all'` union mode (`providerKey === 'all'`): `{ id, cityName, cityId, isPickupCity, isDeliveryCity, providerKey }` — `providerKey` IS included.
+   - **Frontend TypeScript interface** (`city-autocomplete.tsx` lines 42-48) is INCOMPLETE — it omits the optional `providerKey` field even though the API returns it in 'all' mode:
+     ```ts
+     interface CityOption {
+       id: string
+       cityName: string
+       cityId: string | null
+       isPickupCity: boolean
+       isDeliveryCity: boolean
+       // ⚠️ Missing: providerKey?: string  ← needed to render per-provider badges in 'all' mode
+     }
+     ```
+   - DB-level schema (`prisma/schema.prisma` lines 2193-2210):
+     ```prisma
+     model CourierOperationalCity {
+       id                String   @id @default(cuid())
+       providerKey       String   // 'postex', 'tcs', 'leopard'
+       cityName          String
+       cityId            String?  // nullable, TEXT — Leopard stores numeric ID as string
+       isPickupCity      Boolean  @default(true)
+       isDeliveryCity    Boolean  @default(true)
+       shipmentTypes     String?  // Leopard-specific JSON array string
+       lastSyncedAt      DateTime @default(now())
+       createdAt         DateTime @default(now())
+       updatedAt         DateTime @updatedAt
+       @@unique([providerKey, cityName])
+       @@index([providerKey])
+       @@map("courier_operational_cities")
+     }
+     ```
+
+4. **API route that returns cities**:
+   `GET /api/couriers/[providerKey]/cities?q=<term>&limit=<n>&live=<true|false>`
+   - File: `/home/z/my-project/src/app/api/couriers/[providerKey]/cities/route.ts` (139 lines)
+   - Filters: `providerKey` (exact), `isDeliveryCity=true` (always), `cityName contains q` (case-insensitive).
+   - `providerKey='all'` → union across ALL providers; deduplicates by `cityName.toLowerCase()`, keeps the FIRST provider's row for each unique name (loses multi-provider info — only ONE providerKey per city is returned to the frontend).
+   - `live=true` (single-provider only): when cache returns zero results AND `q.length >= 2`, calls `ensureCityCached(providerKey, q)` which fetches the full city list live from the courier API, bulk-inserts via `createMany + skipDuplicates`, then re-queries.
+   - Response shape: `{ cities: CityOption[] }`.
+
+5. **How `providerKey` is available per city**:
+   - At the DATABASE level: each row in `courier_operational_cities` is PER-PROVIDER. The unique constraint is `@@unique([providerKey, cityName])` — so "Karachi" can exist as 3 separate rows (one each for postex, leopard, tcs), each with its OWN `isPickupCity` / `isDeliveryCity` / `cityId` values.
+   - At the API level: in `'all'` mode, the route fetches all matching rows across providers, then DEDUPLICATES by `cityName.toLowerCase()` keeping the FIRST match (alphabetically first by `cityName asc`, then by insertion order). This means **the API currently returns only ONE providerKey per unique city name** — multi-provider availability for a single city is NOT surfaced to the frontend.
+   - **To show provider badges per city**: the API's dedup logic would need to either (a) be changed to aggregate providerKeys into an array per unique city (e.g. `{ cityName, providers: ['postex','leopard'], isPickupCity, isDeliveryCity }`), OR (b) be left as-is and the frontend only renders ONE provider badge per row (whichever provider "won" the dedup).
+   - In single-provider mode (`providerKey != 'all'`): `providerKey` is already known from the URL — the frontend can simply render a single provider badge from the URL parameter, no API change needed.
+
+6. **Existing courier badge components**:
+   - **No reusable `<CourierBadge>` / `<ProviderBadge>` / `<CourierLogo>` component exists.**
+   - The only existing courier-name → display-name mapping is an INLINE block in `src/components/orders/customer-detail-view.tsx` lines 1200-1208 (inside the `CityMatchInfo` component):
+     ```ts
+     const displayNames = matchedCouriers.map((p) => {
+       const lower = p.toLowerCase()
+       if (lower === 'postex') return 'PostEx'
+       if (lower === 'tcs') return 'TCS'
+       if (lower === 'leopard') return 'Leopard'
+       return p.charAt(0).toUpperCase() + p.slice(1)
+     })
+     ```
+   - Another pattern: `needs-shipper-advice-view.tsx` line 132 — uses CSS `capitalize` on raw `providerKey` (produces "Postex", "Tcs" — not ideal capitalization).
+   - Schema has `IntegrationProvider.providerName` (e.g. "PostEx", "TCS", "Leopard Couriers") and `IntegrationProvider.logoUrl` columns — but these live in the DB and are NOT returned by the cities API. The Integrations settings page (`integrations-view.tsx`) fetches them separately via `/api/integrations` and uses `i.provider.providerName`.
+   - NO courier logo image assets exist in `/public` — only the company logo.svg and uploaded scan-reports/PDFs. The `logoUrl` DB column is therefore likely null or pointing to an external URL for all current couriers.
+   - Adapter registry `src/lib/integrations/registry.ts` only registers three courier providerKeys: `postex`, `leopard`, `tcs`. No `trax`, `callCourier`, etc. — these are the only three badges that need to be supported.
+
+Stage Summary:
+Identified the single source of truth for city autocomplete (`src/components/couriers/city-autocomplete.tsx`) and the API that feeds it (`/api/couriers/[providerKey]/cities`). Confirmed the current pickup/delivery badges are plain `<span>` elements rendered at lines 213-223 of `city-autocomplete.tsx`. Confirmed the DB schema stores one row per (providerKey, cityName) pair — so a city like "Karachi" can have 3 separate rows (postex/leopard/tcs), each with its own pickup/delivery flags. The API's `'all'` mode currently deduplicates by cityName, returning only ONE providerKey per unique city (loses multi-provider info). To render per-provider courier badges in the suggestions dropdown in `'all'` mode, the API's dedup logic must be changed to aggregate providerKeys per city, OR the frontend must accept the single-providerKey-per-row limitation. No reusable `<CourierBadge>` component exists yet — the only existing inline display-name mapping is in `customer-detail-view.tsx` lines 1200-1208. Three couriers need to be supported: `postex` (PostEx), `leopard` (Leopard), `tcs` (TCS — stub adapter). No logo image assets exist in `/public`.
+
+No blockers for downstream implementation tasks (e.g. adding `<CourierBadge>` component + extending the cities API to return per-city provider lists).
