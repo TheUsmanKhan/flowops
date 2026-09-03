@@ -104,8 +104,10 @@ interface CustomerDetailDTO {
   // rtoRate = rto / dispatched-or-later orders * 100
   // deliveryRate = delivered / dispatched-or-later orders * 100
   // where "dispatched-or-later" = status IN ('dispatched','delivered','rto')
-  rtoRate: number
-  deliveryRate: number
+  // NULL when no dispatched-or-later orders exist (new customer with 0
+  // shipped orders — rate is undefined, not 0% or 100%).
+  rtoRate: number | null
+  deliveryRate: number | null
   isFlagged: boolean
   flaggedReason: string | null
   flaggedAt: Date | null
@@ -1802,8 +1804,8 @@ export async function getCustomerDetail(
       (statusMap.get('rto') ?? 0)
     const deliveredCount = statusMap.get('delivered') ?? 0
     const rtoCount = statusMap.get('rto') ?? 0
-    const rtoRate = dispatchedOrLater > 0 ? Math.round((rtoCount / dispatchedOrLater) * 100) : 0
-    const deliveryRate = dispatchedOrLater > 0 ? Math.round((deliveredCount / dispatchedOrLater) * 100) : 0
+    const rtoRate = dispatchedOrLater > 0 ? Math.round((rtoCount / dispatchedOrLater) * 100) : null
+    const deliveryRate = dispatchedOrLater > 0 ? Math.round((deliveredCount / dispatchedOrLater) * 100) : null
 
     // Fetch ALL orders for this customer (not just 20) so the Orders tab
     // matches the stat card's totalOrdersCount. The Orders tab renders a

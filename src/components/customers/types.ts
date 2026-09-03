@@ -90,10 +90,10 @@ export interface CustomerDetail {
   totalOrdersCount: number
   totalOrderValue: number
   totalRtoCount: number
-  /** Live-computed: rto / dispatched-or-later orders * 100 */
-  rtoRate: number
-  /** Live-computed: delivered / dispatched-or-later orders * 100 */
-  deliveryRate: number
+  /** Live-computed: rto / dispatched-or-later orders * 100. NULL when no dispatched orders. */
+  rtoRate: number | null
+  /** Live-computed: delivered / dispatched-or-later orders * 100. NULL when no dispatched orders. */
+  deliveryRate: number | null
   isFlagged: boolean
   flaggedReason: string | null
   flaggedAt: string | null

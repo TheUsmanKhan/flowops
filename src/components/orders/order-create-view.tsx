@@ -1524,15 +1524,19 @@ function CrmStatsWidget({ customer }: { customer: SelectedCustomer }) {
   const totalRto = customer.totalRtoCount
   // Derive a delivery rate from the cached totals (returned orders / total).
   // This is informational — not the source of truth (the live query is).
-  const deliveryRate =
-    totalOrders > 0 ? ((totalOrders - totalRto) / totalOrders) * 100 : 100
-  const rtoRate = totalOrders > 0 ? (totalRto / totalOrders) * 100 : 0
+  // When totalOrders === 0 (new customer), rates are null — display N/A
+  // instead of the misleading "100% delivery / 0% return" (which implies
+  // perfect performance when there's actually no data to measure).
+  const hasOrderData = totalOrders > 0
+  const deliveryRate = hasOrderData ? ((totalOrders - totalRto) / totalOrders) * 100 : null
+  const rtoRate = hasOrderData ? (totalRto / totalOrders) * 100 : null
   const deliveredCount = Math.max(0, totalOrders - totalRto)
 
   return (
     <div className="space-y-2">
       {/* Inline stats — single compact row, no 4-cell grid.
           Format: "N orders · D delivered (X%) · R returned (Y%)"
+          When no orders: "0 orders · Delivery: N/A · Return: N/A"
           Much more compact than 4 separate cards. */}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-1">
@@ -1541,24 +1545,38 @@ function CrmStatsWidget({ customer }: { customer: SelectedCustomer }) {
           <span>{totalOrders === 1 ? 'order' : 'orders'}</span>
         </span>
         <span className="text-border">·</span>
-        <span className="flex items-center gap-1">
-          <CheckCircle2 className="h-3 w-3 text-emerald-600" />
-          <span className="font-semibold text-emerald-700 tabular-nums">{deliveredCount}</span>
-          <span className="text-emerald-700/80">({deliveryRate.toFixed(0)}%)</span>
-        </span>
-        {totalRto > 0 && (
+        {hasOrderData ? (
           <>
-            <span className="text-border">·</span>
             <span className="flex items-center gap-1">
-              <RotateCcw className="h-3 w-3 text-rose-600" />
-              <span className="font-semibold text-rose-700 tabular-nums">{totalRto}</span>
-              <span className="text-rose-700/80">({rtoRate.toFixed(0)}%)</span>
+              <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+              <span className="font-semibold text-emerald-700 tabular-nums">{deliveredCount}</span>
+              <span className="text-emerald-700/80">({deliveryRate!.toFixed(0)}%)</span>
             </span>
+            {totalRto > 0 && (
+              <>
+                <span className="text-border">·</span>
+                <span className="flex items-center gap-1">
+                  <RotateCcw className="h-3 w-3 text-rose-600" />
+                  <span className="font-semibold text-rose-700 tabular-nums">{totalRto}</span>
+                  <span className="text-rose-700/80">({rtoRate!.toFixed(0)}%)</span>
+                </span>
+              </>
+            )}
           </>
+        ) : (
+          /* New customer — no order data yet. Show N/A for both rates
+             instead of the misleading 100%/0%. */
+          <span className="flex items-center gap-1 text-muted-foreground/70">
+            <CheckCircle2 className="h-3 w-3" />
+            <span>Delivery: N/A</span>
+            <span className="text-border mx-1">·</span>
+            <RotateCcw className="h-3 w-3" />
+            <span>Return: N/A</span>
+          </span>
         )}
       </div>
 
-      {totalOrders > 0 && (
+      {hasOrderData && (
         <p className="text-[10px] text-muted-foreground flex items-center gap-1">
           <History className="h-2.5 w-2.5 shrink-0" />
           Returning customer — verify address before dispatch.
