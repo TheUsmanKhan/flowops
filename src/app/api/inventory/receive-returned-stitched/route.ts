@@ -55,46 +55,56 @@ export async function POST(req: Request) {
     const costPerUnit = d.total_cost / d.quantity
 
     if (d.condition === 'damaged') {
-      // Damaged → goes straight to stock_loss_records, no inventory addition
-      const lossRecord = await db.stockLossRecord.create({
-        data: {
-          organizationId: orgId,
-          companyId: company.id,
-          orgVariantId: d.org_variant_id,
-          locationId: d.location_id,
-          lossType: 'damaged',
-          subType: 'confirmed',
-          damageType: 'other',
-          quantity: d.quantity,
-          costPerUnit,
-          investigationStatus: 'none',
-          resolution: 'written_off',
-          responsibleParty: 'courier',
-          evidenceUrls: JSON.stringify(d.photos),
-          notes: `Damaged returned stitched item. ${d.notes || ''}`,
-          reportedById: caller.id,
-          approvedById: caller.id,
-          resolvedById: caller.id,
-          resolvedAt: new Date(),
-        },
+      // Damaged → goes straight to stock_loss_records, no inventory addition.
+      //
+      // UNIFIED: now uses recordStockLoss() (was: direct db.stockLossRecord.create)
+      // so the loss is properly deduped + sourceModule is set. If a loss
+      // already exists for this order item + damaged + returned_stitched,
+      // it returns wasDuplicate=true (idempotent — no double-decrement).
+      const { recordStockLoss } = await import('@/lib/stock-loss')
+      const lossResult = await recordStockLoss({
+        organizationId: orgId,
+        companyId: company.id,
+        orgVariantId: d.org_variant_id,
+        locationId: d.location_id,
+        lossType: 'damaged',
+        sourceModule: 'returned_stitched',
+        quantity: d.quantity,
+        costPerUnit,
+        employeeId: caller.id,
+        subType: 'confirmed',
+        damageType: 'other',
+        responsibleParty: 'courier',
+        notes: `Damaged returned stitched item. ${d.notes || ''}`,
+        // createInventoryTransaction=false — this endpoint does NOT add
+        // stock for damaged items (the loss is just recorded, stock stays
+        // unchanged since the returned item was never added in the first place)
+        createInventoryTransaction: false,
       })
+
+      if (!lossResult.success) {
+        throw new ApiError(500, `Failed to record damaged loss: ${lossResult.error}`)
+      }
+
+      const lossRecordId = lossResult.lossRecordId ?? 'dedup (already existed)'
 
       insertAuditLog({
         action: 'inventory.stitched_return_received',
         entityType: 'stock_loss',
-        entityId: lossRecord.id,
+        entityId: lossResult.lossRecordId ?? 'dedup',
         companyId: company.id,
         organizationId: orgId,
         userId: user.id,
         employeeId: caller.id,
-        newValues: { condition: 'damaged', quantity: d.quantity, totalCost: d.total_cost },
+        newValues: { condition: 'damaged', quantity: d.quantity, totalCost: d.total_cost, wasDuplicate: lossResult.wasDuplicate },
       })
 
       return Response.json({
         success: true,
-        loss_record_id: lossRecord.id,
+        loss_record_id: lossRecordId,
         condition: 'damaged',
         status: 'written_off',
+        was_duplicate: lossResult.wasDuplicate,
       })
     }
 
