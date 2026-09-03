@@ -11939,3 +11939,37 @@ Stage Summary:
 - 24 LOW-severity smells (dead code, hardcoded defaults, fire-and-forget audit logs, etc.).
 - Confirmed 3 previously-fixed bugs from INVENTORY-3-BUGS-FIXED task remain fixed (positive adjustment now uses manual_adjustment_in; production order completion auto-stocks + reserves; pricing seed uses CVP).
 - No source code was modified — read-only audit.
+
+---
+Task ID: PROD-AUDIT-BACKEND
+Agent: general-purpose (read-only audit subagent)
+Task: Audit the PRODUCTS SECTION backend of the FlowOps Next.js 16 ERP — 5 modules (All Products, Add Product, Product Drafts, Returned Stock, Catalog Settings). READ-ONLY — no source modifications.
+
+Work Log:
+- Read worklog.md (last 15 entries + INVENTORY_AUDIT.md) for project context + audit format reference.
+- Read prisma/schema.prisma product/catalog models: OrgCategory (468), OrgBrand (492), OrgAttribute (512), OrgAttributeValue (535), AttributeValueRule (559), OrgProduct (581), OrgProductVariant (635), OrgProductImage (721), OrgProductBundle (743), SelectiveProductAccess (758), CompanyProductSetting (774), CompanyVariantPricing (802), ReturnedStitchedInventory (842), ProductFulfillmentCost (883), FormDraft (1854). Confirmed NO OrgCatalogSettings model exists — Catalog Settings is backed by OrgCategory + OrgBrand + OrgAttribute + OrgAttributeValue + AttributeValueRule.
+- Read all 24 routes under src/app/api/products/**: list+create (route.ts), [id] (GET/PATCH/DELETE), [id]/variants (POST), [id]/variants/generate (cartesian product with bidirectional rule filtering), [id]/variants/[variantId] (PATCH + override/resync price/weight/cost + toggle), [id]/images (POST multipart + DELETE), [id]/variant-groups (GET grouping), [id]/variant-groups/[parentValueId]/{sale-price,cost,weight} (cascade POSTs), [id]/subscribe, [id]/pricing, [id]/promote, [id]/demote, [id]/selective-access (POST+DELETE), drafts (thin wrapper), generate-stitched (stitchable wizard).
+- Read all 3 routes under src/app/api/returned-stitched: list+create (with idempotency), [id] (lifecycle transition sold/write_off), stats.
+- Read all 10 routes under src/app/api/catalog: attributes (GET+POST), attributes/[id] (PATCH+DELETE), attributes/[id]/values (GET+POST), attribute-values/[id] (PATCH+DELETE), inline-attribute, inline-value, available-attributes, seed-defaults, categories/[id] (PATCH+DELETE), brands/[id] (PATCH+DELETE).
+- Read /api/org/catalog (elevated-employee overview), /api/categories (list+create legacy shim), /api/brands (list+create legacy shim), /api/drafts (list+count+get+delete generic).
+- Read src/lib/actions/drafts/save-draft.ts (376 lines) — saveProductDraft + saveOrderDraft + listDrafts + countDrafts + deleteDraft + getDraft. Confirmed it uses modern getWorkspace() pattern (the ONLY product-adjacent code path that does).
+- Read src/lib/validations/product.ts (296 lines) — 18 schemas covering product/variant/pricing/catalot/returned-stitched/draft/fulfillment. Confirmed ~3 dead schemas (createProductShellSchema, generateCombinationsSchema, logFulfillmentCostSchema).
+- Read src/lib/utils/variant-grouping.ts (173 lines) — pure determineParentAttribute + groupVariantsByParentAttribute utilities shared between server (variant-groups route) and client (wizard).
+- Read src/lib/constants/fulfillment-types.ts (91 lines) — FULFILLMENT_TYPES, STITCHING_TYPES, STITCHING_SHORT, PRODUCT_TYPES/SCOPES, syncInventoryPolicy().
+- Read src/lib/attribute-seeding.ts (121 lines) — seedDefaultAttributes() creates Piece Type + Size + Color + Fabric + Unstitched→One Size rule.
+- Spot-checked 5 frontend components: ProductsView (603 lines), ProductCreateView (2337 lines), ProductDetailView (1793 lines), CatalogSettingsView (2301 lines), ReturnedStitchedView (1352 lines), OrgCatalogView (1221 lines), plus AttributeSelector (1294 lines). Confirmed routing in src/app/page.tsx (lines 142-148, 427-440).
+- Grepped for Market/market/db.market references in products code — confirmed CLEAN migration. Only 3 explicit "no market scoping" comments in pricing routes. No orphaned db.market calls.
+- Grepped permissions.ts — confirmed 7 PRODUCTS_* permission keys defined (VIEW, CREATE, EDIT, MANAGE_CATALOG, SUBSCRIBE, PRICING, PROMOTE). Confirmed INVENTORY_RECEIVE, INVENTORY_REPORT_LOSS, INVENTORY_MANAGE_LOSS used by returned-stitched routes (incorrectly — REPORT_LOSS doesn't match the receive-returns use case).
+- Wrote comprehensive audit report to /home/z/my-project/PRODUCTS_AUDIT.md (~22KB).
+
+Stage Summary:
+- Audit report PRODUCTS_AUDIT.md written with full per-module breakdown (5 modules + cross-cutting concerns), summary table, and top-12 priority recommendations.
+- 3 CRITICAL bugs found (most severe: non-atomic multi-step product creation in POST /api/products; non-atomic variant addition in POST /api/products/[id]/variants; permission bypass on POST /api/categories and /api/brands allowing any active employee to create org-level catalog entities; returned-stitched lifecycle not linked to InventoryTransaction ledger).
+- 9 HIGH-severity logic issues found (most recurring: image upload doesn't validate variantId belongs to product, override/resync routes don't verify variant-product link, org-scoped detail routes not company-scoped, demote doesn't clear stale SelectiveProductAccess rows, originalOrderReference/soldOrderReference are free-text strings not FKs, returned-stitched permission check uses wrong permission key).
+- 11 MEDIUM-severity issues (race conditions on slug/displayOrder generation, missing Idempotency-Key support on 18 of 23 mutating routes, frontend/backend Zod schema mismatch on returned-stitched recordReturn form, dead OrgProductBundle + ProductFulfillmentCost schema, draft system has no expiry/TTL/size limit).
+- 14 LOW-severity smells (dead Zod schemas, frontend duplicates backend schemas inline, no full-text search index on product titles, audit logs fire-and-forget, etc.).
+- Confirmed Markets system removal was CLEAN — no orphaned db.market references in any product code path. Only 3 intentional comments documenting "no market scoping" in pricing routes.
+- Confirmed variant hierarchy is implemented via parent-attribute concept (lowest display_order attribute is the parent) NOT via parentId self-relation — consistent and well-factored via shared variant-grouping.ts utility.
+- Confirmed image storage is local filesystem under /public/uploads/products/{orgId}/{productId}/ despite schema comment claiming Supabase Storage — deployment-time bomb on Vercel.
+- Confirmed draft system (FormDraft) has NO expiry — drafts persist forever.
+- No source code was modified — read-only audit. Report saved at /home/z/my-project/PRODUCTS_AUDIT.md.
