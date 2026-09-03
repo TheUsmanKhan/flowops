@@ -136,9 +136,7 @@ export async function register() {
         setTimeout(async () => {
           try {
             const { syncExchangeRates, getActiveCurrencies } = await import('@/lib/exchange-rates')
-            const { db } = await import('@/lib/db')
-            const allMarkets = await db.market.findMany({ where: { isActive: true }, select: { currency: true }, distinct: ['currency'] })
-            const currencies = allMarkets.map((m: { currency: string }) => m.currency)
+            const currencies = await getActiveCurrencies()
             if (currencies.length > 0) {
               const result = await syncExchangeRates(currencies)
               console.log(`[fx-refresh] Stored ${result.stored} rate snapshots. Errors: ${result.errors.length}`)
@@ -151,9 +149,7 @@ export async function register() {
         setInterval(async () => {
           try {
             const { syncExchangeRates, getActiveCurrencies } = await import('@/lib/exchange-rates')
-            const { db } = await import('@/lib/db')
-            const allMarkets = await db.market.findMany({ where: { isActive: true }, select: { currency: true }, distinct: ['currency'] })
-            const currencies = allMarkets.map((m: { currency: string }) => m.currency)
+            const currencies = await getActiveCurrencies()
             if (currencies.length > 0) {
               const result = await syncExchangeRates(currencies)
               console.log(`[fx-refresh] Stored ${result.stored} rate snapshots. Errors: ${result.errors.length}`)

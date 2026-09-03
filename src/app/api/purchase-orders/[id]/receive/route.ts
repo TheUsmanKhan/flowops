@@ -83,7 +83,15 @@ export async function POST(
       },
     })
 
-    // Process each receipt item
+    // Process each receipt item.
+    //
+    // ATOMICITY: Each item's 4 writes (processInventoryTransaction +
+    // purchaseOrderReceiptItem.create + purchaseOrderItem.update +
+    // inventoryPool.update) are NOT wrapped in db.$transaction because
+    // processInventoryTransaction uses the global db client. Instead, we
+    // use a per-item COMPENSATING pattern: if any write AFTER
+    // processInventoryTransaction succeeds fails, we reverse the inventory
+    // transaction so stock isn't left in an inconsistent state.
     let allFullyReceived = true
     for (const ri of d.items) {
       if (ri.received_quantity <= 0) continue // skip zero-quantity lines
@@ -91,7 +99,8 @@ export async function POST(
       const poItem = po.items.find((item) => item.id === ri.purchase_order_item_id)
       if (!poItem) throw new ApiError(400, `PO item ${ri.purchase_order_item_id} not found on this PO.`)
 
-      // Process the inventory transaction (purchase_received)
+      // Step 1: Process the inventory transaction (purchase_received) —
+      // this increments onHand + recalculates WAC.
       const txnResult = await processInventoryTransaction({
         orgVariantId: ri.org_variant_id,
         locationId: po.deliveryLocationId,
@@ -111,47 +120,75 @@ export async function POST(
         throw new ApiError(500, `Inventory transaction failed for variant ${ri.org_variant_id}: ${txnResult.error}`)
       }
 
-      // Create the receipt item record
-      await db.purchaseOrderReceiptItem.create({
-        data: {
-          purchaseOrderReceiptId: receipt.id,
-          purchaseOrderItemId: ri.purchase_order_item_id,
-          orgVariantId: ri.org_variant_id,
-          receivedQuantity: ri.received_quantity,
-          actualCostPerUnit: ri.actual_cost_per_unit,
-          shortageQuantity: ri.shortage_quantity,
-          shortageReason: ri.shortage_reason || null,
-          inventoryTxnId: txnResult.transactionId ?? null,
-        },
-      })
-
-      // Update the PO item's received_quantity
-      await db.purchaseOrderItem.update({
-        where: { id: ri.purchase_order_item_id },
-        data: { receivedQuantity: { increment: ri.received_quantity } },
-      })
-
-      // Decrement incoming on the pool (never below 0)
-      const pool = await db.inventoryPool.findUnique({
-        where: {
-          orgVariantId_locationId: {
+      // Steps 2-4: create receipt item, update PO item, decrement incoming.
+      // If ANY of these fail, reverse the inventory transaction (step 1) so
+      // stock isn't left incremented without a receipt record.
+      try {
+        // Step 2: Create the receipt item record
+        await db.purchaseOrderReceiptItem.create({
+          data: {
+            purchaseOrderReceiptId: receipt.id,
+            purchaseOrderItemId: ri.purchase_order_item_id,
             orgVariantId: ri.org_variant_id,
-            locationId: po.deliveryLocationId,
+            receivedQuantity: ri.received_quantity,
+            actualCostPerUnit: ri.actual_cost_per_unit,
+            shortageQuantity: ri.shortage_quantity,
+            shortageReason: ri.shortage_reason || null,
+            inventoryTxnId: txnResult.transactionId ?? null,
           },
-        },
-        select: { incoming: true },
-      })
-      if (pool) {
-        const newIncoming = Math.max(0, pool.incoming - ri.received_quantity)
-        await db.inventoryPool.update({
+        })
+
+        // Step 3: Update the PO item's received_quantity
+        await db.purchaseOrderItem.update({
+          where: { id: ri.purchase_order_item_id },
+          data: { receivedQuantity: { increment: ri.received_quantity } },
+        })
+
+        // Step 4: Decrement incoming on the pool (never below 0)
+        const pool = await db.inventoryPool.findUnique({
           where: {
             orgVariantId_locationId: {
               orgVariantId: ri.org_variant_id,
               locationId: po.deliveryLocationId,
             },
           },
-          data: { incoming: newIncoming },
+          select: { incoming: true },
         })
+        if (pool) {
+          const newIncoming = Math.max(0, pool.incoming - ri.received_quantity)
+          await db.inventoryPool.update({
+            where: {
+              orgVariantId_locationId: {
+                orgVariantId: ri.org_variant_id,
+                locationId: po.deliveryLocationId,
+              },
+            },
+            data: { incoming: newIncoming },
+          })
+        }
+      } catch (postTxnErr) {
+        // COMPENSATING ACTION: reverse the inventory transaction so stock
+        // isn't left incremented without a receipt record. This prevents
+        // "phantom stock" — stock that exists in the pool but has no
+        // receipt item linking it to a PO.
+        await processInventoryTransaction({
+          orgVariantId: ri.org_variant_id,
+          locationId: po.deliveryLocationId,
+          organizationId: orgId,
+          companyId: company.id,
+          employeeId: caller.id,
+          transactionType: 'manual_adjustment_in', // reverse: negate the received qty
+          quantity: -ri.received_quantity, // negative = decrement (processInventoryTransaction handles sign)
+          costPerUnit: ri.actual_cost_per_unit,
+          referenceType: 'purchase_order',
+          referenceId: poId,
+          notes: `REVERSAL: PO receipt item creation failed. Reversing the purchase_received txn ${txnResult.transactionId}. Reason: ${postTxnErr instanceof Error ? postTxnErr.message : 'unknown'}.`,
+        }).catch(() => {}) // best-effort reversal
+
+        throw new ApiError(
+          500,
+          `Failed to create receipt record for variant ${ri.org_variant_id}: ${postTxnErr instanceof Error ? postTxnErr.message : 'unknown error'}. Inventory transaction reversed — stock not affected.`,
+        )
       }
 
       // Check if this item is now fully received
