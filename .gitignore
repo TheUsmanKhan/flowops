@@ -46,8 +46,8 @@ local-*
 *.log
 dev.log
 dev.out.log
-test
-prompt
+/test/
+/prompt/
 
 server.log
 # Skills directory
@@ -60,3 +60,8 @@ server.log
 .env.local-db
 *.tar
 *.zip
+
+# NOTE: the old `test` rule was too broad — it matched any path containing
+# "test" (e.g. src/app/api/integrations/[id]/test/route.ts). Use /test/
+# to only ignore the top-level test directory.
+/test/
