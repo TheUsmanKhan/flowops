@@ -1367,155 +1367,147 @@ function CustomerSection({
 
         {/* ── SELECTED MODE (customer selected) ──────────────────────────── */}
         {selectedCustomer && (
-          <div className="space-y-4">
-            {/* Customer info card + CRM stats + address selector + phone + recipient */}
-            <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-3 space-y-3">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-start gap-2.5 min-w-0">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
-                    <User className="h-4 w-4" />
+          <div className="space-y-3">
+            {/* Customer info card + CRM stats + address selector + phone + recipient.
+                Compact: tighter padding (p-2.5), smaller avatar, inline stats. */}
+            <div className="rounded-lg border border-primary/30 bg-primary/5 p-2.5 space-y-2">
+              {/* Header: avatar + name + phone + change button — single row */}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
+                    <User className="h-3.5 w-3.5" />
                   </div>
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <p className="text-sm font-semibold truncate">{selectedCustomer.name}</p>
                       {selectedCustomer.isFlagged && (
-                        <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
+                        <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[9px] h-4 px-1">
                           Flagged
                         </Badge>
                       )}
                     </div>
                     {selectedCustomer.phones[0] && (
-                      <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
-                        <Phone className="h-2.5 w-2.5" /> {selectedCustomer.phones[0].phoneRaw}
+                      <p className="text-[11px] text-muted-foreground font-mono flex items-center gap-1">
+                        <Phone className="h-2.5 w-2.5" />
+                        {selectedCustomer.phones[0].phoneRaw}
                         {selectedCustomer.phones[0].isValidFormat === false && (
                           <span className="text-amber-600 font-sans font-medium ml-1">
-                            (invalid format — please correct in CRM)
+                            (invalid — fix in CRM)
                           </span>
                         )}
                       </p>
                     )}
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={onDeselectCustomer}>
-                  <RotateCcw className="h-3.5 w-3.5" /> Change
+                <Button size="sm" variant="ghost" className="h-7 px-2 shrink-0" onClick={onDeselectCustomer}>
+                  <RotateCcw className="h-3 w-3" /> Change
                 </Button>
               </div>
 
-              {/* Phone format warning — shown when the customer's primary phone
-                  has isValidFormat=false (e.g., from an external platform with
-                  an unformatted phone). Does NOT block order creation, but
-                  surfaces the issue so the user can correct it in CRM. */}
+              {/* Phone format warning — compact inline, not a big banner */}
               {selectedCustomer.phones.some((p) => p.isPrimary && p.isValidFormat === false) && (
-                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2.5">
-                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-xs font-medium text-amber-900">
-                      This customer's phone number may be invalid.
-                    </p>
-                    <p className="text-[11px] text-amber-700 mt-0.5">
-                      The phone was imported from an external platform and may not be in the correct format.
-                      Please correct it in the customer's CRM profile before booking a courier shipment.
-                    </p>
-                  </div>
-                </div>
+                <p className="text-[10px] text-amber-700 flex items-start gap-1.5">
+                  <AlertTriangle className="h-2.5 w-2.5 text-amber-600 mt-0.5 shrink-0" />
+                  <span>Phone imported from external platform may be invalid — correct in CRM before booking.</span>
+                </p>
               )}
 
-              {/* Compact CRM stats (informational only) */}
+              {/* Inline CRM stats (compact) */}
               <CrmStatsWidget customer={selectedCustomer} />
+            </div>
 
-              <Separator />
+            <Separator />
 
-              {/* Phone selector + Recipient name */}
-              <div className="grid sm:grid-cols-2 gap-3">
-                {selectedCustomer.phones.length > 1 ? (
-                  <div className="space-y-1 min-w-0">
-                    <Label className="text-xs flex items-center gap-1">
-                      <Phone className="h-3 w-3" /> Contact Phone
-                    </Label>
-                    <Select
-                      value={usedCustomerPhoneId ?? undefined}
-                      onValueChange={(v) => setUsedCustomerPhoneId(v)}
-                    >
-                      <SelectTrigger className="text-sm w-full min-w-0">
-                        <SelectValue placeholder="Select phone" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {selectedCustomer.phones.map((p) => (
-                          <SelectItem key={p.id} value={p.id}>
-                            <span className="font-mono">{p.phoneRaw}</span>
-                            {p.isPrimary && (
-                              <Badge variant="outline" className="ml-2 text-[10px] bg-primary/10 text-primary border-primary/20">
-                                Primary
-                              </Badge>
-                            )}
-                            {p.label && (
-                              <span className="text-xs text-muted-foreground ml-1">· {p.label}</span>
-                            )}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                ) : (
-                  /* Spacer — keeps Recipient Name in col 2 when the phone
-                     selector is hidden (single-phone customer). */
-                  <div className="hidden sm:block" aria-hidden />
-                )}
-
+            {/* Phone selector + Recipient name */}
+            <div className="grid sm:grid-cols-2 gap-3">
+              {selectedCustomer.phones.length > 1 ? (
                 <div className="space-y-1 min-w-0">
                   <Label className="text-xs flex items-center gap-1">
-                    <User className="h-3 w-3" /> Recipient Name
+                    <Phone className="h-3 w-3" /> Contact Phone
                   </Label>
-                  <Input
-                    placeholder="Who is receiving this order?"
-                    value={recipientName}
-                    onChange={(e) => setRecipientName(e.target.value)}
-                    className="text-sm"
-                  />
-                  <p className="text-[10px] text-muted-foreground">
-                    Defaults to the customer name — edit if someone else is receiving.
-                  </p>
+                  <Select
+                    value={usedCustomerPhoneId ?? undefined}
+                    onValueChange={(v) => setUsedCustomerPhoneId(v)}
+                  >
+                    <SelectTrigger className="text-sm w-full min-w-0">
+                      <SelectValue placeholder="Select phone" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {selectedCustomer.phones.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          <span className="font-mono">{p.phoneRaw}</span>
+                          {p.isPrimary && (
+                            <Badge variant="outline" className="ml-2 text-[10px] bg-primary/10 text-primary border-primary/20">
+                              Primary
+                            </Badge>
+                          )}
+                          {p.label && (
+                            <span className="text-xs text-muted-foreground ml-1">· {p.label}</span>
+                          )}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
-              </div>
+              ) : (
+                /* Spacer — keeps Recipient Name in col 2 when the phone
+                   selector is hidden (single-phone customer). */
+                <div className="hidden sm:block" aria-hidden />
+              )}
 
-              {/* ── Address selector (REPLACES the empty address/city inputs) ── */}
-              <AddressSelector
-                addresses={selectedCustomer.addresses}
-                value={addressSelectorValue}
-                onChange={onAddressSelectorChange}
-                addressError={fieldError('delivery_address')}
-                cityError={fieldError('delivery_city')}
-                courierProviderKey={courierProviderKey}
-              />
-            </div>
-
-            {/* ── Discount (kept in CustomerSection; delivery logistics moved to DeliverySidebar) ── */}
-            <div className="space-y-3">
-              <p className="text-sm font-medium flex items-center gap-1.5">
-                <CreditCard className="h-4 w-4 text-muted-foreground" /> Discount
-              </p>
-              <div className="grid sm:grid-cols-2 gap-3">
-                <div className="space-y-1 min-w-0">
-                  <Label className="text-xs">Discount (Rs.)</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    placeholder="0"
-                    value={discountAmount}
-                    onChange={(e) => setDiscountAmount(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1 min-w-0">
-                  <Label className="text-xs">Discount reason</Label>
-                  <Input
-                    placeholder="Optional"
-                    value={discountReason}
-                    onChange={(e) => setDiscountReason(e.target.value)}
-                  />
-                </div>
+              <div className="space-y-1 min-w-0">
+                <Label className="text-xs flex items-center gap-1">
+                  <User className="h-3 w-3" /> Recipient Name
+                </Label>
+                <Input
+                  placeholder="Who is receiving this order?"
+                  value={recipientName}
+                  onChange={(e) => setRecipientName(e.target.value)}
+                  className="text-sm"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Defaults to customer name — edit if someone else is receiving.
+                </p>
               </div>
             </div>
+
+            {/* ── Address selector (REPLACES the empty address/city inputs) ── */}
+            <AddressSelector
+              addresses={selectedCustomer.addresses}
+              value={addressSelectorValue}
+              onChange={onAddressSelectorChange}
+              addressError={fieldError('delivery_address')}
+              cityError={fieldError('delivery_city')}
+              courierProviderKey={courierProviderKey}
+            />
+
+          {/* ── Discount (kept in CustomerSection; delivery logistics moved to DeliverySidebar) ── */}
+          <div className="space-y-3">
+            <p className="text-sm font-medium flex items-center gap-1.5">
+              <CreditCard className="h-4 w-4 text-muted-foreground" /> Discount
+            </p>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div className="space-y-1 min-w-0">
+                <Label className="text-xs">Discount (Rs.)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="0"
+                  value={discountAmount}
+                  onChange={(e) => setDiscountAmount(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1 min-w-0">
+                <Label className="text-xs">Discount reason</Label>
+                <Input
+                  placeholder="Optional"
+                  value={discountReason}
+                  onChange={(e) => setDiscountReason(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
           </div>
         )}
       </CardContent>
@@ -1538,64 +1530,39 @@ function CrmStatsWidget({ customer }: { customer: SelectedCustomer }) {
   const deliveredCount = Math.max(0, totalOrders - totalRto)
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <StatCell label="Total Orders" value={String(totalOrders)} />
-        <StatCell
-          label="Delivered"
-          value={String(deliveredCount)}
-          sub={`${deliveryRate.toFixed(1)}%`}
-          tone="emerald"
-        />
-        <StatCell
-          label="Returned"
-          value={String(totalRto)}
-          sub={`${rtoRate.toFixed(1)}%`}
-          tone="rose"
-        />
-        <StatCell
-          label="Delivery Rate"
-          value={`${deliveryRate.toFixed(1)}%`}
-          tone="emerald"
-        />
+    <div className="space-y-2">
+      {/* Inline stats — single compact row, no 4-cell grid.
+          Format: "N orders · D delivered (X%) · R returned (Y%)"
+          Much more compact than 4 separate cards. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1">
+          <ShoppingBag className="h-3 w-3" />
+          <span className="font-semibold text-foreground tabular-nums">{totalOrders}</span>
+          <span>{totalOrders === 1 ? 'order' : 'orders'}</span>
+        </span>
+        <span className="text-border">·</span>
+        <span className="flex items-center gap-1">
+          <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+          <span className="font-semibold text-emerald-700 tabular-nums">{deliveredCount}</span>
+          <span className="text-emerald-700/80">({deliveryRate.toFixed(0)}%)</span>
+        </span>
+        {totalRto > 0 && (
+          <>
+            <span className="text-border">·</span>
+            <span className="flex items-center gap-1">
+              <RotateCcw className="h-3 w-3 text-rose-600" />
+              <span className="font-semibold text-rose-700 tabular-nums">{totalRto}</span>
+              <span className="text-rose-700/80">({rtoRate.toFixed(0)}%)</span>
+            </span>
+          </>
+        )}
       </div>
 
       {totalOrders > 0 && (
-        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <History className="h-3 w-3" />
+        <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+          <History className="h-2.5 w-2.5 shrink-0" />
           Returning customer — verify address before dispatch.
         </p>
-      )}
-
-      {/* Saved address history (from customer.addresses[] with lastUsedAt) */}
-      {customer.addresses.length > 0 && (
-        <div className="space-y-1.5">
-          <p className="text-[10px] uppercase tracking-wide text-muted-foreground flex items-center gap-1">
-            <MapPin className="h-3 w-3" /> Saved addresses
-          </p>
-          <ul className="space-y-1 max-h-32 overflow-y-auto pr-1 scrollbar-thin">
-            {customer.addresses.slice(0, 5).map((a) => (
-              <li
-                key={a.id}
-                className="text-xs flex items-center justify-between gap-2 rounded bg-background/60 px-2 py-1"
-              >
-                <span className="truncate">
-                  {a.address || '—'} · {a.city}
-                </span>
-                <div className="flex items-center gap-1 shrink-0">
-                  {a.isDefault && (
-                    <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20">
-                      Default
-                    </Badge>
-                  )}
-                  <Badge variant="outline" className="text-[10px]">
-                    {formatLastUsedShort(a.lastUsedAt)}
-                  </Badge>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
       )}
     </div>
   )

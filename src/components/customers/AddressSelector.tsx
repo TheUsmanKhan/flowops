@@ -3,7 +3,6 @@
 import { useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -11,58 +10,36 @@ import { MapPin, Star, Plus } from 'lucide-react'
 import { formatLastUsed, type AddressDTO } from './types'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 import { CountrySelector } from '@/components/ui/country-selector'
-// No countryCodeToName/countryNameToCode needed — CountrySelector returns
-// alpha-2 codes directly, and we store alpha-2 codes on the DB. No
-// translation at the form boundary.
 
 export interface AddressSelectorValue {
-  /** The selected saved address ID, or null if "new address" mode. */
   usedCustomerAddressId: string | null
-  /** The editable delivery address text (the order's own snapshot). */
   deliveryAddress: string
-  /** The editable delivery city text. */
   deliveryCity: string
-  /** The editable delivery country (ISO 3166-1 alpha-2 code, e.g. "PK",
-   *  "GB") — the order's own snapshot, same editable-per-order semantics
-   *  as deliveryAddress/deliveryCity. Defaults to "PK" (current majority
-   *  use case). Stored as a CODE (not a name) — matches CustomerAddress.country
-   *  + Shopify's default_address.country_code + CountrySelector's output. */
   deliveryCountry: string
-  /** Whether to persist a new one-off address as a permanent customer_addresses row. */
   saveAddressForNextTime: boolean
 }
 
 export interface AddressSelectorProps {
-  /** The customer's saved addresses (already ordered: default first, then lastUsedAt desc). */
   addresses: AddressDTO[]
-  /** Current value. */
   value: AddressSelectorValue
-  /** Callback when the value changes. */
   onChange: (value: AddressSelectorValue) => void
-  /** Show the field error for delivery_address (from form validation). */
   addressError?: string
-  /** Show the field error for delivery_city (from form validation). */
   cityError?: string
-  /**
-   * Optional: when set, the city field uses CityAutocomplete (live suggestions
-   * from courier_operational_cities) instead of a plain text input. Pass the
-   * selected courier's providerKey (e.g. 'postex', 'tcs').
-   */
   courierProviderKey?: string
 }
 
 /**
- * Radio-style card selector for a customer's saved addresses, plus a
- * "+ Use a new address" option that reveals fresh address + city inputs.
+ * Compact address selector for the order-create customer section.
+ *
+ * Redesign (Shopify-style compact):
+ *   - Saved address cards are single-line rows (not tall cards)
+ *   - Address text uses a single-line Input (not a Textarea)
+ *   - Helper text is inline and minimal
+ *   - The "editable for this order" note is a tiny inline hint
  *
  * The selected/entered address text is ALWAYS editable (per the snapshot
- * behavior established in Step 2's createManualOrder()): the order's own
- * delivery_address is a copy that can be tweaked per-order without altering
- * the saved customer_addresses row.
- *
- * Used in:
- *   - The Order Creation page's customer section (replaces the broken empty
- *     address fields)
+ * behavior: the order's delivery_address is a copy that can be tweaked
+ * per-order without altering the saved customer_addresses row).
  */
 export function AddressSelector({
   addresses,
@@ -75,14 +52,11 @@ export function AddressSelector({
   const { usedCustomerAddressId, deliveryAddress, deliveryCity, deliveryCountry, saveAddressForNextTime } = value
   const isNewMode = usedCustomerAddressId === null
 
-  // When a saved address is selected, pre-fill the editable text from it
-  // (but only if the current text is empty OR matches a previously-selected
-  // saved address — so we don't overwrite user edits when switching addresses).
+  // When a saved address is selected, pre-fill the editable text from it.
   useEffect(() => {
     if (usedCustomerAddressId) {
       const selected = addresses.find((a) => a.id === usedCustomerAddressId)
       if (selected) {
-        // Check if the current text is empty or matches a different saved address
         const currentMatch = addresses.find(
           (a) => a.address === deliveryAddress && a.city === deliveryCity,
         )
@@ -91,14 +65,11 @@ export function AddressSelector({
             ...value,
             deliveryAddress: selected.address,
             deliveryCity: selected.city,
-            // Fall back to "PK" if the saved address has no country yet
-            // (rows created before the country-system phase have null).
             deliveryCountry: selected.country ?? 'PK',
           })
         }
       }
     }
-     
   }, [usedCustomerAddressId])
 
   const selectSaved = (addr: AddressDTO) => {
@@ -125,13 +96,13 @@ export function AddressSelector({
 
   return (
     <div className="space-y-2">
-      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+      <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-1">
         <MapPin className="h-3 w-3" /> Delivery Address
       </p>
 
-      {/* Saved address cards */}
+      {/* Saved address cards — compact single-line rows */}
       {addresses.length > 0 && (
-        <div className="space-y-1.5">
+        <div className="space-y-1">
           {addresses.map((addr) => {
             const isSelected = usedCustomerAddressId === addr.id
             return (
@@ -140,36 +111,24 @@ export function AddressSelector({
                 type="button"
                 onClick={() => selectSaved(addr)}
                 className={cn(
-                  'w-full text-left rounded-md border p-2.5 transition-colors',
+                  'w-full text-left rounded-md border px-2.5 py-1.5 transition-colors',
                   isSelected
                     ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
                     : 'border-border hover:border-primary/30 hover:bg-muted/40',
                 )}
               >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      {addr.label && (
-                        <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
-                          {addr.label}
-                        </span>
-                      )}
-                      {addr.isDefault && (
-                        <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[10px] h-4 px-1.5">
-                          <Star className="h-2 w-2 mr-0.5 fill-current" /> Default
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="text-sm font-medium truncate mt-0.5">{addr.address}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {addr.city}{addr.country ? `, ${addr.country}` : ''}
-                    </p>
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      Last used: {formatLastUsed(addr.lastUsedAt)}
-                    </p>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0 flex-1 flex items-center gap-1.5">
+                    <span className="text-xs font-medium truncate">{addr.address || '—'}</span>
+                    <span className="text-[10px] text-muted-foreground shrink-0">· {addr.city}</span>
+                    {addr.isDefault && (
+                      <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[9px] h-3.5 px-1 shrink-0">
+                        <Star className="h-2 w-2 mr-0.5 fill-current" />Default
+                      </Badge>
+                    )}
                   </div>
                   <div className={cn(
-                    'mt-0.5 h-4 w-4 rounded-full border-2 shrink-0',
+                    'h-3.5 w-3.5 rounded-full border-2 shrink-0',
                     isSelected ? 'border-primary bg-primary' : 'border-muted-foreground/30',
                   )} />
                 </div>
@@ -179,45 +138,39 @@ export function AddressSelector({
         </div>
       )}
 
-      {/* "+ Use a new address" option */}
+      {/* "+ Use a new address" option — compact */}
       <button
         type="button"
         onClick={selectNew}
         className={cn(
-          'w-full text-left rounded-md border border-dashed p-2.5 transition-colors',
+          'w-full text-left rounded-md border border-dashed px-2.5 py-1.5 transition-colors',
           isNewMode
             ? 'border-primary bg-primary/5 ring-1 ring-primary/20'
             : 'border-border hover:border-primary/30 hover:bg-muted/40',
         )}
       >
-        <div className="flex items-center gap-2">
-          <Plus className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm">Use a new address</span>
+        <div className="flex items-center gap-1.5">
+          <Plus className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="text-xs">Use a new address</span>
         </div>
       </button>
 
-      {/* Editable address text (always visible — this IS the order's snapshot) */}
-      <div className="grid sm:grid-cols-2 gap-2 pt-1">
-        <div className="space-y-1 sm:col-span-2">
-          <Label className="text-xs">Address {isNewMode ? '*' : '(editable for this order)'}</Label>
-          <Textarea
+      {/* Editable address fields — single-line Input (was Textarea) */}
+      <div className="grid sm:grid-cols-2 gap-2 pt-0.5">
+        <div className="space-y-1 sm:col-span-2 min-w-0">
+          <Label className="text-[10px]">
+            Address {isNewMode ? '*' : <span className="text-muted-foreground">(editable for this order)</span>}
+          </Label>
+          <Input
             placeholder="House #, street, area"
             value={deliveryAddress}
             onChange={(e) => onChange({ ...value, deliveryAddress: e.target.value })}
-            className="text-sm"
-            rows={2}
+            className="text-sm h-8"
           />
-          {addressError && <p className="text-xs text-destructive">{addressError}</p>}
+          {addressError && <p className="text-[10px] text-destructive">{addressError}</p>}
         </div>
-        <div className="space-y-1">
-          <Label className="text-xs">City *</Label>
-          {/* City input mode depends on the address's country:
-              - Pakistan (PK): use CityAutocomplete (courier_operational_cities
-                cache + live fallback) to suggest valid courier cities.
-              - Non-PK: courier_operational_cities is 100% Pakistan-sourced,
-                so autocomplete suggestions would be meaningless for a foreign
-                city. Fall back to a plain text Input — the city is treated as
-                free text with no matching/suggestion UI. */}
+        <div className="space-y-1 min-w-0">
+          <Label className="text-[10px]">City *</Label>
           {deliveryCountry === 'PK' ? (
             courierProviderKey ? (
               <CityAutocomplete
@@ -239,17 +192,14 @@ export function AddressSelector({
               placeholder="Enter city"
               value={deliveryCity}
               onChange={(e) => onChange({ ...value, deliveryCity: e.target.value })}
-              className="pl-8"
+              className="pl-8 text-sm h-8"
               autoComplete="off"
             />
           )}
-          {cityError && <p className="text-xs text-destructive">{cityError}</p>}
+          {cityError && <p className="text-[10px] text-destructive">{cityError}</p>}
         </div>
-        {/* Country — required, visible. Defaults to PK (current majority
-            use case) but the user can change it. CountrySelector returns
-            alpha-2 codes directly; we store them as-is (no translation). */}
-        <div className="space-y-1">
-          <Label className="text-xs">Country *</Label>
+        <div className="space-y-1 min-w-0">
+          <Label className="text-[10px]">Country *</Label>
           <CountrySelector
             value={deliveryCountry}
             onChange={(code) =>
@@ -265,20 +215,21 @@ export function AddressSelector({
 
       {/* "Save for next time" checkbox — only in new-address mode */}
       {isNewMode && (
-        <label className="flex items-center gap-2 cursor-pointer pt-1">
+        <label className="flex items-center gap-2 cursor-pointer">
           <Checkbox
             checked={saveAddressForNextTime}
             onCheckedChange={(v) => onChange({ ...value, saveAddressForNextTime: v === true })}
           />
-          <span className="text-xs text-muted-foreground">
+          <span className="text-[11px] text-muted-foreground">
             Save this address for future orders
           </span>
         </label>
       )}
 
+      {/* Inline hint — tiny, single line */}
       {!isNewMode && (
         <p className="text-[10px] text-muted-foreground">
-          Edit the text above for this order only — the saved customer address is not changed.
+          Edits apply to this order only — the saved customer address is not changed.
         </p>
       )}
     </div>
