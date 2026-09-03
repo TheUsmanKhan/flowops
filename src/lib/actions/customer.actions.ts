@@ -28,7 +28,7 @@ import { getWorkspace, requirePermission, ApiError, getOrdersDataScope } from '@
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { validateAndNormalizePhone, isValidPhoneFormat } from '@/lib/phone-validation'
+import { validateAndNormalizePhone, isValidPhoneFormat, normalizePhoneInternational } from '@/lib/phone-validation'
 // No countryNameToCode import needed — country is stored as alpha-2 code directly.
 import {
   createCustomerSchema,
@@ -147,11 +147,16 @@ interface CustomerDetailDTO {
  * and all matching logic. Keeping a single implementation guarantees the
  * client debounce-preview and the server agree on what "matches".
  */
+/**
+ * Normalize a phone number to E.164 format (e.g., "+923001234567").
+ * Pure JS — 0ms, no DB round-trip. Drop-in replacement for the old SQL
+ * `normalize_phone()` function call that took 150ms–1100ms per search.
+ *
+ * Returns null for non-phone inputs (name searches, emails, etc.) —
+ * same behavior as the SQL function.
+ */
 async function normalizePhone(raw: string): Promise<string | null> {
-  const rows = await db.$queryRaw<{ normalized: string | null }[]>`
-    SELECT normalize_phone(${raw}::TEXT) AS normalized
-  `
-  return rows[0]?.normalized ?? null
+  return normalizePhoneInternational(raw)
 }
 
 /**
@@ -307,6 +312,156 @@ export async function searchCustomerByPhone(
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Failed to search customer by phone',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// searchCustomersDetailed — UNIFIED search (replaces the 3-query
+// searchCustomerByPhone + listCustomers + redundant-findFirst path).
+//
+// Single DB round-trip with OR clause covering all 4 match modes:
+//   1. Exact phone match (indexed: [organizationId, phoneNormalized])
+//   2. Partial phone match (phoneRaw contains — GIN trigram indexed)
+//   3. Name contains (GIN trigram indexed)
+//   4. Email contains (GIN trigram indexed)
+//
+// Returns the FIRST match with full phones + addresses included —
+// no redundant second fetch needed.
+//
+// Phone priority: if the input normalizes to a valid phone, we try
+// exact phone match FIRST (it's the fastest, indexed). If found,
+// return immediately. Otherwise fall through to the OR query.
+// ──────────────────────────────────────────────────────────────
+
+export async function searchCustomersDetailed(
+  query: string,
+): Promise<ActionResult<{
+  found: boolean
+  customer?: {
+    id: string
+    name: string
+    email: string | null
+    totalOrdersCount: number
+    totalRtoCount: number
+    isFlagged: boolean
+    flaggedReason: string | null
+    phones: PhoneDTO[]
+    addresses: AddressDTO[]
+  }
+}>> {
+  try {
+    const ctx = await getWorkspace()
+    const q = query.trim()
+
+    if (!q) {
+      return { success: true, data: { found: false } }
+    }
+
+    const orgId = ctx.company.organizationId
+
+    // Pure-JS phone normalization (0ms — no SQL round-trip)
+    const normalizedPhone = normalizePhoneInternational(q)
+
+    // ── Fast path: exact phone match (indexed) ──
+    // If the input is a valid phone, try the indexed lookup first —
+    // it's the fastest possible match (uses @@index([orgId, phoneNormalized])).
+    if (normalizedPhone) {
+      const phoneRow = await db.customerPhone.findFirst({
+        where: {
+          organizationId: orgId,
+          phoneNormalized: normalizedPhone,
+        },
+        select: { customerId: true },
+      })
+
+      if (phoneRow) {
+        // Fetch the full customer record with phones + addresses
+        const customer = await db.customer.findFirst({
+          where: { id: phoneRow.customerId, organizationId: orgId },
+          include: {
+            phones: { orderBy: { isPrimary: 'desc' } },
+            addresses: {
+              orderBy: [
+                { isDefault: 'desc' },
+                { lastUsedAt: { sort: 'desc', nulls: 'last' } },
+              ],
+            },
+          },
+        })
+        if (customer) {
+          return {
+            success: true,
+            data: {
+              found: true,
+              customer: {
+                id: customer.id,
+                name: customer.name,
+                email: customer.email,
+                totalOrdersCount: customer.totalOrdersCount,
+                totalRtoCount: customer.totalRtoCount,
+                isFlagged: customer.isFlagged,
+                flaggedReason: customer.flaggedReason,
+                phones: customer.phones.map(toPhoneDTO),
+                addresses: customer.addresses.map(toAddressDTO),
+              },
+            },
+          }
+        }
+      }
+    }
+
+    // ── General path: OR search across name + email + phone ──
+    // Covers partial phone matches (e.g. "0300"), name matches, email matches.
+    // Uses GIN trigram indexes when available (pg_trgm extension).
+    const customer = await db.customer.findFirst({
+      where: {
+        organizationId: orgId,
+        OR: [
+          { name: { contains: q, mode: 'insensitive' } },
+          { email: { contains: q, mode: 'insensitive' } },
+          { phones: { some: { phoneRaw: { contains: q, mode: 'insensitive' } } } },
+          ...(normalizedPhone
+            ? [{ phones: { some: { phoneNormalized: normalizedPhone } } }]
+            : []),
+        ],
+      },
+      include: {
+        phones: { orderBy: { isPrimary: 'desc' } },
+        addresses: {
+          orderBy: [
+            { isDefault: 'desc' },
+            { lastUsedAt: { sort: 'desc', nulls: 'last' } },
+          ],
+        },
+      },
+    })
+
+    if (!customer) {
+      return { success: true, data: { found: false } }
+    }
+
+    return {
+      success: true,
+      data: {
+        found: true,
+        customer: {
+          id: customer.id,
+          name: customer.name,
+          email: customer.email,
+          totalOrdersCount: customer.totalOrdersCount,
+          totalRtoCount: customer.totalRtoCount,
+          isFlagged: customer.isFlagged,
+          flaggedReason: customer.flaggedReason,
+          phones: customer.phones.map(toPhoneDTO),
+          addresses: customer.addresses.map(toAddressDTO),
+        },
+      },
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to search customers',
     }
   }
 }

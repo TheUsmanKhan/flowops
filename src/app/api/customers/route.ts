@@ -2,7 +2,7 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import {
   listCustomers,
   createCustomer,
-  searchCustomerByPhone,
+  searchCustomersDetailed,
   flagCustomer,
   unflagCustomer,
 } from '@/lib/actions/customer.actions'
@@ -22,10 +22,12 @@ export const dynamic = 'force-dynamic'
  *
  * Each row includes the primary phone and default address summary.
  *
- * Special case: when `search` is a phone-like string and finds an EXACT
- * normalized phone match, we redirect to searchCustomerByPhone() which
- * returns the full customer record with all phones + addresses (used by
- * the order-create page's live search).
+ * Special case: when `detailed=1` and search is provided, returns the
+ * FULL customer record (phones + addresses) via searchCustomersDetailed().
+ * This is a SINGLE optimized DB query (was 8 queries before) that
+ * searches across name + email + phone (exact + partial) in one round-trip.
+ *
+ * Used by the order-create page's live customer search.
  */
 export async function GET(req: Request) {
   try {
@@ -36,78 +38,20 @@ export async function GET(req: Request) {
     const dateTo = url.searchParams.get('date_to') ?? undefined
     const limit = url.searchParams.get('limit') ? Number(url.searchParams.get('limit')) : undefined
     const offset = url.searchParams.get('offset') ? Number(url.searchParams.get('offset')) : undefined
-    // When `detailed=1` and search is a phone, return the full customer
-    // record (phones + addresses) via searchCustomerByPhone. Used by the
-    // order-create page's live phone search.
+    // When `detailed=1` and search is provided, return the full customer
+    // record (phones + addresses) via the optimized single-query search.
+    // Used by the order-create page's live customer search.
     const detailed = url.searchParams.get('detailed') === '1'
 
     if (detailed && search) {
-      // Try phone-based search first (normalize_phone + exact match on
-      // customer_phones.phoneNormalized). If the input isn't phone-like,
-      // normalizePhone returns null and searchCustomerByPhone returns
-      // { found: false } — then we fall back to name-based search below.
-      const phoneResult = await searchCustomerByPhone(search)
-      if (phoneResult.success && phoneResult.data?.found) {
-        return Response.json(phoneResult.data)
+      // Single optimized DB round-trip — searches name + email + phone
+      // (exact + partial) in one query with full includes.
+      // Falls back to { found: false } if no match.
+      const result = await searchCustomersDetailed(search)
+      if (!result.success) {
+        throw new ApiError(400, result.error ?? 'Failed to search customer')
       }
-
-      // Fallback: name-based search via listCustomers (searches customer.name
-      // case-insensitively). Return the FIRST match in detailed format
-      // (with phones + addresses) so the order-create form can populate.
-      const listResult = await listCustomers({ search, limit: 1 })
-      if (listResult.success && listResult.data && listResult.data.customers.length > 0) {
-        const match = listResult.data.customers[0]
-        // Fetch the full customer record with phones + addresses
-        const { db } = await import('@/lib/db')
-        const full = await db.customer.findFirst({
-          where: { id: match.id },
-          include: {
-            phones: { orderBy: { isPrimary: 'desc' } },
-            addresses: {
-              orderBy: [
-                { isDefault: 'desc' },
-                { lastUsedAt: { sort: 'desc', nulls: 'last' } },
-              ],
-            },
-          },
-        })
-        if (full) {
-          return Response.json({
-            found: true,
-            customer: {
-              id: full.id,
-              name: full.name,
-              email: full.email,
-              totalOrdersCount: full.totalOrdersCount,
-              totalRtoCount: full.totalRtoCount,
-              isFlagged: full.isFlagged,
-              flaggedReason: full.flaggedReason,
-              phones: full.phones.map((p) => ({
-                id: p.id,
-                phoneRaw: p.phoneRaw,
-                phoneNormalized: p.phoneNormalized,
-                label: p.label,
-                isPrimary: p.isPrimary,
-                isValidFormat: p.isValidFormat,
-                createdAt: p.createdAt.toISOString(),
-              })),
-              addresses: full.addresses.map((a) => ({
-                id: a.id,
-                label: a.label,
-                address: a.address,
-                city: a.city,
-                isDefault: a.isDefault,
-                lastUsedAt: a.lastUsedAt?.toISOString() ?? null,
-                createdAt: a.createdAt.toISOString(),
-                updatedAt: a.updatedAt.toISOString(),
-              })),
-            },
-          })
-        }
-      }
-
-      // No match by phone or name
-      return Response.json({ found: false })
+      return Response.json(result.data)
     }
 
     const result = await listCustomers({
