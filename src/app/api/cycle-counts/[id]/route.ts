@@ -168,6 +168,55 @@ export async function PATCH(
     }
 
     if (action === 'submit_counts' && body.counted_items) {
+      // ── Validation: prevent absurd counted_quantity values ──
+      // A cycle count adjusts stock to match physical reality. Without
+      // bounds, a typo (1000 instead of 100) or fraud (50,000 to inflate
+      // stock value) silently goes through. We enforce:
+      //   1. counted_quantity must be a non-negative integer (no negative stock)
+      //   2. counted_quantity must not exceed 10× the system quantity
+      //      (a 10x jump in a single count is almost always a typo/fraud —
+      //      legitimate large deliveries should go through PO receive)
+      //   3. If a count exceeds the threshold, the user must first do a
+      //      manual_adjustment with explicit reason + audit, then re-count.
+      // See INVENTORY_AUDIT.md "HIGH: cycle_count_adjust can SET onHand to
+      // any value with no upper bound".
+      for (const ci of body.counted_items) {
+        if (!Number.isInteger(ci.counted_quantity) || ci.counted_quantity < 0) {
+          throw new ApiError(
+            400,
+            `Counted quantity must be a non-negative integer (got ${ci.counted_quantity} for item ${ci.item_id}). Negative stock is not physically possible.`,
+          )
+        }
+      }
+
+      // Fetch all items being submitted to validate bounds against system qty
+      const itemsToValidate = await db.cycleCountItem.findMany({
+        where: { id: { in: body.counted_items.map((c) => c.item_id) } },
+        select: { id: true, systemQuantity: true, orgVariantId: true },
+      })
+      const itemMap = new Map(itemsToValidate.map((i) => [i.id, i]))
+      const MAX_MULTIPLIER = 10 // counted qty can't exceed 10× system qty
+      const ABSOLUTE_CAP = 1_000_000 // hard cap: 1M units (sanity ceiling)
+
+      for (const ci of body.counted_items) {
+        const item = itemMap.get(ci.item_id)
+        if (!item) continue
+        const sysQty = item.systemQuantity
+        const threshold = Math.max(sysQty * MAX_MULTIPLIER, 100) // allow 100 floor for new items
+        if (ci.counted_quantity > ABSOLUTE_CAP) {
+          throw new ApiError(
+            400,
+            `Counted quantity ${ci.counted_quantity} exceeds the absolute cap of ${ABSOLUTE_CAP.toLocaleString()} units. If this is correct, contact an admin to perform a manual adjustment with explicit reason.`,
+          )
+        }
+        if (ci.counted_quantity > threshold) {
+          throw new ApiError(
+            400,
+            `Counted quantity ${ci.counted_quantity} is ${MAX_MULTIPLIER}× the system quantity (${sysQty}). This looks like a typo. If the physical stock really is this high, first receive the new stock via a Purchase Order, then run the cycle count.`,
+          )
+        }
+      }
+
       // Record counted quantities for each item
       let totalDiscrepancies = 0
       let totalVariance = 0
