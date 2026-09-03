@@ -281,6 +281,12 @@ export async function PATCH(
 
         const absDiscrepancy = Math.abs(discrepancy)
 
+        // Fetch avg_cost for the loss record (used by both branches below)
+        const pool = await db.inventoryPool.findUnique({
+          where: { orgVariantId_locationId: { orgVariantId: item.orgVariantId, locationId: count.locationId } },
+        })
+        const avgCost = pool ? Number(pool.avgCost) : 0
+
         // If shortage AND discrepancy_reason is theft_suspected or unknown:
         // create a missing stock_loss_records entry (quarantine) instead of adjusting
         if (discrepancy < 0 && (item.discrepancyReason === 'theft_suspected' || item.discrepancyReason === 'unknown')) {
@@ -288,31 +294,35 @@ export async function PATCH(
           const { quarantineStock } = await import('@/lib/inventory')
           const quarantineResult = await quarantineStock(item.orgVariantId, count.locationId, absDiscrepancy)
           if (quarantineResult.success) {
-            // Fetch avg_cost for the loss record
-            const pool = await db.inventoryPool.findUnique({
-              where: { orgVariantId_locationId: { orgVariantId: item.orgVariantId, locationId: count.locationId } },
+            // UNIFIED: create the stock loss record via the unified helper
+            // (was: db.stockLossRecord.create directly — which bypassed the
+            // dedup + inventory transaction creation. Now uses recordStockLoss
+            // so the loss is properly linked + deduped.)
+            const { recordStockLoss } = await import('@/lib/stock-loss')
+            const lossResult = await recordStockLoss({
+              organizationId: orgId,
+              companyId: company.id,
+              orgVariantId: item.orgVariantId,
+              locationId: count.locationId,
+              lossType: 'missing',
+              sourceModule: 'cycle_count',
+              quantity: absDiscrepancy,
+              costPerUnit: avgCost,
+              cycleCountItemId: item.id,
+              employeeId: caller.id,
+              subType: 'suspected',
+              responsibleParty: 'unknown',
+              notes: `Auto-created from cycle count ${count.countName}. Discrepancy reason: ${item.discrepancyReason}`,
+              // createInventoryTransaction=false because the quarantine already
+              // reduced available; the cycle_count_adjust below sets onHand to
+              // match the counted quantity. Creating another stock movement
+              // would double-decrement.
+              createInventoryTransaction: false,
             })
-            const avgCost = pool ? Number(pool.avgCost) : 0
-
-            // Create missing stock_loss_records entry
-            await db.stockLossRecord.create({
-              data: {
-                organizationId: orgId,
-                companyId: company.id,
-                orgVariantId: item.orgVariantId,
-                locationId: count.locationId,
-                lossType: 'missing',
-                subType: 'suspected',
-                quantity: absDiscrepancy,
-                costPerUnit: avgCost,
-                investigationStatus: 'open',
-                resolution: null,
-                responsibleParty: 'unknown',
-                notes: `Auto-created from cycle count ${count.countName}. Discrepancy reason: ${item.discrepancyReason}`,
-                reportedById: caller.id,
-                // metadata linking back to cycle count could go in notes
-              },
-            })
+            if (lossResult.wasDuplicate) {
+              // Loss was already recorded for this cycle count item — skip
+              console.log(`[cycle-count] Loss already recorded for item ${item.id}, skipping.`)
+            }
           }
           // Still need to adjust the on_hand to match counted quantity
           // The quarantine reduced available, but on_hand needs to be set to counted value
@@ -335,8 +345,58 @@ export async function PATCH(
               data: { adjustmentApproved: true, inventoryTxnId: txnResult.transactionId },
             })
           }
+        } else if (discrepancy < 0 && item.discrepancyReason === 'damage_not_recorded') {
+          // ── BUG FIX: damage_not_recorded shortage was NOT creating a
+          //    StockLossRecord — it just adjusted onHand via cycle_count_adjust,
+          //    leaving the Stock Losses module completely unaware. Now we
+          //    create a proper loss record via the unified helper.
+          //    See STOCKLOSS_INVESTIGATION.md Problem 2. ──
+          const { recordStockLoss } = await import('@/lib/stock-loss')
+          const lossResult = await recordStockLoss({
+            organizationId: orgId,
+            companyId: company.id,
+            orgVariantId: item.orgVariantId,
+            locationId: count.locationId,
+            lossType: 'damaged',
+            sourceModule: 'cycle_count',
+            quantity: absDiscrepancy,
+            costPerUnit: avgCost,
+            cycleCountItemId: item.id,
+            employeeId: caller.id,
+            subType: 'confirmed',
+            responsibleParty: 'warehouse',
+            notes: `Auto-created from cycle count ${count.countName}. Discrepancy reason: damage_not_recorded.`,
+            // createInventoryTransaction=false — the cycle_count_adjust
+            // below already sets onHand to the counted value. A separate
+            // damage_writeoff would double-decrement.
+            createInventoryTransaction: false,
+          })
+          if (lossResult.wasDuplicate) {
+            console.log(`[cycle-count] Damage loss already recorded for item ${item.id}, skipping.`)
+          }
+
+          // Still adjust onHand to match the counted quantity
+          const txnResult = await processInventoryTransaction({
+            orgVariantId: item.orgVariantId,
+            locationId: count.locationId,
+            organizationId: orgId,
+            companyId: company.id,
+            employeeId: caller.id,
+            transactionType: 'cycle_count_adjust',
+            quantity: item.countedQuantity,
+            costPerUnit: null,
+            referenceType: 'cycle_count',
+            referenceId: id,
+            notes: `Cycle count adjustment (shortage - damage): ${item.systemQuantity} → ${item.countedQuantity}`,
+          })
+          if (txnResult.success && txnResult.transactionId) {
+            await db.cycleCountItem.update({
+              where: { id: item.id },
+              data: { adjustmentApproved: true, inventoryTxnId: txnResult.transactionId },
+            })
+          }
         } else {
-          // Normal cycle_count_adjust for recording_error, transfer_not_recorded, damage_not_recorded, or surplus
+          // Normal cycle_count_adjust for recording_error, transfer_not_recorded, or surplus
           const txnResult = await processInventoryTransaction({
             orgVariantId: item.orgVariantId,
             locationId: count.locationId,

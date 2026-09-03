@@ -872,6 +872,15 @@ model ReturnedStitchedInventory {
   writtenOffBy   Employee? @relation("ReturnedItemWriteOff", fields: [writtenOffById], references: [id])
   writeOffReason String?
 
+  // ── Stock-loss system unification (migration 027) ──
+  // Links the returned-stitched register to the inventory ledger.
+  // When a returned-stitched record is created, the route also creates an
+  // inventory_transaction (return_stitched_received) and stores its ID here.
+  // This makes the register and the pool stay in sync — every register row
+  // has a corresponding ledger entry.
+  inventoryTxnId String?
+  inventoryTxn   InventoryTransaction? @relation(fields: [inventoryTxnId], references: [id])
+
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -1072,6 +1081,9 @@ model InventoryTransaction {
   stockLossRecords StockLossRecord[]
   cycleCountItems CycleCountItem[]
   productionOrdersFabric ProductionOrder[]
+
+  // Stock-loss system unification (migration 027)
+  returnedStitchedRecords ReturnedStitchedInventory[]
 
   // Item Exchange System back-relations (migration 003)
   exchangeOldItemTxns OrderExchange[] @relation("ExchangeOldItemTxn")
@@ -1324,6 +1336,17 @@ model StockLossRecord {
   orderItemId    String?
   orderItem      OrderItem? @relation(fields: [orderItemId], references: [id])
 
+  // ── Stock-loss system unification (migration 027) ──
+  // sourceModule: which module created this loss record. Used for dedup +
+  //   filtering. One of: stock_loss | rto | cycle_count | adjust_stock |
+  //   returned_stitched | supplier_return | exchange | return_scan.
+  //   NULL for legacy rows (pre-migration).
+  sourceModule   String?
+  // cycleCountItemId: set when a cycle count shortage created this loss.
+  //   Enables tracing "which cycle count item caused this loss record".
+  cycleCountItemId String?
+  cycleCountItem   CycleCountItem? @relation(fields: [cycleCountItemId], references: [id])
+
   // ONLY set when loss_type = 'supplier_dispute' — links to originating rejected return
   supplierReturnId String? @unique
   supplierReturn   SupplierReturn? @relation("SupplierReturnLossLink", fields: [supplierReturnId], references: [id])
@@ -1404,6 +1427,9 @@ model CycleCountItem {
   countedAt      DateTime?
   notes          String?
   createdAt      DateTime @default(now())
+
+  // Back-relation: stock loss records created from this cycle count item
+  stockLossRecords StockLossRecord[]
 
   @@index([cycleCountId])
 }
