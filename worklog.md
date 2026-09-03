@@ -11906,3 +11906,36 @@ Stage Summary:
 Identified the single source of truth for city autocomplete (`src/components/couriers/city-autocomplete.tsx`) and the API that feeds it (`/api/couriers/[providerKey]/cities`). Confirmed the current pickup/delivery badges are plain `<span>` elements rendered at lines 213-223 of `city-autocomplete.tsx`. Confirmed the DB schema stores one row per (providerKey, cityName) pair — so a city like "Karachi" can have 3 separate rows (postex/leopard/tcs), each with its own pickup/delivery flags. The API's `'all'` mode currently deduplicates by cityName, returning only ONE providerKey per unique city (loses multi-provider info). To render per-provider courier badges in the suggestions dropdown in `'all'` mode, the API's dedup logic must be changed to aggregate providerKeys per city, OR the frontend must accept the single-providerKey-per-row limitation. No reusable `<CourierBadge>` component exists yet — the only existing inline display-name mapping is in `customer-detail-view.tsx` lines 1200-1208. Three couriers need to be supported: `postex` (PostEx), `leopard` (Leopard), `tcs` (TCS — stub adapter). No logo image assets exist in `/public`.
 
 No blockers for downstream implementation tasks (e.g. adding `<CourierBadge>` component + extending the cities API to return per-city provider lists).
+
+---
+Task ID: INV-AUDIT-BACKEND
+Agent: general-purpose (read-only audit subagent)
+Task: Audit the INVENTORY SYSTEM backend of the FlowOps Next.js 16 ERP — 11 modules (Dashboard, Locations, Suppliers, Receive Stock, Adjust Stock, Transfer Stock, Purchase Orders, Supplier Returns, Production Orders, Losses & Write-offs, Cycle Counts). READ-ONLY — no source modifications.
+
+Work Log:
+- Read worklog.md for project context (last 20 entries + INVENTORY-ARCHITECTURE-INVESTIGATE, INVENTORY-TEST-AND-PRODUCTION-SETUP, INVENTORY-3-BUGS-FIXED, REBUILD-API-PROTECTION tasks).
+- Read prisma/schema.prisma inventory models: InventoryLocation, Supplier, InventoryPool, InventoryTransaction, AvgCostHistory, StockTransfer, PurchaseOrder, PurchaseOrderItem, PurchaseOrderReceipt, PurchaseOrderReceiptItem, SupplierReturn, StockLossRecord, CycleCount, CycleCountItem, ProductionOrder, ProductFulfillmentCost, ReturnedStitchedInventory (lines 842-1458).
+- Read all 8 routes under src/app/api/inventory/*: dashboard, summary, receive, opening-stock, receive-returned-stitched, adjust, transfers, fulfill-mto.
+- Read all routes under src/app/api/inventory-locations/ (route.ts + [id]/route.ts).
+- Read all routes under src/app/api/suppliers/ (route.ts + [id]/route.ts).
+- Read all routes under src/app/api/purchase-orders/ (route.ts + [id]/route.ts + [id]/confirm + [id]/receive + [id]/cancel).
+- Read all routes under src/app/api/production-orders/ (route.ts + [id]/route.ts).
+- Read all routes under src/app/api/stock-loss/ (route.ts + [id]/route.ts + stats + report-damaged + report-theft + report-transit + resolve).
+- Read all routes under src/app/api/cycle-counts/ (route.ts + [id]/route.ts).
+- Read all routes under src/app/api/supplier-returns/ (route.ts + [id]/route.ts + [id]/dispute).
+- Read src/lib/inventory.ts (949 lines) — processInventoryTransaction, checkReturnedStockAvailability, getProductInventorySummary, generatePoNumber, incrementIncomingStock, decrementIncomingStock, checkAndFulfillMadeToOrderVariant, quarantineStock, releaseQuarantine, reserveStockForOrder, unreserveStockForOrder, dispatchOrder, restockOrderForRto.
+- Read src/lib/validations/inventory.ts (269 lines) and src/lib/validations/stock-loss.ts (113 lines) — confirmed ~50% of schemas are dead code (defined but not used by any route).
+- Read src/lib/actions/backorder.actions.ts (414 lines) — the only inventory-adjacent action file (called from purchase-orders/[id]/receive).
+- Read src/lib/workspace.ts getWorkspace + requirePermission + hasPermission implementations (lines 76-259).
+- Read src/lib/permissions.ts — confirmed 13 INVENTORY_* permission keys defined.
+- Spot-checked 11 inventory frontend components in src/components/inventory/ (lines counted: 14021 total across 16 .tsx files).
+- Wrote comprehensive audit report to /home/z/my-project/INVENTORY_AUDIT.md.
+
+Stage Summary:
+- Audit report INVENTORY_AUDIT.md written with full per-module breakdown (11 modules), cross-cutting concerns (10 items), summary table, and top-10 priority recommendations.
+- 4 CRITICAL bugs found (most severe: non-atomic transfer endpoint that can silently destroy stock; non-atomic PO receive; non-atomic PO creation with status='ordered').
+- 37 HIGH-severity logic issues found (most recurring: missing transaction wrapping, missing permission checks on GET endpoints, missing company-scoping on detail endpoints allowing cross-company access, legacy auth pattern, fire-and-forget post-completion automation).
+- 38 MEDIUM-severity issues (dead Zod schemas, race conditions in PO number generation, missing variant org-membership validation, status enum drift, etc.).
+- 24 LOW-severity smells (dead code, hardcoded defaults, fire-and-forget audit logs, etc.).
+- Confirmed 3 previously-fixed bugs from INVENTORY-3-BUGS-FIXED task remain fixed (positive adjustment now uses manual_adjustment_in; production order completion auto-stocks + reserves; pricing seed uses CVP).
+- No source code was modified — read-only audit.
