@@ -1177,6 +1177,12 @@ function DamagedForm({ onBack, onSuccess }: { onBack: () => void; onSuccess: () 
   const [responsibleParty, setResponsibleParty] = useState<
     'warehouse' | 'courier' | 'customer' | 'employee' | ''
   >('')
+  const [orderSearchTerm, setOrderSearchTerm] = useState('')
+  const [orderSearchResults, setOrderSearchResults] = useState<
+    Array<{ id: string; flowopsOrderNumber: string; customerName: string | null }>
+  >([])
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null)
+  const [orderSearchLoading, setOrderSearchLoading] = useState(false)
   const [notes, setNotes] = useState('')
 
   const selectedVariant = data.variantOptions.find((v) => v.variantId === variantId)
@@ -1186,6 +1192,42 @@ function DamagedForm({ onBack, onSuccess }: { onBack: () => void; onSuccess: () 
   useEffect(() => {
     setLocationId('')
   }, [variantId])
+
+  // Order search — only when courier is selected as responsible party.
+  // Searches by order number (ORD-2026-00001) — debounced 300ms.
+  // Shows the customer name so the user can confirm they're picking the
+  // right order. The selected orderId is sent in the payload so the loss
+  // record links to the order (enables dedup: if a loss already exists
+  // for this order + damaged + stock_loss, it's rejected as duplicate).
+  useEffect(() => {
+    if (responsibleParty !== 'courier' || !orderSearchTerm.trim()) {
+      setOrderSearchResults([])
+      return
+    }
+    const t = setTimeout(async () => {
+      setOrderSearchLoading(true)
+      try {
+        const res = await fetch(
+          `/api/orders?search=${encodeURIComponent(orderSearchTerm)}&pageSize=5`,
+        )
+        if (res.ok) {
+          const data = await res.json()
+          setOrderSearchResults(
+            (data.orders ?? []).map((o: any) => ({
+              id: o.id,
+              flowopsOrderNumber: o.flowopsOrderNumber,
+              customerName: o.recipientName ?? o.customerName ?? null,
+            })),
+          )
+        }
+      } catch {
+        setOrderSearchResults([])
+      } finally {
+        setOrderSearchLoading(false)
+      }
+    }, 300)
+    return () => clearTimeout(t)
+  }, [orderSearchTerm, responsibleParty])
 
   const qty = parseInt(quantity, 10) || 0
   const writeOffValue = qty * (pool?.avgCost ?? selectedVariant?.avgCost ?? 0)
@@ -1209,6 +1251,9 @@ function DamagedForm({ onBack, onSuccess }: { onBack: () => void; onSuccess: () 
     if (qty <= 0) return toast.error('Quantity must be positive.')
     if (!damageType) return toast.error('Select a damage type.')
     if (!responsibleParty) return toast.error('Select a responsible party.')
+    if (responsibleParty === 'courier' && !selectedOrderId) {
+      return toast.error('When courier is responsible, search and select the related order.')
+    }
     if (insufficient)
       return toast.error(
         `Only ${availableAtPool} units available at this location.`,
@@ -1221,7 +1266,10 @@ function DamagedForm({ onBack, onSuccess }: { onBack: () => void; onSuccess: () 
       responsible_party: responsibleParty,
       evidence_urls: [],
       notes: notes.trim() || undefined,
-    })
+      // Link to the order if courier is responsible — enables dedup
+      // (prevents the same loss being recorded twice for the same order)
+      order_item_id: selectedOrderId ?? undefined,
+    } as DamagedPayload & { order_item_id?: string })
   }
 
   const availableLocations = variantId
@@ -1329,9 +1377,14 @@ function DamagedForm({ onBack, onSuccess }: { onBack: () => void; onSuccess: () 
             <Label htmlFor="dmg-party">Responsible party</Label>
             <Select
               value={responsibleParty}
-              onValueChange={(v) =>
+              onValueChange={(v) => {
                 setResponsibleParty(v as 'warehouse' | 'courier' | 'customer' | 'employee')
-              }
+                // Reset order selection when switching away from courier
+                if (v !== 'courier') {
+                  setSelectedOrderId(null)
+                  setOrderSearchTerm('')
+                }
+              }}
             >
               <SelectTrigger id="dmg-party">
                 <SelectValue placeholder="Select responsible party" />
@@ -1346,6 +1399,75 @@ function DamagedForm({ onBack, onSuccess }: { onBack: () => void; onSuccess: () 
             </Select>
           </div>
         </div>
+
+        {/* Order picker — only shown when courier is responsible.
+            Lets the user search for the order by order number and select it.
+            The selected order is linked to the loss record (enables dedup:
+            prevents the same loss being recorded twice for the same order). */}
+        {responsibleParty === 'courier' && (
+          <div className="space-y-1.5">
+            <Label htmlFor="dmg-order">Related order (courier is responsible)</Label>
+            {selectedOrderId ? (
+              <div className="flex items-center justify-between rounded-md border border-primary/30 bg-primary/5 p-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">
+                    {orderSearchResults.find((o) => o.id === selectedOrderId)?.flowopsOrderNumber ?? selectedOrderId}
+                  </p>
+                  <p className="text-xs text-muted-foreground truncate">
+                    {orderSearchResults.find((o) => o.id === selectedOrderId)?.customerName ?? 'Unknown customer'}
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 shrink-0"
+                  onClick={() => {
+                    setSelectedOrderId(null)
+                    setOrderSearchTerm('')
+                  }}
+                >
+                  Change
+                </Button>
+              </div>
+            ) : (
+              <>
+                <Input
+                  id="dmg-order"
+                  placeholder="Search by order number (e.g. ORD-2026-00001)…"
+                  value={orderSearchTerm}
+                  onChange={(e) => setOrderSearchTerm(e.target.value)}
+                />
+                {orderSearchLoading && (
+                  <p className="text-[10px] text-muted-foreground">Searching…</p>
+                )}
+                {!orderSearchLoading && orderSearchResults.length > 0 && (
+                  <div className="space-y-1 max-h-40 overflow-y-auto rounded-md border">
+                    {orderSearchResults.map((o) => (
+                      <button
+                        key={o.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedOrderId(o.id)
+                          setOrderSearchResults([])
+                        }}
+                        className="w-full text-left px-2 py-1.5 text-xs hover:bg-accent transition-colors border-b last:border-b-0"
+                      >
+                        <span className="font-medium">{o.flowopsOrderNumber}</span>
+                        {o.customerName && (
+                          <span className="text-muted-foreground ml-2">· {o.customerName}</span>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {!orderSearchLoading && orderSearchTerm.trim().length >= 3 && orderSearchResults.length === 0 && (
+                  <p className="text-[10px] text-muted-foreground">No orders found.</p>
+                )}
+              </>
+            )}
+          </div>
+        )}
 
         <div className="space-y-1.5">
           <Label htmlFor="dmg-notes">Notes (optional)</Label>

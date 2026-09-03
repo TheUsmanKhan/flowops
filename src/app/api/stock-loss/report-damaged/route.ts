@@ -61,57 +61,49 @@ export async function POST(req: Request) {
       }
       const avgCost = Number(pool.avgCost)
 
-      // 1. Insert stock_loss_records first (with inventory_txn_id = NULL)
-      const lossRecord = await db.stockLossRecord.create({
-        data: {
-          organizationId: orgId,
-          companyId: company.id,
-          orgVariantId: d.org_variant_id,
-          locationId: d.location_id,
-          lossType: 'damaged',
-          subType: 'confirmed',
-          damageType: d.damage_type,
-          quantity: d.quantity,
-          costPerUnit: avgCost,
-          investigationStatus: 'none',
-          resolution: 'written_off',
-          responsibleParty: d.responsible_party,
-          evidenceUrls: JSON.stringify(d.evidence_urls),
-          notes: d.notes || null,
-          reportedById: caller.id,
-          resolvedById: caller.id,
-          resolvedAt: new Date(),
-        },
-      })
-
-      // 2. Call processInventoryTransaction with reference to the loss record
-      const txnResult = await processInventoryTransaction({
-        orgVariantId: d.org_variant_id,
-        locationId: d.location_id,
+      // UNIFIED: use recordStockLoss() (was: direct db.stockLossRecord.create
+      // + processInventoryTransaction + db.stockLossRecord.update). The
+      // helper handles dedup (if order_item_id is set + a loss already
+      // exists for this order + damaged + stock_loss, returns wasDuplicate),
+      // creates the inventory transaction, links it to the loss record,
+      // and rolls back the loss record if the transaction fails.
+      const { recordStockLoss } = await import('@/lib/stock-loss')
+      const lossResult = await recordStockLoss({
         organizationId: orgId,
         companyId: company.id,
-        employeeId: caller.id,
-        transactionType: 'damage_writeoff',
+        orgVariantId: d.org_variant_id,
+        locationId: d.location_id,
+        lossType: 'damaged',
+        sourceModule: 'stock_loss',
         quantity: d.quantity,
         costPerUnit: avgCost,
-        referenceType: 'stock_loss',
-        referenceId: lossRecord.id,
-        notes: `Damaged: ${d.damage_type}. ${d.notes || ''}`,
+        orderItemId: d.order_item_id || null,
+        employeeId: caller.id,
+        subType: 'confirmed',
+        damageType: d.damage_type,
+        responsibleParty: d.responsible_party,
+        notes: d.notes || null,
+        createInventoryTransaction: true,
       })
-      if (!txnResult.success) {
-        throw new ApiError(500, `Write-off transaction failed: ${txnResult.error}`)
+
+      if (!lossResult.success) {
+        throw new ApiError(500, `Failed to record damaged loss: ${lossResult.error}`)
+      }
+      if (lossResult.wasDuplicate) {
+        // Loss already recorded for this order item — idempotent success
+        return {
+          loss_record_id: null,
+          was_duplicate: true,
+          message: 'A loss record already exists for this order item + damaged type. No duplicate created.',
+        }
       }
 
-      // 3. Update loss record with the transaction ID
-      await db.stockLossRecord.update({
-        where: { id: lossRecord.id },
-        data: { inventoryTxnId: txnResult.transactionId },
-      })
+      const lossRecordId = lossResult.lossRecordId!
 
       insertAuditLog({
         action: 'stock_loss.damaged_reported',
         entityType: 'stock_loss',
-        entityId: lossRecord.id,
+        entityId: lossRecordId,
         companyId: company.id,
         organizationId: orgId,
         userId: user.id,
@@ -133,7 +125,7 @@ export async function POST(req: Request) {
         },
       })
 
-      return { success: true, loss_record_id: lossRecord.id, transaction_id: txnResult.transactionId }
+      return { success: true, loss_record_id: lossRecordId, transaction_id: lossResult.inventoryTxnId, was_duplicate: false }
     }
 
     if (idempotencyKey) {
