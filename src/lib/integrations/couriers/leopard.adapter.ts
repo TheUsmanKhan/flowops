@@ -620,7 +620,7 @@ export class LeopardAdapter implements CourierAdapter {
   }
 
   // ──────────────────────────────────────────────────────────────
-  // 9. fetchExistingPickupAddresses — GET getShipperDetails
+  // 9. fetchExistingPickupAddresses — GET getShipperDetails (ALL)
   // ──────────────────────────────────────────────────────────────
 
   async fetchExistingPickupAddresses(): Promise<Array<{
@@ -650,20 +650,81 @@ export class LeopardAdapter implements CourierAdapter {
       return []
     }
 
-    return shippers.map((s) => ({
+    return shippers.map((s) => this.mapShipper(s))
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // 9b. fetchShipperById — GET getShipperDetails?request_param=shipment_id&request_value={id}
+  //
+  // Per Leopard API PDF (page 73-78): getShipperDetails supports filtering
+  // by a single shipper via request_param + request_value query params.
+  // This is the CORRECT way to import a single shipper — NOT fetch-all-filter.
+  //
+  // Returns a single shipper or null if not found.
+  // ──────────────────────────────────────────────────────────────
+
+  async fetchShipperById(shipmentId: string): Promise<{
+    providerAddressCode: string
+    label: string
+    address: string
+    cityName: string
+    contactPersonName: string
+    phone1: string
+    phone2?: string
+  } | null> {
+    const params = {
+      api_key: this.apiKey,
+      api_password: this.apiPassword,
+      request_param: 'shipment_id',
+      request_value: shipmentId,
+    }
+
+    const resp = await this.getWithParams<LeopardShipper[]>('getShipperDetails', params)
+
+    if (resp.status !== 1 && resp.status !== '1') {
+      throw new Error(this.extractError(resp))
+    }
+
+    const shippers = resp.data
+    if (!shippers || !Array.isArray(shippers) || shippers.length === 0) {
+      return null
+    }
+
+    return this.mapShipper(shippers[0])
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  // Helper: map a raw LeopardShipper to the normalized pickup address shape
+  // ──────────────────────────────────────────────────────────────
+
+  private mapShipper(s: LeopardShipper): {
+    providerAddressCode: string
+    label: string
+    address: string
+    cityName: string
+    contactPersonName: string
+    phone1: string
+    phone2?: string
+  } {
+    return {
       providerAddressCode: String(s.shipment_id),
       label: s.shipment_name_eng ?? s.shipment_name ?? 'Shipper',
       address: s.shipment_address ?? '',
-      // cityName: we don't have the name, only the city_id. The sync action
-      // will resolve the name from courier_operational_cities.
+      // cityName: we don't have the name, only the city_id. The caller
+      // (sync/import/refresh action) will resolve the name from
+      // courier_operational_cities.
       cityName: String(s.shipper_city_id ?? s.city_id ?? ''),
       contactPersonName: s.shipment_contact_person ?? s.shipment_name_eng ?? s.shipment_name ?? '',
       phone1: String(s.shipment_phone ?? ''),
-    }))
+    }
   }
 
   // ──────────────────────────────────────────────────────────────
   // 10. pingConnection — read-only connectivity check (test route)
+  //
+  // Per Leopard API PDF: getAllCities is the lightest read-only endpoint
+  // that requires valid credentials. If it returns ≥1 city, credentials
+  // are valid and the API is reachable. This is the real "Test" action.
   // ──────────────────────────────────────────────────────────────
 
   async pingConnection(): Promise<{ success: boolean; error?: string }> {
