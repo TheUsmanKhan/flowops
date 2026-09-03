@@ -3,6 +3,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError } from '@/lib/workspace'
 import { ensureCityCached } from '@/lib/integrations/city-matcher'
+import { rankCities } from '@/lib/utils/city-rank'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -56,6 +57,11 @@ export async function GET(
       // covering that city into a `providers: string[]` array so the
       // frontend can show courier badges (e.g. "Leopard + PostEx").
       // live=true is NOT supported in 'all' mode (no single courier to fetch from).
+      //
+      // RANKING: fetch a superset of `contains` matches, aggregate providers
+      // per unique city, then apply prefix-first ranking (exact > startsWith
+      // > word-boundary > contains) so cities STARTING with the query appear
+      // first — standard search UX. See src/lib/utils/city-rank.ts.
       const allCities = await db.courierOperationalCity.findMany({
         where: {
           isDeliveryCity: true,
@@ -69,8 +75,10 @@ export async function GET(
           isDeliveryCity: true,
           providerKey: true,
         },
-        orderBy: { cityName: 'asc' },
-        take: limit * 10, // over-fetch to aggregate all providers per city
+        // Don't pre-sort by cityName — we'll re-rank in JS. Fetch enough
+        // headroom so prefix matches (which may be alphabetically later)
+        // aren't truncated before ranking.
+        take: q ? 200 : 100,
       })
 
       // Group by case-insensitive cityName, collecting all providers
@@ -105,10 +113,15 @@ export async function GET(
             providers: [c.providerKey],
           })
         }
-        if (byName.size >= limit * 3) break // safety cap
       }
 
-      const cities = Array.from(byName.values()).slice(0, limit)
+      const uniqueCities = Array.from(byName.values())
+      // Apply prefix-first ranking: cities STARTING with q appear before
+      // cities containing q elsewhere. Alphabetical within each tier.
+      const ranked = q ? rankCities(uniqueCities, q) : uniqueCities.sort(
+        (a, b) => a.cityName.localeCompare(b.cityName, undefined, { sensitivity: 'base' }),
+      )
+      const cities = ranked.slice(0, limit)
       return Response.json({ cities })
     }
 
@@ -118,6 +131,8 @@ export async function GET(
       ...(q ? { cityName: { contains: q, mode: 'insensitive' as const } } : {}),
     }
 
+    // Fetch a superset of matches (don't pre-sort — we re-rank in JS).
+    // Over-fetch so prefix matches (alphabetically later) aren't lost.
     let cities = await db.courierOperationalCity.findMany({
       where,
       select: {
@@ -127,8 +142,7 @@ export async function GET(
         isPickupCity: true,
         isDeliveryCity: true,
       },
-      orderBy: { cityName: 'asc' },
-      take: limit,
+      take: q ? 200 : 100,
     })
 
     // ── AUTO-FETCH MISSING CITY ──
@@ -149,15 +163,22 @@ export async function GET(
           isPickupCity: true,
           isDeliveryCity: true,
         },
-        orderBy: { cityName: 'asc' },
-        take: limit,
+        take: q ? 200 : 100,
       })
     }
+
+    // Apply prefix-first ranking: cities STARTING with q appear before
+    // cities containing q elsewhere. Alphabetical within each tier.
+    // This is the standard search UX (Google, IDE file search, etc.).
+    const ranked = q ? rankCities(cities, q) : cities.sort(
+      (a, b) => a.cityName.localeCompare(b.cityName, undefined, { sensitivity: 'base' }),
+    )
+    const sliced = ranked.slice(0, limit)
 
     // Single-provider mode: attach the providerKey as a single-element
     // `providers` array so the frontend can use one consistent code path
     // for rendering courier badges in both 'all' and single-provider modes.
-    const citiesWithProviders = cities.map((c) => ({
+    const citiesWithProviders = sliced.map((c) => ({
       ...c,
       providers: [providerKey],
     }))
