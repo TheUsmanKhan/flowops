@@ -181,8 +181,8 @@ export function CreateCustomerForm({
           <Phone className="h-3 w-3" /> Phone Numbers
         </p>
         {phones.map((entry, idx) => (
-          <div key={entry._key} className="flex items-end gap-2">
-            <div className="flex-1 space-y-1">
+          <div key={entry._key} className="flex flex-col sm:flex-row sm:items-end gap-2">
+            <div className="flex-1 space-y-1 min-w-0">
               {idx === 0 && <Label className="text-[10px]">Phone *</Label>}
               <Input
                 placeholder="0300-1234567"
@@ -194,7 +194,7 @@ export function CreateCustomerForm({
                 <p className="text-[10px] text-destructive">Invalid phone format. Use 03001234567 or +923001234567.</p>
               )}
             </div>
-            <div className="w-32 space-y-1">
+            <div className="sm:w-32 space-y-1 min-w-0">
               {idx === 0 && <Label className="text-[10px]">Label</Label>}
               <Input
                 placeholder="Personal"
@@ -204,13 +204,13 @@ export function CreateCustomerForm({
               />
             </div>
             {phones.length > 1 && (
-              <div className="flex items-center gap-1 pb-1">
+              <div className="flex items-center gap-1 sm:pb-1">
                 {idx > 0 && (
                   <Button
                     type="button"
                     size="sm"
                     variant={entry.is_primary ? 'default' : 'outline'}
-                    className="h-8 px-2"
+                    className="h-8 px-2 shrink-0"
                     onClick={() => setPrimaryPhone(entry._key)}
                     title="Set as primary"
                   >
@@ -221,7 +221,7 @@ export function CreateCustomerForm({
                   type="button"
                   size="sm"
                   variant="ghost"
-                  className="h-8 px-2 text-muted-foreground hover:text-destructive"
+                  className="h-8 px-2 text-muted-foreground hover:text-destructive shrink-0"
                   onClick={() => removePhone(entry._key)}
                   title="Remove phone"
                 >
@@ -230,7 +230,7 @@ export function CreateCustomerForm({
               </div>
             )}
             {idx === 0 && phones.length === 1 && (
-              <div className="pb-2">
+              <div className="sm:pb-2">
                 <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[10px]">
                   <Star className="h-2.5 w-2.5 mr-0.5 fill-current" /> Primary
                 </Badge>
@@ -280,7 +280,7 @@ export function CreateCustomerForm({
               )}
             </div>
             <div className="grid sm:grid-cols-2 gap-2">
-              <div className="space-y-1 sm:col-span-2">
+              <div className="space-y-1 sm:col-span-2 min-w-0">
                 {idx === 0 && <Label className="text-[10px]">Address *</Label>}
                 <Input
                   placeholder="House #, street, area"
@@ -289,7 +289,7 @@ export function CreateCustomerForm({
                   className="text-sm"
                 />
               </div>
-              <div className="space-y-1">
+              <div className="space-y-1 min-w-0">
                 {idx === 0 && <Label className="text-[10px]">City *</Label>}
                 {/* Pakistan (PK): courier-city autocomplete suggestions.
                     Non-PK: plain text Input — courier_operational_cities
@@ -313,14 +313,14 @@ export function CreateCustomerForm({
               </div>
               {/* Country — required, visible, defaults to PK. CountrySelector
                   returns alpha-2 codes directly; we store them as-is. */}
-              <div className="space-y-1">
+              <div className="space-y-1 min-w-0">
                 {idx === 0 && <Label className="text-[10px]">Country *</Label>}
                 <CountrySelector
                   value={entry.country}
                   onChange={(code) => updateAddress(entry._key, 'country', code)}
                 />
               </div>
-              <div className="space-y-1">
+              <div className="space-y-1 sm:col-span-2 min-w-0">
                 {idx === 0 && <Label className="text-[10px]">Label (optional)</Label>}
                 <Input
                   placeholder="Home, Office…"
