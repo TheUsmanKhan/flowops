@@ -1,6 +1,6 @@
 import { getCurrentUser } from '@/lib/session'
 import { insertAuditLog } from '@/lib/audit'
-import { handleError } from '@/lib/workspace'
+import { handleError, clearAllCaches } from '@/lib/workspace'
 import { SESSION_COOKIE } from '@/lib/session'
 import { cookies } from 'next/headers'
 
@@ -17,6 +17,9 @@ export async function POST() {
         entityId: user.id,
         userId: user.id,
       })
+      // Clear the workspace + role-permissions caches so the next login
+      // starts fresh (no stale company/role data from the previous session).
+      clearAllCaches()
     }
     const store = await cookies()
     store.delete(SESSION_COOKIE)
