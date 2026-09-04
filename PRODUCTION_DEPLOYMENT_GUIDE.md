@@ -1,329 +1,200 @@
-# FlowOps ERP — Production Deployment Guide & Development Safety Rules
+# FlowOps ERP — Master Deployment, Database & Development Guide
 
-> **CRITICAL DOCUMENT** — Read this BEFORE deploying to Hostinger or making any changes after deployment.
-> Last Updated: 2026-09-04
-
----
-
-## 🚨 GOLDEN RULES (NON-NEGOTIABLE)
-
-### Rule 1: TWO databases — NEVER mix them
-- **DEV/TEST DB**: `postgresql://postgres.gobwxqkzfulbwhzbbsdj:...@aws-0-ap-south-1.pooler.supabase.com:5432/postgres`
-  - Used for: development, testing, brute-force testing, sandbox experiments
-  - Contains: test users, test orders, test products, fake data
-  - **NEVER** connect production code to this DB
-
-- **PRODUCTION DB**: (new Supabase project — create on deployment day)
-  - Used for: live business operations
-  - Contains: real users, real orders, real money data
-  - **NEVER** run test scripts against this DB
-  - **NEVER** create test users in this DB
-
-### Rule 2: .env FILE MANAGEMENT
-- The `.env` file in the sandbox **always reverts to SQLite** on restart — this is a known sandbox issue
-- On Hostinger (production), the `.env` will be set once and persist
-- **DEV .env**: points to DEV Supabase (current credentials)
-- **PRODUCTION .env**: points to PRODUCTION Supabase (new credentials — set on Hostinger)
-- **NEVER** commit `.env` to git (it's in `.gitignore`)
-
-### Rule 3: NO TEST DATA IN PRODUCTION
-- The production DB starts EMPTY (only schema, no data)
-- Onboarding flow creates the first org → company → owner
-- **NEVER** run seed scripts, test data generators, or brute-force tests against production
-- **NEVER** create test customers, test orders, or test products in production
-
-### Rule 4: MIGRATIONS ARE ONE-WAY
-- Database migrations (supabase/migrations/) are applied to production ONCE
-- Once a migration is applied to production, it CANNOT be rolled back (no down migrations)
-- Test ALL migrations on DEV first — verify they work before applying to production
-- Migration numbering: 001-029 exist. New migrations start at 030+
-
-### Rule 5: CODE CHANGES — DEV FIRST, PRODUCTION SECOND
-- ALL code changes are developed + tested on the DEV sandbox first
-- Only after DEV testing passes, changes are deployed to Hostinger production
-- **NEVER** make code changes directly on the Hostinger server
-- **NEVER** run `bun run dev` on Hostinger — use `bun run build` + `bun run start`
+> **SINGLE SOURCE OF TRUTH** — Keep this document updated whenever infrastructure or workflow changes.  
+> **Target Domain:** https://op.muzammaldatabase.com  
+> **GitHub Repository:** `git@github.com:TheUsmanKhan/flowops.git` (Branch: `main`)  
+> **Last Updated:** 2026-09-04  
 
 ---
 
-## 📋 PRE-DEPLOYMENT CHECKLIST
-
-### Step 1: Create Production Supabase Project
-1. Go to https://supabase.com → New Project
-2. Name it: `flowops-production`
-3. Choose region: `ap-south-1 (Mumbai)` — closest to Pakistan
-4. Set a strong database password
-5. Wait for project to initialize
-6. Copy the connection strings:
-   - `DATABASE_URL=postgresql://postgres.[project-ref]:[password]@aws-0-ap-south-1.pooler.supabase.com:5432/postgres`
-   - `DIRECT_URL=postgresql://postgres.[project-ref]:[password]@aws-0-ap-south-1.pooler.supabase.com:5432/postgres`
-
-### Step 2: Apply Schema + Migrations to Production DB
-```bash
-# Set production env vars
-export DATABASE_URL="postgresql://postgres.[prod-ref]:[prod-password]@..."
-export DIRECT_URL="postgresql://postgres.[prod-ref]:[prod-password]@..."
-
-# Push the full schema (creates all tables + relations)
-bunx prisma db push
-
-# Apply all migrations (SQL functions, indexes, CHECK constraints, etc.)
-# Run each migration file in order:
-for f in supabase/migrations/0*.sql; do
-  echo "Applying $f..."
-  # Apply via Supabase SQL Editor OR psql
-done
-```
-
-### Step 3: Configure Hostinger
-1. Deploy the Next.js app to Hostinger (VPS or shared hosting with Node.js)
-2. Set environment variables in Hostinger panel:
-   ```
-   DATABASE_URL=postgresql://postgres.[prod-ref]:[prod-password]@...
-   DIRECT_URL=postgresql://postgres.[prod-ref]:[prod-password]@...
-   INTEGRATION_ENCRYPTION_KEY=[same key as dev — 64-char hex]
-   SESSION_SECRET=[NEW strong secret — 32+ chars — different from dev]
-   CRON_SECRET=[NEW strong secret — different from dev]
-   APP_URL=https://yourdomain.com
-   NODE_ENV=production
-   ```
-3. Build: `bun run build`
-4. Start: `bun run start`
-5. Verify: visit `https://yourdomain.com/api/health` → should return `{"status":"healthy","db":"connected"}`
-
-### Step 4: First User Onboarding
-1. Visit `https://yourdomain.com`
-2. Click "Create an account"
-3. Enter YOUR real email + password (this becomes the organization owner)
-4. Complete the workspace creation wizard (org name, company name, etc.)
-5. Connect Leopard Courier with REAL production credentials
-6. Sync cities (Settings → Integrations → Sync Cities)
-7. Import shippers by shipment_id (as done in testing)
-8. You're live!
-
----
-
-## 🔄 POST-DEPLOYMENT DEVELOPMENT WORKFLOW
-
-### How future development works after deployment:
+## 🏗️ 1. ARCHITECTURE OVERVIEW
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    DEV SANDBOX (this machine)                │
-│                                                              │
-│  .env → DEV Supabase (test DB)                              │
-│  ┌──────────────────────────────────────┐                   │
-│  │ 1. Make code changes                 │                   │
-│  │ 2. Test on dev server (bun run dev)  │                   │
-│  │ 3. Brute-force test                  │                   │
-│  │ 4. Lint check (bun run lint)         │                   │
-│  │ 5. Commit to git                     │                   │
-│  └──────────────────────────────────────┘                   │
-│                         ↓                                    │
-│  ┌──────────────────────────────────────┐                   │
-│  │ 6. Apply migrations to DEV DB first │                   │
-│  │ 7. Verify schema on DEV              │                   │
-│  │ 8. If migration works → proceed      │                   │
-│  │ 9. If migration breaks → fix on DEV │                   │
-│  └──────────────────────────────────────┘                   │
-│                         ↓                                    │
-└─────────────────────────────────────────────────────────────┘
-                          ↓ (only when DEV is green)
+│                 LOCAL WORKSPACE (Your Mac)                  │
+│                                                             │
+│  .env → DEV Supabase Database (Dummy / Testing Data)       │
+│  • Make code changes & bug fixes                            │
+│  • Test with local dev/prod server (`bun run start`)        │
+│  • Run brute-force tests & build verification               │
+│  • SSH Key: ~/.ssh/id_ed25519_usman                         │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼ git push origin main
 ┌─────────────────────────────────────────────────────────────┐
-│                  PRODUCTION (Hostinger)                       │
-│                                                              │
-│  .env → PRODUCTION Supabase (live DB)                        │
-│  ┌──────────────────────────────────────┐                   │
-│  │ 1. Pull latest code (git pull)       │                   │
-│  │ 2. Apply migrations to PROD DB        │                   │
-│  │ 3. Rebuild (bun run build)           │                   │
-│  │ 4. Restart server (bun run start)    │                   │
-│  │ 5. Verify /api/health                 │                   │
-│  │ 6. Verify key flows manually          │                   │
-│  └──────────────────────────────────────┘                   │
-│                                                              │
-│  ⚠️ NO test scripts, NO brute-force, NO seed data            │
-│  ⚠️ NO `bun run dev` — only `bun run build` + `bun run start`│
-│  ⚠️ NO direct DB edits — only via migrations or the app     │
+│                    GITHUB REPOSITORY                        │
+│                 TheUsmanKhan/flowops                        │
+│                                                             │
+│  • Clean application code only                              │
+│  • ZERO secrets / ZERO database passwords (.env ignored)    │
+│  • Both bun.lock & package-lock.json maintained             │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼ Pull / Webhook
+┌─────────────────────────────────────────────────────────────┐
+│                HOSTINGER CLOUD (Production)                 │
+│              https://op.muzammaldatabase.com                │
+│                                                             │
+│  Environment Variables → NEW Production Supabase DB         │
+│  • Framework: Next.js (Node 22.x)                           │
+│  • Clean live database (Real users, orders, money)          │
+│  • 100% isolated from development machine                   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### Development Session Workflow (what you + I do):
+---
 
-1. **User requests a change** → I implement on DEV sandbox
-2. **I test on DEV** → brute-force test, lint, verify
-3. **I commit to git** → code is version-controlled
-4. **User deploys to Hostinger** → `git pull` → `bun run build` → `bun run start`
-5. **If migration needed** → I write it → test on DEV → user applies to PROD DB
-6. **User verifies on production** → manually check the changed feature
+## 🚨 2. GOLDEN RULES (NON-NEGOTIABLE)
 
-### Migration Application Rules:
-- New migration files go in `supabase/migrations/0XX_description.sql`
-- **ALWAYS test on DEV first**: `bun -e "..."` with `DATABASE_URL=dev_url`
-- **Then apply to PROD**: via Supabase SQL Editor (paste the SQL) OR psql
-- **NEVER** modify an already-applied migration (create a new one instead)
-- **NEVER** use `prisma db push` on production after initial setup (it can drop columns) — use `prisma migrate` or manual SQL
+### Rule 1: Two Databases — NEVER Mix Them
+| Property | Development Database (Local) | Production Database (Hostinger) |
+|---|---|---|
+| **Environment** | Local Mac / Dev Testing | Hostinger Live Server |
+| **Supabase Project** | `gobwxqkzfulbwhzbbsdj` | `phketufsvxqghkdgixli` |
+| **Data Type** | Test users, fake products, test orders | REAL users, REAL customers, REAL revenue |
+| **Connection Location** | Local `.env` file | Hostinger Environment Variables |
+| **Rule** | NEVER connect live code here | NEVER run test scripts or seeds here |
+
+### Rule 2: Local Changes NEVER Affect Production Directly
+- Changing code on your Mac has **0% impact** on Hostinger.
+- Hostinger only updates when code is verified locally, committed, and pushed to GitHub `main`.
+
+### Rule 3: Database URL Encoding (`@` in Passwords)
+- If a database password contains `@` (e.g. `123@Shinein123@`), it **MUST** be URL-encoded as `%40` (`123%40Shinein123%40`).
+- Failing to encode `@` causes PostgreSQL connection strings to split incorrectly, crashing Prisma.
 
 ---
 
-## 🔒 SAFETY GUIDELINES
+## 🗄️ 3. DATABASE CONFIGURATIONS
 
-### What I (AI) will NEVER do:
-1. ❌ Never connect to the production database from this sandbox
-2. ❌ Never run test scripts against production
-3. ❌ Never create test users/orders/products in production
-4. ❌ Never modify production `.env` (user does this on Hostinger)
-5. ❌ Never run `prisma db push` on production (schema-destructive)
-6. ❌ Never apply a migration to production without testing on DEV first
+### A. Development / Testing Database (Used in local `.env`)
+```env
+DATABASE_URL="postgresql://postgres.gobwxqkzfulbwhzbbsdj:123%40Usman123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres"
+DIRECT_URL="postgresql://postgres.gobwxqkzfulbwhzbbsdj:123%40Usman123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres"
+```
 
-### What I (AI) WILL do:
-1. ✅ Develop + test all changes on the DEV sandbox
-2. ✅ Write migrations as idempotent SQL (IF NOT EXISTS)
-3. ✅ Test migrations on DEV DB before declaring them ready
-4. ✅ Commit all changes to git with clear commit messages
-5. ✅ Provide exact commands for the user to run on Hostinger
-6. ✅ Flag any breaking changes that require special deployment steps
-
-### What the USER must do:
-1. 🔧 Create the production Supabase project
-2. 🔧 Set production `.env` on Hostinger (I'll provide exact values)
-3. 🔧 Apply schema + migrations to production DB (I'll provide exact SQL)
-4. 🔧 Deploy the app on Hostinger (build + start)
-5. 🔧 Create the first (owner) account with real credentials
-6. 🔧 Connect real Leopard/PostEx credentials in the production app
-7. 🔧 NEVER share production database credentials in chat
-8. 🔧 Backup production DB before applying any migration
+### B. Production Database (Configured on Hostinger)
+- **Supabase Project Ref:** `phketufsvxqghkdgixli`
+- **Region:** `aws-0-ap-south-1` (Mumbai)
+- **Password (raw):** `123@Shinein123@`
+- **Password (encoded for URL):** `123%40Shinein123%40`
+- **Port:** `5432` (Session Pooler)
+- **Schema Status:** 68 tables synchronized via Prisma + migrations 025, 026, 028, 029 applied.
+```env
+DATABASE_URL=postgresql://postgres.phketufsvxqghkdgixli:123%40Shinein123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
+DIRECT_URL=postgresql://postgres.phketufsvxqghkdgixli:123%40Shinein123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
+```
 
 ---
 
-## 📦 DEPLOYMENT COMMANDS (for Hostinger)
+## ⚙️ 4. HOSTINGER PRODUCTION SETTINGS
 
-### Initial Deployment:
+### Build Settings
+| Setting Name | Exact Value | Notes |
+|---|---|---|
+| **Framework preset** | `Next.js` | Auto-detected |
+| **Branch** | `main` | Production branch |
+| **Node version** | `22.x` | Modern LTS |
+| **Root directory** | `./` | Root of repository |
+| **Build command** | `npm run build` | Builds standalone Next.js bundle |
+| **Package manager** | `npm` | `package-lock.json` is committed |
+| **Output directory** | `.next` | Default Next.js output |
+
+### Hostinger Environment Variables (Key-Value Pairs)
+Enter these in the **"Set environment variables"** section:
+
+1. **`DATABASE_URL`**
+   ```text
+   postgresql://postgres.phketufsvxqghkdgixli:123%40Shinein123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
+   ```
+2. **`DIRECT_URL`**
+   ```text
+   postgresql://postgres.phketufsvxqghkdgixli:123%40Shinein123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
+   ```
+3. **`INTEGRATION_ENCRYPTION_KEY`**
+   ```text
+   1fbf4fd279d9476183566c878e38907764feac7e7843d16ac60065720a451951
+   ```
+   *(Must match across dev and prod so encrypted courier credentials decrypt correctly)*
+4. **`APP_URL`**
+   ```text
+   https://op.muzammaldatabase.com
+   ```
+5. **`NODE_ENV`**
+   ```text
+   production
+   ```
+6. **`SESSION_SECRET`**
+   ```text
+   flowops-production-session-secret-live-32c
+   ```
+7. **`CRON_SECRET`**
+   ```text
+   flowops-cron-secret-live-production
+   ```
+8. **`ENABLE_IN_PROCESS_POLLER`**
+   ```text
+   true
+   ```
+
+---
+
+## 💻 5. LOCAL DEVELOPMENT & GIT WORKFLOW
+
+### A. SSH Key for GitHub
+This Mac has multiple GitHub accounts. This repository specifically uses `TheUsmanKhan`'s key:
 ```bash
-# On Hostinger server:
-git clone [repo-url] /app/flowops
-cd /app/flowops
-bun install
-bunx prisma generate
-
-# Set production .env (via Hostinger panel or nano .env)
-# ... set DATABASE_URL, DIRECT_URL, etc. ...
-
-# Push schema to production DB (FIRST TIME ONLY)
-bunx prisma db push
-
-# Apply SQL migrations (via Supabase SQL Editor — paste each file)
-# 001 through 029
-
-# Build for production
-bun run build
-
-# Start the production server
-bun run start
+git config core.sshCommand "ssh -i ~/.ssh/id_ed25519_usman -o IdentitiesOnly=yes"
 ```
-
-### Subsequent Updates (when I make changes):
+Verify authentication anytime with:
 ```bash
-# On Hostinger server:
-cd /app/flowops
-git pull origin main
-bun install  # if package.json changed
-bunx prisma generate  # if schema.prisma changed
-
-# If new migrations exist, apply them via Supabase SQL Editor
-
-# Rebuild + restart
-bun run build
-# Restart the server process (pm2 restart / systemctl restart / etc.)
+ssh -i ~/.ssh/id_ed25519_usman -o IdentitiesOnly=yes -T git@github.com
+# Expected output: Hi TheUsmanKhan! You've successfully authenticated...
 ```
 
-### Database Backup (BEFORE any migration):
-```bash
-# Via Supabase Dashboard:
-# Settings → Database → Backup → Create backup
-
-# OR via pg_dump:
-pg_dump "postgresql://postgres.[prod-ref]:[prod-password]@..." > backup-$(date +%Y%m%d).sql
-```
+### B. Standard Feature / Bug Fix Routine
+1. Make code changes in local files (`src/`, `prisma/`, etc.).
+2. Test against local Dev Database:
+   - Run dev server: `bun run dev` (or `npm run dev`)
+   - Test production build: `npm run build` and `bun run start`
+   - Test health check: `curl http://localhost:3000/api/health`
+3. Check git status to ensure `.env` and `.pid` are never staged:
+   ```bash
+   git status
+   ```
+4. Commit and push:
+   ```bash
+   git add -A
+   git commit -m "feat/fix: description of change"
+   git push origin main
+   ```
+5. Hostinger automatically rebuilds or user triggers redeploy.
 
 ---
 
-## 🗂️ ENVIRONMENT VARIABLES REFERENCE
+## 🔄 6. DATABASE MIGRATION PROTOCOL
 
-### DEV (.env on sandbox):
-```
-DATABASE_URL=postgresql://postgres.gobwxqkzfulbwhzbbsdj:123%40Usman123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
-DIRECT_URL=postgresql://postgres.gobwxqkzfulbwhzbbsdj:123%40Usman123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
-INTEGRATION_ENCRYPTION_KEY=1fbf4fd279d9476183566c878e38907764feac7e7843d16ac60065720a451951
-SESSION_SECRET=flowops-session-secret-v1-change-in-production-please-32-chars-min
-CRON_SECRET=flowops-cron-secret-v1-change-in-production
-APP_URL=http://localhost:3000
-```
-
-### PRODUCTION (.env on Hostinger — user fills in):
-```
-DATABASE_URL=postgresql://postgres.[PROD-PROJECT-REF]:[PROD-PASSWORD]@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
-DIRECT_URL=postgresql://postgres.[PROD-PROJECT-REF]:[PROD-PASSWORD]@aws-0-ap-south-1.pooler.supabase.com:5432/postgres
-INTEGRATION_ENCRYPTION_KEY=1fbf4fd279d9476183566c878e38907764feac7e7843d16ac60065720a451951
-SESSION_SECRET=[NEW-STRONG-SECRET-32-CHARS-MIN-GENERATE-A-NEW-ONE]
-CRON_SECRET=[NEW-STRONG-SECRET-GENERATE-A-NEW-ONE]
-APP_URL=https://yourdomain.com
-NODE_ENV=production
-```
-
-> **Note**: `INTEGRATION_ENCRYPTION_KEY` MUST be the same on both dev and production —
-> otherwise credentials encrypted on dev can't be decrypted on production (and vice versa).
-> The other secrets (SESSION_SECRET, CRON_SECRET) SHOULD be different for security.
+If a feature requires a schema change (e.g., new table, column, index):
+1. Update `prisma/schema.prisma`.
+2. Generate client: `bunx prisma generate`.
+3. Push to DEV DB first:
+   ```bash
+   bunx prisma db push
+   ```
+4. If a custom SQL migration is needed:
+   - Create `supabase/migrations/0XX_description.sql` (numbering continues from 030+).
+   - Test SQL on Dev DB first.
+   - Apply to Production DB via Supabase SQL Editor or `pg` script.
+5. Commit and push code.
 
 ---
 
-## 🚨 EMERGENCY PROCEDURES
+## 🛠️ 7. KNOWN GOTCHAS & TROUBLESHOOTING
 
-### If production breaks after a deployment:
-1. **Revert code**: `git revert [commit-hash] && bun run build && restart`
-2. **Don't revert migrations** — they're forward-only. Fix forward with a new migration.
-3. **Restore DB backup** if data corruption occurred
-
-### If production DB is corrupted:
-1. **Immediately restore** from the latest Supabase backup
-2. **Notify users** of downtime
-3. **Investigate root cause** on DEV (reproduce the issue)
-4. **Fix** on DEV, test, then redeploy
-
-### If a migration fails on production:
-1. **Check** the error message (Supabase SQL Editor shows it)
-2. **Fix** the migration SQL on DEV
-3. **Apply** the fixed migration to production
-4. **Never** try to "undo" a partial migration — fix forward
-
----
-
-## 📋 MIGRATION CHECKLIST (for each new migration)
-
-Before applying to production:
-- [ ] Migration tested on DEV DB
-- [ ] Migration is idempotent (IF NOT EXISTS / DO $$ blocks)
-- [ ] Migration doesn't drop any existing columns or tables
-- [ ] Migration doesn't lock the database for extended periods
-- [ ] Backup taken before applying
-- [ ] Applied via Supabase SQL Editor (not psql — easier to monitor)
-- [ ] Verified after application (check schema, run a test query)
-
----
-
-## 📋 CODE CHANGE CHECKLIST (for each new feature/fix)
-
-Before deploying to production:
-- [ ] Code tested on DEV sandbox
-- [ ] `bun run lint` passes (0 errors)
-- [ ] Brute-force tested (all flows work end-to-end)
-- [ ] No hardcoded dev credentials in code
-- [ ] No `console.log` debug statements in production paths
-- [ ] `NODE_ENV=production` doesn't break anything
-- [ ] Git committed with clear message
-- [ ] No `.env` file committed to git
-- [ ] If new env vars needed → document them in this guide
-
----
-
-*This document is the single source of truth for deployment + development rules. Update it whenever the workflow changes.*
+| Issue | Cause | Permanent Fix Implemented |
+|---|---|---|
+| **`Cannot find package '@next/bundle-analyzer'`** | `NODE_ENV=production` causes npm to omit `devDependencies`. | Removed `@next/bundle-analyzer` from `next.config.mjs` and moved build packages (`tailwindcss`, `typescript`, `@types/*`) into `dependencies`. |
+| **Prisma DB Connection Refused / Invalid URL** | Password had raw `@` which broke URL parser. | Encoded `@` as `%40` in all connection strings (`123%40...`). |
+| **Missing `package-lock.json`** | Repo only had `bun.lock`, causing npm builds on Hostinger to resolve ad-hoc. | Generated and committed `package-lock.json` so npm builds are deterministic and fast. |
+| **GitHub Push Permission Denied** | Default SSH key was pointing to another user (`noorekhas01-dotcom`). | Configured `core.sshCommand` to use `~/.ssh/id_ed25519_usman`. |
+| **Leopard Bulk Booking Fails** | Leopard API requires `special_instructions`. | Added fallback to `itemDescription` in `bookOrderWithCourier` so notes are never empty. |
