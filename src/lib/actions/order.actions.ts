@@ -1827,6 +1827,12 @@ export async function cancelOrder(
     // (no reservation ever existed for them) — they'll be orphaned since
     // the order is now cancelled and won't be picked up by future
     // checkAndFulfillBackorders() runs (which skip cancelled orders).
+    //
+    // BUG FIX: also set fulfillmentStatus to 'pending' so that un-cancel
+    // can re-reserve the stock (reserveOrderStock skips items already at
+    // 'reserved' — if we leave the status as 'reserved' after unreserve,
+    // un-cancel's reserveOrderStock will think the stock is already
+    // reserved and skip it, leaving the pool.reserved unchanged).
     const reservedItems = await db.orderItem.findMany({
       where: { orderId: d.order_id, fulfillmentStatus: 'reserved' },
     })
@@ -1843,6 +1849,13 @@ export async function cancelOrder(
         employeeId: ctx.employee.id,
         quantity: item.quantity,
         orderId: d.order_id,
+      })
+
+      // Reset the item's fulfillmentStatus to 'pending' so un-cancel
+      // can re-reserve it via reserveOrderStock.
+      await db.orderItem.update({
+        where: { id: item.id },
+        data: { fulfillmentStatus: 'pending' },
       })
     }
 
