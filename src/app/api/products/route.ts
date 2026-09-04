@@ -346,7 +346,7 @@ export async function POST(req: Request) {
         newValues: {
           title: product.title,
           productType: product.productType,
-          variantCount: variantRecords.length,
+          variantCount: variantIds.length,
           isStitchable: product.isStitchable,
         },
       })
