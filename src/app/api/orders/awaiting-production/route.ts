@@ -23,7 +23,14 @@ export async function GET() {
     const items = await db.orderItem.findMany({
       where: {
         productionOrderId: { not: null },
-        order: { companyId: ctx.company.id, ...orderScopeFilter },
+        // BUG FIX (H11): exclude items whose PARENT order is cancelled —
+        // a cancelled order's items shouldn't show in "Awaiting Production"
+        // even if the linked ProductionOrder is still active.
+        order: {
+          companyId: ctx.company.id,
+          ...orderScopeFilter,
+          status: { not: 'cancelled' },
+        },
         productionOrder: {
           status: { notIn: ['completed', 'cancelled', 'dispatched'] },
         },

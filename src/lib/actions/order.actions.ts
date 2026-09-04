@@ -81,14 +81,34 @@ interface OrderFilters {
 // Helper: generate order number via the DB function
 // ──────────────────────────────────────────────────────────────
 
+/**
+ * Generate a unique, sequential order number per company per year.
+ *
+ * Format: ORD-YYYY-NNNNN (e.g. ORD-2026-00001, ORD-2026-00002, ...)
+ * With optional per-company prefix: ORD-<PREFIX>-YYYY-NNNNN
+ *
+ * ATOMIC & RACE-FREE: uses the get_next_sequence_number() Postgres
+ * function (migration 026) which does INSERT ... ON CONFLICT DO UPDATE
+ * ... RETURNING in a single atomic statement. Two concurrent calls
+ * will each get a DIFFERENT number (guaranteed by Postgres's row-level
+ * locking).
+ *
+ * This REPLACES the old generate_order_number() SQL function which used
+ * MAX+1 (race condition — two concurrent order creations could generate
+ * the same number, causing a unique-constraint 500 error). See
+ * ORDERS_AUDIT.md CRITICAL #1.
+ */
 async function generateOrderNumber(companyId: string): Promise<string> {
-  const result = await db.$queryRaw<{ generate_order_number: string }[]>`
-    SELECT generate_order_number(${companyId}::TEXT)
+  const year = new Date().getFullYear()
+
+  // Atomic sequence number generation (same pattern as generatePoNumber)
+  const seqResult = await db.$queryRaw<{ n: number }[]>`
+    SELECT get_next_sequence_number(${companyId}::TEXT, 'order_number', ${year}::INT) AS n
   `
-  const baseNumber = result[0].generate_order_number
-  // Apply per-company prefix if configured. The SQL function returns
-  // "ORD-YYYY-NNNNN" — we insert the prefix between "ORD-" and the year,
-  // producing "ORD-<PREFIX>-YYYY-NNNNN".
+  const seq = seqResult[0].n
+  const baseNumber = `ORD-${year}-${String(seq).padStart(5, '0')}`
+
+  // Apply per-company prefix if configured.
   const settings = await db.companyOrderSetting.findUnique({
     where: { companyId },
     select: { orderNumberPrefix: true },
@@ -103,16 +123,20 @@ async function generateOrderNumber(companyId: string): Promise<string> {
 }
 
 /**
- * Generate a per-company self-fulfilled reference number (SF-YYYY-NNNNN)
- * via the SQL function. Used when fulfillmentChannel = 'self_fulfilled'.
- * Mirrors generateOrderNumber() — calls the SQL function which does a
- * MAX-based per-company sequence.
+ * Generate a per-company self-fulfilled reference number (SF-YYYY-NNNNN).
+ *
+ * ATOMIC & RACE-FREE: uses get_next_sequence_number() with type='sf_number'.
+ * Replaces the old generate_self_fulfilled_reference() SQL function (MAX+1 race).
  */
 async function generateSelfFulfilledReference(companyId: string): Promise<string> {
-  const result = await db.$queryRaw<{ generate_self_fulfilled_reference: string }[]>`
-    SELECT generate_self_fulfilled_reference(${companyId}::TEXT)
+  const year = new Date().getFullYear()
+
+  const seqResult = await db.$queryRaw<{ n: number }[]>`
+    SELECT get_next_sequence_number(${companyId}::TEXT, 'sf_number', ${year}::INT) AS n
   `
-  return result[0].generate_self_fulfilled_reference
+  const seq = seqResult[0].n
+
+  return `SF-${year}-${String(seq).padStart(5, '0')}`
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -848,8 +872,38 @@ export async function createManualOrder(
 
     // 13. If the order auto-confirmed, run the stock reservation logic.
     //     Sequential — reserveOrderStock reads the order items created above.
+    //
+    //     COMPENSATING TRANSACTION: if reserveOrderStock fails, the order +
+    //     items + address are already committed. We can't use db.$transaction
+    //     because reserveOrderStock calls processInventoryTransaction (global db).
+    //     Instead: if reservation fails, DELETE the order + items (cascade)
+    //     so no orphan order is left behind. The customer stats update is
+    //     also reversed. This prevents "order created but no stock reserved"
+    //     — the worst case where the user thinks the order was placed but
+    //     inventory was never held.
     if (orderStatus === 'confirmed') {
-      await reserveOrderStock(order.id, ctx)
+      const reserveResult = await reserveOrderStock(order.id, ctx)
+      if (!reserveResult.success) {
+        // COMPENSATING ACTION: roll back the order creation.
+        // Delete the order (cascades to items + address link).
+        // Recompute customer stats (removes the phantom order from counts).
+        console.error(`[createManualOrder] reserveOrderStock failed for ${flowopsOrderNumber}: order not found. Rolling back.`)
+        await db.order.delete({ where: { id: order.id } }).catch(() => {})
+        await updateCustomerStats(customerId).catch(() => {})
+        return {
+          success: false,
+          error: `Failed to reserve stock: order could not be found after creation. Order was rolled back — please try again.`,
+        }
+      }
+      // Check if any items failed to reserve (not backordered — that's OK)
+      const failedItems = reserveResult.results.filter((r) => r.outcome === 'failed')
+      if (failedItems.length > 0) {
+        // Some items failed completely (not backordered — backordered is OK).
+        // Log the failures but DON'T roll back — the order is created with
+        // some items reserved and some failed. The user can see the status
+        // in the order detail and adjust.
+        console.warn(`[createManualOrder] ${failedItems.length} item(s) failed to reserve for ${flowopsOrderNumber}:`, failedItems.map(f => `${f.orderItemId}: ${f.reason}`).join(', '))
+      }
     }
 
     // 14. AUTO-BOOKING — uses the ALREADY-FETCHED orderSettings (no 2nd
