@@ -202,6 +202,17 @@ export async function bookOrderWithCourier(
       }
     }
 
+    // BUG FIX: Leopard's production API rejects empty special_instructions.
+    // When bulk booking (no per-order transactionNotes passed) OR when the
+    // user left the notes field empty, Leopard returns "Special Instructions
+    // are required". Fix: if the effective transactionNotes is still empty
+    // after all fallbacks, use the itemDescription (product title + qty
+    // summary) as the default. This ensures Leopard always receives a
+    // non-empty value.
+    if (!effectiveTransactionNotes && providerKey === 'leopard') {
+      effectiveTransactionNotes = itemDescription || `Order ${order.flowopsOrderNumber}`
+    }
+
     if (!deliveryCity) {
       const reason = 'Delivery city is required.'
       await db.order.update({
@@ -751,6 +762,9 @@ export async function bookExchangeShipmentWithCourier(
       (shipment.orderDetail && shipment.orderDetail.trim()) ||
       `${shipment.newOrgVariant.product.title} (${shipment.newOrgVariant.sku}) ×${shipment.quantity}`
     const transactionNotes = options.transactionNotes?.trim() || ''
+    // BUG FIX: same as orders — Leopard requires non-empty special_instructions.
+    // Fall back to itemDescription if empty.
+    const effectiveTransactionNotes = transactionNotes || (providerKey === 'leopard' ? (itemDescription || `Exchange ${shipment.exchangeShipmentNumber}`) : transactionNotes)
     const isExchangeReplacement = shipment.orderExchange.exchangeMethod === 'courier_replacement'
 
     if (!deliveryCity) {
@@ -808,7 +822,7 @@ export async function bookExchangeShipmentWithCourier(
       pickupAddressCode,
       orderType,
       quantity: shipment.quantity,
-      transactionNotes,
+      transactionNotes: effectiveTransactionNotes,
     }
 
     const credentials = decryptCredentials(integration.credentialsEncrypted!)
