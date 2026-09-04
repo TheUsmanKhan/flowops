@@ -225,88 +225,113 @@ export async function POST(req: Request) {
         }
       }
 
-      // Create product
-      const product = await db.orgProduct.create({
-        data: {
-          organizationId: orgId,
-          sourceCompanyId: companyId,
-          categoryId: d.category_id || null,
-          brandId: d.brand_id || null,
-          title: d.title,
-          slug,
-          baseSku: d.base_sku || null,
-          description: d.description || null,
-          shortDescription: d.short_description || null,
-          productType: d.product_type,
-          productScope: d.product_scope,
-          isStitchable: d.is_stitchable,
-          hasSizeVariants: d.has_size_variants,
-          stitchingBasePrice: d.stitching_base_price,
-          isActive: d.is_active,
-          isFeatured: d.is_featured,
-          createdById: caller.id,
-        },
+      // ── SKU duplicate pre-check ──
+      // SKU is org-wide unique (@unique on OrgProductVariant). Without this
+      // pre-check, a duplicate SKU hits a raw Prisma unique-constraint error
+      // (500). Now we return a friendly 400 with the specific SKU.
+      const skusToCheck = d.variants.map((v) => v.sku)
+      const existingSkus = await db.orgProductVariant.findMany({
+        where: { organizationId: orgId, sku: { in: skusToCheck } },
+        select: { sku: true },
       })
+      if (existingSkus.length > 0) {
+        const dupSku = existingSkus[0].sku
+        throw new ApiError(400, `SKU "${dupSku}" already exists. Please use a unique SKU.`)
+      }
 
-      // Create variants + company pricing
-      const variantRecords: Array<{ id: string }> = []
-      for (const v of d.variants) {
-        // Sync fulfillment_type ↔ inventory_policy
-        const inventoryPolicy = syncInventoryPolicy(v.fulfillment_type, v.allow_backorder)
-
-        // Validate stitching_type ↔ fulfillment_type consistency
-        let fulfillmentType = v.fulfillment_type
-        if (v.stitching_type === 'unstitched') {
-          fulfillmentType = 'stock_based'
-        } else if (['stitched_basic', 'stitched_heavy', 'custom_order'].includes(v.stitching_type ?? '')) {
-          fulfillmentType = 'made_to_order'
-        }
-
-        const variant = await db.orgProductVariant.create({
+      // ── ATOMIC CREATION: all writes wrapped in db.$transaction ──
+      // Previously these were 4+ sequential writes with NO transaction —
+      // if any mid-loop write failed (e.g. variant #3 of 5), earlier writes
+      // were committed (orphan product + partial variants + missing pricing).
+      // Now: if ANY write fails, ALL are rolled back (true atomicity).
+      // This is safe because product creation does NOT call
+      // processInventoryTransaction (which uses global db, not tx).
+      const { product, variantIds } = await db.$transaction(async (tx) => {
+        // Create product
+        const product = await tx.orgProduct.create({
           data: {
-            productId: product.id,
             organizationId: orgId,
-            sku: v.sku,
-            barcode: v.barcode || null,
-            attributeValues: JSON.stringify(v.attribute_values),
-            costPrice: v.cost_price,
-            weightGrams: v.weight_grams,
-            weightKg: v.weight_kg ?? null,
-            fulfillmentType,
-            stitchingType: v.stitching_type ?? null,
-            stitchingCharges: v.stitching_charges,
-            productionDays: v.production_days,
-            isTaxable: v.is_taxable,
-            requiresShipping: v.requires_shipping,
-            inventoryPolicy: syncInventoryPolicy(fulfillmentType, v.allow_backorder),
-            isDefault: v.is_default,
-            isActive: v.is_active,
-            fabricSourceVariantId: v.fabric_source_variant_id || null,
+            sourceCompanyId: companyId,
+            categoryId: d.category_id || null,
+            brandId: d.brand_id || null,
+            title: d.title,
+            slug,
+            baseSku: d.base_sku || null,
+            description: d.description || null,
+            shortDescription: d.short_description || null,
+            productType: d.product_type,
+            productScope: d.product_scope,
+            isStitchable: d.is_stitchable,
+            hasSizeVariants: d.has_size_variants,
+            stitchingBasePrice: d.stitching_base_price,
+            isActive: d.is_active,
+            isFeatured: d.is_featured,
             createdById: caller.id,
           },
         })
-        variantRecords.push(variant)
 
-        // Create company pricing for this variant
-        await db.companyVariantPricing.create({
+        // Create variants + company pricing
+        const variantIds: string[] = []
+        for (const v of d.variants) {
+          // Sync fulfillment_type ↔ inventory_policy
+          const inventoryPolicy = syncInventoryPolicy(v.fulfillment_type, v.allow_backorder)
+
+          // Validate stitching_type ↔ fulfillment_type consistency
+          let fulfillmentType = v.fulfillment_type
+          if (v.stitching_type === 'unstitched') {
+            fulfillmentType = 'stock_based'
+          } else if (['stitched_basic', 'stitched_heavy', 'custom_order'].includes(v.stitching_type ?? '')) {
+            fulfillmentType = 'made_to_order'
+          }
+
+          const variant = await tx.orgProductVariant.create({
+            data: {
+              productId: product.id,
+              organizationId: orgId,
+              sku: v.sku,
+              barcode: v.barcode || null,
+              attributeValues: JSON.stringify(v.attribute_values),
+              costPrice: v.cost_price,
+              weightGrams: v.weight_grams,
+              weightKg: v.weight_kg ?? null,
+              fulfillmentType,
+              stitchingType: v.stitching_type ?? null,
+              stitchingCharges: v.stitching_charges,
+              productionDays: v.production_days,
+              isTaxable: v.is_taxable,
+              requiresShipping: v.requires_shipping,
+              inventoryPolicy: syncInventoryPolicy(fulfillmentType, v.allow_backorder),
+              isDefault: v.is_default,
+              isActive: v.is_active,
+              fabricSourceVariantId: v.fabric_source_variant_id || null,
+              createdById: caller.id,
+            },
+          })
+          variantIds.push(variant.id)
+
+          // Create company pricing for this variant
+          await tx.companyVariantPricing.create({
+            data: {
+              companyId,
+              orgVariantId: variant.id,
+              organizationId: orgId,
+              salePrice: v.sale_price,
+              comparePrice: v.compare_price ?? null,
+            },
+          })
+        }
+
+        // Create company_product_settings (creator auto-subscribes)
+        await tx.companyProductSetting.create({
           data: {
             companyId,
-            orgVariantId: variant.id,
             organizationId: orgId,
-            salePrice: v.sale_price,
-            comparePrice: v.compare_price ?? null,
+            orgProductId: product.id,
+            subscribedById: caller.id,
           },
         })
-      }
 
-      // Create company_product_settings (creator auto-subscribes)
-      await db.companyProductSetting.create({
-        data: {
-          companyId,
-          organizationId: orgId,
-          orgProductId: product.id,
-          subscribedById: caller.id,
-        },
+        return { product, variantIds }
       })
 
       // Audit + metric
@@ -333,7 +358,7 @@ export async function POST(req: Request) {
         numericValue: 1,
       })
 
-      return { id: product.id, slug: product.slug, title: product.title, variantIds: variantRecords.map(v => v.id) }
+      return { id: product.id, slug: product.slug, title: product.title, variantIds }
     }
 
     // If an idempotency key is provided, wrap the creation in withIdempotency()
