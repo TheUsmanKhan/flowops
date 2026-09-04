@@ -1409,6 +1409,37 @@ export async function confirmOrder(orderId: string): Promise<ActionResult> {
       updateEmployeeStats(order.salesEmployeeId).catch(() => {})
     }
 
+    // BUG FIX (H14): trigger auto-booking after manual confirmation.
+    // Previously only createManualOrder + checkAndFulfillBackorders triggered
+    // auto-booking — if an order was manually confirmed (requireOrderConfirmation
+    // = true + paymentType = full_cod), it sat in "Ready to Dispatch" without
+    // being auto-booked. Now we fire maybeAutoBookOrder the same way
+    // createManualOrder does.
+    if (order.fulfillmentChannel !== 'self_fulfilled') {
+      ;(async () => {
+        try {
+          const orderSettings = await db.companyOrderSetting.findUnique({
+            where: { companyId: ctx.company.id },
+            select: { courierBookingMode: true, defaultCourierCompanyIntegrationId: true },
+          })
+          const shouldAutoBook =
+            orderSettings?.courierBookingMode === 'automatic' &&
+            (orderSettings?.defaultCourierCompanyIntegrationId || order.courierCompanyIntegrationId)
+          if (shouldAutoBook) {
+            const { maybeAutoBookOrder } = await import('./booking.actions')
+            const bookResult = await maybeAutoBookOrder(orderId, 'manual_confirm', 'confirmed')
+            if (bookResult.success) {
+              console.log(`[confirmOrder] Auto-booking succeeded for ${order.flowopsOrderNumber}: tracking=${bookResult.data?.trackingNumber}`)
+            } else {
+              console.warn(`[confirmOrder] Auto-booking failed for ${order.flowopsOrderNumber}: ${bookResult.error}`)
+            }
+          }
+        } catch (err) {
+          console.error(`[confirmOrder] Auto-booking threw for ${order.flowopsOrderNumber}:`, err)
+        }
+      })()
+    }
+
     return { success: true }
   } catch (err) {
     return {

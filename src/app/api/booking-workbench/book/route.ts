@@ -3,7 +3,7 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
-import { bookOrderWithCourier } from '@/lib/actions/booking.actions'
+import { bookOrderWithCourier, bookExchangeShipmentWithCourier } from '@/lib/actions/booking.actions'
 import { decryptCredentials } from '@/lib/utils/encryption'
 import { getCourierAdapter } from '@/lib/integrations/registry'
 import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
@@ -97,8 +97,20 @@ export async function POST(req: NextRequest) {
       return Response.json(result.data)
     }
 
-    // ── EXCHANGE SHIPMENT booking: handled inline ──
-    return await bookExchangeShipment(body, companyId, orgId)
+    // ── EXCHANGE SHIPMENT booking: delegate to the unified action ──
+    // BUG FIX (H7): was using an inline bookExchangeShipment function
+    // defined in this route file (duplicate logic that drifted from
+    // bookExchangeShipmentWithCourier in booking.actions.ts). Now delegates
+    // to the proper action for consistency.
+    const shipmentResult = await bookExchangeShipmentWithCourier(
+      body.entity_id,
+      body.courier_company_integration_id,
+      body.pickup_address_id || undefined,
+    )
+    if (!shipmentResult.success) {
+      throw new ApiError(400, shipmentResult.error ?? 'Failed to book exchange shipment')
+    }
+    return Response.json(shipmentResult.data)
   } catch (err) {
     return handleError(err)
   }

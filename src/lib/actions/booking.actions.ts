@@ -125,12 +125,11 @@ export async function bookOrderWithCourier(
     }
 
     const providerKey = integration.provider.providerKey
-    if (providerKey !== 'postex') {
-      return {
-        success: false,
-        error: `Booking not yet implemented for provider '${providerKey}'.`,
-      }
-    }
+    // Previously: rejected all non-PostEx providers. Now removed — Leopard
+    // is live and tested (6 bookings passed). TCS is a stub (will fail
+    // at the adapter level with a clear error). The adapter's bookShipment
+    // method handles provider-specific logic.
+    // if (providerKey !== 'postex') { return { success: false, error: ... } }
 
     // ── Fetch the order with items + variant weights + customer ──
     mark('orderLoadStart')
