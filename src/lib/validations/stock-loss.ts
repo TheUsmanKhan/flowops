@@ -34,6 +34,10 @@ export const reportDamagedLossSchema = z.object({
   ]),
   evidence_urls: z.array(z.string().url()).default([]),
   notes: z.string().max(1000).optional().or(z.literal('')),
+  // Optional: link to an order item (required when responsible_party='courier').
+  // Enables dedup — prevents the same loss being recorded twice for the
+  // same order item + damaged + stock_loss source.
+  order_item_id: z.string().optional().or(z.literal('')),
 })
 export type ReportDamagedLossInput = z.infer<typeof reportDamagedLossSchema>
 

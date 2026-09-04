@@ -35,6 +35,7 @@ import {
   Phone,
   RefreshCw,
   Download,
+  Users,
 } from 'lucide-react'
 import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 import { getErrorMessage } from '@/components/orders/_shared'
@@ -98,13 +99,23 @@ export function PickupAddressesSection({
     onError: (err) => toast.error(getErrorMessage(err)),
   })
 
-  const syncMutation = useMutation({
+  const refreshMutation = useMutation({
     mutationFn: () =>
-      api.post<{ fetched: number; upserted: number }>(
-        `/api/integrations/${companyIntegrationId}/pickup-addresses/sync`,
+      api.post<{ refreshed: number; updated: number; errors: string[] }>(
+        `/api/integrations/${companyIntegrationId}/pickup-addresses/refresh`,
       ),
     onSuccess: (data) => {
-      toast.success(`Synced ${data.upserted} address(es) from courier.`)
+      if (data.updated > 0) {
+        toast.success(`Refreshed ${data.refreshed} shipper(s) — ${data.updated} updated.`)
+      } else if (data.refreshed > 0) {
+        toast.success(`Refreshed ${data.refreshed} shipper(s) — all up to date.`)
+      } else {
+        toast.info('No shippers to refresh. Use Import to add shippers first.')
+      }
+      // Show any per-shipper errors as a warning toast
+      if (data.errors && data.errors.length > 0) {
+        toast.warning(`${data.errors.length} shipper(s) had issues: ${data.errors[0]}`)
+      }
       invalidate()
     },
     onError: (err) => toast.error(getErrorMessage(err)),
@@ -131,23 +142,23 @@ export function PickupAddressesSection({
     <div className="space-y-2 mt-3 pt-3 border-t">
       <div className="flex items-center justify-between">
         <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground flex items-center gap-1">
-          <MapPin className="h-3 w-3" /> Pickup &amp; Return Addresses
+          <Users className="h-3 w-3" /> Shippers Detail
         </p>
         <div className="flex items-center gap-1">
           <Button
             size="sm"
             variant="ghost"
             className="h-6 text-[10px] px-2"
-            onClick={() => syncMutation.mutate()}
-            disabled={syncMutation.isPending}
-            title="Fetch all addresses from courier API"
+            onClick={() => refreshMutation.mutate()}
+            disabled={refreshMutation.isPending}
+            title="Re-fetch each shipper's latest details from courier API"
           >
-            {syncMutation.isPending ? (
+            {refreshMutation.isPending ? (
               <Loader2 className="h-3 w-3 animate-spin" />
             ) : (
               <RefreshCw className="h-3 w-3" />
             )}
-            {' '}Sync
+            {' '}Refresh
           </Button>
           <Button
             size="sm"
@@ -178,7 +189,7 @@ export function PickupAddressesSection({
 
       {addresses.length === 0 && !query.isLoading && (
         <p className="text-[10px] text-muted-foreground italic">
-          No pickup addresses saved. Add one to enable courier booking.
+          No shippers saved. Use Import to add a shipper by their shipment_id.
         </p>
       )}
 
@@ -364,9 +375,9 @@ function AddPickupAddressDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Add Pickup &amp; Return Address</DialogTitle>
+          <DialogTitle>Add Shipper</DialogTitle>
           <DialogDescription>
-            This address serves both pickup and return for {providerKey} bookings.
+            Add a shipper manually. For Leopard, use Import to fetch directly from the API.
           </DialogDescription>
         </DialogHeader>
 

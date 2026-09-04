@@ -448,22 +448,32 @@ export async function getProductInventorySummary(productId: string) {
 }
 
 /**
- * Generate the next PO number: PO-{year}-{sequence}
- * Sequence resets per calendar year per organization.
+ * Generate a unique, sequential PO number per organization per year.
+ *
+ * Format: PO-YYYY-NNN (e.g. PO-2026-001, PO-2026-002, ...)
+ *
+ * ATOMIC & RACE-FREE: uses the get_next_sequence_number() Postgres function
+ * which does INSERT ... ON CONFLICT DO UPDATE ... RETURNING in a single
+ * atomic statement. Two concurrent calls will each get a DIFFERENT number
+ * (guaranteed by Postgres's row-level locking).
+ *
+ * This REPLACES the old count+1 pattern which raced under concurrency —
+ * two simultaneous PO creations would generate the same number, causing
+ * a unique-constraint 500 error. See INVENTORY_AUDIT.md CRITICAL #2.
+ *
+ * The sequence counter persists in the number_sequences table, so it
+ * survives restarts and is consistent across all server instances.
  */
 export async function generatePoNumber(organizationId: string): Promise<string> {
   const year = new Date().getFullYear()
   const prefix = `PO-${year}-`
 
-  // Count existing POs this year for this org
-  const count = await db.purchaseOrder.count({
-    where: {
-      organizationId,
-      poNumber: { startsWith: prefix },
-    },
-  })
+  const result = await db.$queryRaw<{ n: number }[]>`
+    SELECT get_next_sequence_number(${organizationId}::TEXT, 'po_number', ${year}::INT) AS n
+  `
+  const seq = result[0].n
 
-  return `${prefix}${String(count + 1).padStart(3, '0')}`
+  return `${prefix}${String(seq).padStart(3, '0')}`
 }
 
 /**

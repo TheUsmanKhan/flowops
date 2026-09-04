@@ -127,6 +127,15 @@ export const createManualOrderSchema = z
     // auto-booking + city-courier-matching). Defaults to 'courier'.
     fulfillment_channel: z.enum(['courier', 'self_fulfilled']).default('courier'),
   })
+  // BUG FIX (C4): prevent double-counting delivery charges. The legacy
+  // `courier_charges` field + the newer `estimated_delivery_charge` field
+  // both represent delivery cost. If both are set > 0, the totalOrderValue
+  // formula adds BOTH → customer is double-charged for delivery.
+  // This refine() rejects the case where both are > 0 simultaneously.
+  .refine(
+    (d) => !(d.courier_charges && d.estimated_delivery_charge && d.courier_charges > 0 && d.estimated_delivery_charge > 0),
+    { message: 'Use either courier_charges OR estimated_delivery_charge, not both. Having both > 0 would double-charge the customer for delivery.' }
+  )
   .refine((data) => data.customer_id || data.new_customer, {
     message: 'Either customer_id (existing) or new_customer is required',
     path: ['customer_id'],

@@ -1,6 +1,6 @@
 import { getCurrentUser } from '@/lib/session'
 import { db } from '@/lib/db'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, handleError, readBody, invalidateWorkspaceCache } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 
 export const runtime = 'nodejs'
@@ -58,6 +58,10 @@ export async function POST(req: Request) {
         newValues: { companyId, organizationId: employee.company.organizationId },
       }),
     ])
+
+    // Invalidate the cached workspace so the next getWorkspace() call
+    // reflects the new active company (not the old one).
+    invalidateWorkspaceCache(user.id)
 
     // Return only the minimal data the client needs — no full session rebuild.
     const c = employee.company

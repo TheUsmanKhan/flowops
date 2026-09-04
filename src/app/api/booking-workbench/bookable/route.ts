@@ -1,7 +1,6 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, getOrdersDataScope } from '@/lib/workspace'
+import { ApiError, handleError, getOrdersDataScope, getWorkspace } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
@@ -18,18 +17,11 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET(_req: NextRequest) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    const orgId = settings?.activeOrgId
-    if (!companyId || !orgId) throw new ApiError(403, 'No active company')
-
-    const caller = await db.employee.findFirst({
-      where: { companyId, userId: user.id, status: 'active' },
-      include: { role: true },
-    })
-    if (!caller) throw new ApiError(403, 'Not a member of this company.')
+    // Modern auth: getWorkspace() (cached, 0ms) — replaces 4 DB queries
+    const ctx = await getWorkspace()
+    const companyId = ctx.company.id
+    const orgId = ctx.company.organizationId
+    const caller = ctx.employee
 
     // Phase 4 — Defensive scoping: if a custom role with ordersDataScope='own'
     // + booking permissions ever exists, filter bookable orders to only the

@@ -1,5 +1,4 @@
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { getWorkspace, ApiError, handleError, readBody } from '@/lib/workspace'
 import { updatePaymentScreenshot } from '@/lib/actions/order.actions'
 import { NextRequest } from 'next/server'
 
@@ -33,8 +32,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
+    const ctx = await getWorkspace()
+    if (!ctx) throw new ApiError(401, 'Not authenticated')
     const { id } = await params
 
     const body = await readBody<{ advance_payment_screenshot_url?: string }>(req)

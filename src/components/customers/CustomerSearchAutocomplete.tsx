@@ -6,7 +6,7 @@ import { api } from '@/lib/api-client'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
-import { Search, Loader2, Plus, User, Phone, X } from 'lucide-react'
+import { Search, Loader2, Plus, User, Phone, MapPin, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { CustomerSearchResult } from './types'
 
@@ -167,7 +167,8 @@ export function CustomerSearchAutocomplete({
             </div>
           ) : customer ? (
             <>
-              {/* Exact match result */}
+              {/* Exact match result — shows name, phone, city, order count
+                  so the user can verify they're selecting the right customer. */}
               <button
                 type="button"
                 onMouseEnter={() => setHighlightedIndex(0)}
@@ -181,21 +182,31 @@ export function CustomerSearchAutocomplete({
                   <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
                     <User className="h-3.5 w-3.5" />
                   </div>
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
+                    {/* Line 1: Name + Flagged badge */}
                     <div className="flex items-center gap-2">
                       <p className="text-sm font-medium truncate">{customer.name}</p>
                       {customer.isFlagged && (
-                        <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px] h-4 px-1.5">
+                        <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px] h-4 px-1.5 shrink-0">
                           Flagged
                         </Badge>
                       )}
                     </div>
-                    {customer.phones[0] && (
-                      <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
-                        <Phone className="h-2.5 w-2.5" /> {customer.phones[0].phoneRaw}
-                      </p>
-                    )}
-                    <p className="text-[10px] text-muted-foreground">
+                    {/* Line 2: Phone + City (inline, so user sees both key identifiers) */}
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                      {customer.phones[0] && (
+                        <span className="text-xs text-muted-foreground font-mono flex items-center gap-1">
+                          <Phone className="h-2.5 w-2.5" /> {customer.phones[0].phoneRaw}
+                        </span>
+                      )}
+                      {customer.addresses[0]?.city && (
+                        <span className="text-xs text-muted-foreground flex items-center gap-1">
+                          <MapPin className="h-2.5 w-2.5" /> {customer.addresses[0].city}
+                        </span>
+                      )}
+                    </div>
+                    {/* Line 3: Order count + address count (secondary info) */}
+                    <p className="text-[10px] text-muted-foreground mt-0.5">
                       {customer.totalOrdersCount} order{customer.totalOrdersCount === 1 ? '' : 's'}
                       {customer.addresses.length > 0 && ` · ${customer.addresses.length} address${customer.addresses.length === 1 ? '' : 'es'}`}
                     </p>

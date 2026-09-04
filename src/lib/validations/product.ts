@@ -127,22 +127,6 @@ export const productSchema = z.object({
 })
 export type ProductInput = z.infer<typeof productSchema>
 
-/** Shell-only product creation (no variants in this step). */
-export const createProductShellSchema = z.object({
-  title: z.string().min(2, 'Title must be at least 2 characters').max(255),
-  base_sku: z.string().max(50).optional().or(z.literal('')),
-  description: z.string().optional().or(z.literal('')),
-  short_description: z.string().max(500).optional().or(z.literal('')),
-  product_type: z.enum(['simple', 'variable', 'bundle', 'service']).default('variable'),
-  category_id: z.string().optional().or(z.literal('')),
-  brand_id: z.string().optional().or(z.literal('')),
-  is_stitchable: z.boolean().default(false),
-  stitching_base_price: z.number().min(0).default(0),
-  has_size_variants: z.boolean().default(false),
-  is_featured: z.boolean().default(false),
-})
-export type CreateProductShellInput = z.infer<typeof createProductShellSchema>
-
 export const updateProductSchema = z.object({
   title: z.string().min(2).max(255).optional(),
   base_sku: z.string().max(50).optional().or(z.literal('')),
@@ -157,33 +141,6 @@ export const updateProductSchema = z.object({
   is_featured: z.boolean().optional(),
 })
 export type UpdateProductInput = z.infer<typeof updateProductSchema>
-
-// ──────────────────────────────────────────────────────────────
-// VARIANT GENERATION (pure calculation)
-// ──────────────────────────────────────────────────────────────
-
-export const generateCombinationsSchema = z.object({
-  selected_attributes: z
-    .array(
-      z.object({
-        attribute_id: z.string().min(1),
-        attribute_name: z.string().min(1),
-        selected_values: z
-          .array(
-            z.object({
-              value_id: z.string().min(1),
-              value: z.string().min(1),
-              display_value: z.string().min(1),
-            }),
-          )
-          .min(1, 'Select at least one value'),
-      }),
-    )
-    .min(1, 'Select at least one attribute'),
-  is_stitchable: z.boolean().default(false),
-  product_slug: z.string().min(1),
-})
-export type GenerateCombinationsInput = z.infer<typeof generateCombinationsSchema>
 
 // ──────────────────────────────────────────────────────────────
 // COMPANY PRICING
@@ -257,23 +214,6 @@ export const writeOffSchema = z.object({
   reason: z.string().min(3, 'Reason is required').max(500),
 })
 export type WriteOffInput = z.infer<typeof writeOffSchema>
-
-// ──────────────────────────────────────────────────────────────
-// FULFILLMENT COST
-// ──────────────────────────────────────────────────────────────
-
-export const logFulfillmentCostSchema = z.object({
-  org_variant_id: z.string().min(1),
-  order_reference: z.string().optional().or(z.literal('')),
-  fabric_cost: z.number().min(0),
-  stitching_cost: z.number().min(0),
-  embroidery_cost: z.number().min(0).default(0),
-  other_cost: z.number().min(0).default(0),
-  sale_price: z.number().min(0),
-  tailor_name: z.string().optional().or(z.literal('')),
-  notes: z.string().optional().or(z.literal('')),
-})
-export type LogFulfillmentCostInput = z.infer<typeof logFulfillmentCostSchema>
 
 // ──────────────────────────────────────────────────────────────
 // GENERATE-STITCHED HELPER

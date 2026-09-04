@@ -68,6 +68,30 @@ export async function POST(
         },
       })
 
+      // ── BUG FIX: create the inventory ledger entry for the sale ──
+      // When a returned-stitched item is marked "sold", the stock must be
+      // decremented from the pool (it was added back on creation via
+      // return_stitched_received; now it's leaving via sale). Without
+      // this, the pool shows stock that no longer exists (phantom stock).
+      try {
+        const { processInventoryTransaction } = await import('@/lib/inventory')
+        await processInventoryTransaction({
+          orgVariantId: record.orgVariantId,
+          locationId: record.locationId,
+          organizationId: orgId,
+          companyId,
+          employeeId: caller.id,
+          transactionType: 'sale_dispatched',
+          quantity: record.quantity,
+          costPerUnit: Number(record.totalCost) / record.quantity,
+          referenceType: 'returned_stitched',
+          referenceId: recordId,
+          notes: `Returned-stitched item sold. Order ref: ${parsed.data.sold_order_reference || 'N/A'}.`,
+        })
+      } catch (e) {
+        console.error(`[returned-stitched] Failed to create sale_dispatched txn for ${recordId}:`, e instanceof Error ? e.message : e)
+      }
+
       insertAuditLog({
         action: 'returned_stitched.sold',
         entityType: 'returned_stitched',
@@ -105,6 +129,32 @@ export async function POST(
           writeOffReason: parsed.data.reason,
         },
       })
+
+      // ── BUG FIX: create stock loss record + write-off transaction ──
+      // When a returned-stitched item is written off (damaged/unsellable),
+      // the stock must be decremented + a StockLossRecord created via the
+      // unified recordStockLoss helper (dedup-safe + sourceModule tracked).
+      // Without this, the pool shows phantom stock that's been written off.
+      try {
+        const { recordStockLoss } = await import('@/lib/stock-loss')
+        await recordStockLoss({
+          organizationId: orgId,
+          companyId,
+          orgVariantId: record.orgVariantId,
+          locationId: record.locationId,
+          lossType: 'damaged',
+          sourceModule: 'returned_stitched',
+          quantity: record.quantity,
+          costPerUnit: Number(record.totalCost) / record.quantity,
+          employeeId: caller.id,
+          subType: 'confirmed',
+          responsibleParty: 'warehouse',
+          notes: `Returned-stitched item written off. Reason: ${parsed.data.reason}. Record ID: ${recordId}.`,
+          createInventoryTransaction: true,
+        })
+      } catch (e) {
+        console.error(`[returned-stitched] Failed to create write-off loss for ${recordId}:`, e instanceof Error ? e.message : e)
+      }
 
       insertAuditLog({
         action: 'returned_stitched.written_off',

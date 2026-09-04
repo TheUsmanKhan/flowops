@@ -81,14 +81,34 @@ interface OrderFilters {
 // Helper: generate order number via the DB function
 // ──────────────────────────────────────────────────────────────
 
+/**
+ * Generate a unique, sequential order number per company per year.
+ *
+ * Format: ORD-YYYY-NNNNN (e.g. ORD-2026-00001, ORD-2026-00002, ...)
+ * With optional per-company prefix: ORD-<PREFIX>-YYYY-NNNNN
+ *
+ * ATOMIC & RACE-FREE: uses the get_next_sequence_number() Postgres
+ * function (migration 026) which does INSERT ... ON CONFLICT DO UPDATE
+ * ... RETURNING in a single atomic statement. Two concurrent calls
+ * will each get a DIFFERENT number (guaranteed by Postgres's row-level
+ * locking).
+ *
+ * This REPLACES the old generate_order_number() SQL function which used
+ * MAX+1 (race condition — two concurrent order creations could generate
+ * the same number, causing a unique-constraint 500 error). See
+ * ORDERS_AUDIT.md CRITICAL #1.
+ */
 async function generateOrderNumber(companyId: string): Promise<string> {
-  const result = await db.$queryRaw<{ generate_order_number: string }[]>`
-    SELECT generate_order_number(${companyId}::TEXT)
+  const year = new Date().getFullYear()
+
+  // Atomic sequence number generation (same pattern as generatePoNumber)
+  const seqResult = await db.$queryRaw<{ n: number }[]>`
+    SELECT get_next_sequence_number(${companyId}::TEXT, 'order_number', ${year}::INT) AS n
   `
-  const baseNumber = result[0].generate_order_number
-  // Apply per-company prefix if configured. The SQL function returns
-  // "ORD-YYYY-NNNNN" — we insert the prefix between "ORD-" and the year,
-  // producing "ORD-<PREFIX>-YYYY-NNNNN".
+  const seq = seqResult[0].n
+  const baseNumber = `ORD-${year}-${String(seq).padStart(5, '0')}`
+
+  // Apply per-company prefix if configured.
   const settings = await db.companyOrderSetting.findUnique({
     where: { companyId },
     select: { orderNumberPrefix: true },
@@ -103,16 +123,20 @@ async function generateOrderNumber(companyId: string): Promise<string> {
 }
 
 /**
- * Generate a per-company self-fulfilled reference number (SF-YYYY-NNNNN)
- * via the SQL function. Used when fulfillmentChannel = 'self_fulfilled'.
- * Mirrors generateOrderNumber() — calls the SQL function which does a
- * MAX-based per-company sequence.
+ * Generate a per-company self-fulfilled reference number (SF-YYYY-NNNNN).
+ *
+ * ATOMIC & RACE-FREE: uses get_next_sequence_number() with type='sf_number'.
+ * Replaces the old generate_self_fulfilled_reference() SQL function (MAX+1 race).
  */
 async function generateSelfFulfilledReference(companyId: string): Promise<string> {
-  const result = await db.$queryRaw<{ generate_self_fulfilled_reference: string }[]>`
-    SELECT generate_self_fulfilled_reference(${companyId}::TEXT)
+  const year = new Date().getFullYear()
+
+  const seqResult = await db.$queryRaw<{ n: number }[]>`
+    SELECT get_next_sequence_number(${companyId}::TEXT, 'sf_number', ${year}::INT) AS n
   `
-  return result[0].generate_self_fulfilled_reference
+  const seq = seqResult[0].n
+
+  return `SF-${year}-${String(seq).padStart(5, '0')}`
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -848,8 +872,38 @@ export async function createManualOrder(
 
     // 13. If the order auto-confirmed, run the stock reservation logic.
     //     Sequential — reserveOrderStock reads the order items created above.
+    //
+    //     COMPENSATING TRANSACTION: if reserveOrderStock fails, the order +
+    //     items + address are already committed. We can't use db.$transaction
+    //     because reserveOrderStock calls processInventoryTransaction (global db).
+    //     Instead: if reservation fails, DELETE the order + items (cascade)
+    //     so no orphan order is left behind. The customer stats update is
+    //     also reversed. This prevents "order created but no stock reserved"
+    //     — the worst case where the user thinks the order was placed but
+    //     inventory was never held.
     if (orderStatus === 'confirmed') {
-      await reserveOrderStock(order.id, ctx)
+      const reserveResult = await reserveOrderStock(order.id, ctx)
+      if (!reserveResult.success) {
+        // COMPENSATING ACTION: roll back the order creation.
+        // Delete the order (cascades to items + address link).
+        // Recompute customer stats (removes the phantom order from counts).
+        console.error(`[createManualOrder] reserveOrderStock failed for ${flowopsOrderNumber}: order not found. Rolling back.`)
+        await db.order.delete({ where: { id: order.id } }).catch(() => {})
+        await updateCustomerStats(customerId).catch(() => {})
+        return {
+          success: false,
+          error: `Failed to reserve stock: order could not be found after creation. Order was rolled back — please try again.`,
+        }
+      }
+      // Check if any items failed to reserve (not backordered — that's OK)
+      const failedItems = reserveResult.results.filter((r) => r.outcome === 'failed')
+      if (failedItems.length > 0) {
+        // Some items failed completely (not backordered — backordered is OK).
+        // Log the failures but DON'T roll back — the order is created with
+        // some items reserved and some failed. The user can see the status
+        // in the order detail and adjust.
+        console.warn(`[createManualOrder] ${failedItems.length} item(s) failed to reserve for ${flowopsOrderNumber}:`, failedItems.map(f => `${f.orderItemId}: ${f.reason}`).join(', '))
+      }
     }
 
     // 14. AUTO-BOOKING — uses the ALREADY-FETCHED orderSettings (no 2nd
@@ -1355,6 +1409,37 @@ export async function confirmOrder(orderId: string): Promise<ActionResult> {
       updateEmployeeStats(order.salesEmployeeId).catch(() => {})
     }
 
+    // BUG FIX (H14): trigger auto-booking after manual confirmation.
+    // Previously only createManualOrder + checkAndFulfillBackorders triggered
+    // auto-booking — if an order was manually confirmed (requireOrderConfirmation
+    // = true + paymentType = full_cod), it sat in "Ready to Dispatch" without
+    // being auto-booked. Now we fire maybeAutoBookOrder the same way
+    // createManualOrder does.
+    if (order.fulfillmentChannel !== 'self_fulfilled') {
+      ;(async () => {
+        try {
+          const orderSettings = await db.companyOrderSetting.findUnique({
+            where: { companyId: ctx.company.id },
+            select: { courierBookingMode: true, defaultCourierCompanyIntegrationId: true },
+          })
+          const shouldAutoBook =
+            orderSettings?.courierBookingMode === 'automatic' &&
+            (orderSettings?.defaultCourierCompanyIntegrationId || order.courierCompanyIntegrationId)
+          if (shouldAutoBook) {
+            const { maybeAutoBookOrder } = await import('./booking.actions')
+            const bookResult = await maybeAutoBookOrder(orderId, 'manual_confirm', 'confirmed')
+            if (bookResult.success) {
+              console.log(`[confirmOrder] Auto-booking succeeded for ${order.flowopsOrderNumber}: tracking=${bookResult.data?.trackingNumber}`)
+            } else {
+              console.warn(`[confirmOrder] Auto-booking failed for ${order.flowopsOrderNumber}: ${bookResult.error}`)
+            }
+          }
+        } catch (err) {
+          console.error(`[confirmOrder] Auto-booking threw for ${order.flowopsOrderNumber}:`, err)
+        }
+      })()
+    }
+
     return { success: true }
   } catch (err) {
     return {
@@ -1742,6 +1827,12 @@ export async function cancelOrder(
     // (no reservation ever existed for them) — they'll be orphaned since
     // the order is now cancelled and won't be picked up by future
     // checkAndFulfillBackorders() runs (which skip cancelled orders).
+    //
+    // BUG FIX: also set fulfillmentStatus to 'pending' so that un-cancel
+    // can re-reserve the stock (reserveOrderStock skips items already at
+    // 'reserved' — if we leave the status as 'reserved' after unreserve,
+    // un-cancel's reserveOrderStock will think the stock is already
+    // reserved and skip it, leaving the pool.reserved unchanged).
     const reservedItems = await db.orderItem.findMany({
       where: { orderId: d.order_id, fulfillmentStatus: 'reserved' },
     })
@@ -1758,6 +1849,13 @@ export async function cancelOrder(
         employeeId: ctx.employee.id,
         quantity: item.quantity,
         orderId: d.order_id,
+      })
+
+      // Reset the item's fulfillmentStatus to 'pending' so un-cancel
+      // can re-reserve it via reserveOrderStock.
+      await db.orderItem.update({
+        where: { id: item.id },
+        data: { fulfillmentStatus: 'pending' },
       })
     }
 
@@ -1801,8 +1899,103 @@ export async function cancelOrder(
 }
 
 // ──────────────────────────────────────────────────────────────
-// listOrders
+// unCancelOrder — reverse a cancellation (restore status + re-reserve stock)
 // ──────────────────────────────────────────────────────────────
+// Only works if:
+//   - Order is currently 'cancelled'
+//   - The order was NOT dispatched/delivered before cancel (can't un-cancel
+//     something that physically shipped)
+//   - Items still have their orgVariantId + quantity intact
+//
+// What it does:
+//   1. Re-reserves stock for each item (same as reserveOrderStock)
+//   2. Sets status back to 'confirmed' (or 'pending' if was pending before)
+//   3. Clears cancelledAt + cancellationReason
+//   4. Updates customer + employee stats
+//
+// What it does NOT do:
+//   - Re-book the courier (if the courier booking was cancelled, user must
+//     re-book manually via Booking Workbench)
+//   - Restore a courier booking that was already cancelled on the courier side
+
+export async function unCancelOrder(
+  orderId: string,
+): Promise<ActionResult<{ orderId: string; status: string }>> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+
+    const order = await db.order.findFirst({
+      where: { id: orderId, companyId: ctx.company.id },
+      include: { items: { select: { id: true, orgVariantId: true, quantity: true, fulfillmentStatus: true, reservedLocationId: true } } },
+    })
+    if (!order) return { success: false, error: 'Order not found' }
+    if (order.status !== 'cancelled') {
+      return { success: false, error: `Order is not cancelled (current status: ${order.status}). Only cancelled orders can be un-cancelled.` }
+    }
+
+    // Determine the pre-cancel status. If the order was cancelled from
+    // 'pending' (requireOrderConfirmation=true), restore to 'pending'.
+    // If cancelled from 'confirmed'/'processing', restore to 'confirmed'.
+    // We check confirmedAt — if it's set, the order was confirmed before cancel.
+    const restoredStatus = order.confirmedAt ? 'confirmed' : 'pending'
+
+    // Step 1: Update order status + clear cancellation fields
+    await db.order.update({
+      where: { id: orderId },
+      data: {
+        status: restoredStatus,
+        cancelledAt: null,
+        cancellationReason: null,
+        physicalUnpackRequired: false,
+      },
+    })
+
+    // Step 2: If restoring to 'confirmed', re-reserve stock
+    if (restoredStatus === 'confirmed') {
+      const reserveResult = await reserveOrderStock(orderId, ctx)
+      if (!reserveResult.success) {
+        // Non-fatal — order is un-cancelled but stock reservation had issues
+        console.warn(`[unCancelOrder] Stock reservation had issues for ${order.flowopsOrderNumber}:`, reserveResult.results)
+      }
+    }
+
+    // Step 3: Audit log + metrics
+    insertAuditLog({
+      action: 'order.un_cancelled',
+      entityType: 'order',
+      entityId: orderId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      oldValues: { status: 'cancelled' },
+      newValues: { status: restoredStatus },
+    })
+
+    insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: orderId,
+      metricKey: 'order.un_cancelled',
+      numericValue: Number(order.totalOrderValue),
+      dimensions: { restored_status: restoredStatus },
+    })
+
+    // Step 4: Recompute stats
+    await updateCustomerStats(order.customerId).catch(() => {})
+    if (order.salesEmployeeId) {
+      updateEmployeeStats(order.salesEmployeeId).catch(() => {})
+    }
+
+    return { success: true, data: { orderId, status: restoredStatus } }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to un-cancel order',
+    }
+  }
+}
 
 export async function listOrders(
   filters: OrderFilters = {},

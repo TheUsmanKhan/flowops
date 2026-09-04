@@ -293,7 +293,8 @@ export async function fetchExistingPickupAddresses(
 
 // ──────────────────────────────────────────────────────────────
 // importPickupAddressById — import a single shipper by shipment_id
-// (Leopard-specific: calls getShipperDetails with a specific shipment_id)
+// (Leopard-specific: calls getShipperDetails with request_param=shipment_id
+// & request_value={id} to fetch a SINGLE shipper — NOT fetch-all-filter)
 // ──────────────────────────────────────────────────────────────
 
 export async function importPickupAddressById(
@@ -319,30 +320,44 @@ export async function importPickupAddressById(
     const credentials = decryptCredentials(integration.credentialsEncrypted!)
     const adapter = getCourierAdapter(providerKey, credentials)
 
-    if (!adapter.fetchExistingPickupAddresses) {
-      return { success: false, error: 'Provider does not support fetching addresses.' }
+    // Use the Leopard-specific fetchShipperById method which calls
+    // getShipperDetails?request_param=shipment_id&request_value={id}
+    // — this fetches a SINGLE shipper directly (per PDF page 73-78),
+    // NOT fetch-all-then-filter.
+    // fetchShipperById is NOT on the CourierAdapter interface (it's
+    // Leopard-specific), so we cast to access it.
+    const leopardAdapter = adapter as unknown as {
+      fetchShipperById?: (shipmentId: string) => Promise<{
+        providerAddressCode: string
+        label: string
+        address: string
+        cityName: string
+        contactPersonName: string
+        phone1: string
+        phone2?: string
+      } | null>
+    }
+    if (!leopardAdapter.fetchShipperById) {
+      return { success: false, error: 'Provider does not support importing by ID.' }
     }
 
-    // Fetch ALL shippers, then filter by shipment_id
-    // (Leopard's getShipperDetails doesn't support filtering by a single ID
-    // via the API — it returns all. We filter client-side.)
-    const allAddresses = await executeLoggedIntegrationAction<Array<{
+    const found = await executeLoggedIntegrationAction<{
       providerAddressCode: string
-      label?: string
+      label: string
       address: string
       cityName: string
       contactPersonName: string
       phone1: string
       phone2?: string
-    }>>({
+    } | null>({
       companyIntegrationId,
       organizationId: integration.organizationId,
-      actionType: 'fetch_existing_pickup_addresses',
+      actionType: 'fetch_shipper_by_id',
       direction: 'outbound',
-      fn: async () => adapter.fetchExistingPickupAddresses!(),
+      fn: async () => leopardAdapter.fetchShipperById!(shipmentId),
+      requestPayload: { shipment_id: shipmentId },
     })
 
-    const found = allAddresses.find((a) => a.providerAddressCode === shipmentId)
     if (!found) {
       return { success: false, error: `No shipper found with shipment_id "${shipmentId}".` }
     }
@@ -638,6 +653,170 @@ export async function syncPickupAddresses(
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Failed to sync pickup addresses',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// refreshAllPickupAddresses — re-fetch each EXISTING local shipper's
+// details from Leopard by their stored shipment_id, and update the
+// local record if anything changed (name, address, phone, city).
+//
+// This is DIFFERENT from sync (which fetches ALL remote shippers and
+// imports new ones). Refresh only updates shippers that are ALREADY
+// in the local address book — it does NOT add new ones. Use Import
+// by ID to add new shippers.
+// ──────────────────────────────────────────────────────────────
+
+export async function refreshAllPickupAddresses(
+  companyIntegrationId: string,
+): Promise<ActionResult<{
+  refreshed: number
+  updated: number
+  errors: string[]
+}>> {
+  try {
+    const ctx = await getWorkspace()
+    if (!isElevated(ctx)) {
+      return { success: false, error: 'Only elevated roles can refresh addresses.' }
+    }
+
+    const integration = await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+    const providerKey = integration.provider.providerKey
+
+    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+    const adapter = getCourierAdapter(providerKey, credentials)
+
+    // fetchShipperById is Leopard-specific (not on the CourierAdapter interface)
+    const leopardAdapter = adapter as unknown as {
+      fetchShipperById?: (shipmentId: string) => Promise<{
+        providerAddressCode: string
+        label: string
+        address: string
+        cityName: string
+        contactPersonName: string
+        phone1: string
+        phone2?: string
+      } | null>
+    }
+
+    if (providerKey === 'leopard' && !leopardAdapter.fetchShipperById) {
+      return { success: false, error: 'Leopard adapter does not support fetchShipperById.' }
+    }
+
+    // Load all locally-stored shippers for this integration
+    const localAddresses = await db.courierPickupAddress.findMany({
+      where: { companyIntegrationId },
+    })
+
+    if (localAddresses.length === 0) {
+      return {
+        success: true,
+        data: { refreshed: 0, updated: 0, errors: [] },
+      }
+    }
+
+    let updated = 0
+    const errors: string[] = []
+
+    for (const local of localAddresses) {
+      try {
+        // Use fetchShipperById (Leopard) or fall back to fetchExistingPickupAddresses
+        // for other providers (none currently, but future-proof)
+        let remote: {
+          label: string
+          address: string
+          cityName: string
+          contactPersonName: string
+          phone1: string
+          phone2?: string
+        } | null = null
+
+        if (providerKey === 'leopard' && leopardAdapter.fetchShipperById) {
+          remote = await executeLoggedIntegrationAction<{
+            providerAddressCode: string
+            label: string
+            address: string
+            cityName: string
+            contactPersonName: string
+            phone1: string
+            phone2?: string
+          } | null>({
+            companyIntegrationId,
+            organizationId: integration.organizationId,
+            actionType: 'refresh_shipper_by_id',
+            direction: 'outbound',
+            fn: async () => leopardAdapter.fetchShipperById!(local.providerAddressCode),
+            requestPayload: { shipment_id: local.providerAddressCode },
+          })
+        }
+
+        if (!remote) {
+          errors.push(`Shipper ${local.providerAddressCode} (${local.label}): not found on Leopard.`)
+          continue
+        }
+
+        // Resolve city name from courier_operational_cities
+        let cityName = remote.cityName
+        const cityRecord = await db.courierOperationalCity.findFirst({
+          where: { providerKey, cityId: remote.cityName },
+          select: { cityName: true },
+        })
+        if (cityRecord) {
+          cityName = cityRecord.cityName
+        }
+
+        // Check if anything actually changed (avoid unnecessary writes)
+        const changed =
+          local.label !== (remote.label || local.label) ||
+          local.address !== remote.address ||
+          local.cityName !== cityName ||
+          local.contactPersonName !== remote.contactPersonName ||
+          local.phone1 !== remote.phone1 ||
+          (local.phone2 ?? null) !== (remote.phone2 ?? null)
+
+        if (changed) {
+          await db.courierPickupAddress.update({
+            where: { id: local.id },
+            data: {
+              label: remote.label || local.label,
+              address: remote.address,
+              cityName,
+              contactPersonName: remote.contactPersonName,
+              phone1: remote.phone1,
+              phone2: remote.phone2 ?? null,
+            },
+          })
+          updated++
+        }
+      } catch (e) {
+        errors.push(
+          `Shipper ${local.providerAddressCode} (${local.label}): ${e instanceof Error ? e.message : 'fetch failed'}`,
+        )
+      }
+    }
+
+    const refreshed = localAddresses.length
+
+    insertAuditLog({
+      action: 'courier_pickup_addresses_refreshed',
+      entityType: 'company_integration',
+      entityId: companyIntegrationId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      newValues: { refreshed, updated, errors: errors.length },
+    })
+
+    return {
+      success: true,
+      data: { refreshed, updated, errors },
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to refresh pickup addresses',
     }
   }
 }

@@ -1367,151 +1367,147 @@ function CustomerSection({
 
         {/* ── SELECTED MODE (customer selected) ──────────────────────────── */}
         {selectedCustomer && (
-          <div className="space-y-4">
-            {/* Customer info card + CRM stats + address selector + phone + recipient */}
-            <div className="rounded-lg border-2 border-primary/30 bg-primary/5 p-3 space-y-3">
-              <div className="flex items-start justify-between gap-2">
-                <div className="flex items-start gap-2.5 min-w-0">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
-                    <User className="h-4 w-4" />
+          <div className="space-y-3">
+            {/* Customer info card + CRM stats + address selector + phone + recipient.
+                Compact: tighter padding (p-2.5), smaller avatar, inline stats. */}
+            <div className="rounded-lg border border-primary/30 bg-primary/5 p-2.5 space-y-2">
+              {/* Header: avatar + name + phone + change button — single row */}
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
+                    <User className="h-3.5 w-3.5" />
                   </div>
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5 flex-wrap">
                       <p className="text-sm font-semibold truncate">{selectedCustomer.name}</p>
                       {selectedCustomer.isFlagged && (
-                        <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px]">
+                        <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[9px] h-4 px-1">
                           Flagged
                         </Badge>
                       )}
                     </div>
                     {selectedCustomer.phones[0] && (
-                      <p className="text-xs text-muted-foreground font-mono flex items-center gap-1">
-                        <Phone className="h-2.5 w-2.5" /> {selectedCustomer.phones[0].phoneRaw}
+                      <p className="text-[11px] text-muted-foreground font-mono flex items-center gap-1">
+                        <Phone className="h-2.5 w-2.5" />
+                        {selectedCustomer.phones[0].phoneRaw}
                         {selectedCustomer.phones[0].isValidFormat === false && (
                           <span className="text-amber-600 font-sans font-medium ml-1">
-                            (invalid format — please correct in CRM)
+                            (invalid — fix in CRM)
                           </span>
                         )}
                       </p>
                     )}
                   </div>
                 </div>
-                <Button size="sm" variant="ghost" onClick={onDeselectCustomer}>
-                  <RotateCcw className="h-3.5 w-3.5" /> Change
+                <Button size="sm" variant="ghost" className="h-7 px-2 shrink-0" onClick={onDeselectCustomer}>
+                  <RotateCcw className="h-3 w-3" /> Change
                 </Button>
               </div>
 
-              {/* Phone format warning — shown when the customer's primary phone
-                  has isValidFormat=false (e.g., from an external platform with
-                  an unformatted phone). Does NOT block order creation, but
-                  surfaces the issue so the user can correct it in CRM. */}
+              {/* Phone format warning — compact inline, not a big banner */}
               {selectedCustomer.phones.some((p) => p.isPrimary && p.isValidFormat === false) && (
-                <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2.5">
-                  <AlertTriangle className="h-3.5 w-3.5 text-amber-600 mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-xs font-medium text-amber-900">
-                      This customer's phone number may be invalid.
-                    </p>
-                    <p className="text-[11px] text-amber-700 mt-0.5">
-                      The phone was imported from an external platform and may not be in the correct format.
-                      Please correct it in the customer's CRM profile before booking a courier shipment.
-                    </p>
-                  </div>
-                </div>
+                <p className="text-[10px] text-amber-700 flex items-start gap-1.5">
+                  <AlertTriangle className="h-2.5 w-2.5 text-amber-600 mt-0.5 shrink-0" />
+                  <span>Phone imported from external platform may be invalid — correct in CRM before booking.</span>
+                </p>
               )}
 
-              {/* Compact CRM stats (informational only) */}
+              {/* Inline CRM stats (compact) */}
               <CrmStatsWidget customer={selectedCustomer} />
+            </div>
 
-              <Separator />
+            <Separator />
 
-              {/* Phone selector + Recipient name */}
-              <div className="grid sm:grid-cols-2 gap-3">
-                {selectedCustomer.phones.length > 1 && (
-                  <div className="space-y-1">
-                    <Label className="text-xs flex items-center gap-1">
-                      <Phone className="h-3 w-3" /> Contact Phone
-                    </Label>
-                    <Select
-                      value={usedCustomerPhoneId ?? undefined}
-                      onValueChange={(v) => setUsedCustomerPhoneId(v)}
-                    >
-                      <SelectTrigger className="text-sm">
-                        <SelectValue placeholder="Select phone" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {selectedCustomer.phones.map((p) => (
-                          <SelectItem key={p.id} value={p.id}>
-                            <span className="font-mono">{p.phoneRaw}</span>
-                            {p.isPrimary && (
-                              <Badge variant="outline" className="ml-2 text-[10px] bg-primary/10 text-primary border-primary/20">
-                                Primary
-                              </Badge>
-                            )}
-                            {p.label && (
-                              <span className="text-xs text-muted-foreground ml-1">· {p.label}</span>
-                            )}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-
-                <div className="space-y-1">
+            {/* Phone selector + Recipient name */}
+            <div className="grid sm:grid-cols-2 gap-3">
+              {selectedCustomer.phones.length > 1 ? (
+                <div className="space-y-1 min-w-0">
                   <Label className="text-xs flex items-center gap-1">
-                    <User className="h-3 w-3" /> Recipient Name
+                    <Phone className="h-3 w-3" /> Contact Phone
                   </Label>
-                  <Input
-                    placeholder="Who is receiving this order?"
-                    value={recipientName}
-                    onChange={(e) => setRecipientName(e.target.value)}
-                    className="text-sm"
-                  />
-                  <p className="text-[10px] text-muted-foreground">
-                    Defaults to the customer name — edit if someone else is receiving.
-                  </p>
+                  <Select
+                    value={usedCustomerPhoneId ?? undefined}
+                    onValueChange={(v) => setUsedCustomerPhoneId(v)}
+                  >
+                    <SelectTrigger className="text-sm w-full min-w-0">
+                      <SelectValue placeholder="Select phone" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {selectedCustomer.phones.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          <span className="font-mono">{p.phoneRaw}</span>
+                          {p.isPrimary && (
+                            <Badge variant="outline" className="ml-2 text-[10px] bg-primary/10 text-primary border-primary/20">
+                              Primary
+                            </Badge>
+                          )}
+                          {p.label && (
+                            <span className="text-xs text-muted-foreground ml-1">· {p.label}</span>
+                          )}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
-              </div>
+              ) : (
+                /* Spacer — keeps Recipient Name in col 2 when the phone
+                   selector is hidden (single-phone customer). */
+                <div className="hidden sm:block" aria-hidden />
+              )}
 
-              {/* ── Address selector (REPLACES the empty address/city inputs) ── */}
-              <AddressSelector
-                addresses={selectedCustomer.addresses}
-                value={addressSelectorValue}
-                onChange={onAddressSelectorChange}
-                addressError={fieldError('delivery_address')}
-                cityError={fieldError('delivery_city')}
-                courierProviderKey={courierProviderKey}
-              />
-            </div>
-
-            {/* ── Discount (kept in CustomerSection; delivery logistics moved to DeliverySidebar) ── */}
-            <div className="space-y-3">
-              <p className="text-sm font-medium flex items-center gap-1.5">
-                <CreditCard className="h-4 w-4 text-muted-foreground" /> Discount
-              </p>
-              <div className="grid sm:grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label className="text-xs">Discount (Rs.)</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    placeholder="0"
-                    value={discountAmount}
-                    onChange={(e) => setDiscountAmount(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Discount reason</Label>
-                  <Input
-                    placeholder="Optional"
-                    value={discountReason}
-                    onChange={(e) => setDiscountReason(e.target.value)}
-                  />
-                </div>
+              <div className="space-y-1 min-w-0">
+                <Label className="text-xs flex items-center gap-1">
+                  <User className="h-3 w-3" /> Recipient Name
+                </Label>
+                <Input
+                  placeholder="Who is receiving this order?"
+                  value={recipientName}
+                  onChange={(e) => setRecipientName(e.target.value)}
+                  className="text-sm"
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  Defaults to customer name — edit if someone else is receiving.
+                </p>
               </div>
             </div>
+
+            {/* ── Address selector (REPLACES the empty address/city inputs) ── */}
+            <AddressSelector
+              addresses={selectedCustomer.addresses}
+              value={addressSelectorValue}
+              onChange={onAddressSelectorChange}
+              addressError={fieldError('delivery_address')}
+              cityError={fieldError('delivery_city')}
+              courierProviderKey={courierProviderKey}
+            />
+
+          {/* ── Discount (kept in CustomerSection; delivery logistics moved to DeliverySidebar) ── */}
+          <div className="space-y-3">
+            <p className="text-sm font-medium flex items-center gap-1.5">
+              <CreditCard className="h-4 w-4 text-muted-foreground" /> Discount
+            </p>
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div className="space-y-1 min-w-0">
+                <Label className="text-xs">Discount (Rs.)</Label>
+                <Input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  placeholder="0"
+                  value={discountAmount}
+                  onChange={(e) => setDiscountAmount(e.target.value)}
+                />
+              </div>
+              <div className="space-y-1 min-w-0">
+                <Label className="text-xs">Discount reason</Label>
+                <Input
+                  placeholder="Optional"
+                  value={discountReason}
+                  onChange={(e) => setDiscountReason(e.target.value)}
+                />
+              </div>
+            </div>
+          </div>
           </div>
         )}
       </CardContent>
@@ -1528,70 +1524,63 @@ function CrmStatsWidget({ customer }: { customer: SelectedCustomer }) {
   const totalRto = customer.totalRtoCount
   // Derive a delivery rate from the cached totals (returned orders / total).
   // This is informational — not the source of truth (the live query is).
-  const deliveryRate =
-    totalOrders > 0 ? ((totalOrders - totalRto) / totalOrders) * 100 : 100
-  const rtoRate = totalOrders > 0 ? (totalRto / totalOrders) * 100 : 0
+  // When totalOrders === 0 (new customer), rates are null — display N/A
+  // instead of the misleading "100% delivery / 0% return" (which implies
+  // perfect performance when there's actually no data to measure).
+  const hasOrderData = totalOrders > 0
+  const deliveryRate = hasOrderData ? ((totalOrders - totalRto) / totalOrders) * 100 : null
+  const rtoRate = hasOrderData ? (totalRto / totalOrders) * 100 : null
   const deliveredCount = Math.max(0, totalOrders - totalRto)
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        <StatCell label="Total Orders" value={String(totalOrders)} />
-        <StatCell
-          label="Delivered"
-          value={String(deliveredCount)}
-          sub={`${deliveryRate.toFixed(1)}%`}
-          tone="emerald"
-        />
-        <StatCell
-          label="Returned"
-          value={String(totalRto)}
-          sub={`${rtoRate.toFixed(1)}%`}
-          tone="rose"
-        />
-        <StatCell
-          label="Delivery Rate"
-          value={`${deliveryRate.toFixed(1)}%`}
-          tone="emerald"
-        />
+    <div className="space-y-2">
+      {/* Inline stats — single compact row, no 4-cell grid.
+          Format: "N orders · D delivered (X%) · R returned (Y%)"
+          When no orders: "0 orders · Delivery: N/A · Return: N/A"
+          Much more compact than 4 separate cards. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+        <span className="flex items-center gap-1">
+          <ShoppingBag className="h-3 w-3" />
+          <span className="font-semibold text-foreground tabular-nums">{totalOrders}</span>
+          <span>{totalOrders === 1 ? 'order' : 'orders'}</span>
+        </span>
+        <span className="text-border">·</span>
+        {hasOrderData ? (
+          <>
+            <span className="flex items-center gap-1">
+              <CheckCircle2 className="h-3 w-3 text-emerald-600" />
+              <span className="font-semibold text-emerald-700 tabular-nums">{deliveredCount}</span>
+              <span className="text-emerald-700/80">({deliveryRate!.toFixed(0)}%)</span>
+            </span>
+            {totalRto > 0 && (
+              <>
+                <span className="text-border">·</span>
+                <span className="flex items-center gap-1">
+                  <RotateCcw className="h-3 w-3 text-rose-600" />
+                  <span className="font-semibold text-rose-700 tabular-nums">{totalRto}</span>
+                  <span className="text-rose-700/80">({rtoRate!.toFixed(0)}%)</span>
+                </span>
+              </>
+            )}
+          </>
+        ) : (
+          /* New customer — no order data yet. Show N/A for both rates
+             instead of the misleading 100%/0%. */
+          <span className="flex items-center gap-1 text-muted-foreground/70">
+            <CheckCircle2 className="h-3 w-3" />
+            <span>Delivery: N/A</span>
+            <span className="text-border mx-1">·</span>
+            <RotateCcw className="h-3 w-3" />
+            <span>Return: N/A</span>
+          </span>
+        )}
       </div>
 
-      {totalOrders > 0 && (
-        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <History className="h-3 w-3" />
+      {hasOrderData && (
+        <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+          <History className="h-2.5 w-2.5 shrink-0" />
           Returning customer — verify address before dispatch.
         </p>
-      )}
-
-      {/* Saved address history (from customer.addresses[] with lastUsedAt) */}
-      {customer.addresses.length > 0 && (
-        <div className="space-y-1.5">
-          <p className="text-[10px] uppercase tracking-wide text-muted-foreground flex items-center gap-1">
-            <MapPin className="h-3 w-3" /> Saved addresses
-          </p>
-          <ul className="space-y-1 max-h-32 overflow-y-auto pr-1 scrollbar-thin">
-            {customer.addresses.slice(0, 5).map((a) => (
-              <li
-                key={a.id}
-                className="text-xs flex items-center justify-between gap-2 rounded bg-background/60 px-2 py-1"
-              >
-                <span className="truncate">
-                  {a.address || '—'} · {a.city}
-                </span>
-                <div className="flex items-center gap-1 shrink-0">
-                  {a.isDefault && (
-                    <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/20">
-                      Default
-                    </Badge>
-                  )}
-                  <Badge variant="outline" className="text-[10px]">
-                    {formatLastUsedShort(a.lastUsedAt)}
-                  </Badge>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
       )}
     </div>
   )
@@ -1766,102 +1755,119 @@ function DeliverySidebar({
         </div>
 
         {/* Courier dropdown — only shown for 'courier' channel. Hidden for
-            'self_fulfilled' (no courier needed). */}
+            'self_fulfilled' (no courier needed).
+
+            LAYOUT: Each field is a full-width row (no 2-col grid) so that
+            conditional rendering of the Pickup Address field doesn't break
+            the grid flow (which was causing overflow/overlap). All selects
+            have `min-w-0` + `w-full` to prevent the trigger from expanding
+            beyond its container on long text. */}
         {fulfillmentChannel === 'courier' && (
-          <div className="grid sm:grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <Label className="text-xs">Courier</Label>
-              <Select
-                value={courierIntegrationId || '__none__'}
-                onValueChange={(v) => {
-                  // Mark that the user has manually chosen — stops the
-                  // country-driven Self-Fulfilled auto-default from
-                  // overriding their explicit selection (Phase 3).
-                  setUserPickedCourier(true)
-                  if (v === '__none__') {
-                    setCourierIntegrationId('')
-                    setCourierName('')
-                    setPickupAddressId('')
-                  } else {
-                    setCourierIntegrationId(v)
-                    setPickupAddressId('') // reset pickup address when courier changes
-                    const ci = courierIntegrations.find((c) => c.id === v)
-                    if (ci) setCourierName(ci.provider.providerName)
-                  }
-                }}
-              >
-                <SelectTrigger><SelectValue placeholder="Select courier" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">No courier</SelectItem>
-                  {courierIntegrations.map((ci) => (
-                    <SelectItem key={ci.id} value={ci.id}>
-                      {ci.provider.providerName} — {ci.connectionName}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {courierIntegrations.length === 0 && (
-                <p className="text-[10px] text-amber-700">
-                  No couriers connected. Connect one in Settings → Integrations.
-                </p>
-              )}
-              {/* Phase 3 (Country System): Self-Fulfilled hint for non-Pakistan
-                  deliveries. Shown when no courier is selected AND the address
-                  country isn't Pakistan — the courier was auto-cleared because
-                  the connected couriers are Pakistan-only. The user can still
-                  pick a courier manually if they have an international option. */}
-              {courierIntegrationId === '' && deliveryCountry !== 'PK' && (
-                <p className="text-[10px] text-emerald-700 flex items-center gap-1">
-                  <PackageCheck className="h-3 w-3" />
-                  Self-Fulfilled (international delivery — Pakistani couriers don&apos;t deliver abroad). Pick a courier only if you have an international option.
-                </p>
+          <div className="space-y-4">
+            {/* Courier + Pickup Address — 2-col on sm+, stacks on mobile.
+                Each column has `min-w-0` so the Select trigger can't push
+                the grid wider than its track. */}
+            <div className="grid sm:grid-cols-2 gap-3">
+              <div className="space-y-1 min-w-0">
+                <Label className="text-xs">Courier</Label>
+                <Select
+                  value={courierIntegrationId || '__none__'}
+                  onValueChange={(v) => {
+                    // Mark that the user has manually chosen — stops the
+                    // country-driven Self-Fulfilled auto-default from
+                    // overriding their explicit selection (Phase 3).
+                    setUserPickedCourier(true)
+                    if (v === '__none__') {
+                      setCourierIntegrationId('')
+                      setCourierName('')
+                      setPickupAddressId('')
+                    } else {
+                      setCourierIntegrationId(v)
+                      setPickupAddressId('') // reset pickup address when courier changes
+                      const ci = courierIntegrations.find((c) => c.id === v)
+                      if (ci) setCourierName(ci.provider.providerName)
+                    }
+                  }}
+                >
+                  <SelectTrigger className="w-full min-w-0"><SelectValue placeholder="Select courier" /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">No courier</SelectItem>
+                    {courierIntegrations.map((ci) => (
+                      <SelectItem key={ci.id} value={ci.id}>
+                        {ci.provider.providerName} — {ci.connectionName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {courierIntegrations.length === 0 && (
+                  <p className="text-[10px] text-amber-700">
+                    No couriers connected. Connect one in Settings → Integrations.
+                  </p>
+                )}
+                {/* Phase 3 (Country System): Self-Fulfilled hint for non-Pakistan
+                    deliveries. Shown when no courier is selected AND the address
+                    country isn't Pakistan — the courier was auto-cleared because
+                    the connected couriers are Pakistan-only. The user can still
+                    pick a courier manually if they have an international option. */}
+                {courierIntegrationId === '' && deliveryCountry !== 'PK' && (
+                  <p className="text-[10px] text-emerald-700 flex items-start gap-1">
+                    <PackageCheck className="h-3 w-3 mt-0.5 shrink-0" />
+                    <span>Self-Fulfilled (international delivery — Pakistani couriers don&apos;t deliver abroad). Pick a courier only if you have an international option.</span>
+                  </p>
+                )}
+              </div>
+              {/* Pickup address override — only shown when a courier is selected.
+                  Defaults to the integration's default address (marked with ★).
+                  User can override to use a different address for this order. */}
+              {courierIntegrationId ? (
+                <div className="space-y-1 min-w-0">
+                  <Label className="text-xs">Pickup / Return Address</Label>
+                  {pickupAddressesLoading ? (
+                    <Skeleton className="h-9 w-full" />
+                  ) : pickupAddresses.length === 0 ? (
+                    <p className="text-[10px] text-amber-700">
+                      No pickup addresses synced. Go to Integrations → PostEx →
+                      Sync to import addresses from the courier.
+                    </p>
+                  ) : (
+                    <Select
+                      value={pickupAddressId || '__default__'}
+                      onValueChange={(v) => setPickupAddressId(v === '__default__' ? '' : v)}
+                    >
+                      <SelectTrigger className="w-full min-w-0"><SelectValue placeholder="Default (from courier settings)" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__default__">
+                          Default (use courier&apos;s default address)
+                        </SelectItem>
+                        {pickupAddresses.map((addr) => (
+                          <SelectItem key={addr.id} value={addr.id}>
+                            {addr.label} — {addr.cityName}
+                            {addr.isDefault ? ' ★' : ''}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                  <p className="text-[10px] text-muted-foreground">
+                    Overrides the pickup/return address for this order. Leave as
+                    &quot;Default&quot; to use the courier&apos;s default address.
+                  </p>
+                </div>
+              ) : (
+                /* Spacer to keep the grid balanced when no courier is selected —
+                   the pickup column collapses but the grid stays 2-col. */
+                <div className="hidden sm:block" aria-hidden />
               )}
             </div>
-            {/* Pickup address override — only shown when a courier is selected.
-                Defaults to the integration's default address (marked with ★).
-                User can override to use a different address for this order. */}
-            {courierIntegrationId && (
-              <div className="space-y-1">
-                <Label className="text-xs">Pickup / Return Address</Label>
-                {pickupAddressesLoading ? (
-                  <Skeleton className="h-9" />
-                ) : pickupAddresses.length === 0 ? (
-                  <p className="text-[10px] text-amber-700">
-                    No pickup addresses synced. Go to Integrations → PostEx →
-                    Sync to import addresses from the courier.
-                  </p>
-                ) : (
-                  <Select
-                    value={pickupAddressId || '__default__'}
-                    onValueChange={(v) => setPickupAddressId(v === '__default__' ? '' : v)}
-                  >
-                    <SelectTrigger><SelectValue placeholder="Default (from courier settings)" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__default__">
-                        Default (use courier&apos;s default address)
-                      </SelectItem>
-                      {pickupAddresses.map((addr) => (
-                        <SelectItem key={addr.id} value={addr.id}>
-                          {addr.label} — {addr.cityName}
-                          {addr.isDefault ? ' ★' : ''}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-                <p className="text-[10px] text-muted-foreground">
-                  Overrides the pickup/return address for this order. Leave as
-                  &quot;Default&quot; to use the courier&apos;s default address.
-                </p>
-              </div>
-            )}
+
+            {/* Dispatch Location — full width (was col 1 of a broken row) */}
             <div className="space-y-1">
               <Label className="text-xs">Dispatch Location *</Label>
               {isLoadingLocations ? (
-                <Skeleton className="h-9" />
+                <Skeleton className="h-9 w-full" />
               ) : (
                 <Select value={dispatchLocationId} onValueChange={setDispatchLocationId}>
-                  <SelectTrigger><SelectValue placeholder="Select location" /></SelectTrigger>
+                  <SelectTrigger className="w-full min-w-0"><SelectValue placeholder="Select location" /></SelectTrigger>
                   <SelectContent>
                     {locations.map((l) => (
                       <SelectItem key={l.id} value={l.id}>
@@ -1875,7 +1881,9 @@ function DeliverySidebar({
                 <p className="text-xs text-destructive">{fieldError('dispatch_location_id')}</p>
               )}
             </div>
-            <div className="space-y-1 sm:col-span-2">
+
+            {/* Transaction Notes — full width */}
+            <div className="space-y-1">
               <Label className="text-xs">Transaction Notes (for courier)</Label>
               <Input
                 placeholder="Optional notes for the courier"
@@ -1888,35 +1896,50 @@ function DeliverySidebar({
                 </p>
               )}
             </div>
-            <div className="space-y-1">
-              <Label className="text-xs">Order Reference (for courier)</Label>
-              <Input
-                placeholder="Defaults to ORD-YYYY-NNNNN — type to override"
-                value={orderRefNumber}
-                onChange={(e) => setOrderRefNumber(e.target.value)}
-              />
-              <p className="text-[10px] text-muted-foreground">
-                Universal courier reference field. Almost every courier
-                (PostEx, TCS, Leopard…) has a reference field — we map
-                this to the courier&apos;s own field at booking time. Leave
-                blank to use the auto-generated FlowOps order number.
-              </p>
-            </div>
-            {courierProviderKey !== 'leopard' && (
-              <div className="space-y-1">
-                <Label className="text-xs">Order Detail (item summary)</Label>
+
+            {/* Order Reference + Order Detail — STACKED FULL WIDTH.
+                These fields have long helper text that gets truncated in a
+                2-col grid on narrow viewports. Full-width rows give the
+                descriptive text room to breathe. */}
+            <div className="space-y-4">
+              <div className="space-y-1 min-w-0">
+                <Label className="text-xs">Order Reference (for courier)</Label>
                 <Input
-                  placeholder="Auto-filled from cart items"
-                  value={orderDetail}
-                  onChange={(e) => setOrderDetail(e.target.value)}
+                  placeholder="Defaults to ORD-YYYY-NNNNN — type to override"
+                  value={orderRefNumber}
+                  onChange={(e) => setOrderRefNumber(e.target.value)}
                 />
                 <p className="text-[10px] text-muted-foreground">
-                  Auto-generated from selected products (title + SKU +
-                  variant attributes + qty). Edit to override — otherwise
-                  the canonical version is generated server-side at submit.
+                  Universal courier reference field. Almost every courier
+                  (PostEx, TCS, Leopard…) has a reference field — we map
+                  this to the courier&apos;s own field at booking time. Leave
+                  blank to use the auto-generated FlowOps order number.
                 </p>
               </div>
-            )}
+              {courierProviderKey !== 'leopard' ? (
+                <div className="space-y-1 min-w-0">
+                  <Label className="text-xs">Order Detail (item summary)</Label>
+                  <Input
+                    placeholder="Auto-filled from cart items"
+                    value={orderDetail}
+                    onChange={(e) => setOrderDetail(e.target.value)}
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Auto-generated from selected products (title + SKU +
+                    variant attributes + qty). Edit to override — otherwise
+                    the canonical version is generated server-side at submit.
+                  </p>
+                </div>
+              ) : (
+                /* Leopard hint replaces Order Detail field — full width */
+                <div className="space-y-1 min-w-0 rounded-md border border-amber-200 bg-amber-50 p-2">
+                  <p className="text-[10px] text-amber-800 font-medium flex items-start gap-1">
+                    <span className="shrink-0">ℹ</span>
+                    <span>Leopard: the Order Detail field is not sent to this courier (hidden per Leopard API requirements). Transaction Notes above will carry your item summary.</span>
+                  </p>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </CardContent>

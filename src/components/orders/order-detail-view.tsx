@@ -410,6 +410,16 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
     onError: (err) => toast.error(getErrorMessage(err)),
   })
 
+  // Un-cancel mutation — reverses a cancellation, restores status + re-reserves stock
+  const unCancelMutation = useMutation({
+    mutationFn: () => api.post(`/api/orders/${orderId}/un-cancel`),
+    onSuccess: (data: { status: string }) => {
+      toast.success(`Order restored to ${data.status}.`)
+      invalidateAll()
+    },
+    onError: (err) => toast.error(getErrorMessage(err)),
+  })
+
   const rtoMutation = useMutation({
     mutationFn: (vars: { return_reason: string }) =>
       api.post(`/api/orders/${orderId}/rto`, vars),
@@ -736,6 +746,28 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
             >
               <XCircle className="h-4 w-4" />
               Cancel Order
+            </Button>
+          )}
+          {/* Un-Cancel button — only shown when order is cancelled.
+              Reverses the cancellation, restores status + re-reserves stock. */}
+          {status === 'cancelled' && canManage && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700"
+              onClick={() => {
+                if (confirm('Restore this cancelled order? Stock will be re-reserved and the order will return to its pre-cancel status. The courier booking will NOT be re-booked — you must re-book manually via Booking Workbench.')) {
+                  unCancelMutation.mutate()
+                }
+              }}
+              disabled={unCancelMutation.isPending}
+            >
+              {unCancelMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RotateCcw className="h-4 w-4" />
+              )}
+              Un-Cancel Order
             </Button>
           )}
         </CardContent>

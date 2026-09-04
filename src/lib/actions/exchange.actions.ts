@@ -571,32 +571,36 @@ export async function verifyOldItemReceived(
     const oldItemCost = Number(exchange.oldItemPrice)
 
     // 5. IF condition IN ('perfect','good','open_box'): receive into inventory
-    // 6. IF condition = 'damaged': create stock_loss_records entry directly
+    // 6. IF condition = 'damaged': create stock_loss_records entry via
+    //    the unified recordStockLoss helper (dedup + sourceModule tracked)
     if (d.condition === 'damaged') {
-      // Damaged → straight to stock_loss, no inventory addition
-      const lossRecord = await db.stockLossRecord.create({
-        data: {
-          organizationId: ctx.company.organizationId,
-          companyId: ctx.company.id,
-          orgVariantId: exchange.originalOrderItem.orgVariantId,
-          locationId,
-          lossType: 'damaged',
-          subType: 'confirmed',
-          damageType: 'other',
-          quantity: 1,
-          costPerUnit: oldItemCost,
-          investigationStatus: 'none',
-          resolution: 'written_off',
-          responsibleParty: 'customer',
-          evidenceUrls: JSON.stringify(d.evidence_urls),
-          notes: `Damaged exchanged item. ${d.notes || ''}`.trim(),
-          reportedById: ctx.employee.id,
-          approvedById: ctx.employee.id,
-          resolvedById: ctx.employee.id,
-          resolvedAt: new Date(),
-        },
+      // UNIFIED: now uses recordStockLoss() (was: direct db.stockLossRecord.create)
+      // so the loss is properly deduped + sourceModule is set. Enables tracing
+      // "this loss came from the exchange module" + prevents duplicates.
+      const { recordStockLoss } = await import('@/lib/stock-loss')
+      const lossResult = await recordStockLoss({
+        organizationId: ctx.company.organizationId,
+        companyId: ctx.company.id,
+        orgVariantId: exchange.originalOrderItem.orgVariantId,
+        locationId,
+        lossType: 'damaged',
+        sourceModule: 'exchange',
+        quantity: 1,
+        costPerUnit: oldItemCost,
+        orderItemId: exchange.originalOrderItemId, // enables dedup
+        employeeId: ctx.employee.id,
+        subType: 'confirmed',
+        damageType: 'other',
+        responsibleParty: 'customer',
+        notes: `Damaged exchanged item. ${d.notes || ''}`.trim(),
+        // createInventoryTransaction=false — the old item was returned, not
+        // in-stock. No stock movement needed (the item was never added back).
+        createInventoryTransaction: false,
       })
-      stockLossId = lossRecord.id
+      if (lossResult.success) {
+        stockLossId = lossResult.lossRecordId ?? null
+        inventoryTxnId = lossResult.inventoryTxnId ?? null
+      }
     } else {
       // Not damaged → add to stock via processInventoryTransaction
       // (same function the /api/inventory/receive-returned-stitched route uses)

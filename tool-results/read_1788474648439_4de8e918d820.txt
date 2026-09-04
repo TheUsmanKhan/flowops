@@ -1,0 +1,302 @@
+     1→# Inventory System Audit Report
+     2→
+     3→**Task ID:** INV-AUDIT-BACKEND
+     4→**Agent:** general-purpose (read-only audit subagent)
+     5→**Scope:** All 11 inventory modules listed in the FlowOps sidebar
+     6→**Mode:** READ-ONLY — no source code was modified
+     7→
+     8→---
+     9→
+    10→## Executive Summary
+    11→
+    12→- **Total modules audited:** 11
+    13→- **Total inventory API routes:** 26 (across 6 route folders)
+    14→- **Total server actions in `src/lib/actions/`:** 0 dedicated inventory action files (logic lives entirely in API routes — see notes)
+    15→- **Critical bugs found:** 3
+    16→- **High-severity logic issues:** 9
+    17→- **Medium-severity issues:** 14
+    18→- **Low-severity / smell issues:** 11
+    19→
+    20→The inventory subsystem is **architecturally sound** at the data-model layer (append-only ledger, single write function for `InventoryPool`, WAC recalculation, separate quarantine/reservation channel) but suffers from **systemic consistency problems** at the API layer: missing transactions, missing permission checks on read endpoints, legacy auth pattern (manual `db.rolePermission.count(...)` instead of the modern `getWorkspace()` + `requirePermission()` helper used everywhere else post-REBUILD-API-PROTECTION), no stock-negativity guard at the DB level, and several multi-step writes that are not wrapped in `db.$transaction`.
+    21→
+    22→The previous audit (`INVENTORY-ARCHITECTURE-INVESTIGATE`, worklog line 11144) and the follow-up fix task (`INVENTORY-3-BUGS-FIXED`, line 11556) already addressed three known bugs. This audit confirms those fixes are in place and surfaces **new, previously-undocumented issues**.
+    23→
+    24→---
+    25→
+    26→## Module 1: Dashboard
+    27→
+    28→### Purpose
+    29→Read-only cockpit showing total stock value, low-stock / out-of-stock / dead-stock counts, this-month movement summary (received / sold / losses, units + value), the live stock table, and the last 30 inventory transactions.
+    30→
+    31→### API Routes
+    32→
+    33→| Method | Path | Description |
+    34→| --- | --- | --- |
+    35→| GET | `/api/inventory/dashboard` | Returns `{stats, movement, stockTable, recentTransactions}` for the active org. |
+    36→
+    37→### Server Actions
+    38→None — logic is inline in the route handler.
+    39→
+    40→### Schema Models
+    41→Reads `InventoryPool` (with `OrgProductVariant.product` + `InventoryLocation`) and `InventoryTransaction`.
+    42→
+    43→### Issues Found
+    44→
+    45→- **[HIGH] No permission check.** Only `getCurrentUser()` + `activeOrgId` is verified — any authenticated user of the org can read the full inventory dashboard, including stock values and COGS. Should require `PERMISSIONS.INVENTORY_VIEW`. Same problem reported for all read endpoints (see Cross-Cutting Concerns).
+    46→- **[HIGH] `openingValue` formula is approximate and documented as such.** `movement.openingValue = totalStockValue - receivedValue + soldValue + lossValue` (line 92) — this is a rough algebraic back-solve, not a real opening snapshot. The field name implies precision the data doesn't have. Should either be removed, renamed to `approxOpeningValue`, or computed by reading `InventoryPool` state at `startOfMonth`.
+    47→- **[MEDIUM] N+1-free but unbounded.** Pulls **all** pools for the org in one query (line 22, no `take`). For an org with thousands of variants × multiple locations, this will degrade. Should paginate or use a SQL aggregate (`SUM(on_hand * avg_cost)`) instead of in-JS reduction.
+    48→- **[MEDIUM] Dead-stock threshold hardcoded at 90 days.** `ninetyDaysAgo.setDate(... - 90)` (line 43). Configurable per-org policy would be more useful (some SKUs are seasonal).
+    49→- **[LOW] `losses` bucket includes `supplier_return`.** Line 64 groups `supplier_return` under "losses" — but a supplier return is a deliberate outbound, not a loss. The metric overstates loss value.
+    50→- **[LOW] Does not surface `incoming` (PO-expected) total in stats.** Dashboard shows onHand/reserved/available in `stockTable` rows but no top-line "expected incoming value" KPI.
+    51→
+    52→### Frontend
+    53→`src/components/inventory/inventory-dashboard-view.tsx` (712 lines). Uses TanStack Query, role-gated client-side via `useCan(PERMISSIONS.INVENTORY_VIEW)`. Type definitions for `StockPoolRow` and `RecentTxn` are duplicated from the API response shape — drift risk. No pagination on `stockTable`.
+    54→
+    55→---
+    56→
+    57→## Module 2: Locations
+    58→
+    59→### Purpose
+    60→Manage warehouse / dispatch-hub / retail / transit / damaged-hold locations. Locations can be org-level shared (`companyId = NULL`) or company-private.
+    61→
+    62→### API Routes
+    63→
+    64→| Method | Path | Description |
+    65→| --- | --- | --- |
+    66→| GET | `/api/inventory-locations` | List locations visible to the active company (org-shared + own). |
+    67→| POST | `/api/inventory-locations` | Create a location (idempotency-key supported). |
+    68→| GET | `/api/inventory-locations/[id]` | Get a single location with its pools + recent 20 transactions. |
+    69→| PATCH | `/api/inventory-locations/[id]` | Update location fields; flips `isDefault`/`isActive`. |
+    70→| DELETE | `/api/inventory-locations/[id]` | Soft-delete (sets `isActive=false`). Refuses if any pool has `onHand > 0`. |
+    71→
+    72→### Server Actions
+    73→None.
+    74→
+    75→### Schema Models
+    76→`InventoryLocation` — key fields: `organizationId`, `companyId?` (NULL = org-shared), `name`, `locationType` (default `'warehouse'`), `city`/`province`/`countryCode` (default `'Lahore'`/`'Punjab'`/`'PK'`), `isDefault`, `isActive`, `createdById`. Relations to `InventoryPool`, `InventoryTransaction`, `StockTransfer` (both from + to), `PurchaseOrder`, `SupplierReturn`, `StockLossRecord`, `CycleCount`, `ProductionOrder`. Indexes: `organizationId`, `companyId`.
+    77→
+    78→### Issues Found
+    79→
+    80→- **[HIGH] GET endpoints have NO permission check.** `GET /api/inventory-locations` and `GET /api/inventory-locations/[id]` only verify auth + org membership. Any employee can enumerate all locations in the org (including company-private locations of OTHER companies via the detail endpoint — see next item).
+    81→- **[CRITICAL] `GET /api/inventory-locations/[id]` is **not** company-scoped.** `where: { id, organizationId: orgId }` (line 25) — there is no `companyId` filter, so a user in Company A can fetch the full pool/transaction detail of a Company-B private location by guessing/enumerating the ID. The list endpoint correctly filters to `companyId IS NULL OR companyId = own` (line 24-28), but the detail endpoint does not. **Information-disclosure vulnerability.**
+    82→- **[HIGH] PATCH is also not company-scoped.** Same problem — `findFirst({ where: { id, organizationId: orgId } })` (line 126). A user with `INVENTORY_MANAGE_LOCATIONS` in Company A can edit/deactivate a Company-B private location. (DELETE has the same flaw, line 199.)
+    83→- **[HIGH] No transaction wrapping for `isDefault` flip + create/update.** Lines 99-107 (`updateMany` to clear prior default) followed by `create`/`update` — two separate writes. A crash between them leaves the org with NO default.
+    84→- **[MEDIUM] `locationType` not validated against enum.** The Prisma comment lists `warehouse | dispatch_hub | retail_store | transit | damaged_hold`, but the column is a free-form `String`. The POST endpoint accepts any string (defaults to `'warehouse'`). The validation schema `locationSchema` in `validations/inventory.ts` enforces the enum — but **the route handler doesn't use that schema**, it reads `body.locationType` raw (line 114). Drift.
+    85→- **[MEDIUM] Hardcoded defaults `'Lahore'` / `'Punjab'` / `'PK'`** in the route (lines 116-117) and in the schema. Pakistan-specific; should come from org/company defaults.
+    86→- **[LOW] DELETE requires `roleTier === 'elevated'`** (line 194) but PATCH only requires `INVENTORY_MANAGE_LOCATIONS`. Inconsistent privilege boundary.
+    87→- **[LOW] `createdById` is optional** in schema but always supplied in code — fine, just dead nullability.
+    88→- **[LOW] No audit log for the `updateMany` isDefault=false step** — only the final create/update is audited.
+    89→
+    90→### Frontend
+    91→`src/components/inventory/locations-view.tsx` (704 lines) + `location-detail-view.tsx` (562 lines). Uses react-hook-form + zodResolver. The client-side schema correctly enforces the locationType enum, so the server drift above is masked. No bulk-activate/deactivate.
+    92→
+    93→---
+    94→
+    95→## Module 3: Suppliers
+    96→
+    97→### Purpose
+    98→Vendor master records. Same org-level/company-private scoping as Locations. Tracks `paymentTerms`, running `creditBalance` (credit owed by supplier to us).
+    99→
+   100→### API Routes
+   101→
+   102→| Method | Path | Description |
+   103→| --- | --- | --- |
+   104→| GET | `/api/suppliers` | List suppliers visible to the active company (org-shared + own). |
+   105→| POST | `/api/suppliers` | Create a supplier (idempotency supported). |
+   106→| PATCH | `/api/suppliers/[id]` | Update supplier fields. |
+   107→| DELETE | `/api/suppliers/[id]` | Soft-deactivate (`isActive=false`). Elevated-only. |
+   108→
+   109→### Server Actions
+   110→None.
+   111→
+   112→### Schema Models
+   113→`Supplier` — `organizationId`, `companyId?`, `name`, `contactPerson?`, `phone?`, `email?`, `address?` (JSONB string), `paymentTerms` (default `'immediate'`), `creditBalance Decimal @default(0) @db.Decimal(12,2)`, `isActive`. Relations: `PurchaseOrder[]`, `SupplierReturn[]`.
+   114→
+   115→### Issues Found
+   116→
+   117→- **[HIGH] GET has NO permission check.** Same pattern as Locations — any authenticated employee of the org can list all suppliers.
+   118→- **[HIGH] PATCH/DELETE not company-scoped.** `findFirst({ where: { id, organizationId: orgId } })` (PATCH line 40, DELETE line 109). A Company-A user can edit/deactivate a Company-B private supplier.
+   119→- **[HIGH] DELETE doesn't check for dependent records.** Unlike locations (which check `onHand > 0`), deactivating a supplier doesn't check for open POs, pending supplier returns, or non-zero `creditBalance`. Leaves orphans.
+   120→- **[MEDIUM] `creditBalance` mutation is non-atomic.** The credit_balance is incremented in `supplier-returns/[id]/route.ts` (line 73-77) with a separate `db.supplier.update` — NOT in a transaction with the supplier_return resolution. A crash leaves the supplier's credit out of sync with the ledger of returns.
+   121→- **[MEDIUM] No endpoint to GET a single supplier by id.** Frontend `supplier-detail-view.tsx` exists but the API has no `GET /api/suppliers/[id]` route. The detail view must be using the list endpoint and filtering client-side (or fetching via a different shape). **Dead-end route.**
+   122→- **[MEDIUM] `paymentTerms` accepted as any string.** Route accepts `body.paymentTerms` raw (line 99) without enum validation, despite the schema's enum constraint.
+   123→- **[LOW] No email format validation in route** — schema validates, route doesn't.
+   124→- **[LOW] `address` field documented as JSONB but stored as plain String.** No JSON parse anywhere — clients treat it as opaque string.
+   125→
+   126→### Frontend
+   127→`src/components/inventory/suppliers-view.tsx` (681 lines) + `supplier-detail-view.tsx` (609 lines). React-Hook-Form + Zod. Shows `poCount` denormalized via Prisma `_count`. Credit-balance display exists but no UI to adjust it directly (relies on supplier-return credit_note flow).
+   128→
+   129→---
+   130→
+   131→## Module 4: Receive Stock
+   132→
+   133→### Purpose
+   134→Two endpoints: `POST /api/inventory/receive` (batch receive for many variants at one location — also used for opening stock when first txn ever) and `POST /api/inventory/opening-stock` (per-variant opening stock, used by the product-creation wizard). Also `POST /api/inventory/receive-returned-stitched` for receiving returned made-to-order stitched items.
+   135→
+   136→### API Routes
+   137→
+   138→| Method | Path | Description |
+   139→| --- | --- | --- |
+   140→| POST | `/api/inventory/receive` | Batch receive stock — `opening_stock` or `purchase_received` txn per item. Idempotency supported. |
+   141→| POST | `/api/inventory/opening-stock` | Per-variant opening stock — `opening_stock` txn. Idempotency supported. |
+   142→| POST | `/api/inventory/receive-returned-stitched` | Receive a returned MTO stitched item — adds to stock or, if damaged, creates `stock_loss_records` directly. |
+   143→
+   144→### Server Actions
+   145→None.
+   146→
+   147→### Schema Models
+   148→`InventoryPool`, `InventoryTransaction`, `StockLossRecord` (for damaged-return path), `OrgProductVariant.trackInventory` (one-way FALSE→TRUE flip on MTO variants).
+   149→
+   150→### Issues Found
+   151→
+   152→- **[HIGH] `/api/inventory/receive` does NOT verify location is accessible to the active company.** No check that `location_id` belongs to the user's company (or is org-shared). A user can receive stock into ANY org location regardless of company scope.
+   153→- **[HIGH] `/api/inventory/receive` does NOT verify the variant belongs to the org.** The variant is fetched (line 64-67) for the MTO check, but no `organizationId` filter. Cross-org stock poisoning possible.
+   154→- **[HIGH] Multi-item receive is NOT wrapped in `db.$transaction`.** Lines 56-100 — each item calls `processInventoryTransaction` separately. A failure halfway through leaves some items received and others not, with no rollback. The audit log entries are also not transactional with the txn inserts.
+   155→- **[MEDIUM] "First-ever transaction" check is racy.** `existingTxnCount = count(...)` (line 58) then decides between `opening_stock` vs `purchase_received`. Two concurrent receives for the same new variant+location both see count=0, both fire `opening_stock`. Not catastrophic (both still increment onHand correctly), but the txn-type semantics are wrong — should be `purchase_received` for the second. Should use a UPSERT or a DB-level advisory lock.
+   156→- **[MEDIUM] `/api/inventory/opening-stock` calls `processInventoryTransaction` outside a transaction**, then separately calls `insertAuditLog` and `insertMetricEvent`. Audit log insert is fire-and-forget (no await) — if it fails, no record.
+   157→- **[MEDIUM] `receive-returned-stitched` damaged path** (lines 57-99) creates a `StockLossRecord` with `lossType='damaged'`, `resolution='written_off'`, but **does NOT call `processInventoryTransaction`** to actually decrement onHand — the assumption is the item was already decremented at dispatch (sale_dispatched). This is correct ONLY for items that came back from a dispatched order. For a returned-stitched item that was never dispatched (e.g. production QA failure), this would create a loss record without ever touching the pool. No `original_order_reference` validation enforces the dispatched-order precondition.
+   158→- **[MEDIUM] `costPerUnit = d.total_cost / d.quantity`** (line 55) — float division before being passed to `processInventoryTransaction`, which expects a number. Decimal precision lost in JS. Should use `Decimal` math or pass `total_cost` + `quantity` separately.
+   159→- **[MEDIUM] `receive-returned-stitched` is NOT idempotency-wrapped** — the other two receive endpoints are. Inconsistent.
+   160→- **[LOW] `firstVariantId = d.items[0]?.org_variant_id ?? d.location_id`** (line 108) — fallback to location_id as the metric entity ID is semantically wrong; should be `null` or omit.
+   161→- **[LOW] `preMadeStitchedStockAdded` flag** is computed (line 69) but the variant-fetch loop and processInventoryTransaction call don't actually USE it for any side effect — it's just returned in the response. Dead-ish code; intent unclear.
+   162→
+   163→### Frontend
+   164→`src/components/inventory/receive-stock-view.tsx` (602 lines). Variant picker, line-item table, idempotent mutation via `useIdempotentMutation`. No validation that the selected location is org-shared vs. company-private.
+   165→
+   166→---
+   167→
+   168→## Module 5: Adjust Stock
+   169→
+   170→### Purpose
+   171→Manual positive or negative stock adjustment with a reason + notes. Bypasses PO/loss workflows for one-off corrections (found stock, cycle-count corrections, system errors).
+   172→
+   173→### API Routes
+   174→
+   175→| Method | Path | Description |
+   176→| --- | --- | --- |
+   177→| POST | `/api/inventory/adjust` | Adjust onHand up (`manual_adjustment_in`) or down (`damage_writeoff`). Idempotency supported. |
+   178→
+   179→### Server Actions
+   180→None.
+   181→
+   182→### Schema Models
+   183→`InventoryPool`, `InventoryTransaction` (type `manual_adjustment_in` or `damage_writeoff`).
+   184→
+   185→### Issues Found
+   186→
+   187→- **[HIGH] Negative adjustment masquerades as `damage_writeoff`.** Line 123 — a negative manual adjustment uses transaction_type `damage_writeoff`, which means every "remove stock" action shows up in reports as if it were damaged goods. This conflates deliberate corrections (e.g. "system error, remove 5 units") with actual physical damage. Should use a dedicated `manual_adjustment_out` type. (Mirror of the bug fixed in INVENTORY-3-BUGS-FIXED for positive adjustments, but the negative side was left alone.)
+   188→- **[HIGH] Negative adjustment does NOT check available stock.** Lines 116-130 — the route calls `processInventoryTransaction({ transactionType: 'damage_writeoff', quantity: absQty, ... })` without first verifying `onHand - reserved >= absQty`. The function itself does validate (inventory.ts line 152-160), but the route's metric event uses `avgCostForMetric` from a stale `pool` read (line 57-66) taken BEFORE the function runs — if another concurrent txn changes the pool, the metric is wrong.
+   189→- **[MEDIUM] No `location_id` org/company scoping.** Same as receive — any location ID is accepted without verifying it belongs to the active company.
+   190→- **[MEDIUM] No `org_variant_id` org scoping.** Variant not verified to belong to the org.
+   191→- **[MEDIUM] `reason` validation is minimal.** `z.string().min(3).max(500)` — no enum or controlled vocabulary. Reports cannot group by reason reliably.
+   192→- **[LOW] Metric event uses `absQty * avgCostForMetric`** for both directions — for negative adjustments, this is the value of stock removed, which is correct, but the dimension `direction: 'decrease'` is the only signal. OK but easy to misread in dashboards.
+   193→- **[LOW] `insertAuditLog` and `insertMetricEvent` are fire-and-forget** (no `await`) — if either throws, the audit/metric is lost silently. Acceptable for metrics (best-effort) but concerning for audit logs.
+   194→
+   195→### Frontend
+   196→`src/components/inventory/adjust-stock-view.tsx` (651 lines). Direction toggle (add/remove), reason presets (line 97+), variant picker, idempotent submit. No location-access check client-side.
+   197→
+   198→---
+   199→
+   200→## Module 6: Transfer Stock
+   201→
+   202→### Purpose
+   203→Move stock from one location to another. Logistics cost is tracked separately (never merged into WAC). Produces TWO inventory_transactions: `transfer_out` + `transfer_in`.
+   204→
+   205→### API Routes
+   206→
+   207→| Method | Path | Description |
+   208→| --- | --- | --- |
+   209→| POST | `/api/inventory/transfers` | Create a transfer. Validates available stock at source. Idempotency supported. |
+   210→| GET | `/api/inventory/transfers` | List last 50 transfers for the org. |
+   211→
+   212→### Server Actions
+   213→None.
+   214→
+   215→### Schema Models
+   216→`StockTransfer` — `organizationId`, `orgVariantId`, `fromLocationId`, `toLocationId`, `quantity`, `costPerUnitAtTransfer Decimal(12,4)`, `logisticsCost Decimal(12,2) @default(0)`, `status` (default `'completed'`), `initiatedById?`. `InventoryTransaction` × 2 (out + in).
+   217→
+   218→### Issues Found
+   219→
+   220→- **[CRITICAL] Transfer is NOT atomic.** Lines 80-149: `stockTransfer.create` → `processInventoryTransaction(out)` → `processInventoryTransaction(in)`. Three separate writes, no `db.$transaction`. If the `transfer_in` fails (e.g. destination location deleted concurrently), the stock has already been removed from the source — **stock vanishes from the system**. The route throws ApiError(500) but does not roll back the `transfer_out` or delete the `StockTransfer` row. This is the most serious issue in the inventory subsystem.
+   221→- **[HIGH] Transfer status is hardcoded `'completed'`.** Line 91 — there is no `'in_transit'` state ever set, despite the schema documenting it as a valid status. The transfer-out + transfer-in happen synchronously with no transit period. For multi-warehouse logistics, the schema supports an in_transit state but the API never produces it.
+   222→- **[HIGH] GET endpoint has NO permission check.** Any authenticated user can list all transfers in the org.
+   223→- **[HIGH] GET endpoint is org-scoped, not company-scoped.** `where: { organizationId: orgId }` (line 204) — exposes transfers for all companies in the org.
+   224→- **[HIGH] `from_location_id` and `to_location_id` not validated for company access.** Same as everywhere — a Company-A user can transfer stock OUT of a Company-B private location.
+   225→- **[MEDIUM] No `org_variant_id` org-membership check.** Variant not verified to belong to the org.
+   226→- **[MEDIUM] `quantity <= 0` check (line 55) but no `Number.isInteger` check.** Schema (transferStockSchema line 96) requires `int`, but the route doesn't use that schema — it does inline validation. Drift.
+   227→- **[MEDIUM] The route uses `readBody<{...}>` with inline validation** instead of the Zod schema (`transferStockSchema` in `validations/inventory.ts`). The schema's `.refine` for `from !== to` is bypassed (though the route does check separately at line 56-58).
+   228→- **[LOW] `costPerUnitAtTransfer` is snapshotted from the source pool's avgCost** (line 75) — correct, but no AvgCostHistory entry is created on the destination pool when transfer_in recalculates WAC. The avg_cost_history only records the trigger txn, not the source-pool snapshot.
+   229→- **[LOW] `logisticsCost` defaults to 0 if undefined** — acceptable, but no validation that it's non-negative (route accepts any number including negatives).
+   230→
+   231→### Frontend
+   232→`src/components/inventory/transfer-stock-view.tsx` (712 lines). Source/destination pickers, available-stock display, idempotent submit. No warning when transferring between company-private and org-shared locations.
+   233→
+   234→---
+   235→
+   236→## Module 7: Purchase Orders
+   237→
+   238→### Purpose
+   239→Full PO lifecycle: create (draft or ordered) → confirm (draft→ordered, increments incoming) → receive (creates receipt + increments onHand, recalculates WAC) → cancel (decrements incoming for unreceived qty).
+   240→
+   241→### API Routes
+   242→
+   243→| Method | Path | Description |
+   244→| --- | --- | --- |
+   245→| GET | `/api/purchase-orders` | List POs for active company (filterable by status). |
+   246→| POST | `/api/purchase-orders` | Create a PO with line items. If status='ordered', increments incoming. Idempotency supported. |
+   247→| GET | `/api/purchase-orders/[id]` | Get a PO with items + receipts. |
+   248→| POST | `/api/purchase-orders/[id]/confirm` | Draft → ordered. Increments incoming per item. |
+   249→| POST | `/api/purchase-orders/[id]/receive` | Receive goods against PO. Creates receipt + receipt_items + `purchase_received` txn per item. Supports partial delivery. Triggers backorder auto-fulfillment. |
+   250→| POST | `/api/purchase-orders/[id]/cancel` | Cancel PO. Decrements incoming for unreceived qty. |
+   251→
+   252→### Server Actions
+   253→None — but `checkAndFulfillBackorders` in `src/lib/actions/backorder.actions.ts` is called from the receive endpoint.
+   254→
+   255→### Schema Models
+   256→`PurchaseOrder` (`poNumber` unique, status `draft|ordered|partially_received|received|cancelled`, `advancePayment`, `paymentMethod?`, `cancelledAt?`, `cancellationReason?`). `PurchaseOrderItem` (`orderedQuantity`, `receivedQuantity`, `costPerUnit`). `PurchaseOrderReceipt` + `PurchaseOrderReceiptItem` (`receivedQuantity`, `actualCostPerUnit`, `shortageQuantity`, `shortageReason?`, `inventoryTxnId?`).
+   257→
+   258→### Issues Found
+   259→
+   260→- **[CRITICAL] PO creation with status='ordered' has a NON-atomic incoming-stock update.** Lines 168-187 of `purchase-orders/route.ts` — `purchaseOrder.create` succeeds, then for each item a separate `inventoryPool.upsert` runs. If item 3 of 5 fails, the PO is created with status='ordered' but only items 1-2 have incremented incoming. The audit log says "PO created" with no indication of partial incoming update. Not wrapped in `db.$transaction`.
+   261→- **[HIGH] PO receive is NOT atomic.** `purchase-orders/[id]/receive/route.ts` lines 77-172 — for each receipt item: `processInventoryTransaction` → `purchaseOrderReceiptItem.create` → `purchaseOrderItem.update(receivedQuantity increment)` → `inventoryPool.update(incoming)`. Four writes per item, no transaction. A failure on item 3 leaves items 1-2 fully received, item 3 partially received (txn created but receipt_item not, or vice versa), and the PO status update at the end may set `'received'` based on stale `allFullyReceived` flag.
+   262→- **[HIGH] PO receive backorder-fulfillment is fire-and-forget.** Lines 205-217 — wrapped in try/catch with `console.error` only. If backorder fulfillment fails, the stock is received but no order is unblocked, and **there is no audit trail of the failure**. A user sees stock in the pool but their backordered order stays backordered with no explanation.
+   263→- **[HIGH] PO receive does NOT verify `org_variant_id` matches the PO item's variant.** Line 91 — the receipt item looks up `poItem` by `purchase_order_item_id`, but the inventory txn is created with the `ri.org_variant_id` from the request body, NOT `poItem.orgVariantId`. A client could supply a different `org_variant_id` and stock the wrong variant. The receipt_item row also stores the wrong `orgVariantId`. **Stock-poisoning bug.**
+   264→- **[HIGH] PO cancel does NOT restore incoming atomically.** Lines 57-62 of `cancel/route.ts` — loops through items calling `decrementIncomingStock` separately, then `purchaseOrder.update` separately. If item 3's decrement fails, items 1-2 are decremented but the PO is later marked cancelled — leaving phantom incoming for item 3.
+   265→- **[HIGH] GET endpoints have NO permission check.** List + detail readable by any authenticated user.
+   266→- **[MEDIUM] `actual_cost_per_unit` can differ from `costPerUnit` on the PO item** — the WAC recalculation correctly uses `actual_cost_per_unit`, but the `balanceDue` calculation in GET (line 80) uses the original `costPerUnit`, not what was actually paid. Reports will under/over-state balance due.
+   267→- **[MEDIUM] `receivedQuantity` is incremented without upper-bound check.** Line 131 — `receivedQuantity: { increment: ri.received_quantity }`. If a user receives MORE than ordered (over-shipment), `receivedQuantity` exceeds `orderedQuantity` and `allFullyReceived` is still true. No rejection of over-receipt.
+   268→- **[MEDIUM] `generatePoNumber` is racy.** `inventory.ts` line 454-467 — counts existing POs with the prefix, then adds 1. Two concurrent creates can produce the same PO number, which would violate the `@unique` constraint and one would 500. Should use a SQL sequence or a transactional `SELECT ... FOR UPDATE`.
+   269→- **[MEDIUM] Confirm endpoint (draft→ordered) does not validate PO has items.** An empty PO could be confirmed.
+   270→- **[MEDIUM] No validation that the supplier on the PO belongs to the same company scope as the PO.** Lines 126-129 — `findFirst({ where: { id, organizationId: orgId, isActive: true } })` — supplier could be company-B private, used in a company-A PO. Cross-company contamination.
+   271→- **[LOW] `paymentMethod` is a free-form string**, no enum.
+   272→- **[LOW] PO list is hard-capped at 50** (line 54) with no pagination cursor. A company with many POs only sees the latest 50.
+   273→
+   274→### Frontend
+   275→`src/components/inventory/purchase-orders-view.tsx` (453 lines, list) + `po-create-view.tsx` (926 lines, wizard) + `po-detail-view.tsx` (977 lines, detail + receive flow). All three use idempotent mutations. PO-create has inline Zod, not the shared `createPurchaseOrderSchema` from `validations/inventory.ts`.
+   276→
+   277→---
+   278→
+   279→## Module 8: Supplier Returns
+   280→
+   281→### Purpose
+   282→Return stock to a supplier. Creates a `supplier_return` inventory transaction (decrements onHand). Resolution paths: refund / replacement / credit_note (increments supplier.creditBalance) / disputed (no financial move) / rejected (auto-creates a `supplier_dispute` StockLossRecord to keep the loss visible).
+   283→
+   284→### API Routes
+   285→
+   286→| Method | Path | Description |
+   287→| --- | --- | --- |
+   288→| GET | `/api/supplier-returns` | List supplier returns for active company. |
+   289→| POST | `/api/supplier-returns` | Create a supplier return — processes `supplier_return` txn. Idempotency supported. |
+   290→| PATCH | `/api/supplier-returns/[id]` | Resolve a return — sets status, resolution_type/amount. Increments supplier.creditBalance if credit_note. Auto-creates supplier_dispute loss if rejected. |
+   291→| POST | `/api/supplier-returns/[id]/dispute` | Mark a return as disputed. |
+   292→
+   293→### Server Actions
+   294→None.
+   295→
+   296→### Schema Models
+   297→`SupplierReturn` — `quantity`, `costPerUnit`, `reason` (enum), `status` (default `'pending'`), `resolutionType?`, `resolutionAmount?`, `replacementPoId?`, `inventoryTxnId?`, `supplierReturnId` link to `StockLossRecord` (1:1 via `@unique`). `StockLossRecord` (for auto-created dispute loss).
+   298→
+   299→### Issues Found
+   300→
+
+[showing lines 1-300 of 747; use offset=301 with limit to continue reading]

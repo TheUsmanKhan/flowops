@@ -40,9 +40,14 @@ export function isValidPhoneFormat(phone: string, defaultCountry: string = DEFAU
 }
 
 /**
- * Normalize a phone number to E.164 format (e.g., "+923001234567").
+ * Normalize a phone number to E.164 format (e.g., "+923001234567" — NO spaces).
  * Returns null if the number cannot be parsed.
  * Defaults to Pakistan ('PK') for numbers without a country code.
+ *
+ * IMPORTANT: The output format MUST match the SQL `normalize_phone()` function
+ * (stored in the `phone_normalized` DB column). Both produce E.164 without
+ * spaces. This allows the pure-JS function to be a drop-in replacement for
+ * the SQL function — no network round-trip needed.
  */
 export function normalizePhoneInternational(phone: string, defaultCountry: string = DEFAULT_COUNTRY): string | null {
   const trimmed = phone.trim()
@@ -54,7 +59,10 @@ export function normalizePhoneInternational(phone: string, defaultCountry: strin
     // sometimes parse invalid numbers. We only return the normalized form
     // if the number is actually valid.
     if (!isValidPhoneNumber(trimmed, defaultCountry as any)) return null
-    return parsed.formatInternational()
+    // E.164 format: +923001234567 (no spaces) — matches the DB column.
+    // Do NOT use formatInternational() — it adds spaces (+92 300 1234567)
+    // which won't match the stored phoneNormalized values.
+    return parsed.format('E.164')
   } catch {
     return null
   }

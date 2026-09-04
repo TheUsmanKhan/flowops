@@ -1,0 +1,250 @@
+- **CustomerSection invocation (in OrderCreateView)**: removed 17 delivery-related props (courierName, setCourierName, courierIntegrationId, setCourierIntegrationId, courierIntegrations, pickupAddressId, setPickupAddressId, pickupAddresses, pickupAddressesLoading, dispatchLocationId, setDispatchLocationId, notesForCourier, setNotesForCourier, orderRefNumber, setOrderRefNumber, orderDetail, setOrderDetail, locations, isLoadingLocations, fulfillmentChannel, setFulfillmentChannel, userPickedCourier, setUserPickedCourier, deliveryCountry). Kept: customer props + courierProviderKey + discount fields + fieldError + isCountryBlocked + countryBlockReason.
+- **CustomerSection component definition**: same prop removal in both the destructure and the inline type annotation. Added `courierProviderKey?: string` (kept as optional, still needed by AddressSelector to drive CityAutocomplete).
+- **CustomerSection JSX**: removed the entire "Delivery Logistics" sub-section (fulfillment channel toggle + courier dropdown + pickup address + dispatch location + transaction notes + order ref + order detail conditional blocks, ~230 lines). Kept the Discount fields (Discount amount + Discount reason) as a standalone sub-section with a small "Discount" header (CreditCard icon).
+- **Right column layout (OrderCreateView return)**: replaced the original `<div className="lg:sticky lg:top-6 space-y-4">` wrapper with a new two-tier structure — outer `<div className="space-y-4">` containing `<DeliverySidebar/>` first, then an inner `<div className="lg:sticky lg:top-6 space-y-4">` wrapping SummarySection + the Create/Save/Cancel Card. This means the DeliverySidebar scrolls naturally with the page while the summary+action buttons remain sticky.
+- **NEW DeliverySidebar component** (~280 lines): inserted between the `StatCell` memo helper and the `SECTION 2: Items` comment. A Card titled "Delivery & Logistics" with a Truck icon. Contains:
+  - Fulfillment channel toggle (Courier Delivery vs Self-Fulfilled) — always visible.
+  - Courier dropdown (only shown when `fulfillmentChannel === 'courier'`).
+  - Pickup / Return Address dropdown (only shown when a courier is selected).
+  - Dispatch Location dropdown (only shown for courier channel).
+  - Transaction Notes input — with a NEW Leopard-specific hint shown when `courierProviderKey === 'leopard'`: "For Leopard, product details (name/code/color) are automatically appended based on your Leopard preferences."
+  - Order Reference input — always shown for courier channel.
+  - Order Detail input — **HIDDEN when `courierProviderKey === 'leopard'`** (wrapped in `{courierProviderKey !== 'leopard' && (...)}`). Backend still auto-generates it from Leopard preferences.
+  - All delivery-related props from the original CustomerSection (same prop names + types).
+  - Added a local `const isLeopard = courierProviderKey === 'leopard'` for readability.
+
+Design notes:
+- The DeliverySidebar is rendered ABOVE the sticky SummarySection in the right column. On long pages, the DeliverySidebar scrolls away naturally while SummarySection + Create button remain sticky. On short pages, both fit in the viewport.
+- Discount fields stay in CustomerSection because they're conceptually per-customer/per-order rather than per-shipment, and they need to be visible even when no courier is selected (e.g., for self-fulfilled orders).
+- Leopard hint placement: under Transaction Notes (not Order Detail) because Order Detail is hidden for Leopard — putting the hint next to the hidden field would be invisible. Transaction Notes is the closest visible field that conveys "stuff the backend fills in for you".
+- The `userPickedCourier` prop is still passed through to DeliverySidebar even though it's only `set` inside the courier dropdown `onValueChange` — the parent's auto-default effect still reads it.
+
+Verification:
+- `bun run lint`: **0 errors, 12 warnings** (all pre-existing `react-hooks/incompatible-library` warnings in unrelated `products/*-view.tsx` files — NONE in `order-create-view.tsx`).
+- Targeted eslint on `order-create-view.tsx`: only 2 pre-existing `Unused eslint-disable directive` warnings at lines 371 and 482 (inside the main `OrderCreateView` function, not in CustomerSection/DeliverySidebar) — NOT introduced by this change.
+- `bunx tsc --noEmit`: no errors in `order-create-view.tsx`. Pre-existing TS errors in unrelated files (`customer.actions.ts`, `order.actions.ts`, `leopard-webhook.actions.ts`, `shipper-advice.actions.ts`, `proof-of-delivery.ts`, `status-history.ts`, `session-payload.ts`) all relate to the DB-schema mismatch (originalUnitPrice, salesEmployeeId, lastShipperAdviceSubmittedAt, etc.) described in the prior worklog — NOT caused by this change.
+- Dev server log: shows the same pre-existing `DATABASE_URL` misconfiguration (`must start with the protocol postgresql://`) noted in the prior worklog — UNRELATED to my changes; runtime testing requires the DB URL to be fixed (out of scope).
+
+Git commit: succeeded — `8d896f4 BATCH-6: Delivery sidebar redesign (move logistics to right sidebar, always visible, Leopard order_detail hidden)` (1 file changed, 381 insertions(+), 338 deletions(-)).
+
+No blockers for downstream tasks.
+
+---
+Task ID: REMOVE-MARKET-SYSTEM
+Agent: main (Z.ai Code)
+Task: COMPLETELY remove the market system (Market, MarketCountry, MarketProduct, MarketVariantPricing) from application code. Products and orders now work without any market dependency — simple per-company pricing via CompanyVariantPricing. Schema models are left in place for a separate removal step.
+
+Files DELETED (10):
+1. `src/components/markets/markets-view.tsx`
+2. `src/components/markets/market-detail-view.tsx` (entire `src/components/markets/` directory removed)
+3. `src/app/api/markets/route.ts`
+4. `src/app/api/markets/[id]/route.ts`
+5. `src/app/api/markets/[id]/products/route.ts`
+6. `src/app/api/markets/[id]/copy-pricing-from-default/route.ts` (entire `src/app/api/markets/` directory removed)
+7. `src/app/api/orders/market-for-country/route.ts`
+8. `src/app/api/products/[id]/market-enablement/route.ts`
+9. `src/lib/markets.ts`
+
+Files MODIFIED (16):
+
+**Frontend — order/product UX:**
+1. `src/components/orders/order-create-view.tsx` — Removed the `marketContextQuery` (useQuery to `/api/orders/market-for-country`), `resolvedMarket`, `isCountryBlocked`, `allowedPaymentTypes`, `enabledProductIdsSet`, `pricedVariantIdsSet` variables. Removed the country-block check in `handleSubmit` (the early-return that prevented creation when country wasn't in a market). Removed `isCountryBlocked` + `countryBlockReason` props from `CustomerSection` (and the destructive red banner UI). Removed `enabledProductIdsSet` + `pricedVariantIdsSet` + `resolvedMarketName` props from `ItemsSection`. Removed gate 2/3 checks in the product picker — picker now uses ONLY gate 1 (variant.isActive) for graying out variants. Removed `allowedPaymentTypes` prop from `PaymentSection` — all three payment types (full_cod, partial_advance, fully_prepaid) are now ALWAYS shown. Removed `disabled={isSubmitting || isCountryBlocked}` → just `disabled={isSubmitting}` on the Create Order button. Removed the `useEffect` that auto-switched payment type when market changed. Country selector still works (just no longer blocks on market).
+2. `src/components/products/product-detail-view.tsx` — Removed the "Markets" tab trigger and `<TabsContent value="markets">` block. Replaced `<PricingTabWithMarkets>` with a direct `<ParentChildVariantTable productId={productId} mode="pricing" />` (no marketId). Removed the entire `PricingTabWithMarkets` component (~115 lines: market sub-tabs, completion badges, copy-from-default button) and `MarketsEnablementSection` component (~120 lines: per-market checkboxes). Cleaned up unused imports (`Copy`, `Globe2`, `Checkbox`).
+3. `src/components/products/parent-child-variant-table.tsx` — Removed the `marketId?` prop from `ParentChildVariantTable`. Removed all `marketId` references in query keys (`['variant-groups', productId, marketId]` → `['variant-groups', productId]`) and API call bodies (`...(marketId ? { market_id: marketId } : {})` stripped from override-price, resync-price, sale-price cascade calls). Removed unused `useMutation` and `Star` imports.
+4. `src/components/layout/sidebar.tsx` — Removed the "Markets" nav item (`{ route: { name: 'markets' }, label: 'Markets', icon: Globe2, ... }`). Removed unused `Globe2` import.
+5. `src/stores/app-store.ts` — Removed `{ name: 'markets' }` and `{ name: 'market-detail'; id: string }` from the `AppRoute` union type.
+6. `src/app/page.tsx` — Removed `MarketsView` and `MarketDetailView` dynamic imports. Removed `case 'markets'` and `case 'market-detail'` switch arms.
+
+**Backend — order actions:**
+7. `src/lib/actions/order.actions.ts` (`createOrderFromShopifyWebhook`) — Removed `resolveMarketByCountry`, `isMultiMarketCompany`, `getPricedVariantIdsForMarket`, `getEnabledProductIdsForMarket` imports. Removed `resolvedShopifyMarket`, `marketResolutionIssue`, `enabledProductIdsSet`, `pricedVariantIdsSet` variables. Changed variant fetch to use `companyPricing: { where: { companyId } }` instead of `marketPricing`. Removed gate 2 (MarketProduct enablement) and gate 3 (MarketVariantPricing) checks — only gate 1 (variant.isActive) + a new gate 2 (CompanyVariantPricing existence) remain. Removed `marketResolutionIssue` from the order create payload. Note: `createManualOrder` was already using CompanyVariantPricing (verified — no changes needed). Also updated a stale comment from "MarketVariantPricing" → "CompanyVariantPricing" in `createManualOrder`.
+
+**Backend — API routes (4 modified to use CompanyVariantPricing):**
+8. `src/app/api/products/[id]/variants/[variantId]/override-price/route.ts` — Rewrote to use `db.companyVariantPricing.upsert` with `companyId_orgVariantId` unique key. Removed `market_id` body param + market resolution block. UPSERT semantics preserved (update existing row → detach synced flags; create new row with override values + synced=false if none exists).
+9. `src/app/api/products/[id]/variants/[variantId]/resync-price/route.ts` — Rewrote to fetch sibling pricing from `companyPricing` (scoped by companyId) instead of `marketPricing`. Removed `market_id` body param + market resolution block. Synced-sibling lookup logic unchanged.
+10. `src/app/api/products/[id]/variant-groups/[parentValueId]/sale-price/route.ts` — Rewrote to cascade to `db.companyVariantPricing` (scoped by companyId). Removed `market_id` body param + market resolution block. Cascade logic preserved (only update synced rows; UPSERT missing rows with synced=true).
+11. `src/app/api/products/[id]/variant-groups/route.ts` — Removed `marketId` query param parsing + Default-market fallback. Changed variant fetch from `marketPricing` to `companyPricing: { where: { companyId } }`. Updated the `groupableVariants` typing from `marketPricing[number]` to `companyPricing[number]`.
+
+**Backend — libraries (3 modified):**
+12. `src/lib/analytics/revenue.ts` — Simplified `computeRevenueWithCurrencies` to a single-currency sum (every order is denominated in the company's baseCurrency now that markets are gone). Removed the country→currency map lookup (was via `db.marketCountry.findMany`). Removed `getLatestRates` + `convertAmount` imports. Signature preserved for backwards-compat with 3 callers (orders-view, customer.actions, order-funnel, revenue-summary route). `deliveryCountry` is now optional in the order type (still passed by callers, just ignored).
+13. `src/lib/exchange-rates.ts` — Changed `getActiveCurrencies` from `db.market.findMany` (distinct currency) to `db.company.findMany` (distinct baseCurrency). Signature changed to optional companyId (was required). The function is no longer called by the cron route (which now inlines its own `db.company.findMany`) but kept for any future callers.
+14. `src/lib/actions/customer.actions.ts` — Updated a stale comment from "market resolution" → "revenue resolution" (line 1302). The actual `updateCustomerStats` logic was already calling `computeRevenueWithCurrencies` (which is now simplified) — no functional change beyond the comment.
+
+**Backend — onboarding + cron:**
+15. `src/app/api/onboarding/create-company/route.ts` — Removed the entire `db.market.create` block (step 5b) that created the company's Default Market + Default MarketCountry entry. Replaced with a comment noting the markets system is removed. The rest of the onboarding flow (org → company → roles → employee → userSetting) is unchanged.
+16. `src/app/api/cron/refresh-exchange-rates/route.ts` — Changed from `db.market.findMany({ where: { isActive: true }, distinct: ['currency'] })` to `db.company.findMany({ distinct: ['baseCurrency'] })` for collecting the set of currencies that need exchange rate snapshots. Removed `getActiveCurrencies` import (now inlined). Updated the "no active markets" message to "no companies with currencies".
+
+**Validation schema (1 modified):**
+17. `src/lib/validations/order.schemas.ts` — Updated a stale comment from "MarketVariantPricing for the resolved market" → "CompanyVariantPricing for this company" (line 37).
+
+Key design decisions:
+- The `Order.marketResolutionIssue` schema field is LEFT in place (per task: "DO NOT remove the Market models from schema yet"). New orders simply don't set this field (always null) — old orders may have it set. `order-detail-view.tsx` + `orders/[id]/route.ts` still read it (banner shows for legacy orders, hidden for new ones). No code change needed there.
+- `computeRevenueWithCurrencies` keeps its 3-arg signature for backwards-compat. The 1st arg (companyId) is now `_companyId` (unused) — the function no longer needs the DB.
+- The cron route for refresh-exchange-rates still works (just sources currencies from companies' baseCurrency instead of markets). This keeps the ExchangeRateSnapshot table populated for any future multi-currency needs.
+- All 4 modified API routes (override-price, resync-price, sale-price cascade, variant-groups GET) now use the `companyId_orgVariantId` unique key on CompanyVariantPricing instead of `marketId_variantId` on MarketVariantPricing.
+- `parent-child-variant-table.tsx` had a pre-existing closure bug where `marketId` was referenced inside `GroupCard`, `ChildRow`, and `VariantEditDialog` without being passed as a prop — meaning the spread `...(marketId ? { market_id: marketId } : {})` always evaluated to `{}` (marketId was always undefined in those scopes). Removing the references didn't change runtime behavior for those API calls but did simplify the code.
+
+Verification:
+- `bun run lint`: **0 errors, 12 warnings** — all pre-existing (10 are `react-hooks/incompatible-library` warnings on unrelated files, 2 are `Unused eslint-disable directive` warnings in order-create-view.tsx at lines 371 + 482 — pre-existing per prior worklog). None of my changes introduced new warnings.
+- `bunx tsc --noEmit`: NO new TS errors in any modified file. Pre-existing TS errors remain in `customer.actions.ts` (lines 199, 1714, 1727 — `country`/`deliveryCountry`/`salesEmployeeId` DB-schema mismatches) and `order.actions.ts` (lines 2402, 2403 — `salesEmployeeId` DB-schema mismatch) — all unrelated to this change, all documented in prior worklogs.
+- Dev server log: shows stale "Module not found: Can't resolve '@/lib/markets'" errors from BEFORE my edits — the actual file at line 1102 of `order.actions.ts` is now `for (const li of d.line_items)` (no markets import). The dev server needs a recompile to clear the cached error.
+
+Git commit: succeeded — `3cf33b5 Remove market system completely from all modules` (27 files changed, 2162 insertions(+), 2366 deletions(-)).
+
+No blockers for downstream tasks. The schema models (Market, MarketCountry, MarketProduct, MarketVariantPricing) remain in `prisma/schema.prisma` and can be removed in a separate step after verifying the application works end-to-end without markets.
+
+---
+Task ID: EXPLORE-CITY-BADGES
+Agent: Explore
+Task: Locate and report on the city autocomplete component(s) used in the customer-creation form (in order-create) and the customer module (customer create/edit form). Specifically find the city-autocomplete file, the current "pickup"/"delivery" badge rendering code, the data structure returned by the city API, the API route serving cities, the per-city `providerKey` availability, and any existing courier badge components (Leopard/PostEx logos or text badges).
+
+Work Log:
+- Read prior worklog sections (11,784 lines) for context — located Task IDs 3242, 3284, 3292, 9615, 11693 etc. that introduced and iterated on the city-autocomplete system. Confirmed the canonical component is `src/components/couriers/city-autocomplete.tsx`.
+- Read full `src/components/couriers/city-autocomplete.tsx` (233 lines) — confirmed it is the single reusable city-search component, with a controlled input + debounced react-query dropdown. Two-query strategy: cache-only first; live-fallback second (with `?live=true`) when cache returns zero.
+- Read full `src/app/api/couriers/[providerKey]/cities/route.ts` (139 lines) — confirmed API route behavior for both single-provider and `'all'` union modes.
+- Read full `src/components/customers/CreateCustomerForm.tsx` (367 lines) — confirmed the customer create/edit form uses `<CityAutocomplete providerKey="all">` for Pakistan addresses (line 298), plain Input for non-PK (line 306).
+- Read full `src/components/customers/AddressSelector.tsx` (287 lines) — confirmed the order-create customer section uses `<CityAutocomplete providerKey={courierProviderKey ?? 'all'}>` (lines 222-235) for Pakistan addresses.
+- Read full `src/components/couriers/city-mismatch-resolver.tsx` (157 lines) — confirmed it renders `<CityAutocomplete>` inside the manual-search fallback (line 125).
+- Read schema `prisma/schema.prisma` lines 1745-1764 (IntegrationProvider) and 2190-2210 (CourierOperationalCity) — confirmed per-provider row structure with `@@unique([providerKey, cityName])`.
+- Read `src/lib/integrations/city-matcher.ts` lines 236-348 (`ensureCityCached`) — confirmed the cache-miss → live-fetch → bulk-insert flow used by the `live=true` fallback.
+- Read `src/lib/integrations/registry.ts` (119 lines) — confirmed the three registered courier providerKeys: `postex`, `leopard`, `tcs` (TCS is framework_ready / stub).
+- Grepped all 6 usages of `CityAutocomplete` — found in: `CreateCustomerForm`, `AddressSelector`, `city-mismatch-resolver`, `pickup-addresses-section`, `send-exchange-shipment-modal`, `booking-workbench-view`.
+- Grepped for existing courier badge components — none exist as a reusable component. Closest patterns:
+  * `src/components/orders/customer-detail-view.tsx` lines 1200-1208: INLINE display-name mapping (`postex → PostEx`, `tcs → TCS`, `leopard → Leopard`) for the `cityMatchedCouriers` list under each address card.
+  * `src/components/orders/needs-shipper-advice-view.tsx` line 132: `<Badge variant="outline" className="text-[9px] capitalize">{item.providerKey}</Badge>` — uses raw providerKey + CSS capitalize (produces "Postex", "Tcs", "Leopard" — NOT properly cased).
+- Greps for `PROVIDER_LABELS`, `providerLabel`, `providerDisplayName`, `getCourierLabel`, `providerMetadata` — NO matches. No centralized providerKey→display-name helper exists.
+- Listed `/public` directory — NO courier logo assets exist (only `logo.svg`, scan-reports, slip PDFs, one company image). `IntegrationProvider.logoUrl` schema column exists but is not currently populated for any courier in `/public`.
+
+Findings (consolidated):
+
+1. **Exact file path of the city autocomplete component**:
+   `/home/z/my-project/src/components/couriers/city-autocomplete.tsx` (233 lines, the single reusable component used in 6 places across the codebase).
+
+2. **Current badge rendering code** (file: `src/components/couriers/city-autocomplete.tsx`, lines 205-227):
+   ```jsx
+   filteredSuggestions.map((city) => (
+     <button
+       key={city.id}
+       type="button"
+       className="w-full text-left px-3 py-2 text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2"
+       onClick={() => handleSelect(city)}
+     >
+       <span className="font-medium">{city.cityName}</span>
+       <div className="flex items-center gap-1">
+         {city.isPickupCity && (
+           <span className="text-[9px] px-1 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200">
+             Pickup
+           </span>
+         )}
+         {city.isDeliveryCity && (
+           <span className="text-[9px] px-1 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
+             Delivery
+           </span>
+         )}
+       </div>
+     </button>
+   ))
+   ```
+   - Badges are plain `<span>` elements (NOT the shared `<Badge>` shadcn component) with hardcoded color classes (sky-50/sky-700 for Pickup, emerald-50/emerald-700 for Delivery).
+   - Both badges can render simultaneously (a city can be both pickup AND delivery — OR'd across the three PostEx API calls per the worklog).
+
+3. **Data structure returned by the city API**:
+   - Single-provider mode (`providerKey != 'all'`): `{ id, cityName, cityId, isPickupCity, isDeliveryCity }` — `providerKey` is NOT included (implied by URL).
+   - `'all'` union mode (`providerKey === 'all'`): `{ id, cityName, cityId, isPickupCity, isDeliveryCity, providerKey }` — `providerKey` IS included.
+   - **Frontend TypeScript interface** (`city-autocomplete.tsx` lines 42-48) is INCOMPLETE — it omits the optional `providerKey` field even though the API returns it in 'all' mode:
+     ```ts
+     interface CityOption {
+       id: string
+       cityName: string
+       cityId: string | null
+       isPickupCity: boolean
+       isDeliveryCity: boolean
+       // ⚠️ Missing: providerKey?: string  ← needed to render per-provider badges in 'all' mode
+     }
+     ```
+   - DB-level schema (`prisma/schema.prisma` lines 2193-2210):
+     ```prisma
+     model CourierOperationalCity {
+       id                String   @id @default(cuid())
+       providerKey       String   // 'postex', 'tcs', 'leopard'
+       cityName          String
+       cityId            String?  // nullable, TEXT — Leopard stores numeric ID as string
+       isPickupCity      Boolean  @default(true)
+       isDeliveryCity    Boolean  @default(true)
+       shipmentTypes     String?  // Leopard-specific JSON array string
+       lastSyncedAt      DateTime @default(now())
+       createdAt         DateTime @default(now())
+       updatedAt         DateTime @updatedAt
+       @@unique([providerKey, cityName])
+       @@index([providerKey])
+       @@map("courier_operational_cities")
+     }
+     ```
+
+4. **API route that returns cities**:
+   `GET /api/couriers/[providerKey]/cities?q=<term>&limit=<n>&live=<true|false>`
+   - File: `/home/z/my-project/src/app/api/couriers/[providerKey]/cities/route.ts` (139 lines)
+   - Filters: `providerKey` (exact), `isDeliveryCity=true` (always), `cityName contains q` (case-insensitive).
+   - `providerKey='all'` → union across ALL providers; deduplicates by `cityName.toLowerCase()`, keeps the FIRST provider's row for each unique name (loses multi-provider info — only ONE providerKey per city is returned to the frontend).
+   - `live=true` (single-provider only): when cache returns zero results AND `q.length >= 2`, calls `ensureCityCached(providerKey, q)` which fetches the full city list live from the courier API, bulk-inserts via `createMany + skipDuplicates`, then re-queries.
+   - Response shape: `{ cities: CityOption[] }`.
+
+5. **How `providerKey` is available per city**:
+   - At the DATABASE level: each row in `courier_operational_cities` is PER-PROVIDER. The unique constraint is `@@unique([providerKey, cityName])` — so "Karachi" can exist as 3 separate rows (one each for postex, leopard, tcs), each with its OWN `isPickupCity` / `isDeliveryCity` / `cityId` values.
+   - At the API level: in `'all'` mode, the route fetches all matching rows across providers, then DEDUPLICATES by `cityName.toLowerCase()` keeping the FIRST match (alphabetically first by `cityName asc`, then by insertion order). This means **the API currently returns only ONE providerKey per unique city name** — multi-provider availability for a single city is NOT surfaced to the frontend.
+   - **To show provider badges per city**: the API's dedup logic would need to either (a) be changed to aggregate providerKeys into an array per unique city (e.g. `{ cityName, providers: ['postex','leopard'], isPickupCity, isDeliveryCity }`), OR (b) be left as-is and the frontend only renders ONE provider badge per row (whichever provider "won" the dedup).
+   - In single-provider mode (`providerKey != 'all'`): `providerKey` is already known from the URL — the frontend can simply render a single provider badge from the URL parameter, no API change needed.
+
+6. **Existing courier badge components**:
+   - **No reusable `<CourierBadge>` / `<ProviderBadge>` / `<CourierLogo>` component exists.**
+   - The only existing courier-name → display-name mapping is an INLINE block in `src/components/orders/customer-detail-view.tsx` lines 1200-1208 (inside the `CityMatchInfo` component):
+     ```ts
+     const displayNames = matchedCouriers.map((p) => {
+       const lower = p.toLowerCase()
+       if (lower === 'postex') return 'PostEx'
+       if (lower === 'tcs') return 'TCS'
+       if (lower === 'leopard') return 'Leopard'
+       return p.charAt(0).toUpperCase() + p.slice(1)
+     })
+     ```
+   - Another pattern: `needs-shipper-advice-view.tsx` line 132 — uses CSS `capitalize` on raw `providerKey` (produces "Postex", "Tcs" — not ideal capitalization).
+   - Schema has `IntegrationProvider.providerName` (e.g. "PostEx", "TCS", "Leopard Couriers") and `IntegrationProvider.logoUrl` columns — but these live in the DB and are NOT returned by the cities API. The Integrations settings page (`integrations-view.tsx`) fetches them separately via `/api/integrations` and uses `i.provider.providerName`.
+   - NO courier logo image assets exist in `/public` — only the company logo.svg and uploaded scan-reports/PDFs. The `logoUrl` DB column is therefore likely null or pointing to an external URL for all current couriers.
+   - Adapter registry `src/lib/integrations/registry.ts` only registers three courier providerKeys: `postex`, `leopard`, `tcs`. No `trax`, `callCourier`, etc. — these are the only three badges that need to be supported.
+
+Stage Summary:
+Identified the single source of truth for city autocomplete (`src/components/couriers/city-autocomplete.tsx`) and the API that feeds it (`/api/couriers/[providerKey]/cities`). Confirmed the current pickup/delivery badges are plain `<span>` elements rendered at lines 213-223 of `city-autocomplete.tsx`. Confirmed the DB schema stores one row per (providerKey, cityName) pair — so a city like "Karachi" can have 3 separate rows (postex/leopard/tcs), each with its own pickup/delivery flags. The API's `'all'` mode currently deduplicates by cityName, returning only ONE providerKey per unique city (loses multi-provider info). To render per-provider courier badges in the suggestions dropdown in `'all'` mode, the API's dedup logic must be changed to aggregate providerKeys per city, OR the frontend must accept the single-providerKey-per-row limitation. No reusable `<CourierBadge>` component exists yet — the only existing inline display-name mapping is in `customer-detail-view.tsx` lines 1200-1208. Three couriers need to be supported: `postex` (PostEx), `leopard` (Leopard), `tcs` (TCS — stub adapter). No logo image assets exist in `/public`.
+
+No blockers for downstream implementation tasks (e.g. adding `<CourierBadge>` component + extending the cities API to return per-city provider lists).
+
+---
+Task ID: INV-AUDIT-BACKEND
+Agent: general-purpose (read-only audit subagent)
+Task: Audit the INVENTORY SYSTEM backend of the FlowOps Next.js 16 ERP — 11 modules (Dashboard, Locations, Suppliers, Receive Stock, Adjust Stock, Transfer Stock, Purchase Orders, Supplier Returns, Production Orders, Losses & Write-offs, Cycle Counts). READ-ONLY — no source modifications.
+
+Work Log:
+- Read worklog.md for project context (last 20 entries + INVENTORY-ARCHITECTURE-INVESTIGATE, INVENTORY-TEST-AND-PRODUCTION-SETUP, INVENTORY-3-BUGS-FIXED, REBUILD-API-PROTECTION tasks).
+- Read prisma/schema.prisma inventory models: InventoryLocation, Supplier, InventoryPool, InventoryTransaction, AvgCostHistory, StockTransfer, PurchaseOrder, PurchaseOrderItem, PurchaseOrderReceipt, PurchaseOrderReceiptItem, SupplierReturn, StockLossRecord, CycleCount, CycleCountItem, ProductionOrder, ProductFulfillmentCost, ReturnedStitchedInventory (lines 842-1458).
+- Read all 8 routes under src/app/api/inventory/*: dashboard, summary, receive, opening-stock, receive-returned-stitched, adjust, transfers, fulfill-mto.
+- Read all routes under src/app/api/inventory-locations/ (route.ts + [id]/route.ts).
+- Read all routes under src/app/api/suppliers/ (route.ts + [id]/route.ts).
+- Read all routes under src/app/api/purchase-orders/ (route.ts + [id]/route.ts + [id]/confirm + [id]/receive + [id]/cancel).
+- Read all routes under src/app/api/production-orders/ (route.ts + [id]/route.ts).
+- Read all routes under src/app/api/stock-loss/ (route.ts + [id]/route.ts + stats + report-damaged + report-theft + report-transit + resolve).
+- Read all routes under src/app/api/cycle-counts/ (route.ts + [id]/route.ts).
+- Read all routes under src/app/api/supplier-returns/ (route.ts + [id]/route.ts + [id]/dispute).
+- Read src/lib/inventory.ts (949 lines) — processInventoryTransaction, checkReturnedStockAvailability, getProductInventorySummary, generatePoNumber, incrementIncomingStock, decrementIncomingStock, checkAndFulfillMadeToOrderVariant, quarantineStock, releaseQuarantine, reserveStockForOrder, unreserveStockForOrder, dispatchOrder, restockOrderForRto.
+- Read src/lib/validations/inventory.ts (269 lines) and src/lib/validations/stock-loss.ts (113 lines) — confirmed ~50% of schemas are dead code (defined but not used by any route).
+- Read src/lib/actions/backorder.actions.ts (414 lines) — the only inventory-adjacent action file (called from purchase-orders/[id]/receive).
+- Read src/lib/workspace.ts getWorkspace + requirePermission + hasPermission implementations (lines 76-259).
+- Read src/lib/permissions.ts — confirmed 13 INVENTORY_* permission keys defined.
+- Spot-checked 11 inventory frontend components in src/components/inventory/ (lines counted: 14021 total across 16 .tsx files).
+- Wrote comprehensive audit report to /home/z/my-project/INVENTORY_AUDIT.md.
+
+Stage Summary:
+- Audit report INVENTORY_AUDIT.md written with full per-module breakdown (11 modules), cross-cutting concerns (10 items), summary table, and top-10 priority recommendations.
+- 4 CRITICAL bugs found (most severe: non-atomic transfer endpoint that can silently destroy stock; non-atomic PO receive; non-atomic PO creation with status='ordered').
+- 37 HIGH-severity logic issues found (most recurring: missing transaction wrapping, missing permission checks on GET endpoints, missing company-scoping on detail endpoints allowing cross-company access, legacy auth pattern, fire-and-forget post-completion automation).
+- 38 MEDIUM-severity issues (dead Zod schemas, race conditions in PO number generation, missing variant org-membership validation, status enum drift, etc.).
+- 24 LOW-severity smells (dead code, hardcoded defaults, fire-and-forget audit logs, etc.).
+- Confirmed 3 previously-fixed bugs from INVENTORY-3-BUGS-FIXED task remain fixed (positive adjustment now uses manual_adjustment_in; production order completion auto-stocks + reserves; pricing seed uses CVP).
+- No source code was modified — read-only audit.

@@ -77,8 +77,19 @@ export async function POST(req: Request) {
     // Core creation logic — wrapped in a closure so it can be run either
     // directly (no idempotency key, backwards-compatible) or via
     // withIdempotency() (prevents duplicate transfer submissions).
+    //
+    // ATOMICITY: The 3 writes (stockTransfer.create + transfer_out txn +
+    // transfer_in txn) are NOT wrapped in db.$transaction because
+    // processInventoryTransaction uses the global db client (can't accept
+    // a tx client without a major refactor of the 949-line inventory.ts).
+    // Instead, we use a COMPENSATING-TRANSACTION pattern: if step 2 or 3
+    // fails, we explicitly delete the orphan stockTransfer record so the
+    // system is left in a consistent state (no stock moved, no orphan
+    // transfer record). This prevents the "stock vanished" bug where
+    // transfer_out succeeds but transfer_in fails — previously the stock
+    // was decremented from source but never added to destination.
     const createTransfer = async () => {
-      // Create the stock_transfer record
+      // Step 1: Create the stock_transfer record (orphan if steps 2/3 fail)
       const transfer = await db.stockTransfer.create({
         data: {
           organizationId: orgId,
@@ -88,48 +99,86 @@ export async function POST(req: Request) {
           quantity: body.quantity!,
           costPerUnitAtTransfer,
           logisticsCost: body.logistics_cost || 0,
-          status: 'completed',
+          status: 'in_transit', // start as in_transit, mark completed after both txns succeed
           notes: body.notes || null,
           initiatedById: caller.id,
         },
       })
 
-      // Process transfer_out at source location
-      const outResult = await processInventoryTransaction({
-        orgVariantId: body.org_variant_id!,
-        locationId: body.from_location_id!,
-        organizationId: orgId,
-        companyId: company.id,
-        employeeId: caller.id,
-        transactionType: 'transfer_out',
-        quantity: body.quantity!,
-        costPerUnit: costPerUnitAtTransfer,
-        referenceType: 'transfer',
-        referenceId: transfer.id,
-        notes: `Transfer to ${body.to_location_id}`,
-      })
-      if (!outResult.success) {
-        throw new ApiError(500, `Transfer out failed: ${outResult.error}`)
+      // Step 2: Process transfer_out at source location
+      let outResult
+      try {
+        outResult = await processInventoryTransaction({
+          orgVariantId: body.org_variant_id!,
+          locationId: body.from_location_id!,
+          organizationId: orgId,
+          companyId: company.id,
+          employeeId: caller.id,
+          transactionType: 'transfer_out',
+          quantity: body.quantity!,
+          costPerUnit: costPerUnitAtTransfer,
+          referenceType: 'transfer',
+          referenceId: transfer.id,
+          notes: `Transfer to ${body.to_location_id}`,
+        })
+        if (!outResult.success) {
+          throw new Error(`Transfer out failed: ${outResult.error}`)
+        }
+      } catch (outErr) {
+        // COMPENSATING ACTION: delete the orphan transfer record so the
+        // system is left clean (no stock moved, no orphan record).
+        await db.stockTransfer.delete({ where: { id: transfer.id } }).catch(() => {})
+        throw new ApiError(500, outErr instanceof Error ? outErr.message : 'Transfer out failed — rolled back.')
       }
 
-      // Process transfer_in at destination location
+      // Step 3: Process transfer_in at destination location
       // costPerUnit is the sending location's cost — logistics_cost is NOT merged
-      const inResult = await processInventoryTransaction({
-        orgVariantId: body.org_variant_id!,
-        locationId: body.to_location_id!,
-        organizationId: orgId,
-        companyId: company.id,
-        employeeId: caller.id,
-        transactionType: 'transfer_in',
-        quantity: body.quantity!,
-        costPerUnit: costPerUnitAtTransfer,
-        referenceType: 'transfer',
-        referenceId: transfer.id,
-        notes: `Transfer from ${body.from_location_id}`,
-      })
-      if (!inResult.success) {
-        throw new ApiError(500, `Transfer in failed: ${inResult.error}`)
+      let inResult
+      try {
+        inResult = await processInventoryTransaction({
+          orgVariantId: body.org_variant_id!,
+          locationId: body.to_location_id!,
+          organizationId: orgId,
+          companyId: company.id,
+          employeeId: caller.id,
+          transactionType: 'transfer_in',
+          quantity: body.quantity!,
+          costPerUnit: costPerUnitAtTransfer,
+          referenceType: 'transfer',
+          referenceId: transfer.id,
+          notes: `Transfer from ${body.from_location_id}`,
+        })
+        if (!inResult.success) {
+          throw new Error(`Transfer in failed: ${inResult.error}`)
+        }
+      } catch (inErr) {
+        // COMPENSATING ACTION: reverse the transfer_out (step 2 succeeded,
+        // so source stock was decremented — we must add it back) AND delete
+        // the orphan transfer record. This prevents "stock vanished" —
+        // the source gets its stock back, the destination was never
+        // incremented, and the transfer record is cleaned up.
+        await processInventoryTransaction({
+          orgVariantId: body.org_variant_id!,
+          locationId: body.from_location_id!,
+          organizationId: orgId,
+          companyId: company.id,
+          employeeId: caller.id,
+          transactionType: 'manual_adjustment_in', // reverse the transfer_out
+          quantity: body.quantity!,
+          costPerUnit: costPerUnitAtTransfer,
+          referenceType: 'transfer',
+          referenceId: transfer.id,
+          notes: `REVERSAL: Transfer in failed. Returning stock to source location. Original out txn: ${outResult.transactionId}.`,
+        }).catch(() => {}) // best-effort reversal; if this fails too, admin must manually reconcile
+        await db.stockTransfer.delete({ where: { id: transfer.id } }).catch(() => {})
+        throw new ApiError(500, inErr instanceof Error ? inErr.message : 'Transfer in failed — stock returned to source, transfer rolled back.')
       }
+
+      // Both transactions succeeded — mark the transfer as completed
+      await db.stockTransfer.update({
+        where: { id: transfer.id },
+        data: { status: 'completed' },
+      })
 
       insertAuditLog({
         action: 'stock.transferred',

@@ -139,6 +139,77 @@ export async function PATCH(
       data: updateData,
     })
 
+    // ── BUG FIX: When cancelling a production order, REVERSE the fabric
+    //    consumption if fabric was already consumed.
+    //
+    //    Problem (from INVENTORY_AUDIT.md CRITICAL #3): the old code only
+    //    set status='cancelled' but did NOT return the consumed fabric to
+    //    inventory. The fabric was physically still in the warehouse
+    //    (tailor didn't use it), but the system's onHand was decremented
+    //    at fabric_reserved stage — so the fabric became "invisible" in
+    //    the system. Next cycle count would show a phantom shortage.
+    //
+    //    Fix: when cancelling, if the production order's fabricTxn exists
+    //    (meaning fabric was consumed at fabric_reserved stage), create a
+    //    reverse transaction that ADDS the fabric back to onHand.
+    //
+    //    This only applies when fabric was consumed (status was
+    //    fabric_reserved / in_production / completed). If status was
+    //    'pending' (fabric not yet consumed), there's nothing to reverse.
+    if (
+      body.status === 'cancelled' &&
+      oldValues.status !== 'cancelled' &&
+      oldValues.status !== 'pending' &&
+      order.fabricTxnId
+    ) {
+      try {
+        const { processInventoryTransaction } = await import('@/lib/inventory')
+
+        // Fetch the original fabric consumption transaction to get the
+        // exact quantity + cost that was consumed (so we reverse the same).
+        const fabricTxn = await db.inventoryTransaction.findUnique({
+          where: { id: order.fabricTxnId },
+          select: { quantity: true, costPerUnit: true },
+        })
+
+        if (fabricTxn) {
+          // fabricTxn.quantity is NEGATIVE (it was an OUT transaction).
+          // To reverse, we create an IN transaction with the ABSOLUTE value.
+          // We use 'manual_adjustment_in' (not 'cycle_count_adjust') because:
+          //   - cycle_count_adjust SETS onHand to a value (wrong — we want to ADD)
+          //   - manual_adjustment_in INCREMENTS onHand (correct)
+          // The referenceType + notes link it back to the production order
+          // so the audit trail is clear.
+          const absFabricQty = Math.abs(fabricTxn.quantity)
+          await processInventoryTransaction({
+            orgVariantId: order.fabricVariantId,
+            locationId: order.fabricLocationId,
+            organizationId: orgId,
+            companyId,
+            employeeId: caller.id,
+            transactionType: 'manual_adjustment_in',
+            quantity: absFabricQty,
+            costPerUnit: Number(fabricTxn.costPerUnit) || null,
+            referenceType: 'production_order',
+            referenceId: id,
+            notes: `FABRIC RETURNED: Production order ${order.id} cancelled. Fabric was consumed at fabric_reserved stage but stitching did not complete. Returning ${absFabricQty} units of fabric to inventory. Original txn: ${order.fabricTxnId}.`,
+          })
+          // Note: the original fabric_consumed_for_stitching transaction
+          // remains in the ledger (append-only) — it's the historical
+          // record. The new manual_adjustment_in transaction is the
+          // reversal. Auditors can trace: consumed on Day 1, returned on
+          // Day 5 when order cancelled.
+        }
+      } catch (reverseErr) {
+        // Log but don't fail the cancel — the order IS cancelled, just
+        // the fabric reversal failed. Admin can manually adjust later.
+        console.error(
+          `[production-orders] Cancel: failed to reverse fabric consumption for order ${id}:`,
+          reverseErr instanceof Error ? reverseErr.message : reverseErr,
+        )
+      }
+    }
+
     // ── Automation: when production order is marked "completed", add the
     //    produced stock to inventory AND reserve it for the linked order item.
     //    This closes the MTO cycle: production completes → stock exists →

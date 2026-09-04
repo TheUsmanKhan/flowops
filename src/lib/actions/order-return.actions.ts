@@ -225,6 +225,11 @@ export async function processOrderReturn(
 export async function correctReturnItemCondition(
   orderItemId: string,
   actualCondition: 'damaged',
+  options?: {
+    damageType?: string
+    responsibleParty?: string
+    notes?: string
+  },
 ): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
@@ -295,31 +300,47 @@ export async function correctReturnItemCondition(
       return { success: false, error: `Failed to reverse auto-processed entry: ${reverseResult.error}` }
     }
 
-    // Create the proper stock_loss_records entry
-    const lossRecord = await db.stockLossRecord.create({
-      data: {
-        organizationId: item.order.organizationId,
-        companyId: item.order.companyId,
-        orgVariantId: item.orgVariantId,
-        locationId,
-        lossType: 'damaged',
-        subType: 'confirmed',
-        damageType: 'other',
-        quantity,
-        costPerUnit,
-        investigationStatus: 'none',
-        resolution: 'written_off',
-        responsibleParty: 'courier',
-        evidenceUrls: '[]',
-        notes: `RTO return found damaged on physical inspection. Order item: ${orderItemId}`,
-        reportedById: ctx.employee.id,
-        approvedById: ctx.employee.id,
-        resolvedById: ctx.employee.id,
-        resolvedAt: new Date(),
-        orderItemId: item.id,
-        inventoryTxnId: reverseResult.transactionId,
-      },
+    // Create the proper stock_loss_records entry via the unified helper.
+    //
+    // UNIFIED: now uses recordStockLoss() (was: direct db.stockLossRecord.create)
+    // so the loss is properly deduped via the (orderItemId, lossType,
+    // sourceModule) unique index. If the user already corrected this item's
+    // condition (loss already exists), recordStockLoss returns wasDuplicate=true
+    // and we skip creating a duplicate — preventing the double-decrement bug
+    // where the same damaged return is recorded twice.
+    const { recordStockLoss } = await import('@/lib/stock-loss')
+    const lossResult = await recordStockLoss({
+      organizationId: item.order.organizationId,
+      companyId: item.order.companyId,
+      orgVariantId: item.orgVariantId,
+      locationId,
+      lossType: 'damaged',
+      sourceModule: 'rto',
+      quantity,
+      costPerUnit,
+      orderItemId: item.id,  // enables dedup
+      employeeId: ctx.employee.id,
+      subType: 'confirmed',
+      // BUG FIX (H10): use the caller-provided damageType + responsibleParty
+      // instead of hardcoding 'other' + 'courier'. The Returns Review UI
+      // now lets staff select the actual damage type + responsible party.
+      damageType: options?.damageType || 'other',
+      responsibleParty: options?.responsibleParty || 'courier',
+      notes: options?.notes || `RTO return found damaged on physical inspection. Order item: ${orderItemId}`,
+      // createInventoryTransaction=false — the reverseResult above already
+      // decremented onHand (damage_writeoff). A separate stock movement
+      // would double-decrement.
+      createInventoryTransaction: false,
     })
+
+    if (!lossResult.success) {
+      // If the loss record failed (not a dedup), we have a problem:
+      // the reverse transaction already decremented stock, but we
+      // couldn't create the loss record. Log it so admin can reconcile.
+      console.error(`[rto-correct] Failed to create loss record for item ${orderItemId}: ${lossResult.error}. Reverse txn ${reverseResult.transactionId} exists but has no loss record.`)
+    }
+
+    const lossRecordId = lossResult.lossRecordId ?? (lossResult.wasDuplicate ? 'dedup' : null)
 
     // Mark item as reviewed + corrected
     await db.orderItem.update({
@@ -336,7 +357,7 @@ export async function correctReturnItemCondition(
       userId: ctx.user.id,
       employeeId: ctx.employee.id,
       oldValues: { auto_processed_as: 'perfect', needs_review: true },
-      newValues: { corrected_to: actualCondition, loss_record_id: lossRecord.id },
+      newValues: { corrected_to: actualCondition, loss_record_id: lossRecordId, was_duplicate: lossResult.wasDuplicate },
     })
 
     // Metric: order_item.return_condition_corrected

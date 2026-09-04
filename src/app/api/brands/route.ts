@@ -1,7 +1,8 @@
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, handleError, readBody, getWorkspace, requirePermission } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -35,25 +36,18 @@ export async function GET() {
   }
 }
 
-/** Create a brand. */
+/** Create a brand. Requires PRODUCTS_MANAGE_CATALOG permission. */
 export async function POST(req: Request) {
   try {
     const idempotencyKey = req.headers.get('Idempotency-Key')
 
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({
-      where: { userId: user.id },
-      include: { activeCompany: true },
-    })
-    const orgId = settings?.activeOrgId
-    const company = settings?.activeCompany
-    if (!orgId || !company) throw new ApiError(403, 'No active organization')
+    // Modern auth: getWorkspace() (cached, 0ms) + requirePermission
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.PRODUCTS_MANAGE_CATALOG)
 
-    const caller = await db.employee.findFirst({
-      where: { companyId: company.id, userId: user.id, status: 'active' },
-    })
-    if (!caller) throw new ApiError(403, 'Not a member of this company.')
+    const orgId = ctx.company.organizationId
+    const company = ctx.company
+    const caller = ctx.employee
 
     const body = await readBody<{ name?: string }>(req)
     if (!body.name || body.name.trim().length < 2) {
@@ -94,7 +88,7 @@ export async function POST(req: Request) {
         entityId: brand.id,
         companyId: company.id,
         organizationId: orgId,
-        userId: user!.id,
+        userId: ctx.user.id,
         employeeId: caller.id,
         newValues: { name: brand.name },
       })

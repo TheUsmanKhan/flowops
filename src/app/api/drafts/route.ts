@@ -1,11 +1,18 @@
 import { ApiError, handleError } from '@/lib/workspace'
 import { listDrafts, countDrafts, deleteDraft, getDraft } from '@/lib/actions/drafts/save-draft'
+import { db } from '@/lib/db'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 /** GET /api/drafts?draftType=product|order&scope=mine|all&mode=count
  *  GET /api/drafts?id=draftId  (fetch single draft for resume)
+ *
+ * DRAFT EXPIRY: on every list/count request, lazily deletes drafts older
+ * than 30 days. This prevents abandoned drafts from accumulating in the
+ * DB forever (a draft is a temporary work-in-progress, not a permanent
+ * record). The delete is non-blocking (fire-and-forget) — the list
+ * returns immediately with whatever drafts exist at query time.
  */
 export async function GET(req: Request) {
   try {
@@ -25,6 +32,13 @@ export async function GET(req: Request) {
     const mode = url.searchParams.get('mode')
 
     if (!draftType) throw new ApiError(400, 'draftType is required (or provide id for single draft)')
+
+    // ── Lazy cleanup: delete drafts older than 30 days ──
+    // Fire-and-forget (no await) so the response isn't delayed.
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    db.formDraft.deleteMany({
+      where: { updatedAt: { lt: thirtyDaysAgo } },
+    }).catch(() => {/* non-fatal */})
 
     if (mode === 'count') {
       const result = await countDrafts({ draftType, scope: scope ?? undefined })

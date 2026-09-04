@@ -113,21 +113,58 @@ export async function POST(req: Request) {
 
         return { success: true, transaction_id: txnResult.transactionId }
       } else {
-        // Removing stock — use damage_writeoff as a generic removal type
-        const txnResult = await processInventoryTransaction({
-          orgVariantId: d.org_variant_id,
-          locationId: d.location_id,
+        // Removing stock — use damage_writeoff as a generic removal type.
+        //
+        // BUG FIX: Previously this branch only created the inventory
+        // transaction (decremented onHand) but NO StockLossRecord —
+        // leaving the Stock Losses module completely unaware that stock
+        // was lost/damaged. The user could then record the same loss
+        // AGAIN in the Stock Losses module → double-decrement.
+        //
+        // Now we create a StockLossRecord via the unified recordStockLoss
+        // helper, which:
+        //   1. Creates the loss record (linked to the inventory txn)
+        //   2. Is dedup-safe (if the user re-records in Stock Losses, the
+        //      unique index prevents duplicate)
+        //   3. Uses sourceModule='adjust_stock' so it's traceable
+        // See STOCKLOSS_INVESTIGATION.md Problem 2.
+        const { recordStockLoss } = await import('@/lib/stock-loss')
+        const lossResult = await recordStockLoss({
           organizationId: orgId,
           companyId: company.id,
-          employeeId: caller.id,
-          transactionType: 'damage_writeoff',
+          orgVariantId: d.org_variant_id,
+          locationId: d.location_id,
+          // Infer loss type from the reason — if reason mentions "theft",
+          // use theft; otherwise default to damaged (manual adjustment
+          // is typically for damage correction).
+          lossType: d.reason.toLowerCase().includes('theft') ? 'theft' : 'damaged',
+          sourceModule: 'adjust_stock',
           quantity: absQty,
-          referenceType: 'manual',
+          costPerUnit: avgCostForMetric,
+          employeeId: caller.id,
+          subType: 'confirmed',
+          responsibleParty: 'warehouse',
           notes: `Manual adjustment: ${d.reason}. ${d.notes || ''}`,
+          // createInventoryTransaction=true (default) — recordStockLoss
+          // creates the damage_writeoff transaction itself, so we DON'T
+          // call processInventoryTransaction separately below (was the
+          // old behavior). This unifies the stock movement + loss record
+          // into one atomic-ish operation with rollback on failure.
         })
-        if (!txnResult.success) {
-          throw new ApiError(500, `Adjustment failed: ${txnResult.error}`)
+
+        if (!lossResult.success) {
+          throw new ApiError(500, `Adjustment failed: ${lossResult.error}`)
         }
+        if (lossResult.wasDuplicate) {
+          // Loss already recorded for this — the adjustment is still valid
+          // (the user might be re-adjusting). Don't fail, just log.
+          console.log(`[adjust-stock] Loss already existed for this item, continuing with adjustment.`)
+        }
+
+        // If recordStockLoss created the inventory transaction, use that
+        // txn ID; otherwise (createInventoryTransaction was false), create
+        // the txn directly (shouldn't happen here since we use default true).
+        const txnId = lossResult.inventoryTxnId
 
         insertAuditLog({
           action: 'stock.adjusted',
@@ -137,7 +174,7 @@ export async function POST(req: Request) {
           organizationId: orgId,
           userId: user.id,
           employeeId: caller.id,
-          newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id },
+          newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id, lossRecordId: lossResult.lossRecordId },
         })
 
         // Metric event (CRITICAL — powers stock adjustment KPI)
@@ -151,10 +188,11 @@ export async function POST(req: Request) {
             location_id: d.location_id,
             direction: 'decrease',
             reason: d.reason,
+            loss_record_id: lossResult.lossRecordId ?? undefined,
           },
         })
 
-        return { success: true, transaction_id: txnResult.transactionId }
+        return { success: true, transaction_id: txnId, loss_record_id: lossResult.lossRecordId }
       }
     }
 

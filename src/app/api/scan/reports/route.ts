@@ -33,11 +33,15 @@ export async function POST(req: NextRequest) {
     const result = await getScanReport(dateFrom, dateTo, { employeeId, customerId })
     if (!result.success || !result.data) return Response.json({ error: result.error }, { status: 400 })
 
-    // Get company name
-    const user = await db.userSetting.findFirst({})
-    const company = user?.activeCompanyId
-      ? await db.company.findUnique({ where: { id: user.activeCompanyId }, select: { name: true, id: true } })
-      : null
+    // Get company name — BUG FIX: was findFirst({}) with NO where clause
+    // (returned ANY user's settings, not the authenticated user's).
+    // Now uses getWorkspace() (cached, 0ms) for the correct company.
+    const { getWorkspace } = await import('@/lib/workspace')
+    const ctx = await getWorkspace()
+    const company = await db.company.findUnique({
+      where: { id: ctx.company.id },
+      select: { name: true, id: true },
+    })
 
     const pdfPath = await generateScanReportPdf({
       companyName: company?.name ?? 'Company',

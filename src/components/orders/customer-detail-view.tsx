@@ -247,8 +247,10 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
   // getCustomerDetail() using the correct denominator (dispatched-or-later
   // orders, not all non-cancelled orders). The old local useMemo formulas
   // were inaccurate (treated all non-RTO as delivered, used wrong base).
-  const rtoRate = customer?.rtoRate ?? 0
-  const deliveryRate = customer?.deliveryRate ?? 0
+  // NULL when no dispatched-or-later orders exist (new customer) — the
+  // UI shows "N/A" instead of the misleading "0%".
+  const rtoRate = customer?.rtoRate ?? null
+  const deliveryRate = customer?.deliveryRate ?? null
 
   // Focus the inline name input when entering edit mode
   useEffect(() => {
@@ -484,15 +486,15 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
             />
             <StatCard
               label="RTO Rate"
-              value={`${rtoRate}%`}
+              value={rtoRate === null ? 'N/A' : `${rtoRate}%`}
               icon={<TrendingUp className="h-4 w-4" />}
-              tone={rtoRate >= 30 ? 'rose' : rtoRate > 0 ? 'amber' : 'emerald'}
+              tone={rtoRate === null ? 'default' : rtoRate >= 30 ? 'rose' : rtoRate > 0 ? 'amber' : 'emerald'}
             />
             <StatCard
               label="Delivery Rate"
-              value={`${deliveryRate}%`}
+              value={deliveryRate === null ? 'N/A' : `${deliveryRate}%`}
               icon={<Truck className="h-4 w-4" />}
-              tone={deliveryRate >= 80 ? 'emerald' : deliveryRate >= 50 ? 'amber' : 'rose'}
+              tone={deliveryRate === null ? 'default' : deliveryRate >= 80 ? 'emerald' : deliveryRate >= 50 ? 'amber' : 'rose'}
             />
           </div>
         </CardContent>

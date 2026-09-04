@@ -1,9 +1,8 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, handleError, readBody, getWorkspace, requirePermission } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
-import { bookOrderWithCourier } from '@/lib/actions/booking.actions'
+import { bookOrderWithCourier, bookExchangeShipmentWithCourier } from '@/lib/actions/booking.actions'
 import { decryptCredentials } from '@/lib/utils/encryption'
 import { getCourierAdapter } from '@/lib/integrations/registry'
 import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
@@ -47,24 +46,11 @@ interface BookRequest {
  */
 export async function POST(req: NextRequest) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    const orgId = settings?.activeOrgId
-    if (!companyId || !orgId) throw new ApiError(403, 'No active company')
-
-    const caller = await db.employee.findFirst({
-      where: { companyId, userId: user.id, status: 'active' },
-      include: { role: true },
-    })
-    if (!caller) throw new ApiError(403, 'Not a member of this company.')
-    const allowed =
-      caller.role.roleTier === 'elevated' ||
-      (await db.rolePermission.count({
-        where: { roleId: caller.roleId, permissionKey: PERMISSIONS.ORDERS_FULFILL },
-      })) > 0
-    if (!allowed) throw new ApiError(403, 'You lack permission to fulfill orders.')
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+    const companyId = ctx.company.id
+    const orgId = ctx.company.organizationId
+    const caller = ctx.employee
 
     const body = await readBody<BookRequest>(req)
     if (!body.companyIntegrationId) {
@@ -97,8 +83,20 @@ export async function POST(req: NextRequest) {
       return Response.json(result.data)
     }
 
-    // ── EXCHANGE SHIPMENT booking: handled inline ──
-    return await bookExchangeShipment(body, companyId, orgId)
+    // ── EXCHANGE SHIPMENT booking: delegate to the unified action ──
+    // BUG FIX (H7): was using an inline bookExchangeShipment function
+    // defined in this route file (duplicate logic that drifted from
+    // bookExchangeShipmentWithCourier in booking.actions.ts). Now delegates
+    // to the proper action for consistency.
+    const shipmentResult = await bookExchangeShipmentWithCourier(
+      body.entity_id,
+      body.courier_company_integration_id,
+      body.pickup_address_id || undefined,
+    )
+    if (!shipmentResult.success) {
+      throw new ApiError(400, shipmentResult.error ?? 'Failed to book exchange shipment')
+    }
+    return Response.json(shipmentResult.data)
   } catch (err) {
     return handleError(err)
   }

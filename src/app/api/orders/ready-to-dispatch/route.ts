@@ -13,8 +13,17 @@ export async function GET() {
   try {
     const { ctx, scopeFilter } = await resolveOrderScope()
 
+    // BUG FIX (H12): moved the "every item must be reserved" check from
+    // JS filter to DB-level Prisma relation filter. This is more efficient
+    // (DB does the filtering, no 200 rows loaded into memory just to filter
+    // in JS) and correctly excludes orders with backordered items.
     const orders = await db.order.findMany({
-      where: { companyId: ctx.company.id, status: { in: ['confirmed', 'processing'] }, ...scopeFilter },
+      where: {
+        companyId: ctx.company.id,
+        status: { in: ['confirmed', 'processing'] },
+        ...scopeFilter,
+        items: { every: { fulfillmentStatus: 'reserved' } },
+      },
       include: {
         customer: {
           select: {
@@ -32,9 +41,9 @@ export async function GET() {
       take: 200,
     })
 
-    const ready = orders.filter(
-      (o) => o.items.length > 0 && o.items.every((i) => i.fulfillmentStatus === 'reserved'),
-    )
+    // DB-level filter handles the "every item reserved" check now —
+    // no need for JS filter. All returned orders are already ready to dispatch.
+    const ready = orders
 
     const totalValue = ready.reduce((s, o) => s + Number(o.totalOrderValue), 0)
 
