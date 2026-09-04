@@ -1,0 +1,439 @@
+     1→- **Known issue**: Bulk tracking API intermittently returns HTTP 400 "Required List parameter 'TrackingNumbers' is not present" — handled with single-track fallback
+     2→
+     3→### Courier: Leopard
+     4→- **API Base**: `https://www.leopardscourierspk.com/services`
+     5→- **Auth**: `api_key` + `api_password` in body/query
+     6→- **Endpoints used**:
+     7→  - `POST /bookPacket/format/json/` — book shipment
+     8→  - `POST /trackBookedPacket/format/json/` — track shipment
+     9→  - `POST /cancelBookedPackets/format/json/` — cancel shipment
+    10→  - `POST /getAllCities/format/json/` — fetch all cities (returns `shipment_type` array per city)
+    11→  - `POST /createShipper/format/json/` — create pickup address (shipper)
+    12→  - `GET /getShipperDetails/format/json/` — fetch existing shippers
+    13→- **Status field**: 2-character codes (RC, SP, DP, AR, AC, DV, PN1, PN2, RO, RN1, RN2, NR, RW, DW, RS, DR)
+    14→- **No HMAC webhook signature** — security relies on `webhookEndpointId` URL routing
+    15→
+    16→### Courier: TCS (NOT integrated)
+    17→- **Status**: `framework_ready` (stub)
+    18→- **Needed**: Real API integration
+    19→
+    20→### E-commerce: Shopify (NOT integrated)
+    21→- **Status**: `framework_ready` (stub)
+    22→- **Partial work**: `createOrderFromShopifyWebhook()` exists in `order.actions.ts` but the Shopify adapter is a stub
+    23→
+    24→### E-commerce: Daraz (NOT integrated)
+    25→- **Status**: `framework_ready` (stub)
+    26→
+    27→### AI SDK: z-ai-web-dev-sdk
+    28→- **Used for**: Image generation, VLM (vision), TTS, ASR, LLM, web search — backend only
+    29→- **Skills**: Available via the Skills system (see `skills/` directory)
+    30→
+    31→---
+    32→
+    33→## 13. Background Jobs & Cron
+    34→
+    35→### Vercel Cron (`vercel.json`)
+    36→5. **Vercel cron** (`vercel.json`) — 5 cron schedules — but **only work on Vercel deployments** (the app currently runs on a long-lived Bun server, so these DON'T fire automatically):
+    37→
+    38→| Schedule | Path | Purpose |
+    39→|---|---|---|
+    40→| `0 */3 * * *` (3h) | `/api/cron/sync-cities` | Sync courier cities |
+    41→| `*/30 * * * *` (30min) | `/api/cron/poll-postex` | Poll PostEx statuses |
+    42→| `0 */12 * * *` (12h) | `/api/cron/poll-leopard-safety-net` | Leopard safety-net poll |
+    43→| `0 1 * * *` (daily 1AM) | `/api/cron/generate-scan-reports` | Generate scan reports |
+    44→| `0 2 * * *` (daily 2AM) | `/api/cron/refresh-exchange-rates` | Fetch + store exchange rate snapshots |
+    45→
+    46→### In-Process Poller (`instrumentation.ts`)
+    47→Since the app runs on a long-lived server (not Vercel), two background jobs are started in-process via Next.js's instrumentation hook:
+    48→- **PostEx status poller**: every 30 minutes (matches vercel.json). Guarded by `ENABLE_IN_PROCESS_POLLER` env var (default `true`).
+    49→- **Exchange rate refresh**: every 24 hours (matches vercel.json). Guarded by `ENABLE_IN_PROCESS_FX_REFRESH` env var (default `true`).
+    50→- Both use dynamic `import()` inside async closures (avoids bundling at build time). Singleton guard via module-level boolean flags.
+    51→
+    52→### Manual Triggers
+    53→All cron routes accept GET (manual) + POST (cron-triggered with `x-cron-secret` header). The `CRON_SECRET` is `flowops-cron-secret-v1-change-in-production`.
+    54→
+    55→---
+    56→
+    57→## 14. Storage & File System
+    58→
+    59→### Local File Storage
+    60→| Path | Purpose |
+    61→|---|---|
+    62→| `public/uploads/company-logos/` | Company logo images |
+    63→| `public/uploads/scan-reports/` | Scan report PDFs |
+    64→| `public/uploads/payslips/` | Payslip PDFs |
+    65→| `public/uploads/self-fulfilled-slips/` | Self-fulfilled internal slip PDFs (with CODE128 barcode) |
+    66→| `public/uploads/load-sheets/` | PostEx load sheet PDFs |
+    67→| `public/uploads/courier-slips/` | Downloaded courier slip PDFs (stored locally, not trusted to external URLs) |
+    68→| `public/uploads/product-images/` | Product images (uploaded via `/api/products/[id]/images`) |
+    69→| `public/uploads/payment-proofs/` | Payment proof screenshot uploads |
+    70→
+    71→### File Upload Pattern
+    72→- Images: `sharp` for processing → stored in `public/uploads/`
+    73→- PDFs: `@react-pdf/renderer` for generation (scan reports) OR downloaded from courier (slips)
+    74→- No cloud storage (S3, Cloudinary, etc.) — all local filesystem
+    75→
+    76→### Database Storage
+    77→- All business data in Supabase PostgreSQL
+    78→- No Redis/cache — TanStack Query handles client-side caching
+    79→- No file blobs in DB — only file paths
+    80→
+    81→---
+    82→
+    83→## 15. Gateway & Deployment
+    84→
+    85→### Caddy Gateway (`Caddyfile`)
+    86→The sandbox exposes one port (81) via Caddy:
+    87→- **Default**: reverse-proxies `:81` → `localhost:3000` (Next.js)
+    88→- **XTransformPort**: if URL has `?XTransformPort=XXXX`, proxies to `localhost:XXXX` (for mini-services)
+    89→- **Timeouts**: 120s (supports long courier API calls)
+    90→
+    91→### Development
+    92→- **Command**: `bun run dev` (runs `next dev -p 3000`)
+    93→- **Predev guard**: refuses to start if `.env` `DATABASE_URL` isn't `postgresql://`
+    94→- **Hot reload**: Turbopack (can be unstable in sandbox — memory issues)
+    95→
+    96→### Production
+    97→- **Build**: `next build` → `.next/standalone/`
+    98→- **Start**: `NODE_ENV=production bun .next/standalone/server.js`
+    99→- **Output mode**: `standalone` (self-contained server bundle)
+   100→
+   101→### Mini-Services
+   102→- **Directory**: `mini-services/`
+   103→- **`postex-poller/`**: Scaffold for a detached PostEx status poller service (for horizontal scaling). Has `package.json`, `README.md`, placeholder `Dockerfile`. NOT yet implemented — the `ENABLE_IN_PROCESS_POLLER` env var (default `true`) controls whether the in-process poller runs. Set to `false` on all but one replica, or use this dedicated worker.
+   104→- **Convention**: Each mini-service is an independent Bun project with its own port + `package.json`
+   105→- **Gateway**: Access via `?XTransformPort=PORT` query parameter
+   106→
+   107→---
+   108→
+   109→## 16. What's Built vs. In-Process vs. Needed
+   110→
+   111→### ✅ Fully Built & Working
+   112→
+   113→1. **Auth System** — login, register, logout, forgot/reset password, dual-channel sessions
+   114→2. **Multi-Tenancy** — org → company → employee, workspace switching, 30 permissions
+   115→3. **Catalog** — org-level categories, brands, attributes, attribute values
+   116→4. **Product Management** — org products, company subscriptions, variant management, pricing overrides, selective access. **Products list view**: responsive table (desktop, 8 columns) + stacked card list (mobile), switches at `md` breakpoint.
+   117→5. **Customer Management** — multi-phone, multi-address, external identities, RTO flagging, stats
+   118→6. **Order Management** — create (manual + Shopify stub), confirm, dispatch, deliver, cancel, RTO, payment conversion, queues
+   119→7. **Inventory System** — pools, transactions (16 types), WAC, reservations, dispatch, returns, transfers, adjustments
+   120→8. **Stock-Based + Made-to-Order** — fulfillment types, fabric consumption, production orders, returned-stitched bucket
+   121→9. **Purchase Orders** — create, confirm, receive, cancel
+   122→10. **Supplier Returns** — create, dispute
+   123→11. **Stock Loss** — theft, transit, damaged, resolve
+   124→12. **Cycle Counts** — create, count, adjust
+   125→13. **Exchanges** — request, verify, dispatch replacement, settle price difference
+   126→14. **Exchange Shipments** — reserve, dispatch, RTO, cancel
+   127→15. **Courier Integrations** — PostEx (live), Leopard (live)
+   128→16. **Booking Workbench** — book orders/shipments, load sheets
+   129→17. **City Management** — sync, search, auto-fetch missing cities, fuzzy match, aliases
+   130→18. **Courier Status Tracking** — auto-poller (30min), bulk+single fallback, status mapping, auto-dispatch/deliver/RTO
+   131→19. **Webhook Receiver** — generic, PostEx + Leopard
+   132→20. **Order Scan Module** — 6 scan modes, daily reports
+   133→21. **Dashboard** — KPIs, recent activity
+   134→22. **Audit Logs** — every mutation logged (fire-and-forget)
+   135→23. **Form Drafts** — autosave
+   136→24. **Settings** — company, organization, order workflow, integrations
+   137→25. **Inventory-OMS Connection** — reserve on confirm, deduct on dispatch, unreserve on cancel, restock on RTO (recently fixed)
+   138→26. **Docker Deployment** — multi-stage Dockerfile (dev + prod), docker-compose files, local DB for testing, PostEx poller toggle (see DOCKER.md)
+   139→27. **International Phone Validation** — libphonenumber-js for international numbers (UK, UAE, US, etc.); normalize_phone() SQL has pass-through fix for `+`-prefixed non-PK numbers; manual creation blocks on invalid; external flags isValidFormat=false
+   140→28. **Country System** — CustomerAddress.country + Order.deliveryCountry (alpha-2 codes, @default("PK")); CountrySelector in AddressSelector + CreateCustomerForm; non-PK addresses skip courier city-matching; phone validation uses address country as a hint (not a hard rule); Shopify fallback: country_code → country name → Company.countryCode
+   141→29. **Self-Fulfilled Channel** — Order.fulfillmentChannel ('courier' | 'self_fulfilled'); SF-YYYY-NNNNN per-company reference via SQL function; auto-defaults to self_fulfilled for non-PK (overridable); skips auto-booking + city-matching; internal slip PDF with CODE128 barcode via jsbarcode → SVG → sharp → PNG; processScan() resolves both trackingNumber + selfFulfilledReferenceNumber; fully independent of Markets system
+   142→30. **Markets System** — Market, MarketCountry, MarketVariantPricing, MarketProduct models; auto-created Default market at company creation; single→multi-market transition backfill; per-market pricing with full cascade/sync (mirrors CompanyVariantPricing); product enablement per market; Markets management UI (list/create/edit/archive/delete/promote); bulk product assignment from market-detail-view
+   143→31. **3-Gate Enforcement** — Gate 1 (variant isActive), Gate 2 (MarketProduct enablement), Gate 3 (MarketVariantPricing exists); first-failing-reason only; manual orders blocked if country not in any market; payment types restricted to market's allowedPaymentTypes (client + server); external orders never blocked — flagged with needsReview + needsReviewReason
+   144→32. **Discount Rework** — client-overridable unit_price removed; originalUnitPrice resolved strictly from MarketVariantPricing (server-side only, never client-writable); per-item discount (percentage/fixed) with validation; Order.discountAmount/discountReason (order-wide) works independently; Shopify total_discounts now captured
+   145→33. **Dashboard Currency Rollup** — shared computeRevenueWithCurrencies() function; per-currency breakdown (always accurate) + estimated total in baseCurrency; daily exchange rate cron; display-only (never touches stored order prices)
+   146→34. **Pricing Tab with Market Sub-Tabs** — product-detail-view Pricing tab renders market sub-tabs (Default first) with completion badges; ParentChildVariantTable scoped by marketId with full cascade/sync; "Copy from Default" bulk action for empty markets
+   147→
+   148→### 🔧 In-Process / Recently Fixed
+   149→
+   150→1. **PostEx bulk tracking API** — added single-track fallback for intermittent 400 errors (FIXED)
+   151→2. **Courier status auto-poller** — added in-process poller via `instrumentation.ts` since Vercel cron doesn't fire on long-lived server (FIXED)
+   152→3. **Scan "packed" status** — `markOrderPacked` now transitions `order.status` to `'processing'` + shows "Packed" badge (FIXED)
+   153→4. **Inventory-OMS disconnect** — 4 bugs fixed: placeholder `'reserved'` → `'pending'`, `convertPaymentStatus` now reserves, courier RTO restocks dispatched orders, Shopify webhook now reserves (FIXED)
+   154→5. **Fire-and-forget audit/metrics** — all 257 call sites converted from blocking `await` to non-blocking (FIXED)
+   155→6. **getWorkspace() optimization** — 4 sequential queries → 1 JOIN query (FIXED)
+   156→7. **createManualOrder() parallelization** — sequential reads → `Promise.all` batches (FIXED)
+   157→8. **Code-splitting** (Step 1) — all 70+ views lazy-loaded via `next/dynamic`; First Load JS 3,148 KB → 1,070 KB (66% reduction) (FIXED)
+   158→9. **React.memo** (Step 2) — leaf components in 6 largest views wrapped in `memo()` to prevent unnecessary re-renders (FIXED)
+   159→10. **TanStack Query migration** (Step 3) — 6 tech-debt views (`employees-view`, `roles-view`, `organization-view`, `company-settings-view`, `audit-log-view`, `onboarding-view`) migrated from raw `useEffect`+`api.get()` to `useQuery`/`useMutation` (FIXED)
+   160→11. **Dead dependencies removed** (Step 4) — 10 unused packages removed (`@mdxeditor/editor`, `@tanstack/react-table`, `@dnd-kit/*`, `framer-motion`, `react-syntax-highlighter`, `react-markdown`, `next-intl`, `next-auth`); node_modules 1.3 GB → 1.2 GB (FIXED)
+   161→12. **LCP optimization** — route-aware `LoadingFallback` added; renders PageHeader text at Suspense boundary immediately (FIXED)
+   162→13. **LCP regression** — `ROUTE_CHUNK_LOADERS` map (which caused +55 duplicate chunks) removed; chunk count 150 → 95 (FIXED)
+   163→14. **Products view conversion** — grid cards → responsive table (desktop, 8 columns) + stacked card list (mobile); switches at `md` breakpoint (FIXED)
+   164→15. **Product create scroll** — added `useEffect` to scroll to top on step change; prevents users landing at the bottom of step 3 (FIXED)
+   165→16. **Hydration mismatch** — added `suppressHydrationWarning` to `<body>` tag in `layout.tsx`; fixes Grammarly browser extension attribute injection (FIXED)
+   166→17. **Docker setup** — multi-stage Dockerfile (dev + prod), docker-compose.yml (dev), docker-compose.prod.yml (prod), docker-compose.local-db.yml (local Postgres for schema testing), DOCKER.md guide, PostEx poller toggle via `ENABLE_IN_PROCESS_POLLER` env var (FIXED)
+   167→18. **Courier cancel — Leopard support** (FIXED) — removed PostEx-only guard; Leopard's `cancelShipment()` now works for both orders + exchange shipments
+   168→19. **Courier cancel — retroactive** (FIXED) — already-internally-cancelled orders can now have their courier booking cancelled retroactively
+   169→20. **Order cancel → courier cancel** (FIXED) — `cancelOrder()` now calls `cancelCourierBooking()` first when a courier booking exists (pre-dispatch only)
+   170→21. **Exchange shipment cancel → courier cancel** (FIXED) — `cancelExchangeShipment()` now calls courier cancel when trackingNumber exists
+   171→22. **City propagation** (FIXED) — corrected cities propagate from order creation + booking-time resolution back to CustomerAddress (only when using saved address)
+   172→23. **Phone validation** (FIXED) — international phone validation using libphonenumber-js; client + server defense in depth; external platform phones flagged with `isValidFormat=false`
+   173→24. **Idempotency system** (FIXED) — `withIdempotency()` backend helper + `useIdempotentMutation()` frontend hook; applied to ALL 24+ creation endpoints; DB-level unique constraints on employee invites + company integrations
+   174→25. **Request payload logging** (FIXED) — `IntegrationActionLog.requestPayload` now populated for all outbound courier calls (book_shipment, cancel_shipment, track_shipment, etc.)
+   175→26. **DB-level uniqueness** (FIXED) — partial unique index on `Invitation(companyId, invitedEmail) WHERE status='pending'`; `@@unique([companyId, providerId])` on `CompanyIntegration`
+   176→27. **Button cursor fix** (FIXED) — `cursor-pointer` on all buttons; `disabled:cursor-not-allowed` replaces `disabled:pointer-events-none`
+   177→28. **Order-create child-component scope leaks** (FIXED) — `order-create-view.tsx` has 6 child function components (`CustomerSection`, `CrmStatsWidget`, `ItemsSection`, `PaymentSection`, `ProofFileInput`, `SummarySection`) declared at module level (NOT closures inside `OrderCreateView`). During the Markets/3-gate feature work, parent-scope variables were referenced directly inside child components without being passed as props, causing `ReferenceError: X is not defined` at runtime. Fixed by passing ALL required variables as props: `isCountryBlocked`, `countryBlockReason`, `fulfillmentChannel`, `setFulfillmentChannel`, `userPickedCourier`, `setUserPickedCourier`, `deliveryCountry`, `enabledProductIdsSet`, `pricedVariantIdsSet`, `resolvedMarketName`. Exhaustive Python audit confirmed all 6 child components are now clean.
+   178→29. **Self-fulfilled slip PDF 404 fix** (FIXED) — The slip PDF API previously returned a URL path (`/uploads/self-fulfilled-slips/...`) and the frontend did `window.open(url)` to open it, but the Caddy gateway didn't serve the static file correctly (404). Fixed: the API now returns the PDF as a **binary response** (`Content-Type: application/pdf`), and the frontend uses `fetch()` → `response.blob()` → `URL.createObjectURL(blob)` → `window.open(blobUrl)` — no static file serving needed, no 404 possible.
+   179→
+   180→### ❌ Not Yet Built / Needed
+   181→
+   182→1. **TCS Courier Integration** — adapter is a stub, needs real API integration
+   183→2. **Shopify E-commerce Integration** — `createOrderFromShopifyWebhook()` is fully implemented (with 3-gate soft enforcement + total_discounts capture + needsReview flagging). The webhook parsing + customer matching works. However, the adapter that parses Shopify webhooks into the `ShopifyOrderWebhook` payload shape is a stub — needs real webhook signature verification + payload mapping.
+   184→3. **Daraz E-commerce Integration** — adapter is a stub (`notImplemented`). No order creation path.
+   185→4. **External Scheduler for Cron Jobs** — Vercel cron doesn't fire on this server. Options:
+   186→   - External service (cron-job.org, GitHub Actions) hitting the cron endpoints
+   187→   - OR deploy to Vercel (where the cron config works natively)
+   188→5. **Calculate Rate** — both PostEx + Leopard `calculateRate()` throw "not implemented" — needed for shipping cost estimation
+   189→6. **Reports & Analytics** — `REPORTS_VIEW` / `REPORTS_EXPORT` permissions exist but no reporting module is built
+   190→7. **KPI Dashboard** — `KPI_VIEW` / `KPI_MANAGE` permissions exist; basic dashboard exists but no advanced KPI management
+   191→8. **Finance Module** — `FINANCE_VIEW` / `FINANCE_MANAGE` permissions exist but no finance module is built
+   192→9. **Real-time Notifications** — no websocket/notification system (mini-services/postex-poller/ is a stub; examples/websocket/ is reference only)
+   193→10. **Mobile App** — no mobile app (web-only, but responsive)
+   194→11. ~~**Multi-currency**~~ **BUILT**: Market-level currencies + daily exchange rate cron + per-currency revenue breakdown + estimated converted total. Display-only (never touches stored prices).
+   195→12. **Tax Management** — `taxAmount` / `taxLabel` fields exist but no tax calculation engine
+   196→13. **Email Notifications** — no email sending (forgot-password is a stub)
+   197→14. **SMS Notifications** — no SMS integration
+   198→15. **Product Bundles** — `OrgProductBundle` model exists but no bundle management UI
+   199→16. **Attribute Value Rules** — `AttributeValueRule` model exists but no rule engine UI
+   200→17. **Advanced Inventory Features** — reorder points (`reorderPoint` / `reorderQuantity` fields exist) but no low-stock alerts
+   201→18. **Data Export** — `REPORTS_EXPORT` permission exists but no CSV/Excel export
+   202→19. ~~**`/api/auth/me` performance**~~ **FIXED (Phase 1)**: `buildSessionPayload()` now uses a single raw SQL JOIN. Latency reduced from ~696ms to ~210ms (67% faster). See §11.7.
+   203→
+   204→    > **Note (deferred, not forgotten)**: Server-side in-memory caching for `/api/auth/me` was considered and deliberately deferred after the raw-SQL JOIN fix brought warm requests to ~210ms. At current traffic levels, the marginal gain (shaving ~210ms to ~1-5ms only on repeat calls within a short window) didn't justify the added invalidation complexity (workspace switch, termination, role change, future isBlocked flag). Revisit this alongside introducing Redis, once either (a) a second server replica is deployed, or (b) concurrent DB read load from this endpoint becomes measurable.
+   205→
+   206→---
+   207→
+   208→## 17. Key Conventions & Patterns
+   209→
+   210→### Naming
+   211→- **Tables**: PascalCase (Prisma default) — `Order`, `OrderItem`, `InventoryPool`
+   212→- **Columns**: camelCase (Prisma default) — `flowopsOrderNumber`, `courierSubStatus`
+   213→- **API routes**: kebab-case — `/api/booking-workbench/bookable`
+   214→- **Files**: kebab-case — `order.actions.ts`, `postex.adapter.ts`
+   215→- **Components**: PascalCase — `OrderDetailView`, `BookingWorkbenchView`
+   216→
+   217→### Status Enums (all plain strings, no DB enums)
+   218→- **Order.status**: `pending | confirmed | partially_backordered | processing | dispatched | delivered | rto | cancelled | refunded`
+   219→- **OrderItem.fulfillmentStatus**: `pending | reserved | backordered | dispatched | returned`
+   220→- **courierSubStatus**: `slip_generated | pickup_requested | picked_up | at_warehouse | en_route | out_for_delivery | delivered | returned | out_for_return | attempted | under_review | cancelled_by_merchant | expired`
+   221→- **courierBookingStatus**: `not_booked | booked | failed | cancelled`
+   222→- **paymentStatus**: `cod_pending | advance_paid | fully_prepaid | cod_collected`
+   223→- **fulfillmentType**: `stock_based | made_to_order`
+   224→- **inventoryPolicy**: `deny | continue`
+   225→
+   226→### Fire-and-Forget Pattern
+   227→```typescript
+   228→// insertAuditLog + insertMetricEvent return void immediately
+   229→// The DB write happens on the event loop AFTER the response is sent
+   230→insertAuditLog({ action: 'order.created', ... })  // no await!
+   231→insertMetricEvent({ metricKey: 'order.created', ... })  // no await!
+   232→```
+   233→
+   234→### Workspace Context Pattern
+   235→```typescript
+   236→// Every authenticated API route starts with:
+   237→const ctx = await getWorkspace()  // resolves user + employee + company
+   238→await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)  // throws 403 if lacking
+   239→```
+   240→
+   241→### Adapter Pattern
+   242→```typescript
+   243→// Never call adapter methods directly — always through executeLoggedIntegrationAction:
+   244→const result = await executeLoggedIntegrationAction({
+   245→  companyIntegrationId: integration.id,
+   246→  organizationId: ctx.company.organizationId,
+   247→  actionType: 'book_shipment',
+   248→  direction: 'outbound',
+   249→  fn: async () => adapter.bookShipment(bookInput),
+   250→})
+   251→// This logs the call to IntegrationActionLog + handles errors
+   252→```
+   253→
+   254→### Idempotency
+   255→- `reserveOrderStock` skips items with `fulfillmentStatus === 'reserved'` or `'dispatched'`
+   256→- `performOrderDispatch` skips items already `'dispatched'`
+   257→- `restockOrderForRto` skips items already `'returned'`
+   258→- `processInventoryTransaction` validates stock before mutating
+   259→
+   260→### Creation Idempotency (withIdempotency pattern)
+   261→```typescript
+   262→// ALL creation endpoints wrap their action in withIdempotency():
+   263→const { result, wasReplay } = await withIdempotency({
+   264→  key: idempotencyKey,          // from Idempotency-Key header
+   265→  companyId: ctx.company.id,
+   266→  employeeId: ctx.employee.id,
+   267→  actionType: 'order.create',   // or 'product.create', 'customer.create', etc.
+   268→  fn: async () => { /* actual creation logic */ },
+   269→})
+   270→// DB unique constraint on key enforces atomicity — no race window
+   271→// Failed attempts can be retried with the same key
+   272→// Stale 'processing' rows (>60s) auto-recover
+   273→```
+   274→
+   275→### Phone Validation (libphonenumber-js)
+   276→```typescript
+   277→// Client-side: isValidPhoneFormat(phone) blocks submission
+   278→// Server-side: validateAndNormalizePhone(phone) returns { isValid, normalized }
+   279→// External platform: isValidFormat=false on CustomerPhone row (not blocked)
+   280→// International: normalize_phone() SQL has pass-through fix for + non-PK numbers
+   281→// matchOrCreateExternalCustomer: pre-normalizes international numbers via libphonenumber-js before SQL call
+   282→import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-validation'
+   283→```
+   284→
+   285→### Country System
+   286→- `CustomerAddress.country` + `Order.deliveryCountry` store ISO 3166-1 alpha-2 codes (e.g. "PK", "GB"), defaulting to "PK"
+   287→- `CountrySelector` component (reusable) returns alpha-2 codes directly
+   288→- Non-PK addresses skip courier city-matching (matchCity, revalidateCityAtBookingTime, validateCustomerAddressCity all early-return for non-PK)
+   289→- Phone validation uses the address's country as a HINT for no-`+`-prefix numbers (never a hard rule)
+   290→- Shopify fallback: `country_code → countryNameToCode(country) → customer.addresses[0].country → Company.countryCode → 'PK'`
+   291→
+   292→### Self-Fulfilled Channel
+   293→- `Order.fulfillmentChannel`: `'courier' | 'self_fulfilled'` (default `'courier'`)
+   294→- Auto-defaults to `'self_fulfilled'` when `deliveryCountry !== 'PK'` (always overridable)
+   295→- `generate_self_fulfilled_reference(companyId)` SQL: per-company MAX-based `SF-YYYY-NNNNN`
+   296→- Self-fulfilled orders skip auto-booking + city-courier-matching entirely
+   297→- Internal slip PDF: jsbarcode CODE128 barcode → SVG → sharp → PNG → @react-pdf/renderer
+   298→- `processScan()` resolves via `OR: [trackingNumber, selfFulfilledReferenceNumber]`
+   299→- Fully independent of the Markets system (no code coupling)
+   300→
+   301→### Markets System (3-Gate Enforcement)
+   302→- **Gate 1**: `OrgProductVariant.isActive` — toggled-off variants appear DISABLED in picker (not hidden)
+   303→- **Gate 2**: `MarketProduct` enablement for the resolved market
+   304→- **Gate 3**: `MarketVariantPricing` exists for this variant + resolved market
+   305→- First failing reason only (priority: gate 1 → 2 → 3)
+   306→- Manual orders: blocked if country not in any market (server-side rejection)
+   307→- External orders: NEVER blocked — flagged with `needsReview` + `needsReviewReason`
+   308→- Payment types restricted to market's `allowedPaymentTypes` (client + server enforcement)
+   309→- No fallback anywhere — a variant with no explicit market price is simply not sellable
+   310→
+   311→### Pricing Resolution (Discount Rework)
+   312→- `unit_price` is NO LONGER accepted from the client (removed from schema)
+   313→- Server resolves `originalUnitPrice` STRICTLY from `MarketVariantPricing` for the resolved market
+   314→- If no MVP row exists → server REJECTS with gate-3 error (no CompanyVariantPricing/costPrice fallback)
+   315→- Per-item discount (`discountType`/`discountValue`): percentage (0-100) or fixed (≤ originalUnitPrice), clamped at 0
+   316→- `unitPrice = originalUnitPrice - discount` (final charged price)
+   317→- `Order.discountAmount`/`discountReason` (order-wide flat discount) works independently
+   318→
+   319→### Currency Revenue Rollup
+   320→- `computeRevenueWithCurrencies(companyId, orders, baseCurrency)` in `src/lib/analytics/revenue.ts`
+   321→- Returns: `{ perCurrency: Map, estimatedTotalBase, baseCurrency, estimateComplete }`
+   322→- Per-currency breakdown is always accurate (raw sums, no conversion)
+   323→- Estimated total uses latest `ExchangeRateSnapshot` — display only, never touches stored prices
+   324→- Used by all 3 revenue sites: orders-view (via `/api/orders/revenue-summary`), order-funnel.ts, customer.actions.ts
+   325→
+   326→---
+   327→
+   328→## 18. Known Issues & Gotchas
+   329→
+   330→### Environment
+   331→1. **`.env` reverts to SQLite** — the `predev` script guards against this, but always verify before starting. If it happens, restore from DOCKER.md reference or git history.
+   332→2. **DB latency** — Mumbai region (~100ms per query from sandbox). Performance optimizations (fire-and-forget, parallel queries, single-JOIN getWorkspace) have been applied. `/api/auth/me` is now ~210ms (was 500-1000ms) — FIXED (see item 14 for details).
+   333→3. **Turbopack instability** — dev server can hang during compilation in the sandbox (memory issue). Clear `.next/` cache and restart.
+   334→4. **Hydration mismatch from browser extensions** — Grammarly injects `data-gr-ext-installed` + `data-new-gr-c-s-check-loaded` attributes into `<body>`. Fixed via `suppressHydrationWarning` on `<body>` in `layout.tsx`. If new hydration errors appear, check for other browser-extension-injected attributes.
+   335→
+   336→### Bundling
+   337→5. **Do NOT add module-scope `import()` maps** — a `ROUTE_CHUNK_LOADERS` map with 55 `() => import(...)` entries caused Turbopack to create 55 duplicate chunks (+1,303 KB). The ONLY place each route's code should be imported is the `dynamic()` call in `page.tsx`. See §11.1 warning.
+   338→
+   339→### Integrations
+   340→6. **PostEx bulk tracking API** — intermittently returns HTTP 400. Handled with single-track fallback
+   341→7. **Vercel cron doesn't fire** — on long-lived server. In-process pollers added for PostEx (30min) + exchange rate refresh (24h). Other crons (city sync, scan reports, Leopard safety-net) need manual triggering or external scheduler. The `ENABLE_IN_PROCESS_POLLER` + `ENABLE_IN_PROCESS_FX_REFRESH` env vars (default `true`) can disable for multi-replica deployments.
+   342→8. **PostEx API lag** — parcels may be physically picked up but PostEx's API still shows "Booked" for hours. This is a PostEx issue, not FlowOps
+   343→
+   344→### Schema
+   345→9. **SQL functions must be applied manually** — `generate_order_number()`, `generate_self_fulfilled_reference()`, `normalize_phone()` (with international pass-through fix), `match_or_create_customer()` (now 7 params), etc. are NOT in the Prisma schema. They must be applied via raw SQL to the DB. A consolidated file `supabase/functions-only.sql` contains all 24+ functions + 2 sequences + 12 triggers + 2 partial unique indexes (`invitation_pending_email_unique` + `market_one_default_per_company`).
+   346→10. **No DB-level RLS** — all multi-tenant isolation is in the app layer. A bug in `getWorkspace()` or a missing `companyId` filter could leak data across tenants
+   347→11. **No `available` column** — `available = onHand - reserved` is computed in app code every time
+   348→12. **Order-create child components are module-level functions** — `CustomerSection`, `ItemsSection`, `PaymentSection`, etc. in `order-create-view.tsx` are declared at the module level (NOT closures inside `OrderCreateView`). Any new state variable used in these child components MUST be passed as a prop — referencing it directly will compile fine but crash at runtime with `ReferenceError`. TypeScript does NOT catch this. When adding new state/hooks to `OrderCreateView` that child components need, always: (1) add it to the child's destructured props, (2) add it to the child's type definition, (3) pass it from `<OrderCreateView>` to `<ChildComponent>`.
+   349→
+   350→### Performance
+   351→13. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
+   352→14. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
+   353→15. ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1 + Phase 2)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw query JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. See `src/lib/session-payload.ts`. Phase 2: client-side stale-while-revalidate caching added via TanStack Query (`refetchOnWindowFocus: true` scoped to session query only — see §11.1). Server-side in-memory cache deliberately deferred (see §16 item 19 note).
+   354→16. **Booking-time city corrections were not persisted** (FIXED) — `order.update` in `bookOrderWithCourier()` now includes `deliveryCity` + `deliveryAddress`. Pre-fix, corrected cities were sent to the courier API but not saved on the Order row. Historical data cannot be backfilled (requestPayload was null for pre-fix logs). Going forward, requestPayload is logged for all outbound calls.
+   355→17. **Employee invite had race window** (FIXED) — was check-then-create (findFirst then create). Now has partial unique index `invitation_pending_email_unique` on `(companyId, invitedEmail) WHERE status='pending'` + catches P2002 constraint violation.
+   356→18. **Company integration had race window** (FIXED) — was find-then-create. Now has `@@unique([companyId, providerId])` + catches P2002 → re-fetches + reactivates.
+   357→
+   358→---
+   359→
+   360→## 19. Prompt Generation Guide
+   361→
+   362→When generating prompts for AI assistants working on FlowOps, use these patterns:
+   363→
+   364→### Context to Always Include
+   365→```
+   366→- Project: FlowOps ERP (Pakistani e-commerce ERP)
+   367→- Stack: Next.js 16 + React 19 + TypeScript + Prisma 6 + Supabase PostgreSQL + Tailwind 4 + shadcn/ui
+   368→- Multi-tenant: Organization → Company → Employee
+   369→- Auth: custom HMAC sessions (not NextAuth), dual-channel (Bearer + cookie)
+   370→- State: Zustand (client) + TanStack Query (server) — ALL 70 data-fetching views use useQuery/useMutation
+   371→- Single SPA route at /, ~70 named view states, all lazy-loaded via next/dynamic (ssr: false)
+   372→- API: 170+ routes under src/app/api/, all use getWorkspace() + requirePermission()
+   373→- Actions: 18 files under src/lib/actions/ contain all business logic
+   374→- Inventory: src/lib/inventory.ts is the ONLY way to modify InventoryPool
+   375→- Couriers: PostEx (live) + Leopard (live) + TCS (stub)
+   376→- Fire-and-forget: insertAuditLog/insertMetricEvent return void
+   377→- Performance: First Load JS 1,070 KB (code-split into 95 chunks). React.memo on leaf components.
+   378→- CRITICAL: Do NOT add module-scope import() maps — use dynamic() in page.tsx only (causes duplicate chunks)
+   379→- Idempotency: withIdempotency() wraps ALL creation endpoints; useIdempotentMutation() on frontend
+   380→- Phone validation: libphonenumber-js (isValidPhoneFormat) — client + server defense in depth; international pass-through in normalize_phone() SQL
+   381→- City propagation: corrected cities propagate to CustomerAddress at order creation + booking time
+   382→- IntegrationActionLog: now logs requestPayload (not just responsePayload) for all outbound calls
+   383→- Country system: CustomerAddress.country + Order.deliveryCountry (alpha-2 codes, @default("PK")); CountrySelector in both address forms; non-PK skips city-matching
+   384→- Self-fulfilled: fulfillmentChannel ('courier'|'self_fulfilled'), SF-YYYY-NNNNN per-company ref, jsbarcode CODE128 slip PDF, processScan OR:[trackingNumber, selfFulfilledReferenceNumber]; independent of Markets
+   385→- Markets: Market + MarketCountry + MarketVariantPricing + MarketProduct; 3-gate enforcement (isActive → MarketProduct → MVP); no fallback; manual blocked if country not in market; external flagged not blocked
+   386→- Pricing: originalUnitPrice resolved from MarketVariantPricing ONLY (no client unit_price, no CVP/costPrice fallback); per-item discount (percentage/fixed)
+   387→- Currency rollup: computeRevenueWithCurrencies() shared by all 3 sites; per-currency breakdown + estimated total; display-only
+   388→- Exchange rates: daily cron (/api/cron/refresh-exchange-rates) + in-process fallback (ENABLE_IN_PROCESS_FX_REFRESH)
+   389→```
+   390→
+   391→### Module-Specific Context
+   392→- **Orders**: `src/lib/actions/order.actions.ts` — `createManualOrder`, `confirmOrder`, `cancelOrder`, `performOrderDispatch`, `markOrderPacked`, `markOrderDelivered`
+   393→- **Inventory**: `src/lib/inventory.ts` — `processInventoryTransaction`, `reserveStockForOrder`, `unreserveStockForOrder`, `dispatchOrder`, `restockOrderForRto`
+   394→- **Couriers**: `src/lib/integrations/couriers/postex.adapter.ts` + `leopard.adapter.ts`
+   395→- **Booking**: `src/lib/actions/booking.actions.ts` — `bookOrderWithCourier`, `maybeAutoBookOrder`
+   396→- **Status polling**: `src/lib/actions/postex-status-poll.actions.ts` + `instrumentation.ts`
+   397→- **Scan**: `src/lib/actions/scan.actions.ts` + `src/components/orders/order-scan-view.tsx`
+   398→- **Markets**: `src/lib/markets.ts` (helpers: isMultiMarketCompany, resolveMarketByCountry, isProductEnabledForMarket, getPricedVariantIdsForMarket, backfillDefaultMarketProducts) + `src/components/markets/markets-view.tsx` + `src/components/markets/market-detail-view.tsx`
+   399→- **Self-fulfilled**: `src/lib/utils/internal-slip-pdf.ts` (jsbarcode + sharp + @react-pdf/renderer) + `src/app/api/orders/[id]/self-fulfilled-slip/route.ts`
+   400→- **Exchange rates**: `src/lib/exchange-rates.ts` (getLatestRates, convertAmount, syncExchangeRates) + `src/app/api/cron/refresh-exchange-rates/route.ts`
+   401→- **Revenue**: `src/lib/analytics/revenue.ts` (computeRevenueWithCurrencies) + `src/app/api/orders/revenue-summary/route.ts`
+   402→
+   403→### Common Prompt Patterns
+   404→```
+   405→"Fix a bug in the [MODULE] module where [SYMPTOM]. The relevant files are
+   406→[FILE PATHS]. The expected behavior is [BEHAVIOR]. Use the existing patterns
+   407→in the codebase (getWorkspace, requirePermission, insertAuditLog fire-and-forget)."
+   408→
+   409→"Add a new feature to [MODULE]. The flow should be: [FLOW]. Create the API
+   410→route at [PATH], the server action in [FILE], and the component in [DIR].
+   411→Follow the existing conventions (runtime='nodejs', dynamic='force-dynamic',
+   412→ApiError handling, fire-and-forget audit logs)."
+   413→
+   414→"Diagnose why [SYMPTOM]. Check the [MODULE] flow from UI → API → action → DB.
+   415→Report the root cause without fixing it yet."
+   416→```
+   417→
+   418→### What NOT to Suggest
+   419→- Don't suggest NextAuth — the app uses custom HMAC sessions (next-auth was removed in Step 4)
+   420→- Don't suggest edge runtime — all routes are `runtime = 'nodejs'`
+   421→- Don't suggest Redis — the app uses TanStack Query + in-memory caching
+   422→- Don't suggest DB-level RLS — isolation is in the app layer
+   423→- Don't suggest Prisma migrations — the app uses `db push`
+   424→- Don't suggest indigo/blue colors — design rules prohibit them
+   425→- Don't suggest client-side `z-ai-web-dev-sdk` — it's backend-only
+   426→- Don't suggest `next start` — production uses `bun .next/standalone/server.js`
+   427→- Don't suggest `framer-motion`, `@dnd-kit/*`, `@tanstack/react-table`, `react-markdown`, `@mdxeditor/editor`, `react-syntax-highlighter`, `next-intl` — all were removed as dead dependencies in Step 4
+   428→- Don't add module-scope `import()` maps in `page.tsx` — causes Turbopack to create duplicate chunks. Use `dynamic()` only.
+   429→- Don't suggest `React.Table` — FlowOps uses shadcn/ui `Table` component (`src/components/ui/table.tsx`)
+   430→- Don't use check-then-create patterns for dedup — use DB-level unique constraints + catch P2002
+   431→- Don't reference parent-component variables directly in child function components in `order-create-view.tsx` — they are module-level functions, not closures. ALWAYS pass new state/hooks as props to child components. See §18 item 12.
+   432→- Don't leave requestPayload null in executeLoggedIntegrationAction — always pass the business data
+   433→
+   434→---
+   435→
+   436→*This document is the authoritative reference for the FlowOps ERP system. It MUST be updated whenever significant changes are made to the architecture, modules, dependencies, performance characteristics, or integrations. Do not let it go stale — a stale briefing leads to incorrect AI-assisted code generation.*
+   437→
+   438→*Performance reports: see `perf-baseline.md` (Step 0 baseline) and `perf-results.md` (Step 4+5 after dead dep removal) for detailed before/after bundle measurements. See `supabase/functions-only.sql` for all manually-applied SQL functions + indexes.*
+   439→

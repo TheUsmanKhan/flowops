@@ -1,0 +1,502 @@
+     1→     1→# FlowOps ERP — Complete Technical Briefing Document
+     2→     2→
+     3→     3→> **Purpose**: This document is the single source of truth for the FlowOps ERP system. It covers every module, the API system, dependencies, database schema, frontend, backend, third-party services, what's built, what's in process, and what needs to be built. Use this to train AI assistants so they can generate correct, context-aware prompts.
+     4→     4→>
+     5→     5→> **Last Updated**: August 2026 (updated after international phone validation, country system, self-fulfilled channel, Markets/regional-pricing system, 3-gate enforcement, discount rework, currency rollup, audit fixes, order-create scope-leak fixes, slip PDF binary response fix)
+     6→     6→> **App URL**: Single-page app at `/` (Next.js 16 App Router)
+     7→     7→> **Stack**: Next.js 16 + React 19 + TypeScript + Prisma 6 + Supabase PostgreSQL + Tailwind 4 + shadcn/ui
+     8→     8→>
+     9→     9→> **MAINTENANCE RULE**: This document MUST be updated whenever significant changes are made to the architecture, modules, dependencies, or performance characteristics. Do not let it go stale.
+    10→    10→
+    11→    11→---
+    12→    12→
+    13→    13→## Table of Contents
+    14→    14→
+    15→    15→1. [Executive Summary](#1-executive-summary)
+    16→    16→2. [What FlowOps Is](#2-what-flowops-is)
+    17→    17→3. [Technology Stack & Dependencies](#3-technology-stack--dependencies)
+    18→    18→4. [Architecture Overview](#4-architecture-overview)
+    19→    19→5. [Database Layer](#5-database-layer)
+    20→    20→6. [Authentication & Multi-Tenancy](#6-authentication--multi-tenancy)
+    21→    21→7. [Module Catalog (Complete)](#7-module-catalog-complete)
+    22→    22→8. [API System (Complete Route Map)](#8-api-system-complete-route-map)
+    23→    23→9. [Backend Server Actions](#9-backend-server-actions)
+    24→    24→10. [Integration / Courier Adapter Framework](#10-integration--courier-adapter-framework)
+    25→    25→11. [Frontend Architecture](#11-frontend-architecture)
+    26→    26→12. [Third-Party Services](#12-third-party-services)
+    27→    27→13. [Background Jobs & Cron](#13-background-jobs--cron)
+    28→    28→14. [Storage & File System](#14-storage--file-system)
+    29→    29→15. [Gateway & Deployment](#15-gateway--deployment)
+    30→    30→16. [What's Built vs. In-Process vs. Needed](#16-whats-built-vs-in-process-vs-needed)
+    31→    31→17. [Key Conventions & Patterns](#17-key-conventions--patterns)
+    32→    32→18. [Known Issues & Gotchas](#18-known-issues--gotchas)
+    33→    33→19. [Prompt Generation Guide](#19-prompt-generation-guide)
+    34→    34→
+    35→    35→---
+    36→    36→
+    37→    37→## 1. Executive Summary
+    38→    38→
+    39→    39→**FlowOps** is a multi-tenant SaaS ERP built for Pakistani e-commerce businesses. It manages the complete order lifecycle: product catalog → customer management → order creation → inventory reservation → courier booking → dispatch → delivery/RTO → returns/exchanges. It integrates with Pakistani courier services (PostEx, Leopard) for real-time booking and status tracking.
+    40→    40→
+    41→    41→**Core value proposition**: One system to manage products, inventory, orders, customers, and courier bookings — replacing the spreadsheets + WhatsApp + manual courier portal workflow that Pakistani e-commerce sellers currently use.
+    42→    42→
+    43→    43→**Scale**: 68 Prisma models, 170+ API routes, ~160 React components (108 non-UI + 52 shadcn/ui), 21 SQL migrations, 30 permission keys, 2 live courier integrations, 5 cron jobs.
+    44→    44→
+    45→    45→**Performance posture** (as of latest optimization pass):
+    46→    46→- First Load JS: **1,070 KB** (down from 3,148 KB baseline — 66% reduction via code-splitting)
+    47→    47→- Total JS across all chunks: **4,665 KB** (95 chunks — was 10 chunks pre-split)
+    48→    48→- All 70 data-fetching views use TanStack Query (was 64/70 — 6 migrated from raw `useEffect`+`api.get()`)
+    49→    49→- `React.memo` used on leaf components in 6 largest views
+    50→    50→- 10 dead dependencies removed (node_modules: 1.2 GB, was 1.3 GB)
+    51→    51→- Route-aware `LoadingFallback` renders PageHeader text immediately at Suspense boundary
+    52→    52→- Idempotency system: `withIdempotency()` + `useIdempotentMutation()` on ALL 24+ creation endpoints
+    53→    53→- Phone validation: libphonenumber-js for international phone format validation
+    54→    54→- Courier cancel: Leopard cancellation now works (guard removed); order cancellation auto-cancels courier booking
+    55→    55→- City propagation: corrected cities propagate back to CustomerAddress
+    56→    56→- IntegrationActionLog now logs request payloads (not just responses)
+    57→    57→
+    58→    58→---
+    59→    59→
+    60→    60→## 2. What FlowOps Is
+    61→    61→
+    62→    62→### Target User
+    63→    63→Pakistani e-commerce sellers (Instagram/Facebook/Daraz/Shopify) who:
+    64→    64→- Sell products COD (Cash on Delivery) — the dominant payment method in Pakistan
+    65→    65→- Ship via local couriers (PostEx, Leopard, TCS)
+    66→    66→- Need to track which orders are confirmed, packed, dispatched, delivered, or returned (RTO)
+    67→    67→- Need inventory management (stock-based + made-to-order)
+    68→    68→- Need customer management with RTO-rate flagging (high-return customers)
+    69→    69→
+    70→    70→### Multi-Tenant Model
+    71→    71→```
+    72→    72→Organization (top-level tenant, owned by one user)
+    73→    73→  └── Company (sub-tenant — a brand/store under the org)
+    74→    74→        ├── Employees (users with roles/permissions in this company)
+    75→    75→        ├── Products (company subscribes to org-level product templates)
+    76→    76→        ├── Inventory (company-owned stock in locations)
+    77→    77→        ├── Orders (company's orders)
+    78→    78→        ├── Customers (org-level, shared across companies in the org)
+    79→    79→        └── Integrations (company's courier connections)
+    80→    80→```
+    81→    81→
+    82→    82→A user can belong to multiple companies (via Employee records) and switch between them using the workspace switcher. The active company is stored in `UserSetting.activeCompanyId`.
+    83→    83→
+    84→    84→### Order Lifecycle (the heart of the system)
+    85→    85→```
+    86→    86→pending → confirmed → processing → packed → dispatched → delivered
+    87→    87→                ↓                                      ↓
+    88→    88→         partially_backordered                       rto
+    89→    89→                ↓
+    90→    90→            cancelled
+    91→    91→```
+    92→    92→
+    93→    93→Every transition has inventory side-effects:
+    94→    94→- **Confirm**: reserve stock (`reserved += qty`) or backorder if insufficient
+    95→    95→- **Dispatch**: deduct stock (`onHand -= qty`, `reserved -= qty`)
+    96→    96→- **Cancel**: unreserve stock (`reserved -= qty`)
+    97→    97→- **RTO**: restock (`onHand += qty` via `return_resellable` or `return_stitched_received`)
+    98→    98→
+    99→    99→---
+   100→   100→
+   101→   101→## 3. Technology Stack & Dependencies
+   102→   102→
+   103→   103→### Core Framework (NON-NEGOTIABLE)
+   104→   104→| Component | Version | Notes |
+   105→   105→|---|---|---|
+   106→   106→| Next.js | 16.1+ | App Router, Turbopack dev server, `output: 'standalone'` |
+   107→   107→| React | 19 | |
+   108→   108→| TypeScript | 5 | Strict mode, `@/*` path alias → `./src/*` |
+   109→   109→| Bun | 1.3+ | Runtime + package manager + production server (`bun .next/standalone/server.js`) |
+   110→   110→
+   111→   111→### Database
+   112→   112→| Component | Version | Notes |
+   113→   113→|---|---|---|
+   114→   114→| Prisma ORM | 6.11+ | PostgreSQL provider, `db push` workflow (not migrations) |
+   115→   115→| Supabase PostgreSQL | — | Mumbai (ap-south-1) region, session pooler on port 5432 |
+   116→   116→| `pg` | 8.22+ | Raw SQL queries (e.g., `generate_order_number()` SQL function) |
+   117→   117→
+   118→   118→### State & Data Fetching
+   119→   119→| Library | Purpose |
+   120→   120→|---|---|
+   121→   121→| Zustand 5 | Client state (session, active company, SPA routing) — single store `useAppStore` |
+   122→   122→| TanStack Query 5 | Server state (data fetching, caching, mutations) — used by ALL 70 data-fetching views |
+   123→   123→
+   124→   124→### Forms & Validation
+   125→   125→| Library | Purpose |
+   126→   126→|---|---|
+   127→   127→| React Hook Form 7 | All forms |
+   128→   128→| Zod 4 | Schema validation (shared between client + server) |
+   129→   129→| `@hookform/resolvers` | Zod resolver for RHF |
+   130→   130→
+   131→   131→### UI
+   132→   132→| Library | Purpose |
+   133→   133→|---|---|
+   134→   134→| Tailwind CSS 4 | Styling (NO indigo/blue colors per design rules) |
+   135→   135→| shadcn/ui (New York style) | 52 component primitives in `src/components/ui/` |
+   136→   136→| Radix UI | 26 `@radix-ui/react-*` packages (shadcn/ui foundation) |
+   137→   137→| Lucide React | Icons |
+   138→   138→| Sonner | Toast notifications |
+   139→   139→| next-themes | Dark/light mode |
+   140→   140→| vaul, embla-carousel, cmdk | Drawer, carousel, command palette |
+   141→   141→
+   142→   142→### Other Key Libraries
+   143→   143→| Library | Purpose |
+   144→   144→|---|---|
+   145→   145→| `@react-pdf/renderer` | Scan report + internal slip PDF generation |
+   146→   146→| `jsbarcode` | CODE128 barcode generation for self-fulfilled slip PDFs |
+   147→   147→| `sharp` | Image processing (SVG → PNG conversion for barcodes) |
+   148→   148→| `recharts` | Dashboard charts |
+   149→   149→| `date-fns` | Date utilities |
+   150→   150→| `bcryptjs` | Password hashing (actually uses Node `crypto.scrypt` in `src/lib/auth.ts`) |
+   151→   151→| `z-ai-web-dev-sdk` | AI skills (image generation, VLM, etc.) — backend only |
+   152→   152→| `libphonenumber-js` | International phone number validation + E.164 normalization (client + server) |
+   153→   153→
+   154→   154→### Removed Dependencies (Step 4 cleanup — August 2026)
+   155→   155→The following 10 packages were installed but confirmed unused (0 code imports) and removed to reduce install time + Docker image size:
+   156→   156→- `@mdxeditor/editor` (1.1 MB) — was listed for "rich text" but never imported
+   157→   157→- `@tanstack/react-table` (796 KB) — FlowOps uses shadcn/ui `Table` component instead
+   158→   158→- `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/utilities` (2.4 MB total) — no drag-drop features
+   159→   159→- `framer-motion` (5.4 MB) — animations handled by CSS transitions + Tailwind
+   160→   160→- `react-syntax-highlighter` (8.9 MB) — no code display features
+   161→   161→- `react-markdown` (88 KB) — no markdown rendering
+   162→   162→- `next-intl` (1.6 MB) — app is English-only, no i18n
+   163→   163→- `next-auth` (2.7 MB) — app uses custom HMAC sessions (see §6)
+   164→   164→
+   165→   165→### Full dependency list: see `package.json`
+   166→   166→
+   167→   167→---
+   168→   168→
+   169→   169→## 4. Architecture Overview
+   170→   170→
+   171→   171→### High-Level Data Flow
+   172→   172→```
+   173→   173→Browser (SPA at /)
+   174→   174→  ↓ Authorization: Bearer <token> + cookie
+   175→   175→Caddy Gateway (:81 → :3000)
+   176→   176→  ↓
+   177→   177→Next.js 16 API Routes (148 routes under src/app/api/)
+   178→   178→  ↓
+   179→   179→Server Actions (src/lib/actions/*.ts)
+   180→   180→  ↓
+   181→   181→Prisma Client (src/lib/db.ts)
+   182→   182→  ↓
+   183→   183→Supabase PostgreSQL (Mumbai)
+   184→   184→```
+   185→   185→
+   186→   186→### Key Architectural Decisions
+   187→   187→
+   188→   188→1. **Single SPA route** — the entire app lives at `/` (`src/app/page.tsx`). Navigation is client-side via Zustand's `navigate(route)` with URL sync. There are no other Next.js pages.
+   189→   189→
+   190→   190→2. **Custom HMAC sessions** — Sessions are HMAC-signed tokens: `userId.timestamp.hmac` (30-day TTL). Dual-channel: `Authorization: Bearer` header (works in iframes/cross-origin) + HttpOnly cookie fallback. (`next-auth` was previously installed but unused; it was removed in Step 4 — see §3.)
+   191→   191→
+   192→   192→3. **Multi-tenant isolation in app layer** — `getWorkspace()` in `src/lib/workspace.ts` resolves the caller's active company from `UserSetting.activeCompanyId` via a SINGLE Prisma JOIN query (Profile → settings.activeCompany + employees.role). No database-level RLS — all scoping is enforced in the application layer via `requirePermission()`.
+   193→   193→
+   194→   194→4. **Fire-and-forget audit/metric writes** — `insertAuditLog()` and `insertMetricEvent()` return `void` immediately (detached promises via `fireAndForget()`). This works because the app runs on a long-lived Bun/Node server where the event loop survives the HTTP response.
+   195→   195→
+   196→   196→5. **Adapter pattern for couriers** — provider-agnostic `CourierAdapter` interface. Only PostEx + Leopard are real implementations; TCS is a stub. All courier calls go through `executeLoggedIntegrationAction()` which logs every API call to `integration_action_logs`.
+   197→   197→
+   198→   198→6. **Prisma `db push` workflow** — the `supabase/migrations/*.sql` files are reference SQL. The live schema is managed via `prisma db push` against `prisma/schema.prisma`. SQL functions (like `generate_order_number()`) must be applied manually to the DB.
+   199→   199→
+   200→   200→---
+   201→   201→
+   202→   202→## 5. Database Layer
+   203→   203→
+   204→   204→### Connection
+   205→   205→- **Provider**: PostgreSQL (Supabase)
+   206→   206→- **Region**: Mumbai (ap-south-1) — ~100ms latency from sandbox
+   207→   207→- **Pooler**: Session mode, port 5432
+   208→   208→- **Client**: `src/lib/db.ts` — Prisma singleton with `log: ['error', 'warn']`
+   209→   209→
+   210→   210→### Environment Variables (REQUIRED)
+   211→   211→```env
+   212→   212→DATABASE_URL="postgresql://postgres.gobwxqkzfulbwhzbbsdj:123%40Usman123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres"
+   213→   213→DIRECT_URL="postgresql://postgres.gobwxqkzfulbwhzbbsdj:123%40Usman123%40@aws-0-ap-south-1.pooler.supabase.com:5432/postgres"
+   214→   214→INTEGRATION_ENCRYPTION_KEY="1fbf4fd279d9476183566c878e38907764feac7e7843d16ac60065720a451951"
+   215→   215→SESSION_SECRET="flowops-session-secret-v1-change-in-production-please-32-chars-min"
+   216→   216→CRON_SECRET="flowops-cron-secret-v1-change-in-production"
+   217→   217→APP_URL="http://localhost:3000"
+   218→   218→```
+   219→   219→
+   220→   220→> ⚠️ **KNOWN ISSUE**: The `.env` file keeps reverting to SQLite (`file:./db/custom.db`). The `predev` script guards against this — it refuses to start if `DATABASE_URL` doesn't start with `postgresql://`. Always verify `.env` before starting the server.
+   221→   221→
+   222→   222→### Schema: 68 Prisma Models
+   223→   223→
+   224→   224→#### Auth / Org / Tenancy (10 models)
+   225→   225→| Model | Purpose |
+   226→   226→|---|---|
+   227→   227→| `Profile` | Registered user (email, passwordHash, isOnboarded) |
+   228→   228→| `Organization` | Top-level tenant (ownerId → Profile) |
+   229→   229→| `Company` | Sub-tenant (brand/store under an org) |
+   230→   230→| `Role` | Company-scoped role (isSystemRole, systemRoleKey ∈ owner/founder/co_founder/investor) |
+   231→   231→| `RolePermission` | Permission grant per role |
+   232→   232→| `Employee` | User's membership in a Company |
+   233→   233→| `Invitation` | Pending invite (email, token, role) |
+   234→   234→| `UserSetting` | Per-user settings (activeCompanyId, activeWorkspaceId) |
+   235→   235→| `AuditLog` | Immutable event log (every mutation) |
+   236→   236→| `MetricEvent` | KPI/metric events (for dashboards) |
+   237→   237→
+   238→   238→#### Catalog / Products (14 models)
+   239→   239→| Model | Purpose |
+   240→   240→|---|---|
+   241→   241→| `OrgCategory` | Org-level category |
+   242→   242→| `OrgBrand` | Org-level brand |
+   243→   243→| `OrgAttribute` | Org-level attribute (color, size, etc.) |
+   244→   244→| `OrgAttributeValue` | Attribute value |
+   245→   245→| `AttributeValueRule` | Rules over attribute values |
+   246→   246→| `OrgProduct` | Org-level product template |
+   247→   247→| `OrgProductVariant` | Org-level variant (SKU, weight, cost, fulfillmentType, isActive toggle) |
+   248→   248→| `OrgProductImage` | Product image |
+   249→   249→| `OrgProductBundle` | Product bundle composition |
+   250→   250→| `SelectiveProductAccess` | Which companies can subscribe to which org products |
+   251→   251→| `CompanyProductSetting` | Company-level product subscription state |
+   252→   252→| `CompanyVariantPricing` | Company-specific pricing (read ONCE for market seed, then deprecated for order pricing) |
+   253→   253→| `ProductFulfillmentCost` | Per-product fulfillment cost |
+   254→   254→| `ReturnedStitchedInventory` | Returned-stitched inventory bucket (for made-to-order) |
+   255→   255→
+   256→   256→#### Inventory (15 models)
+   257→   257→| Model | Purpose |
+   258→   258→|---|---|
+   259→   259→| `InventoryLocation` | Warehouse/dispatch hub (warehouse, dispatch_hub, retail_store, transit, damaged_hold) |
+   260→   260→| `Supplier` | Supplier master |
+   261→   261→| `InventoryPool` | Stock pool per location × variant (onHand, reserved, incoming, avgCost) |
+   262→   262→| `InventoryTransaction` | Append-only ledger of every stock movement |
+   263→   263→| `AvgCostHistory` | Moving average cost history |
+   264→   264→| `StockTransfer` | Location-to-location transfer |
+   265→   265→| `PurchaseOrder` | PO header |
+   266→   266→| `PurchaseOrderItem` | PO line items |
+   267→   267→| `PurchaseOrderReceipt` | Receipt against PO |
+   268→   268→| `PurchaseOrderReceiptItem` | Receipt line items |
+   269→   269→| `SupplierReturn` | Return to supplier |
+   270→   270→| `StockLossRecord` | Damaged/transit/theft loss |
+   271→   271→| `CycleCount` | Cycle count header |
+   272→   272→| `CycleCountItem` | Cycle count line |
+   273→   273→| `ProductionOrder` | Made-to-order production order |
+   274→   274→
+   275→   275→#### Customer (4 models)
+   276→   276→| Model | Purpose |
+   277→   277→|---|---|
+   278→   278→| `Customer` | Customer master (org-level, shared across companies) |
+   279→   279→| `CustomerPhone` | Multi-phone (normalized + raw). Has `isValidFormat Boolean @default(true)` field — false = phone came from external platform with unvalidated format. International numbers validated via libphonenumber-js (NOT normalize_phone() SQL). |
+   280→   280→| `CustomerAddress` | Multi-address. Has `country String @default("PK")` — ISO 3166-1 alpha-2 code. Populated via CountrySelector. |
+   281→   281→| `CustomerExternalIdentity` | External ID mapping (Shopify/Daraz customer ID). Now accepts optional `country` param. |
+   282→   282→
+   283→   283→#### OMS / Orders (3 models)
+   284→   284→| Model | Purpose |
+   285→   285→|---|---|
+   286→   286→| `CompanyOrderSetting` | Company-level order workflow config (requireOrderConfirmation, courierBookingMode, defaultCourier, defaultDispatchLocation) |
+   287→   287→| `Order` | Order header — LARGE model (status, payment, courier, tracking, timestamps, totals, deliveryCountry, fulfillmentChannel, selfFulfilledReferenceNumber, marketResolutionIssue) |
+   288→   288→| `OrderItem` | Order line item (fulfillmentStatus, fulfillmentTypeSnapshot, reservedLocationId, productionOrderId, originalUnitPrice, discountType, discountValue, needsReview, needsReviewReason) |
+   289→   289→
+   290→   290→**Order.status enum**: `pending | confirmed | partially_backordered | processing | dispatched | delivered | rto | cancelled | refunded`
+   291→   291→
+   292→   292→**OrderItem.fulfillmentStatus**: `pending | reserved | backordered | dispatched | returned`
+   293→   293→
+   294→   294→#### Exchange (2 models)
+   295→   295→| Model | Purpose |
+   296→   296→|---|---|
+   297→   297→| `OrderExchange` | Exchange request against an order |
+   298→   298→| `ExchangeShipment` | Replacement shipment for an exchange |
+   299→   299→
+   300→   300→#### Markets (5 models) — Shopify-Markets-style regional system
+   301→   301→| Model | Purpose |
+   302→   302→|---|---|
+   303→   303→| `Market` | Regional pricing/payment/country context within a company. Fields: name, currency, isDefault, allowedPaymentTypes[], isActive, countries[], pricing[], products[]. `@@unique([companyId, name])`. Partial unique index `market_one_default_per_company` enforces exactly one Default per company. |
+   304→   304→| `MarketCountry` | Maps countries to markets. `@@unique([companyId, countryCode])` — a country belongs to at most one market per company. |
+   305→   305→| `MarketVariantPricing` | Per-variant selling price for a specific market. Mirrors CompanyVariantPricing's full cascade/sync structure (salePrice, comparePrice, both sync flags). `@@unique([marketId, variantId])`. |
+   306→   306→| `MarketProduct` | Per-market product enablement. Presence = enabled; absence = not enabled. `@@unique([marketId, productId])`. |
+   307→   307→| `ExchangeRateSnapshot` | Daily exchange rate snapshots (relative to USD). Used for display-only revenue conversion. `@@index([currency, fetchedAt])`. |
+   308→   308→
+   309→   309→#### Integrations / Courier (6 models)
+   310→   310→| Model | Purpose |
+   311→   311→|---|---|
+   312→   312→| `IntegrationProvider` | Registered provider master (postex, leopard, tcs, shopify, daraz) |
+   313→   313→| `CompanyIntegration` | Company's connection to a provider (encrypted credentials). `@@unique([companyId, providerId])` — prevents duplicate integrations per provider per company. |
+   314→   314→| `IntegrationActionLog` | Every API call to a provider (logged with duration) |
+   315→   315→| `CourierOperationalCity` | Cached list of cities each courier serves |
+   316→   316→| `CourierCityAlias` | Local city ↔ courier city fuzzy-match mapping |
+   317→   317→| `CourierPickupAddress` | Pickup address book per integration |
+   318→   318→
+   319→   319→#### Scan (2 models)
+   320→   320→| Model | Purpose |
+   321→   321→|---|---|
+   322→   322→| `ScanEvent` | Individual scan event (trackingNumber, scanMode, scanResult) |
+   323→   323→| `ScanDailyReport` | Daily aggregated scan report |
+   324→   324→
+   325→   325→#### Load Sheets (1 model)
+   326→   326→| Model | Purpose |
+   327→   327→|---|---|
+   328→   328→| `LoadSheet` | Pickup manifest (PostEx load sheet — PDF stored locally) |
+   329→   329→
+   330→   330→#### Drafts (1 model)
+   331→   331→| Model | Purpose |
+   332→   332→|---|---|
+   333→   333→| `FormDraft` | Autosaved form drafts (product create, order create) |
+   334→   334→
+   335→   335→#### Idempotency (1 model)
+   336→   336→| Model | Purpose |
+   337→   337→|---|---|
+   338→   338→| `IdempotencyKey` | Duplicate-submission protection — DB unique constraint on `key` enforces atomicity. Status: `processing` → `completed` / `failed`. Stores cached response for replay. Stale `processing` rows (>60s) auto-recover. |
+   339→   339→
+   340→   340→### SQL Functions (applied manually, not in Prisma schema)
+   341→   341→| Function | Purpose |
+   342→   342→|---|---|
+   343→   343→| `generate_order_number(companyId TEXT)` | Generates `ORD-{year}-{seq}` per company per year |
+   344→   344→| `generate_self_fulfilled_reference(companyId TEXT)` | Generates `SF-{year}-{seq}` per company per year (MAX-based, per-company) |
+   345→   345→| `generate_exchange_shipment_number()` | Generates `EXCH-{year}-{seq}` (global sequence) |
+   346→   346→| `generate_draft_number()` | Generates draft numbers |
+   347→   347→| `normalize_phone(phone TEXT)` | Normalizes Pakistani phone numbers. International pass-through: `+`-prefixed non-PK numbers returned unchanged (fix prevents mangling of UK/UAE/US numbers). |
+   348→   348→| `recompute_order_status(orderId)` | Recomputes order status from items |
+   349→   349→| RLS helpers | `get_active_company_id()`, `get_active_org_id()`, `has_permission()`, `is_elevated_employee()` |
+   350→   350→| Triggers | `backfill_order_timestamps()`, `update_*_updatedAt()` |
+   351→   351→| `invitation_pending_email_unique` (partial index) | UNIQUE INDEX on `Invitation(companyId, invitedEmail) WHERE status='pending'` — prevents duplicate pending invites. Applied manually (not in Prisma schema). Documented in `supabase/functions-only.sql`. |
+   352→   352→| `market_one_default_per_company` (partial index) | UNIQUE INDEX on `Market(companyId) WHERE "isDefault"=TRUE` — enforces exactly one Default market per company. Documented in `supabase/functions-only.sql`. |
+   353→   353→| `match_or_create_customer(...)` | Customer matching SQL function (4-layer: exact_identity, phone_match, email_match, create). Now accepts 7 params including `p_country` (alpha-2 code). |
+   354→   354→
+   355→   355→### Migrations
+   356→   356→21 SQL migration files in `supabase/migrations/` (numbered 001–021, with 015 and 017 missing). These are reference SQL — the live schema is managed via `prisma db push`.
+   357→   357→
+   358→   358→---
+   359→   359→
+   360→   360→## 6. Authentication & Multi-Tenancy
+   361→   361→
+   362→   362→### Session System
+   363→   363→- **Token format**: `userId.timestamp.hmac` (HMAC-SHA256 signed)
+   364→   364→- **TTL**: 30 days
+   365→   365→- **Storage**: `localStorage` key `flowops_session_token` + HttpOnly cookie `flowops_session`
+   366→   366→- **Dual-channel**: API client sends BOTH `Authorization: Bearer <token>` header AND cookie — works in iframes, cross-origin, and same-origin
+   367→   367→
+   368→   368→### Auth Flow
+   369→   369→```
+   370→   370→1. POST /api/auth/login {email, password}
+   371→   371→2. Server: verify scrypt hash → create session token → set cookie + return token
+   372→   372→3. Client: store token in localStorage + Zustand store
+   373→   373→4. Subsequent requests: send Bearer token + cookie
+   374→   374→5. POST /api/auth/logout → clear cookie + localStorage
+   375→   375→```
+   376→   376→
+   377→   377→### Permission System (30 keys)
+   378→   378→Permissions use dot-notation `module.action`:
+   379→   379→
+   380→   380→| Module | Keys |
+   381→   381→|---|---|
+   382→   382→| Inventory (14) | view, create, adjust, delete, receive, report_loss, manage_loss, manage_locations, manage_suppliers, transfer, manage_purchase_orders, manage_supplier_returns, cycle_count, manage_production |
+   383→   383→| Products (7) | view, create, edit, manage_catalog, subscribe, pricing, promote |
+   384→   384→| Orders (5) | view, create, fulfill, cancel, manage |
+   385→   385→| Employees (4) | view, invite, terminate, manage |
+   386→   386→| Finance (2) | view, manage |
+   387→   387→| Reports (2) | view, export |
+   388→   388→| Settings (3) | company_view, company_edit, roles_manage |
+   389→   389→| Integrations (2) | view, manage |
+   390→   390→| KPI & Audit (3) | kpi_view, kpi_manage, audit_view |
+   391→   391→
+   392→   392→**Elevated roles** (`owner`, `founder`, `co_founder`, `investor`) bypass ALL permission checks via `isElevated()`.
+   393→   393→
+   394→   394→### Workspace Resolution
+   395→   395→`getWorkspace()` in `src/lib/workspace.ts`:
+   396→   396→- Resolves caller's active company + employee + role in a SINGLE Prisma query (Profile → settings.activeCompany + employees.role)
+   397→   397→- Throws `ApiError(401)` if not signed in, `ApiError(403)` if no active company or not a member
+   398→   398→- Returns `WorkspaceContext` = `{ user, employee, company }`
+   399→   399→- Called by nearly every authenticated API route
+   400→   400→
+   401→   401→### Session Payload (`src/lib/session-payload.ts`)
+   402→   402→`buildSessionPayload()` uses a SINGLE raw SQL JOIN (`prisma.$queryRaw`) that joins Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. Replaces the previous 5-6 sequential Prisma queries. Latency: ~696ms → ~210ms warm (67% faster). The raw query result (flat rows) is grouped in JS back into the nested SessionResponse shape. The old SQL `normalize_phone()` function remains for DB-level triggers/matching; the app-layer path now uses `libphonenumber-js` for phone normalization.
+   403→   403→
+   404→   404→---
+   405→   405→
+   406→   406→## 7. Module Catalog (Complete)
+   407→   407→
+   408→   408→### 7.1 Auth Module
+   409→   409→- **Status**: ✅ Built
+   410→   410→- **Routes**: `/api/auth/login`, `/api/auth/register`, `/api/auth/logout`, `/api/auth/me`, `/api/auth/forgot-password`, `/api/auth/reset-password`
+   411→   411→- **Components**: `auth-shell`, `login-form`, `register-form`, `forgot-password-form`, `reset-password-form`
+   412→   412→- **Logic**: scrypt password hashing, HMAC token sessions, dual-channel auth
+   413→   413→
+   414→   414→### 7.2 Onboarding Module
+   415→   415→- **Status**: ✅ Built
+   416→   416→- **Routes**: `/api/onboarding/invitations`, `/api/onboarding/create-company`, `/api/onboarding/accept-invite`
+   417→   417→- **Components**: `onboarding-view`, `create-organization-view`, `create-company-view`, `accept-invite-card`
+   418→   418→- **Logic**: New user creates org → creates company → auto-becomes Owner. Existing users accept invitations via token.
+   419→   419→
+   420→   420→### 7.3 Organization & Company Management
+   421→   421→- **Status**: ✅ Built
+   422→   422→- **Routes**: `/api/organizations/create`, `/api/organizations/[id]`, `/api/companies/create`, `/api/companies/[id]/archive`, `/api/company`, `/api/workspaces`, `/api/workspace/switch`
+   423→   423→- **Components**: `workspace-switcher`, `organization-view`, `company-settings-view`
+   424→   424→- **Logic**: Org owns companies. User switches active company via `POST /api/workspace/switch` which updates `UserSetting.activeCompanyId`. The switch returns minimal data (active company + employee + role + permissions) — no full session rebuild.
+   425→   425→
+   426→   426→### 7.4 Employee & Role Management
+   427→   427→- **Status**: ✅ Built
+   428→   428→- **Routes**: `/api/employees`, `/api/employees/[id]`, `/api/employees/[id]/terminate`, `/api/roles`, `/api/roles/[id]`
+   429→   429→- **Components**: `employees-view`, `invite-employee-view`, `employee-detail-view`, `roles-view`, `role-edit-view`, `permission-key-selector`
+   430→   430→- **Logic**: Owner invites employees by email → employee accepts → gets role with permissions. System roles (Owner/Founder/Co-Founder/Investor) are elevated (bypass permissions). Custom roles are created per-company with selected permission keys.
+   431→   431→
+   432→   432→### 7.5 Catalog Module (Org-Level)
+   433→   433→- **Status**: ✅ Built
+   434→   434→- **Routes**: `/api/categories`, `/api/brands`, `/api/catalog/attributes`, `/api/catalog/attributes/[id]/values`, `/api/catalog/seed-defaults`, `/api/catalog/inline-attribute`, `/api/catalog/inline-value`, `/api/org/catalog`
+   435→   435→- **Components**: `org-catalog-view`, `catalog-settings-view`
+   436→   436→- **Logic**: Org-level categories, brands, and attributes (color, size, fabric, etc.). Attributes have values (e.g., Color → Red/Blue/Green). These are templates shared across all companies in the org.
+   437→   437→
+   438→   438→### 7.6 Product Module (Company-Level)
+   439→   439→- **Status**: ✅ Built
+   440→   440→- **Routes**: 24 routes under `/api/products/` — CRUD, subscribe, promote/demote, pricing, variants, variant-groups, images, selective-access
+   441→   441→- **Components**: `products-view`, `product-create-view`, `product-detail-view`, `parent-child-variant-table`, `attribute-selector`, `fulfillment-type-badge`, `product-scope-badge`, `returned-stock-banner`
+   442→   442→- **Logic**:
+   443→   443→  - Org creates product templates (`OrgProduct` + `OrgProductVariant`)
+   444→   444→  - Companies SUBSCRIBE to org products (creates `CompanyProductSetting`)
+   445→   445→  - Companies can override pricing (`CompanyVariantPricing`), cost, weight per variant
+   446→   446→  - Variants have `fulfillmentType`: `stock_based` or `made_to_order`
+   447→   447→  - Made-to-order variants have `fabricSourceVariantId` (the raw fabric variant used for stitching)
+   448→   448→  - Selective access controls which companies can see which org products
+   449→   449→
+   450→   450→### 7.7 Inventory Module
+   451→   451→- **Status**: ✅ Built
+   452→   452→- **Routes**: `/api/inventory/dashboard`, `/api/inventory/summary`, `/api/inventory/opening-stock`, `/api/inventory/receive`, `/api/inventory/adjust`, `/api/inventory/transfers`, `/api/inventory/fulfill-mto`, `/api/inventory/receive-returned-stitched`
+   453→   453→- **Components**: `inventory-dashboard-view`, `locations-view`, `location-detail-view`, `receive-stock-view`, `adjust-stock-view`, `transfer-stock-view`
+   454→   454→- **Logic**:
+   455→   455→  - **InventoryPool**: one row per (variant × location) with `onHand`, `reserved`, `incoming`, `avgCost`
+   456→   456→  - **Available** = `onHand - reserved` (computed in app, no DB column)
+   457→   457→  - **InventoryTransaction**: append-only ledger — the ONLY way to modify pools is via `processInventoryTransaction()` in `src/lib/inventory.ts`
+   458→   458→  - **Transaction types**: `opening_stock`, `purchase_received`, `sale_dispatched`, `order_reserved`, `order_unreserved`, `return_resellable`, `return_stitched_received`, `return_damaged`, `transfer_out`, `transfer_in`, `cycle_count_adjust`, `damage_writeoff`, `theft_writeoff`, `missing_writeoff`, `transit_loss`, `supplier_return`, `fabric_consumed_for_stitching`
+   459→   459→  - **WAC (Weighted Average Cost)**: recalculated on every IN-direction transaction
+   460→   460→  - **Made-to-order**: `checkAndFulfillMadeToOrderVariant()` checks returned-stitched inventory first, then triggers fresh production (consumes fabric + creates `ProductionOrder`)
+   461→   461→
+   462→   462→### 7.8 Supplier & Purchase Order Module
+   463→   463→- **Status**: ✅ Built
+   464→   464→- **Routes**: `/api/suppliers`, `/api/suppliers/[id]`, `/api/purchase-orders`, `/api/purchase-orders/[id]`, `/api/purchase-orders/[id]/confirm`, `/api/purchase-orders/[id]/receive`, `/api/purchase-orders/[id]/cancel`
+   465→   465→- **Components**: `suppliers-view`, `supplier-detail-view`, `purchase-orders-view`, `po-create-view`, `po-detail-view`
+   466→   466→- **Logic**: Create PO → confirm → receive (increments `incoming` then `onHand` via `purchase_received` transaction) → cancel (if needed)
+   467→   467→
+   468→   468→### 7.9 Production Order Module (Made-to-Order)
+   469→   469→- **Status**: ✅ Built
+   470→   470→- **Routes**: `/api/production-orders`, `/api/production-orders/[id]`
+   471→   471→- **Components**: `production-orders-view`
+   472→   472→- **Logic**: When an order contains a made-to-order variant, `checkAndFulfillMadeToOrderVariant()` creates a `ProductionOrder` that consumes fabric (`fabric_consumed_for_stitching` transaction) and produces the finished variant.
+   473→   473→
+   474→   474→### 7.10 Stock Loss Module
+   475→   475→- **Status**: ✅ Built
+   476→   476→- **Routes**: `/api/stock-loss`, `/api/stock-loss/[id]`, `/api/stock-loss/stats`, `/api/stock-loss/report-theft`, `/api/stock-loss/report-transit`, `/api/stock-loss/report-damaged`, `/api/stock-loss/resolve`
+   477→   477→- **Components**: `losses-view`, `loss-detail-view`
+   478→   478→- **Logic**: Report loss (theft/transit/damaged) → resolve (write off stock via `damage_writeoff` / `theft_writeoff` / `missing_writeoff` / `transit_loss` transactions)
+   479→   479→
+   480→   480→### 7.11 Cycle Count Module
+   481→   481→- **Status**: ✅ Built
+   482→   482→- **Routes**: `/api/cycle-counts`, `/api/cycle-counts/[id]`
+   483→   483→- **Components**: `cycle-counts-view`
+   484→   484→- **Logic**: Create cycle count → count items → adjust stock via `cycle_count_adjust` transaction (sets `onHand` directly to counted value)
+   485→   485→
+   486→   486→### 7.12 Returned Stitched Inventory Module
+   487→   487→- **Status**: ✅ Built
+   488→   488→- **Routes**: `/api/returned-stitched`, `/api/returned-stitched/[id]`, `/api/returned-stitched/stats`
+   489→   489→- **Components**: `returned-stitched-view`
+   490→   490→- **Logic**: When a made-to-order item is returned in "perfect" condition, it goes into `ReturnedStitchedInventory` (not back into regular `InventoryPool`). Future made-to-order orders check this bucket first before triggering fresh production (saves stitching cost).
+   491→   491→
+   492→   492→### 7.13 Customer Management System (CMS)
+   493→   493→- **Status**: ✅ Built
+   494→   494→- **Routes**: `/api/customers`, `/api/customers/[id]`, `/api/customers/[id]/phones`, `/api/customers/[id]/addresses`, `/api/customers/backfill-stats`
+   495→   495→- **Components**: `customers-view`, `customer-detail-view`, `CreateCustomerForm`, `CustomerSearchAutocomplete`, `AddressSelector`
+   496→   496→- **Logic**:
+   497→   497→  - Customers are org-level (shared across companies in the org)
+   498→   498→  - Multi-phone (normalized via `normalize_phone()` SQL function) + multi-address
+   499→   499→  - External identity mapping (Shopify/Daraz customer IDs)
+   500→   500→  - Cached stats: `totalOrdersCount`, `totalOrderValue`, `totalRtoCount` — recomputed via `updateCustomerStats()` on every order mutation
+
+[showing lines 1-500 of 1938; use offset=501 with limit to continue reading]
