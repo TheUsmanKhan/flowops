@@ -1,7 +1,6 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { ApiError, handleError, getWorkspace } from '@/lib/workspace'
 import { pollPostExOrderStatuses } from '@/lib/actions/postex-status-poll.actions'
 
 export const runtime = 'nodejs'
@@ -18,17 +17,9 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(_req: NextRequest) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
-
-    const caller = await db.employee.findFirst({
-      where: { companyId, userId: user.id, status: 'active' },
-      include: { role: true },
-    })
-    if (!caller) throw new ApiError(403, 'Not a member of this company.')
+    const ctx = await getWorkspace()
+    const companyId = ctx.company.id
+    const caller = ctx.employee
     if (caller.role.roleTier !== 'elevated') {
       throw new ApiError(403, 'Only elevated roles can trigger polling.')
     }

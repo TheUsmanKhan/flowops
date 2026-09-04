@@ -1,5 +1,4 @@
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { getWorkspace, ApiError, handleError } from '@/lib/workspace'
 import { confirmOrder } from '@/lib/actions/order.actions'
 import { NextRequest } from 'next/server'
 
@@ -12,8 +11,8 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
+    const ctx = await getWorkspace()
+    if (!ctx) throw new ApiError(401, 'Not authenticated')
     const { id } = await params
     const result = await confirmOrder(id)
     if (!result.success) {

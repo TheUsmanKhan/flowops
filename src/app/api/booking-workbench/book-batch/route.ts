@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+
+import { ApiError, handleError, readBody, getWorkspace } from '@/lib/workspace'
 import { bookOrdersBatch } from '@/lib/actions/booking.actions'
 
 export const runtime = 'nodejs'
@@ -38,17 +38,9 @@ interface BookBatchBody {
  */
 export async function POST(req: NextRequest) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
-
-    const caller = await db.employee.findFirst({
-      where: { companyId, userId: user.id, status: 'active' },
-      include: { role: true },
-    })
-    if (!caller) throw new ApiError(403, 'Not a member of this company.')
+    const ctx = await getWorkspace()
+    const companyId = ctx.company.id
+    const caller = ctx.employee
 
     if (caller.role.roleTier !== 'elevated') {
       throw new ApiError(403, 'Only elevated roles can book shipments.')
