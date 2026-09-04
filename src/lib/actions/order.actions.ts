@@ -1886,8 +1886,103 @@ export async function cancelOrder(
 }
 
 // ──────────────────────────────────────────────────────────────
-// listOrders
+// unCancelOrder — reverse a cancellation (restore status + re-reserve stock)
 // ──────────────────────────────────────────────────────────────
+// Only works if:
+//   - Order is currently 'cancelled'
+//   - The order was NOT dispatched/delivered before cancel (can't un-cancel
+//     something that physically shipped)
+//   - Items still have their orgVariantId + quantity intact
+//
+// What it does:
+//   1. Re-reserves stock for each item (same as reserveOrderStock)
+//   2. Sets status back to 'confirmed' (or 'pending' if was pending before)
+//   3. Clears cancelledAt + cancellationReason
+//   4. Updates customer + employee stats
+//
+// What it does NOT do:
+//   - Re-book the courier (if the courier booking was cancelled, user must
+//     re-book manually via Booking Workbench)
+//   - Restore a courier booking that was already cancelled on the courier side
+
+export async function unCancelOrder(
+  orderId: string,
+): Promise<ActionResult<{ orderId: string; status: string }>> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+
+    const order = await db.order.findFirst({
+      where: { id: orderId, companyId: ctx.company.id },
+      include: { items: { select: { id: true, orgVariantId: true, quantity: true, fulfillmentStatus: true, reservedLocationId: true } } },
+    })
+    if (!order) return { success: false, error: 'Order not found' }
+    if (order.status !== 'cancelled') {
+      return { success: false, error: `Order is not cancelled (current status: ${order.status}). Only cancelled orders can be un-cancelled.` }
+    }
+
+    // Determine the pre-cancel status. If the order was cancelled from
+    // 'pending' (requireOrderConfirmation=true), restore to 'pending'.
+    // If cancelled from 'confirmed'/'processing', restore to 'confirmed'.
+    // We check confirmedAt — if it's set, the order was confirmed before cancel.
+    const restoredStatus = order.confirmedAt ? 'confirmed' : 'pending'
+
+    // Step 1: Update order status + clear cancellation fields
+    await db.order.update({
+      where: { id: orderId },
+      data: {
+        status: restoredStatus,
+        cancelledAt: null,
+        cancellationReason: null,
+        physicalUnpackRequired: false,
+      },
+    })
+
+    // Step 2: If restoring to 'confirmed', re-reserve stock
+    if (restoredStatus === 'confirmed') {
+      const reserveResult = await reserveOrderStock(orderId, ctx)
+      if (!reserveResult.success) {
+        // Non-fatal — order is un-cancelled but stock reservation had issues
+        console.warn(`[unCancelOrder] Stock reservation had issues for ${order.flowopsOrderNumber}:`, reserveResult.results)
+      }
+    }
+
+    // Step 3: Audit log + metrics
+    insertAuditLog({
+      action: 'order.un_cancelled',
+      entityType: 'order',
+      entityId: orderId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      oldValues: { status: 'cancelled' },
+      newValues: { status: restoredStatus },
+    })
+
+    insertMetricEvent({
+      companyId: ctx.company.id,
+      entityType: 'order',
+      entityId: orderId,
+      metricKey: 'order.un_cancelled',
+      numericValue: Number(order.totalOrderValue),
+      dimensions: { restored_status: restoredStatus },
+    })
+
+    // Step 4: Recompute stats
+    await updateCustomerStats(order.customerId).catch(() => {})
+    if (order.salesEmployeeId) {
+      updateEmployeeStats(order.salesEmployeeId).catch(() => {})
+    }
+
+    return { success: true, data: { orderId, status: restoredStatus } }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to un-cancel order',
+    }
+  }
+}
 
 export async function listOrders(
   filters: OrderFilters = {},

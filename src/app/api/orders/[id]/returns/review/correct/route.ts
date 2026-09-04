@@ -1,5 +1,5 @@
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { correctReturnItemCondition } from '@/lib/actions/order-return.actions'
 import { NextRequest } from 'next/server'
 
@@ -14,6 +14,11 @@ export const dynamic = 'force-dynamic'
  * a damage investigation on the linked variant.
  *
  * Path param `id` is the ORDER id; query must carry `item_id` (the order_item).
+ *
+ * Body (optional): { damage_type, responsible_party, notes }
+ * — lets the staff select the actual damage type + responsible party
+ *   instead of hardcoding 'other' + 'courier'. Falls back to defaults if
+ *   not provided (backwards-compatible).
  */
 export async function POST(
   req: NextRequest,
@@ -30,7 +35,18 @@ export async function POST(
       throw new ApiError(400, 'item_id query parameter is required')
     }
 
-    const result = await correctReturnItemCondition(orderItemId, 'damaged')
+    // Parse optional body for damage type + responsible party
+    const body = await readBody<{
+      damage_type?: string
+      responsible_party?: string
+      notes?: string
+    }>(req).catch(() => ({}))
+
+    const result = await correctReturnItemCondition(orderItemId, 'damaged', {
+      damageType: body?.damage_type,
+      responsibleParty: body?.responsible_party,
+      notes: body?.notes,
+    })
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to correct item condition')
     }

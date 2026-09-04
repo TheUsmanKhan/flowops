@@ -225,6 +225,11 @@ export async function processOrderReturn(
 export async function correctReturnItemCondition(
   orderItemId: string,
   actualCondition: 'damaged',
+  options?: {
+    damageType?: string
+    responsibleParty?: string
+    notes?: string
+  },
 ): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
@@ -316,9 +321,12 @@ export async function correctReturnItemCondition(
       orderItemId: item.id,  // enables dedup
       employeeId: ctx.employee.id,
       subType: 'confirmed',
-      damageType: 'other',
-      responsibleParty: 'courier',
-      notes: `RTO return found damaged on physical inspection. Order item: ${orderItemId}`,
+      // BUG FIX (H10): use the caller-provided damageType + responsibleParty
+      // instead of hardcoding 'other' + 'courier'. The Returns Review UI
+      // now lets staff select the actual damage type + responsible party.
+      damageType: options?.damageType || 'other',
+      responsibleParty: options?.responsibleParty || 'courier',
+      notes: options?.notes || `RTO return found damaged on physical inspection. Order item: ${orderItemId}`,
       // createInventoryTransaction=false — the reverseResult above already
       // decremented onHand (damage_writeoff). A separate stock movement
       // would double-decrement.
