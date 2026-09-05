@@ -12724,3 +12724,39 @@ Stage Summary:
   2. Data: 5 integration providers + 1670 courier cities seeded into production DB
 - After Hostinger deploys, integrations page will show all 5 providers (Leopard, PostEx, TCS, Daraz, Shopify) ready to connect.
 - User needs to LOG OUT and LOG BACK IN for permission changes to take effect.
+
+---
+Task ID: LEOPARD-PROD-TOGGLE-FIX
+Agent: main
+Task: Fix Leopard courier production/staging toggle — read API PDF + sync with adapter
+
+Work Log:
+- Read Leopard API PDF documentation (eCom-Merchant-APIs-V2, 94 pages):
+  * Staging base URL:    https://merchantapistaging.leopardscourier.com/api/
+  * Production base URL: https://merchantapi.leopardscourier.com/api/
+  * Authentication: api_key + api_password (generated in LCS ECOM Portal under API settings)
+  * Endpoints: getAllCities, bookPacket, trackBookedPacket, cancelBookedPackets,
+    generateLoadSheet, createShipper, getShipperDetails, getPaymentDetails, etc.
+- Found the adapter already has correct base URLs (LEOPARD_STAGING_BASE + LEOPARD_PRODUCTION_BASE)
+- Bug 1: LeopardAdapter constructor only checked credentials.isProduction === 'true' (string).
+  But the frontend sends boolean values (true/false), HTML checkbox values ('on'), or
+  numeric values ('1'/1). Only string 'true' worked — all other truthy values defaulted to STAGING.
+- Fix 1: Updated constructor to handle ALL boolean formats:
+  true, 'true', 'on', '1', 1 → production
+  everything else → staging
+- Bug 2: The ConnectDialog form rendered the isProduction field as a text Input.
+  Users had to type 'true' or 'false' manually — confusing UX, and most users left it blank
+  (which defaulted to staging even when they wanted production).
+- Fix 2: Boolean fields now render as a Switch toggle with description text visible.
+  Users get a clear ON/OFF toggle: OFF = staging, ON = production.
+- Added Switch import from @/components/ui/switch.
+- Committed as 2a201bd, pushed to GitHub.
+- Dev server restarted locally for verification.
+
+Stage Summary:
+- Leopard production/staging toggle now works correctly:
+  1. UI: Switch toggle (ON = production, OFF = staging)
+  2. Backend: Handles all boolean value formats
+  3. Adapter: Correctly switches between production and staging base URLs
+- User can now connect Leopard with production credentials and the adapter will
+  use the production API endpoint (merchantapi.leopardscourier.com).
