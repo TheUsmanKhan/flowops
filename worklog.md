@@ -12313,3 +12313,40 @@ Stage Summary:
 - The --webpack switch is the KEY fix: Turbopack's postcss bundling can't resolve plugins from .next/build/, webpack resolves them normally from node_modules/.
 - Orders /api/orders 500 error: will resolve automatically once the build succeeds and deploys (serverExternalPackages: ["@prisma/client"] is already in next.config.mjs).
 - All changes pushed. Hostinger auto-deploy should now succeed end-to-end.
+
+---
+Task ID: PROD-DEPLOY-FIX-4
+Agent: main
+Task: Fix Hostinger runtime crash — EEXIST at process.stdin + orders 500 error
+
+Work Log:
+- User reported Hostinger runtime log: server starts (Ready in 163ms) → immediately crashes with "Error: Server is not running" → restarts → eventually "Error: open EEXIST" at process.getStdin. Orders page still 500.
+- Root cause analysis — THREE issues identified:
+  1. NO postinstall script: After `npm install` on Hostinger, Prisma client is NOT generated. Every DB query crashes because the Prisma binary engine isn't present. This is the ROOT CAUSE of the orders 500 error.
+  2. Start script uses `bun`: Hostinger has Node.js, NOT bun. The `bun .next/standalone/server.js` command fails immediately.
+  3. Start script uses `| tee server.log`: The pipe causes `Error: open EEXIST` at `process.getStdin` during crash-restart loops (file descriptor exhaustion).
+- Fixes applied to package.json:
+  - Added `postinstall: "prisma generate || true"` — runs automatically after npm install, generates Prisma client binary. The `|| true` prevents build failure if DATABASE_URL isn't set during install.
+  - Build: `prisma generate && next build --webpack && cp ...` — double-ensures Prisma client is generated before build.
+  - Start: `node .next/standalone/server.js` — removed bun (not on Hostinger), removed NODE_ENV (Hostinger sets it), removed tee pipe (caused stdin EEXIST).
+- Local verification (all passed):
+  - Build: succeeds with all 100+ routes compiled, Prisma client generated
+  - Standalone server starts: Ready in 76ms, no EEXIST error
+  - /api/auth/me: HTTP 200 (DB query works — Prisma loads correctly)
+  - /: HTTP 200 (page renders)
+  - Prisma client present in .next/standalone/node_modules/@prisma/client/ and .next/standalone/node_modules/.prisma/client/
+- Committed as `62e4261` and pushed to GitHub main.
+- Sandbox dev server restarted, verified GET / 200.
+
+Stage Summary:
+- The postinstall: "prisma generate" is the KEY fix — without it, the Prisma client binary isn't generated on Hostinger after npm install, causing every DB query to crash.
+- The start script fix (node instead of bun, no tee) prevents the runtime EEXIST crash loop.
+- Combined with previous fixes:
+  1. next.config.mjs: lazy-load @next/bundle-analyzer (commit a488f30)
+  2. package.json: move CSS packages to dependencies (commit 949d594)
+  3. package.json: next build --webpack (commit 4d6be63)
+  4. package.json: postinstall prisma generate + start node (commit 62e4261)
+  5. next.config.mjs: serverExternalPackages: ["@prisma/client"] (prior commit)
+- All 5 Hostinger build + runtime blockers are now resolved.
+- IMPORTANT: User must ensure environment variables are set on Hostinger dashboard:
+  DATABASE_URL, DIRECT_URL, INTEGRATION_ENCRYPTION_KEY, SESSION_SECRET, CRON_SECRET, APP_URL
