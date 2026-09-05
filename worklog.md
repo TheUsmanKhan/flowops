@@ -12290,3 +12290,26 @@ Stage Summary:
 - The existing serverExternalPackages: ["@prisma/client"] fix (from prior commit) handles the Prisma EEXIST error.
 - All 3 Hostinger build blockers are now resolved. Next auto-deploy should succeed.
 - Local dev verified: GET / 200, all instrumentation pollers start, page renders.
+
+---
+Task ID: PROD-DEPLOY-FIX-3
+Agent: main
+Task: Fix Hostinger production build crash — Turbopack cannot resolve @tailwindcss/postcss + orders 500 error
+
+Work Log:
+- User reported: Hostinger build STILL failing after Fix-2 (package.json deps move) with "Cannot find module '@tailwindcss/postcss'" during Turbopack postcss transform.
+- Root cause investigation: package-lock.json verified CORRECT (has @tailwindcss/postcss in dependencies, matching package.json). The package IS being installed by npm. The real issue is Turbopack's postcss transform: it bundles postcss.config.mjs into .next/build/postcss.js, then Node.js require() from that internal location fails to resolve @tailwindcss/postcss from node_modules — a Turbopack-specific module resolution bug.
+- Fix: switched production build from Turbopack to webpack via `--webpack` flag in package.json build script: `"build": "next build --webpack && ..."`. Webpack resolves postcss plugins via standard Node.js require() from project root, correctly finding packages in node_modules/. Dev server still uses Turbopack (fast HMR).
+- Verified locally: `bun run build` with --webpack completes successfully — all 100+ API routes compiled, CSS processed correctly, standalone server.js generated, no errors.
+- Committed as `4d6be63` and pushed to GitHub main. Triggers Hostinger auto-deploy.
+- Orders 500 error: confirmed root cause is the SAME Prisma EEXIST issue (old build without serverExternalPackages still running). Once new build deploys, both the CSS build error AND the orders 500 error are resolved together.
+- Dev server restarted locally, verified GET / 200.
+
+Stage Summary:
+- Three-layer fix for Hostinger production build (all committed + pushed):
+  1. next.config.mjs: lazy-load @next/bundle-analyzer (commit a488f30)
+  2. package.json deps: move @tailwindcss/postcss + tailwindcss + tw-animate-css to dependencies (commit 949d594)
+  3. package.json build script: `next build --webpack` instead of Turbopack (commit 4d6be63)
+- The --webpack switch is the KEY fix: Turbopack's postcss bundling can't resolve plugins from .next/build/, webpack resolves them normally from node_modules/.
+- Orders /api/orders 500 error: will resolve automatically once the build succeeds and deploys (serverExternalPackages: ["@prisma/client"] is already in next.config.mjs).
+- All changes pushed. Hostinger auto-deploy should now succeed end-to-end.
