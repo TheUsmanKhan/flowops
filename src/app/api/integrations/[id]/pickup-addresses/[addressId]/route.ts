@@ -1,7 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError, readBody } from '@/lib/workspace'
-import { setDefaultPickupAddress } from '@/lib/actions/courier-address-book.actions'
-import { deletePickupAddress } from '@/lib/actions/courier-address-book.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -21,6 +19,7 @@ export async function PATCH(
     const body = await readBody<{ action?: string }>(req).catch(() => ({ action: undefined }))
 
     if (body.action === 'set-default') {
+      const { setDefaultPickupAddress } = await import('@/lib/actions/courier-address-book.actions')
       const result = await setDefaultPickupAddress(id, addressId)
       if (!result.success) {
         return Response.json({ error: result.error }, { status: 400 })
@@ -41,6 +40,7 @@ export async function DELETE(
 ) {
   try {
     const { addressId } = await params
+    const { deletePickupAddress } = await import('@/lib/actions/courier-address-book.actions')
     const result = await deletePickupAddress(addressId)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

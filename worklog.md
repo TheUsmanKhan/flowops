@@ -12760,3 +12760,52 @@ Stage Summary:
   3. Adapter: Correctly switches between production and staging base URLs
 - User can now connect Leopard with production credentials and the adapter will
   use the production API endpoint (merchantapi.leopardscourier.com).
+
+---
+Task ID: FIX-PICKUP-ADDRESS-ROUTES
+Agent: general-purpose
+Task: Fix 5 pickup-address routes — move courier-address-book.actions import to dynamic import
+
+Work Log:
+- Read worklog.md and confirmed the proven /api/orders + /api/exchanges + integration
+  sub-routes pattern: top-level `@/lib/actions/*` import → dynamic `await import()`
+  inside the handler body.
+- Read all 5 target route files FIRST to identify the exact function names and call
+  sites in each handler:
+  1. pickup-addresses/route.ts → listPickupAddresses (GET), addPickupAddress (POST)
+  2. pickup-addresses/sync/route.ts → syncPickupAddresses (POST)
+  3. pickup-addresses/refresh/route.ts → refreshAllPickupAddresses (POST)
+  4. pickup-addresses/import-by-id/route.ts → importPickupAddressById (POST)
+  5. pickup-addresses/[addressId]/route.ts → setDefaultPickupAddress (PATCH),
+     deletePickupAddress (DELETE)
+- For each file: removed ONLY the top-level
+  `import { fn } from '@/lib/actions/courier-address-book.actions'` line(s); left all
+  other imports (next/server, @/lib/workspace) untouched.
+- Added `const { fn } = await import('@/lib/actions/courier-address-book.actions')`
+  INSIDE the try block of each handler, immediately before the function call.
+  • File 1: added dynamic import in both GET (after `const { id } = await params`)
+    and POST (after the required-fields validation guard, before addPickupAddress).
+  • File 2: added dynamic import in POST (after `const { id } = await params`).
+  • File 3: added dynamic import in POST (after `const { id } = await params`).
+  • File 4: added dynamic import in POST (after the shipment_id validation guard).
+  • File 5: added dynamic import inside PATCH (inside the `if (body.action === 'set-default')`
+    block, before setDefaultPickupAddress) AND inside DELETE (after
+    `const { addressId } = await params`, before deletePickupAddress).
+- Verified no other handler logic was modified in any of the 5 files.
+- Cross-checked the new pattern against the existing fixed routes
+  (orders/route.ts, exchanges/route.ts, integration sub-routes).
+- Ran `bun run lint` → 0 errors, 12 pre-existing warnings (same baseline as prior
+  agents; none of the warnings are in the 5 edited files).
+
+Stage Summary:
+- 5 pickup-address API routes fixed to lazy-load courier-address-book.actions via
+  dynamic `import()` inside each handler:
+  • src/app/api/integrations/[id]/pickup-addresses/route.ts (GET + POST)
+  • src/app/api/integrations/[id]/pickup-addresses/sync/route.ts (POST)
+  • src/app/api/integrations/[id]/pickup-addresses/refresh/route.ts (POST)
+  • src/app/api/integrations/[id]/pickup-addresses/import-by-id/route.ts (POST)
+  • src/app/api/integrations/[id]/pickup-addresses/[addressId]/route.ts (PATCH + DELETE)
+- Lint passes cleanly (0 errors). Same proven pattern as the /api/orders,
+  /api/exchanges, and integration sub-route fixes.
+- Next: deploy to Hostinger and verify all 6 endpoints (list, add, sync, refresh,
+  import-by-id, set-default, delete) respond successfully without 500s.

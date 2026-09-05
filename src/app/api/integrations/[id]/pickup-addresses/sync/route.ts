@@ -1,6 +1,5 @@
 import { ApiError, handleError } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { syncPickupAddresses } from '@/lib/actions/courier-address-book.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -22,6 +21,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const { syncPickupAddresses } = await import('@/lib/actions/courier-address-book.actions')
     const result = await syncPickupAddresses(id)
     if (!result.success) throw new ApiError(400, result.error ?? 'Sync failed')
     return Response.json(result.data)

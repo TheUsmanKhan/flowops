@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError, readBody } from '@/lib/workspace'
-import { importPickupAddressById } from '@/lib/actions/courier-address-book.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -26,6 +25,7 @@ export async function POST(
       )
     }
 
+    const { importPickupAddressById } = await import('@/lib/actions/courier-address-book.actions')
     const result = await importPickupAddressById(id, body.shipment_id)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

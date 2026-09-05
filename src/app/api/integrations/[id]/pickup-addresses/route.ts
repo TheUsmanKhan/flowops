@@ -1,9 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError, readBody } from '@/lib/workspace'
-import {
-  listPickupAddresses,
-  addPickupAddress,
-} from '@/lib/actions/courier-address-book.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -15,6 +11,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params
+    const { listPickupAddresses } = await import('@/lib/actions/courier-address-book.actions')
     const result = await listPickupAddresses(id)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })
@@ -48,6 +45,7 @@ export async function POST(
       )
     }
 
+    const { addPickupAddress } = await import('@/lib/actions/courier-address-book.actions')
     const result = await addPickupAddress(id, {
       label: body.label,
       address: body.address,

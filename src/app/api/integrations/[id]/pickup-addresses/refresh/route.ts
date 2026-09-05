@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { ApiError, handleError } from '@/lib/workspace'
-import { refreshAllPickupAddresses } from '@/lib/actions/courier-address-book.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -25,6 +24,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const { refreshAllPickupAddresses } = await import('@/lib/actions/courier-address-book.actions')
     const result = await refreshAllPickupAddresses(id)
     if (!result.success) throw new ApiError(400, result.error ?? 'Refresh failed')
     return Response.json(result.data)
