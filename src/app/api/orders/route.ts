@@ -1,17 +1,15 @@
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { db } from '@/lib/db'
 import {
-  listOrders,
-  createManualOrder,
-} from '@/lib/actions/order.actions'
-import type { CreateManualOrderInput } from '@/lib/validations/order.schemas'
+  getWorkspace,
+  getOrdersDataScope,
+  handleError,
+  readBody,
+  ApiError,
+} from '@/lib/workspace'
+import type { Prisma } from '@prisma/client'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
-
-// Module load-time health check — if this fails, the route returns a raw 500.
-// This log helps diagnose whether the module itself loads on Hostinger.
-// eslint-disable-next-line no-console
-console.log('[orders route] module loaded at', new Date().toISOString())
 
 /**
  * Parse a query parameter that may be either comma-separated
@@ -36,6 +34,10 @@ function parseArrayParam(url: URL, key: string): string[] {
  * GET /api/orders
  * List orders for the active company.
  *
+ * This route uses `db` directly instead of importing from order.actions.ts
+ * (which is 2800+ lines and pulls in a massive transitive dependency tree
+ * that causes module loading failures on Hostinger's production environment).
+ *
  * Supported query params:
  *   - Multi-select (comma-separated OR repeated):
  *       statuses, payment_types, payment_statuses, order_sources, courier_names
@@ -51,23 +53,19 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url)
 
-    // Multi-select filters (preferred)
+    // ── Parse query params ──
     const statuses = parseArrayParam(url, 'statuses')
-    // eslint-disable-next-line no-console
-    console.log('[orders GET] params:', { url: url.pathname, search: url.search })
     const paymentTypes = parseArrayParam(url, 'payment_types')
     const paymentStatuses = parseArrayParam(url, 'payment_statuses')
     const orderSources = parseArrayParam(url, 'order_sources')
     const courierNames = parseArrayParam(url, 'courier_names')
 
-    // Single-value backward-compat filters
     const status = url.searchParams.get('status') ?? ''
     const paymentType = url.searchParams.get('payment_type') ?? ''
     const paymentStatus = url.searchParams.get('payment_status') ?? ''
     const orderSource = url.searchParams.get('order_source') ?? ''
     const courierName = url.searchParams.get('courier_name') ?? ''
 
-    // Scalar filters
     const customerId = url.searchParams.get('customer_id') ?? ''
     const orgVariantId = url.searchParams.get('org_variant_id') ?? ''
     const deliveryCity = url.searchParams.get('delivery_city') ?? ''
@@ -75,77 +73,224 @@ export async function GET(req: Request) {
     const dateFrom = url.searchParams.get('date_from') ?? ''
     const dateTo = url.searchParams.get('date_to') ?? ''
 
-    // Range filters
     const amountMinRaw = url.searchParams.get('amount_min')
     const amountMaxRaw = url.searchParams.get('amount_max')
     const amountMin = amountMinRaw ? Number(amountMinRaw) : undefined
     const amountMax = amountMaxRaw ? Number(amountMaxRaw) : undefined
 
-    const limit = url.searchParams.get('limit')
-      ? Number(url.searchParams.get('limit'))
-      : undefined
+    const limit = Math.min(
+      url.searchParams.get('limit') ? Number(url.searchParams.get('limit')) : 50,
+      100,
+    )
     const offset = url.searchParams.get('offset')
       ? Number(url.searchParams.get('offset'))
-      : undefined
+      : 0
 
-    // eslint-disable-next-line no-console
-    console.log('[orders GET] calling listOrders...')
-    const result = await listOrders({
-      // Multi-select (preferred)
-      statuses: statuses.length > 0 ? statuses : undefined,
-      paymentTypes: paymentTypes.length > 0 ? paymentTypes : undefined,
-      paymentStatuses: paymentStatuses.length > 0 ? paymentStatuses : undefined,
-      orderSources: orderSources.length > 0 ? orderSources : undefined,
-      courierNames: courierNames.length > 0 ? courierNames : undefined,
-      // Single-value backward compat
-      status: status || undefined,
-      paymentType: paymentType || undefined,
-      paymentStatus: paymentStatus || undefined,
-      orderSource: orderSource || undefined,
-      courierName: courierName || undefined,
-      // Scalar
-      customerId: customerId || undefined,
-      orgVariantId: orgVariantId || undefined,
-      deliveryCity: deliveryCity || undefined,
-      search: search || undefined,
-      // Range
-      dateFrom: dateFrom || undefined,
-      dateTo: dateTo || undefined,
-      amountMin: amountMin !== undefined && !Number.isNaN(amountMin) ? amountMin : undefined,
-      amountMax: amountMax !== undefined && !Number.isNaN(amountMax) ? amountMax : undefined,
-      // Pagination
-      limit,
-      offset,
-    })
+    // ── Auth + workspace context ──
+    const ctx = await getWorkspace()
 
-    if (!result.success) {
-      // eslint-disable-next-line no-console
-      console.error('[orders GET] listOrders returned failure:', result.error)
-      throw new ApiError(400, result.error ?? 'Failed to list orders')
+    // ── Build Prisma where clause ──
+    const where: Prisma.OrderWhereInput = {
+      companyId: ctx.company.id,
     }
-    // eslint-disable-next-line no-console
-    console.log('[orders GET] success, returning', result.data?.orders?.length ?? 0, 'orders')
-    return Response.json(result.data)
+
+    // Phase 4 — Server-side scoping: if the caller's role has
+    // ordersDataScope='own', filter to only their attributed orders.
+    if (getOrdersDataScope(ctx) === 'own') {
+      where.salesEmployeeId = ctx.employee.id
+    }
+
+    // Status filter
+    if (statuses.length > 0) {
+      where.status = { in: statuses }
+    } else if (status) {
+      where.status = status
+    }
+
+    // Payment type filter
+    if (paymentTypes.length > 0) {
+      where.paymentType = { in: paymentTypes }
+    } else if (paymentType) {
+      where.paymentType = paymentType
+    }
+
+    // Payment status filter
+    if (paymentStatuses.length > 0) {
+      where.paymentStatus = { in: paymentStatuses }
+    } else if (paymentStatus) {
+      where.paymentStatus = paymentStatus
+    }
+
+    // Order source filter
+    if (orderSources.length > 0) {
+      where.orderSource = { in: orderSources }
+    } else if (orderSource) {
+      where.orderSource = orderSource
+    }
+
+    // Courier filter
+    if (courierNames.length > 0) {
+      where.courierName = { in: courierNames }
+    } else if (courierName) {
+      where.courierName = courierName
+    }
+
+    if (customerId) where.customerId = customerId
+
+    if (deliveryCity) {
+      where.deliveryCity = { contains: deliveryCity, mode: 'insensitive' }
+    }
+
+    if (dateFrom || dateTo) {
+      where.createdAt = {}
+      if (dateFrom) where.createdAt.gte = new Date(dateFrom)
+      if (dateTo) {
+        const end = new Date(dateTo)
+        end.setHours(23, 59, 59, 999)
+        where.createdAt.lte = end
+      }
+    }
+
+    if (amountMin !== undefined || amountMax !== undefined) {
+      where.totalOrderValue = {}
+      if (amountMin !== undefined && !Number.isNaN(amountMin))
+        where.totalOrderValue.gte = amountMin
+      if (amountMax !== undefined && !Number.isNaN(amountMax))
+        where.totalOrderValue.lte = amountMax
+    }
+
+    if (orgVariantId) {
+      where.items = { some: { orgVariantId } }
+    }
+
+    if (search) {
+      where.OR = [
+        { flowopsOrderNumber: { contains: search, mode: 'insensitive' } },
+        { externalOrderReference: { contains: search, mode: 'insensitive' } },
+        { customer: { name: { contains: search, mode: 'insensitive' } } },
+        {
+          customer: {
+            phones: {
+              some: { phoneRaw: { contains: search, mode: 'insensitive' } },
+            },
+          },
+        },
+      ]
+    }
+
+    // ── Execute query ──
+    const [orders, total] = await Promise.all([
+      db.order.findMany({
+        where,
+        include: {
+          customer: {
+            select: {
+              name: true,
+              phones: {
+                where: { isPrimary: true },
+                take: 1,
+                select: { phoneRaw: true },
+              },
+            },
+          },
+          salesEmployee: {
+            select: {
+              id: true,
+              user: { select: { fullName: true } },
+            },
+          },
+          _count: { select: { items: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+        skip: offset,
+      }),
+      db.order.count({ where }),
+    ])
+
+    // ── Map results (same shape as listOrders) ──
+    return Response.json({
+      orders: orders.map((o) => ({
+        id: o.id,
+        flowopsOrderNumber: o.flowopsOrderNumber,
+        externalOrderReference: o.externalOrderReference,
+        externalOrderId: o.externalOrderId,
+        orderSource: o.orderSource,
+        status: o.status,
+        paymentType: o.paymentType,
+        paymentStatus: o.paymentStatus,
+        paymentSource: o.paymentSource,
+        subtotal: Number(o.subtotal),
+        discountAmount: o.discountAmount ? Number(o.discountAmount) : null,
+        courierCharges: o.courierCharges ? Number(o.courierCharges) : null,
+        estimatedDeliveryCharge: o.estimatedDeliveryCharge
+          ? Number(o.estimatedDeliveryCharge)
+          : null,
+        actualDeliveryCharge: o.actualDeliveryCharge
+          ? Number(o.actualDeliveryCharge)
+          : null,
+        taxAmount: o.taxAmount ? Number(o.taxAmount) : null,
+        taxLabel: o.taxLabel ?? null,
+        totalOrderValue: Number(o.totalOrderValue),
+        advanceAmount: o.advanceAmount ? Number(o.advanceAmount) : null,
+        remainingCodAmount: o.remainingCodAmount
+          ? Number(o.remainingCodAmount)
+          : Math.max(
+              0,
+              Number(o.totalOrderValue) -
+                (o.advanceAmount ? Number(o.advanceAmount) : 0),
+            ),
+        codCollected: o.codCollected,
+        courierName: o.courierName,
+        trackingNumber: o.trackingNumber,
+        courierCompanyIntegrationId: o.courierCompanyIntegrationId,
+        courierBookingStatus: o.courierBookingStatus,
+        courierBookingFailureReason: o.courierBookingFailureReason,
+        courierCityStatus: o.courierCityStatus,
+        courierSubStatus: o.courierSubStatus,
+        needsShipperAdvice: o.needsShipperAdvice,
+        dispatchLocationId: o.dispatchLocationId,
+        customerId: o.customerId,
+        deliveryAddress: o.deliveryAddress,
+        deliveryCity: o.deliveryCity,
+        deliveryCountry: o.deliveryCountry,
+        orderRefNumber: o.orderRefNumber,
+        orderDetail: o.orderDetail,
+        notesForCourier: o.notesForCourier,
+        confirmedAt: o.confirmedAt,
+        dispatchedAt: o.dispatchedAt,
+        deliveredAt: o.deliveredAt,
+        createdAt: o.createdAt,
+        customerName: o.customer.name,
+        customerPhone: o.customer.phones[0]?.phoneRaw ?? null,
+        itemCount: o._count.items,
+        salesEmployeeId: o.salesEmployeeId,
+        salesEmployeeName: o.salesEmployee?.user?.fullName ?? null,
+      })),
+      total,
+    })
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[orders GET] UNHANDLED ERROR:', err instanceof Error ? err.stack : err)
     return handleError(err)
   }
 }
 
 /**
  * POST /api/orders
- * Create a manual order. Wraps createManualOrder().
+ * Create a manual order.
+ *
+ * Uses dynamic import() for order.actions.ts so the heavy 2800-line module
+ * (and its transitive deps) only loads when POST is actually called — NOT at
+ * route module initialization time.
  */
 export async function POST(req: Request) {
   try {
-    const body = await readBody<CreateManualOrderInput>(req)
+    const body = await readBody(req)
     const idempotencyKey = req.headers.get('Idempotency-Key')
 
-    // If an idempotency key is provided, wrap the creation in withIdempotency()
-    // to guarantee only ONE order is created per key (prevents duplicate submissions).
+    // Dynamic import — only loads createManualOrder when POST is called
+    const { createManualOrder } = await import('@/lib/actions/order.actions')
+
     if (idempotencyKey) {
-      const { getWorkspace } = await import('@/lib/workspace')
       const ctx = await getWorkspace()
       const { withIdempotency } = await import('@/lib/idempotency')
       const { result, wasReplay } = await withIdempotency({
@@ -164,7 +309,6 @@ export async function POST(req: Request) {
       return Response.json(result, { status: wasReplay ? 200 : 201 })
     }
 
-    // No idempotency key — normal flow (backwards-compatible)
     const result = await createManualOrder(body)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to create order')
