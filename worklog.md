@@ -12263,3 +12263,30 @@ Stage Summary:
 - Both files reference each other + FLOWOPS_BRIEFING.md + companion documentation files (INTERNAL_API_GUIDE.md, DATABASE_GUIDE.md, FRONTEND_GUIDE.md, DOCKER.md) for cross-referencing.
 - Verified both files written correctly (each file ends with footer; line counts: TESTING_GUIDELINES.md = 1243 lines, PRODUCTION_DEPLOYMENT_GUIDE.md = 1920 lines).
 - No source code modifications — documentation-only task. One new file created (TESTING_GUIDELINES.md); one existing file rewritten (PRODUCTION_DEPLOYMENT_GUIDE.md).
+
+---
+Task ID: PROD-DEPLOY-FIX-2
+Agent: main
+Task: Fix Hostinger production build crash — @next/bundle-analyzer not found + CSS build packages in devDependencies
+
+Work Log:
+- Read Hostinger build error log: "Cannot find package '@next/bundle-analyzer' imported from next.config.mjs" — root cause: top-level static `import withBundleAnalyzer from "@next/bundle-analyzer"` runs unconditionally at config load time, but Hostinger skips devDependencies during `npm install` (NODE_ENV=production).
+- Fixed next.config.mjs: converted static import to lazy dynamic `import()` wrapped in try/catch. The bundle analyzer now only loads when `ANALYZE=true` AND the package is installed. Production builds no longer crash if devDeps are missing.
+- Proactive audit: identified 3 MORE build-time packages incorrectly placed in devDependencies that would cause the NEXT build failure after the bundle-analyzer fix:
+  * `@tailwindcss/postcss` — PostCSS plugin for Tailwind v4, referenced in postcss.config.mjs (loaded during `next build` for CSS processing)
+  * `tailwindcss` — Tailwind engine, required by @tailwindcss/postcss
+  * `tw-animate-css` — CSS package, imported via `@import "tw-animate-css"` in globals.css (resolved by PostCSS at build time)
+- Moved all 3 packages from devDependencies → dependencies in package.json. devDependencies now only contains truly dev-only packages (@types/*, eslint, typescript, bun-types, @next/bundle-analyzer) — none of which are imported during `next build` (ignoreBuildErrors: true skips TS checking).
+- Verified package.json is valid JSON. Verified dev server starts cleanly with all 3 instrumentation pollers (exchange rates, PostEx, Leopard) running.
+- Committed 2 commits and pushed to GitHub main:
+  * `a488f30` — fix: lazy-load @next/bundle-analyzer
+  * `949d594` — fix: move build-time CSS packages to dependencies
+- Both pushes trigger Hostinger auto-deploy via GitHub connection.
+
+Stage Summary:
+- Root cause of Hostinger build failure: Hostinger runs `npm install` with devDependencies skipped (NODE_ENV=production / --omit=dev), but the config and CSS build pipeline required devDep packages.
+- Fix 1 (next.config.mjs): @next/bundle-analyzer loaded lazily — production builds work without it.
+- Fix 2 (package.json): @tailwindcss/postcss, tailwindcss, tw-animate-css moved to dependencies — CSS build pipeline works without devDeps.
+- The existing serverExternalPackages: ["@prisma/client"] fix (from prior commit) handles the Prisma EEXIST error.
+- All 3 Hostinger build blockers are now resolved. Next auto-deploy should succeed.
+- Local dev verified: GET / 200, all instrumentation pollers start, page renders.
