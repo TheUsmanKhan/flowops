@@ -12503,3 +12503,41 @@ Stage Summary:
 - GET handlers are now decoupled from @/lib/inventory and will no longer crash with 500 on Hostinger when the inventory module fails to load at boot.
 - POST handlers retain identical logic; only the import mechanism changed (static → dynamic await import).
 - Lint clean (0 errors). Ready for commit + Hostinger redeploy.
+
+---
+Task ID: PROD-DEPLOY-FIX-9
+Agent: main
+Task: Fix 5 more API routes returning 500 — same root cause as /api/orders
+
+Work Log:
+- User reported: 5 more API endpoints returning 500 on production:
+  * /api/exchanges → 500
+  * /api/exchanges/overdue → 500
+  * /api/production-orders → 500
+  * /api/purchase-orders → 500
+  * /api/supplier-returns → 500
+- Root cause: SAME as /api/orders — these routes import from heavy modules at the top level:
+  * /api/exchanges + /api/exchanges/overdue → import from exchange.actions.ts (1350 lines)
+  * /api/production-orders + /api/purchase-orders + /api/supplier-returns → import from @/lib/inventory (958 lines)
+- These modules fail to load on Hostinger → route module fails → raw text/plain 500
+- Fix applied (same pattern as /api/orders):
+  1. /api/exchanges (GET): inlined listExchanges query using db directly (POST: dynamic import)
+  2. /api/exchanges/overdue (GET): inlined listOverdueExchanges query using db directly
+  3. /api/production-orders: moved @/lib/inventory import to dynamic import() in POST (GET uses db directly)
+  4. /api/purchase-orders: moved @/lib/inventory import to dynamic import() in POST (GET uses db directly)
+  5. /api/supplier-returns: moved @/lib/inventory import to dynamic import() in POST (GET uses db directly)
+- Verified locally with production build (webpack standalone, production DB credentials):
+  * /api/exchanges → 401 (was 500) ✅
+  * /api/exchanges/overdue → 401 (was 500) ✅
+  * /api/production-orders → 401 (was 500) ✅
+  * /api/purchase-orders → 401 (was 500) ✅
+  * /api/supplier-returns → 401 (was 500) ✅
+  * /api/orders → 401 (already fixed) ✅
+- Committed as 7e1fde9, pushed to GitHub. Hostinger auto-deploy will trigger.
+- User also reported: missing frontend forms (Add Supplier, Add Location buttons). This is likely the CDN cache issue (old HTML referencing old chunks that 404). User should purge Hostinger CDN cache + hard refresh browser.
+
+Stage Summary:
+- Fixed 5 more API routes using the same pattern that fixed /api/orders.
+- Total API routes fixed: 6 (/api/orders + 5 more)
+- All verified locally with production DB.
+- User should purge CDN cache after deploy to fix the missing frontend forms (old cached HTML referencing old chunks).
