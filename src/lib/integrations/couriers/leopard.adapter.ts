@@ -649,15 +649,26 @@ export class LeopardAdapter implements CourierAdapter {
       // request_param and request_value are optional — if omitted, returns all shippers
     }
 
-    const resp = await this.getWithParams<LeopardShipper[]>('getShipperDetails', params)
+    const resp = await this.getWithParams<LeopardShipper[] | LeopardShipper>('getShipperDetails', params)
 
     if (resp.status !== 1 && resp.status !== '1') {
       throw new Error(this.extractError(resp))
     }
 
-    const shippers = resp.data
-    if (!shippers || !Array.isArray(shippers)) {
+    // Leopard's API returns data as either:
+    // - An array of shippers (when fetching all)
+    // - A SINGLE shipper object (when filtering or only one shipper exists)
+    // We must handle BOTH shapes.
+    const data = resp.data
+    if (!data) {
       return []
+    }
+
+    let shippers: LeopardShipper[] = []
+    if (Array.isArray(data)) {
+      shippers = data
+    } else if (typeof data === 'object') {
+      shippers = [data]
     }
 
     return shippers.map((s) => this.mapShipper(s))
@@ -689,18 +700,33 @@ export class LeopardAdapter implements CourierAdapter {
       request_value: shipmentId,
     }
 
-    const resp = await this.getWithParams<LeopardShipper[]>('getShipperDetails', params)
+    const resp = await this.getWithParams<LeopardShipper[] | LeopardShipper>('getShipperDetails', params)
 
     if (resp.status !== 1 && resp.status !== '1') {
       throw new Error(this.extractError(resp))
     }
 
-    const shippers = resp.data
-    if (!shippers || !Array.isArray(shippers) || shippers.length === 0) {
+    // Leopard's API returns data as either:
+    // - An array of shippers (when fetching all)
+    // - A SINGLE shipper object (when filtering by request_param=request_value)
+    // We must handle BOTH shapes.
+    const data = resp.data
+    if (!data) {
       return null
     }
 
-    return this.mapShipper(shippers[0])
+    let shipper: LeopardShipper | null = null
+    if (Array.isArray(data)) {
+      // Array response — take the first match
+      if (data.length === 0) return null
+      shipper = data[0]
+    } else if (typeof data === 'object') {
+      // Single object response (the common case for request_param filtering)
+      shipper = data
+    }
+
+    if (!shipper) return null
+    return this.mapShipper(shipper)
   }
 
   // ──────────────────────────────────────────────────────────────
