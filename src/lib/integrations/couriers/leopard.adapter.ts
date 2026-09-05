@@ -145,8 +145,18 @@ export class LeopardAdapter implements CourierAdapter {
     if (!this.apiKey || !this.apiPassword) {
       throw new Error('Leopard adapter requires both api_key and api_password in credentials.')
     }
-    // Use production if credentials explicitly say so, otherwise staging
-    this.baseUrl = credentials.isProduction === 'true' ? LEOPARD_PRODUCTION_BASE : LEOPARD_STAGING_BASE
+    // Use production if credentials explicitly say so, otherwise staging.
+    // The isProduction field is a boolean in configSchema, but it can arrive as:
+    //   - "true" / "false" (string from JSON)
+    //   - true / false (boolean — JSON.parse keeps it as boolean)
+    //   - "on" (HTML checkbox default)
+    //   - undefined (field left empty — defaults to staging)
+    const isProd = credentials.isProduction === true
+      || credentials.isProduction === 'true'
+      || credentials.isProduction === 'on'
+      || credentials.isProduction === '1'
+      || credentials.isProduction === 1
+    this.baseUrl = isProd ? LEOPARD_PRODUCTION_BASE : LEOPARD_STAGING_BASE
   }
 
   // ──────────────────────────────────────────────────────────────

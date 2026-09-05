@@ -49,6 +49,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import { cn } from '@/lib/utils'
+import { Switch } from '@/components/ui/switch'
 import { getErrorMessage } from '@/components/orders/_shared'
 import { PickupAddressesSection } from '@/components/couriers/pickup-addresses-section'
 import { LeopardPreferencesSection } from '@/components/settings/leopard-preferences-section'
@@ -664,18 +665,39 @@ function ConnectDialog({
 
             {/* Dynamic credential fields from config_schema */}
             {fields.map((field) => (
-              <div key={field.key} className="space-y-1.5">
-                <Label className="text-xs">
-                  {field.label}
-                  {field.required && <span className="text-rose-600 ml-0.5">*</span>}
-                </Label>
-                <Input
-                  type={field.type === 'password' ? 'password' : 'text'}
-                  placeholder={field.type === 'password' ? '••••••••' : `Enter ${field.label}`}
-                  value={credentials[field.key] ?? ''}
-                  onChange={(e) => setCredentials((p) => ({ ...p, [field.key]: e.target.value }))}
-                />
-              </div>
+              field.type === 'boolean' ? (
+                <div key={field.key} className="space-y-1.5">
+                  <div className="flex items-center justify-between rounded-md border p-3">
+                    <div className="space-y-0.5">
+                      <Label className="text-xs">
+                        {field.label}
+                      </Label>
+                      {field.description && (
+                        <p className="text-[10px] text-muted-foreground">{field.description}</p>
+                      )}
+                    </div>
+                    <Switch
+                      checked={credentials[field.key] === 'true' || credentials[field.key] === true}
+                      onCheckedChange={(checked) =>
+                        setCredentials((p) => ({ ...p, [field.key]: checked ? 'true' : 'false' }))
+                      }
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div key={field.key} className="space-y-1.5">
+                  <Label className="text-xs">
+                    {field.label}
+                    {field.required && <span className="text-rose-600 ml-0.5">*</span>}
+                  </Label>
+                  <Input
+                    type={field.type === 'password' ? 'password' : 'text'}
+                    placeholder={field.type === 'password' ? '••••••••' : `Enter ${field.label}`}
+                    value={credentials[field.key] ?? ''}
+                    onChange={(e) => setCredentials((p) => ({ ...p, [field.key]: e.target.value }))}
+                  />
+                </div>
+              )
             ))}
 
             {/* Per-provider adapter status note — only shown for non-live adapters */}
