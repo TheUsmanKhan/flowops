@@ -12410,3 +12410,44 @@ Stage Summary:
 - User MUST check the Hostinger BUILD LOG (not runtime log) to see why the build keeps failing.
 - User may need to manually trigger a redeploy on Hostinger after confirming all fixes are on GitHub.
 - All 6 fix commits are confirmed pushed to origin/main.
+
+---
+Task ID: PROD-DEPLOY-FIX-7
+Agent: main
+Task: Diagnose /api/orders 500 error after successful build deploy
+
+Work Log:
+- BREAKTHROUGH: Hostinger build FINALLY SUCCEEDED! Build log shows:
+  * postinstall: prisma generate → ✔ Generated Prisma Client v6.19.2
+  * build: prisma generate && next build --webpack → ✓ Compiled successfully in 57s
+  * All 200+ routes generated (app router)
+  * webpack mode confirmed (not Turbopack)
+- BUT: /api/orders still returns 500 on production. Other endpoints work:
+  * GET /api/auth/me → 200 (works)
+  * GET /api/products → 401 (proper JSON auth error)
+  * GET /api/customers → 400 (proper JSON auth error)
+  * GET /api/orders/test123 → 401 (proper JSON auth error — order DETAIL works!)
+  * GET /api/orders/pending → 401 (proper JSON — works!)
+  * GET /api/orders → 500 text/plain "Internal Server Error" (CRASHES)
+- KEY FINDING: The 500 response is text/plain (NOT JSON). This means the route module fails to LOAD or the error handler itself crashes. handleError() returns JSON, so it's not being called.
+- Investigated possible causes:
+  * Prisma client in standalone: ✅ present and loadable (tested require('@prisma/client') from standalone)
+  * Chunk 4892 (order.actions): ✅ present and loadable
+  * No middleware, no conflicting routes
+  * All Prisma schema fields referenced in listOrders exist
+  * Local production build test: /api/orders → 400 (correct, not 500)
+- Added diagnostic logging to /api/orders/route.ts:
+  1. Module load-time: console.log('[orders route] module loaded at <timestamp>')
+  2. Request-time: console.log('[orders GET] params:', ...), console.log('[orders GET] calling listOrders...')
+  3. Error: console.error('[orders GET] UNHANDLED ERROR:', err.stack)
+- Committed as 1640024 and pushed to GitHub. Hostinger auto-deploy will trigger.
+- NEXT STEP: After Hostinger deploys, check the HOSTINGER RUNTIME LOG for:
+  * If '[orders route] module loaded' appears → module loads fine, error is in request handling
+  * If '[orders GET] UNHANDLED ERROR:' appears → we'll see the actual error message
+  * If NEITHER appears → the module itself fails to load (webpack chunk issue on Hostinger)
+
+Stage Summary:
+- Build now succeeds on Hostinger (all 5 previous fixes worked for the build).
+- /api/orders specifically returns raw 500 — all other API routes work.
+- Diagnostic logging pushed to identify the exact error.
+- User needs to check Hostinger runtime log after auto-deploy and share the [orders route] and [orders GET] log lines.
