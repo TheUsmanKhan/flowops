@@ -12833,3 +12833,29 @@ Stage Summary:
 - Root cause: Same module-loading pattern that broke /api/orders — courier-address-book.actions.ts pulls in heavy courier adapter deps.
 - All 5 pickup-address routes now use dynamic import().
 - After Hostinger deploys, the 'No shipper found' error will be resolved — the import-by-id route will actually run the import logic instead of crashing on module load.
+
+---
+Task ID: LEOPARD-SHIPPER-FIX
+Agent: main
+Task: Fix 'No shipper found with shipment_id' — Leopard API returns object, not array
+
+Work Log:
+- User reported: 'No shipper found with shipment_id 1918161' error persists even though the shipper EXISTS and is ACTIVE in Leopard's system.
+- Tested Leopard API directly with production credentials (api_key=BA2177FE04B1F7F19A5727A38741841E, api_password=PAK12345):
+  * STAGING endpoint: returns {status:0, error:'Invalid API Key'} — credentials DON'T work on staging
+  * PRODUCTION endpoint: returns {status:1, data:{shipment_id:'1918161', shipment_name_eng:'SHINE IN', ...}} — works!
+- ROOT CAUSE: Leopard's getShipperDetails API returns data in DIFFERENT shapes:
+  * Without request_param: returns an ARRAY of shippers
+  * With request_param=shipment_id&request_value={id}: returns a SINGLE OBJECT (not wrapped in array)
+  * The code only checked Array.isArray(data) — when API returned single object, check failed → returned null → 'No shipper found'
+- Fix applied to BOTH methods in leopard.adapter.ts:
+  1. fetchShipperById: now handles both single object and array responses
+  2. fetchExistingPickupAddresses: same fix (was returning empty array when API returned single object)
+- Verified with production build: import-by-id route returns 401 (auth error, not 500) — route module loads correctly
+- Committed as 1f8644a, pushed to GitHub.
+
+Stage Summary:
+- ROOT CAUSE: Leopard API response shape mismatch (object vs array) — NOT a module loading issue.
+- Fix: Both fetchShipperById and fetchExistingPickupAddresses now handle both response shapes.
+- IMPORTANT: Leopard credentials only work on PRODUCTION endpoint. The isProduction toggle MUST be ON when connecting.
+- After Hostinger deploys, importing shipper 1918161 will work: returns {shipment_id:'1918161', shipment_name_eng:'SHINE IN', ...}
