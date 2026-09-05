@@ -1,5 +1,3 @@
-import withBundleAnalyzer from "@next/bundle-analyzer";
-
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "standalone",
@@ -17,8 +15,23 @@ const nextConfig = {
   serverExternalPackages: ["@prisma/client"],
 };
 
-const wrapped = withBundleAnalyzer({
-  enabled: process.env.ANALYZE === "true",
-})(nextConfig);
+// Bundle analyzer is a DEV-ONLY dependency.
+// We load it LAZILY via dynamic import() so that production builds (e.g. on
+// Hostinger where devDependencies may be skipped with --omit=dev) don't fail
+// with "Cannot find package '@next/bundle-analyzer'".
+// The analyzer only runs when ANALYZE=true AND the package is installed.
+let config = nextConfig;
 
-export default wrapped;
+if (process.env.ANALYZE === "true") {
+  try {
+    const { default: withBundleAnalyzer } = await import("@next/bundle-analyzer");
+    config = withBundleAnalyzer({ enabled: true })(nextConfig);
+  } catch {
+    console.warn(
+      "[next.config] @next/bundle-analyzer is not installed — skipping bundle analysis. " +
+        "Install it as a devDependency to use ANALYZE=true."
+    );
+  }
+}
+
+export default config;
