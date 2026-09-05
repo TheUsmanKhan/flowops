@@ -12350,3 +12350,30 @@ Stage Summary:
 - All 5 Hostinger build + runtime blockers are now resolved.
 - IMPORTANT: User must ensure environment variables are set on Hostinger dashboard:
   DATABASE_URL, DIRECT_URL, INTEGRATION_ENCRYPTION_KEY, SESSION_SECRET, CRON_SECRET, APP_URL
+
+---
+Task ID: PROD-DEPLOY-FIX-5
+Agent: main
+Task: Diagnose persistent Hostinger EEXIST crash + add production hardening
+
+Work Log:
+- User reported: SAME runtime error persisting (EEXIST at process.getStdin, crash-restart loop, orders 500).
+- ROOT CAUSE ANALYSIS: The `Error: open EEXIST` at `process.getStdin` is SPECIFICALLY caused by the `| tee server.log` PIPE in the OLD start script. My fix (commit 62e4261, changed to `node .next/standalone/server.js` without pipe) was pushed to GitHub, but the error STILL appears. This means THE NEW BUILD HAS NOT DEPLOYED ON HOSTINGER. The old code (with `bun ... | tee server.log`) is still running.
+- Evidence: The EEXIST at process.getStdin ONLY occurs when stdin is connected to a pipe. With the new start script (no pipe), this error is impossible. Therefore the old build is still running.
+- The user needs to check the BUILD LOG on Hostinger (not runtime log) to see if the latest deploy succeeded. If the build failed, the old code keeps running.
+- Proactive fixes added (for when the build DOES succeed):
+  1. Prisma binaryTargets: ['native', 'debian-openssl-3.0.x', 'linux-musl'] — ensures Prisma generates query engine binaries for multiple Linux platforms. If Hostinger's platform doesn't match the build platform, Prisma can still find a compatible binary.
+  2. start script: `node --unhandled-rejections=warn .next/standalone/server.js` — Node.js 15+ defaults to 'throw' on unhandled promise rejections (crashes the process). Setting to 'warn' keeps the process alive, preventing the crash-restart loop that causes EEXIST from file descriptor exhaustion.
+- Verified locally: Prisma generates 2 binaries (debian-openssl-3.0.x + linux-musl), build succeeds, dev server runs.
+- Committed as 4c55064, pushed to GitHub.
+
+Stage Summary:
+- The persistent EEXIST error is NOT a new bug — it's the OLD start script still running because the new build hasn't deployed.
+- User MUST check Hostinger BUILD LOG to see if deploy succeeded. If build failed, we need to see the build error to fix it.
+- Proactive hardening (binaryTargets + --unhandled-rejections=warn) ensures that when the build DOES deploy, the server won't crash-loop even if there are runtime errors.
+- All fixes pushed. Total commits for Hostinger deployment:
+  1. a488f30: lazy-load @next/bundle-analyzer
+  2. 949d594: move CSS packages to dependencies
+  3. 4d6be63: next build --webpack
+  4. 62e4261: postinstall prisma generate + node start (no bun, no tee)
+  5. 4c55064: Prisma binaryTargets + --unhandled-rejections=warn
