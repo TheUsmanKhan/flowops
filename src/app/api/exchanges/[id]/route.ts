@@ -1,6 +1,5 @@
 import { ApiError, handleError } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { getExchangeDetail } from '@/lib/actions/exchange.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -12,6 +11,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params
+    const { getExchangeDetail } = await import('@/lib/actions/exchange.actions')
     const result = await getExchangeDetail(id)
     if (!result.success) throw new ApiError(404, result.error ?? 'Exchange not found')
     return Response.json(result.data)

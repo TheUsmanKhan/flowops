@@ -4,7 +4,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction, releaseQuarantine } from '@/lib/inventory'
 import { resolveTheftOrMissingLossSchema, resolveTransitLossSchema } from '@/lib/validations/stock-loss'
 
 export const runtime = 'nodejs'
@@ -55,6 +54,9 @@ export async function POST(req: Request) {
       const parsed = resolveTheftOrMissingLossSchema.safeParse(body)
       if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
       const d = parsed.data
+
+      // Lazy-load inventory module to avoid heavy top-level import on Hostinger
+      const { processInventoryTransaction, releaseQuarantine } = await import('@/lib/inventory')
 
       // Step 1: Release quarantine in ALL cases
       await releaseQuarantine(record.orgVariantId, record.locationId, record.quantity)

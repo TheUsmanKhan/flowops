@@ -12859,3 +12859,143 @@ Stage Summary:
 - Fix: Both fetchShipperById and fetchExistingPickupAddresses now handle both response shapes.
 - IMPORTANT: Leopard credentials only work on PRODUCTION endpoint. The isProduction toggle MUST be ON when connecting.
 - After Hostinger deploys, importing shipper 1918161 will work: returns {shipment_id:'1918161', shipment_name_eng:'SHINE IN', ...}
+
+---
+Task ID: FIX-ALL-REMAINING-ROUTES
+Agent: general-purpose
+Task: Fix all remaining API routes with heavy top-level imports
+
+Work Log:
+- Read worklog.md and confirmed the proven pattern (top-level
+  `@/lib/inventory` or `@/lib/actions/*.actions` import → dynamic
+  `await import()` inside the handler body, before the function call).
+- Read ALL 30 target route files FIRST to identify:
+  • exact top-level import line to remove
+  • which handler(s) (GET/POST/PATCH/DELETE) use the function(s)
+  • the precise call sites where the dynamic import should be placed
+  • whether functions are used multiple times in one handler (combine into ONE
+    dynamic import at the top of the closure / try block)
+- Applied the fix to ALL 30 files in 3 batches:
+
+  Batch 1 — @/lib/inventory routes (14 files):
+  1. purchase-orders/[id]/confirm/route.ts — `incrementIncomingStock`
+     (POST, before the for-loop)
+  2. purchase-orders/[id]/receive/route.ts — `processInventoryTransaction`
+     (POST, after `const d = parsed.data` — covers both main + compensating
+     reversal calls in the for-loop)
+  3. purchase-orders/[id]/cancel/route.ts — `decrementIncomingStock`
+     (POST, before the for-loop)
+  4. stock-loss/report-theft/route.ts — `quarantineStock`
+     (POST, at start of `createTheftLoss` closure — used inside the closure
+     that's also called by idempotency replay)
+  5. stock-loss/report-damaged/route.ts — `processInventoryTransaction`
+     (import was DEAD CODE — function never directly called in handler;
+     `recordStockLoss` (dynamically imported from `@/lib/stock-loss`) handles
+     the txn internally. Just removed the top-level import, no dynamic
+     import needed.)
+  6. stock-loss/resolve/route.ts — `processInventoryTransaction, releaseQuarantine`
+     (POST, combined into ONE dynamic import inside Path 1: theft/missing
+     branch, after `const d = parsed.data`)
+  7. cycle-counts/[id]/route.ts — `processInventoryTransaction`
+     (PATCH, inside `if (action === 'approve')` block — covers all 3 call
+     sites in the 3 shortage branches. NOTE: `quarantineStock` was already
+     dynamically imported on line 294; left that pattern intact.)
+  8. inventory/fulfill-mto/route.ts — `checkAndFulfillMadeToOrderVariant`
+     (POST, after Zod parse, before the function call)
+  9. inventory/summary/route.ts — `getProductInventorySummary`
+     (GET, after the product_id validation guard)
+  10. inventory/adjust/route.ts — `processInventoryTransaction`
+      (POST, at start of `adjustStock` closure — used in the positive
+      branch; negative branch uses `recordStockLoss` which is already
+      dynamically imported)
+  11. inventory/opening-stock/route.ts — `processInventoryTransaction`
+      (POST, at start of `recordOpeningStock` closure)
+  12. inventory/transfers/route.ts — `processInventoryTransaction`
+      (POST, at start of `createTransfer` closure — covers all 3 calls:
+      transfer_out, transfer_in, and the compensating reversal)
+  13. inventory/receive/route.ts — `processInventoryTransaction`
+      (POST, at start of `receiveStock` closure, before the for-loop)
+  14. inventory/receive-returned-stitched/route.ts — `processInventoryTransaction`
+      (POST, in the not-damaged branch right before the function call)
+
+  Batch 2 — @/lib/actions/exchange.actions routes (8 files, all simple
+  single-handler routes — added dynamic import right after
+  `const { id } = await params`):
+  15. exchanges/[id]/confirm-shipped/route.ts — `confirmCustomerShippedOldItem`
+  16. exchanges/[id]/mark-not-returned/route.ts — `markExchangeAsNotReturned`
+  17. exchanges/[id]/dispatch-new-item/route.ts — `dispatchExchangeNewItem`
+  18. exchanges/[id]/route.ts — `getExchangeDetail` (GET)
+  19. exchanges/[id]/settle-price-difference/route.ts — `settlePriceDifference`
+  20. exchanges/[id]/verify-old-item/route.ts — `verifyOldItemReceived`
+  21. exchanges/[id]/dispatch-replacement/route.ts — `dispatchReplacementForSelfReturnExchange`
+  22. exchanges/[id]/cancel/route.ts — `cancelExchangeRequest`
+
+  Batch 3 — other @/lib/actions/*.actions routes (8 files):
+  23. shipper-advice/queue/route.ts — `listNeedsShipperAdvice` (GET,
+      inside try block before call)
+  24. shipper-advice/route.ts — `sendShipperAdvice` (POST, after the
+      entityId/adviceType validation guards)
+  25. scan/confirm-return/route.ts — `processOrderReturn` (POST, before
+      the call labelled "Confirm RTO (processOrderReturn adds stock back)")
+  26. scan/reports/route.ts — `getScanReport` (BOTH GET and POST handlers
+      — added dynamic import inside each. NOTE: `generateDailyScanReport`
+      was imported but never actually called in this file, so it was
+      dropped; only `getScanReport` is loaded dynamically.)
+  27. scan/route.ts — `processScan, confirmPhysicalUnpack, confirmCancelAfterScan`
+      (POST, after `readBody`, before the conditional branches — combined
+      into ONE dynamic import since all 3 functions are used in different
+      branches of the same handler)
+  28. orders/[id]/payment-proof/route.ts — `updatePaymentScreenshot` (POST,
+      after readBody, before the function call)
+  29. orders/[id]/returns/review/correct/route.ts — `correctReturnItemCondition`
+      (POST, after the body parse with `.catch(() => ({}))` fallback, before
+      the function call)
+  30. orders/[id]/returns/review/dismiss/route.ts — `dismissReturnReview`
+      (POST, after the item_id validation guard, before the function call)
+
+- For EACH file: removed ONLY the top-level import line for the heavy
+  module. Left ALL other imports (next/server, @/lib/db, @/lib/session,
+  @/lib/workspace, @/lib/audit, @/lib/metrics, @/lib/permissions,
+  @/lib/validations/*, @/lib/stock-loss, @/lib/idempotency, @/lib/utils/*,
+  zod, etc.) completely untouched.
+- Did NOT change any handler logic except adding the dynamic import line.
+- Did NOT touch the 4 cron routes explicitly excluded by the task
+  (cron/sync-cities, cron/generate-scan-reports, cron/poll-postex,
+  cron/poll-leopard-safety-net).
+- Verified all 30 edited files via ripgrep: NONE of them still contain a
+  top-level `import ... from '@/lib/inventory'` or
+  `import ... from '@/lib/actions/*.actions'` line.
+- Ran `bun run lint` → 0 errors, 12 pre-existing warnings (all in unrelated
+  React Hook Form component files — none in the 30 edited routes).
+- Ran `bunx tsc --noEmit` to spot-check TS errors. Found 3 TS errors in
+  `orders/[id]/returns/review/correct/route.ts` (lines 46-48, accessing
+  `body?.damage_type` etc. on a `T | {}` union from the `.catch(() => ({}))`
+  fallback). Verified via `git stash` + re-run that these errors are
+  PRE-EXISTING (appear in the unmodified file too) — my edit only added
+  one dynamic-import line and did not touch the `body?.damage_type` access.
+  The 2 errors in `orders/route.ts` are also pre-existing and unrelated
+  (file not in the edit list).
+- Did NOT run `git commit` — leaving the 30 staged-but-uncommitted
+  modifications for the main agent to review and commit as one atomic
+  deploy unit.
+
+Stage Summary:
+- ALL 30 API routes that imported from `@/lib/inventory` or
+  `@/lib/actions/*.actions` at the top level have been converted to dynamic
+  `await import()` inside the handler functions.
+- Same proven pattern as the previously-fixed /api/orders, /api/exchanges,
+  /api/integrations, and /api/pickup-addresses routes — verified to fix
+  500 errors on Hostinger production.
+- Lint passes cleanly: 0 errors, 12 pre-existing warnings (unchanged
+  baseline, none in edited routes).
+- TypeScript: my edits did NOT introduce any new TS errors. The 3 errors
+  in returns/review/correct/route.ts and 2 in orders/route.ts are
+  pre-existing (confirmed via git stash diff).
+- All 30 modified files are unstaged in git — ready for the main agent to
+  commit + push + deploy to Hostinger.
+- After deploy: every user-facing inventory, purchase-order, stock-loss,
+  cycle-count, exchange, shipper-advice, scan, and order-return endpoint
+  should respond without 500 module-load errors.
+- Next: deploy to Hostinger and verify each affected endpoint returns
+  non-500 responses (especially the previously-broken PO receive, stock
+  transfer, exchange detail GET, and scan-confirmation flows).

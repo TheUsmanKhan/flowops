@@ -1,6 +1,5 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { sendShipperAdvice } from '@/lib/actions/shipper-advice.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -23,6 +22,7 @@ export async function POST(req: NextRequest) {
     if (!entityId) throw new ApiError(400, 'entityId is required')
     if (!adviceType) throw new ApiError(400, 'adviceType is required')
 
+    const { sendShipperAdvice } = await import('@/lib/actions/shipper-advice.actions')
     const result = await sendShipperAdvice(entityType, entityId, adviceType, notes)
     if (!result.success) throw new ApiError(400, result.error ?? 'Failed')
     return Response.json({ ok: true })

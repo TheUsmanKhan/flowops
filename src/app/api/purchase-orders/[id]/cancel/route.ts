@@ -4,7 +4,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { decrementIncomingStock } from '@/lib/inventory'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -54,6 +53,7 @@ export async function POST(
     const reason = body.reason || 'No reason provided'
 
     // Decrement incoming for each unreceived item
+    const { decrementIncomingStock } = await import('@/lib/inventory')
     for (const item of po.items) {
       const unreceived = item.orderedQuantity - item.receivedQuantity
       if (unreceived > 0) {

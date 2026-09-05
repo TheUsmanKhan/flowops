@@ -4,7 +4,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction } from '@/lib/inventory'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -89,6 +88,9 @@ export async function POST(req: Request) {
     // transfer_out succeeds but transfer_in fails — previously the stock
     // was decremented from source but never added to destination.
     const createTransfer = async () => {
+      // Lazy-load inventory module to avoid heavy top-level import on Hostinger
+      const { processInventoryTransaction } = await import('@/lib/inventory')
+
       // Step 1: Create the stock_transfer record (orphan if steps 2/3 fail)
       const transfer = await db.stockTransfer.create({
         data: {

@@ -1,6 +1,5 @@
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError } from '@/lib/workspace'
-import { dismissReturnReview } from '@/lib/actions/order-return.actions'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -29,6 +28,7 @@ export async function POST(
       throw new ApiError(400, 'item_id query parameter is required')
     }
 
+    const { dismissReturnReview } = await import('@/lib/actions/order-return.actions')
     const result = await dismissReturnReview(orderItemId)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to dismiss review')

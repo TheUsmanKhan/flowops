@@ -4,7 +4,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { quarantineStock } from '@/lib/inventory'
 import { reportTheftLossSchema } from '@/lib/validations/stock-loss'
 
 export const runtime = 'nodejs'
@@ -50,6 +49,9 @@ export async function POST(req: Request) {
     // directly (no idempotency key, backwards-compatible) or via
     // withIdempotency() (prevents duplicate theft reports).
     const createTheftLoss = async () => {
+      // Lazy-load inventory module to avoid heavy top-level import on Hostinger
+      const { quarantineStock } = await import('@/lib/inventory')
+
       // Fetch current avg_cost for cost recording
       const pool = await db.inventoryPool.findUnique({
         where: { orgVariantId_locationId: { orgVariantId: d.org_variant_id, locationId: d.location_id } },

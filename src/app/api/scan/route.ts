@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError, readBody } from '@/lib/workspace'
-import { processScan, confirmPhysicalUnpack, confirmCancelAfterScan } from '@/lib/actions/scan.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -16,6 +15,9 @@ export async function POST(req: NextRequest) {
       entityType?: string
       entityId?: string
     }>(req)
+
+    // Lazy-load scan actions to avoid heavy top-level import on Hostinger
+    const { processScan, confirmPhysicalUnpack, confirmCancelAfterScan } = await import('@/lib/actions/scan.actions')
 
     if (body.action === 'confirm_unpack' && body.entityType && body.entityId) {
       const result = await confirmPhysicalUnpack(body.entityType as 'order' | 'exchange_shipment', body.entityId)

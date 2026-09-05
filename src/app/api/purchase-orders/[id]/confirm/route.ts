@@ -4,7 +4,6 @@ import { ApiError, handleError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { incrementIncomingStock } from '@/lib/inventory'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -56,6 +55,7 @@ export async function POST(
     })
 
     // Increment incoming stock for each item
+    const { incrementIncomingStock } = await import('@/lib/inventory')
     for (const item of po.items) {
       await incrementIncomingStock(
         item.orgVariantId,

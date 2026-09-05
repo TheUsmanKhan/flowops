@@ -3,7 +3,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction } from '@/lib/inventory'
 import { adjustStockSchema } from '@/lib/validations/inventory'
 import { db } from '@/lib/db'
 
@@ -69,6 +68,9 @@ export async function POST(req: Request) {
     // directly (no idempotency key, backwards-compatible) or via
     // withIdempotency() (prevents duplicate adjustment submissions).
     const adjustStock = async () => {
+      // Lazy-load inventory module to avoid heavy top-level import on Hostinger
+      const { processInventoryTransaction } = await import('@/lib/inventory')
+
       if (isPositive) {
         // Adding stock — use manual_adjustment_in (increments on_hand)
         const txnResult = await processInventoryTransaction({

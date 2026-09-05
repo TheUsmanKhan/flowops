@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError } from '@/lib/workspace'
-import { getScanReport, generateDailyScanReport } from '@/lib/actions/scan-report.actions'
 import { generateScanReportPdf } from '@/lib/utils/scan-pdf'
 import { db } from '@/lib/db'
 
@@ -16,6 +15,7 @@ export async function GET(req: NextRequest) {
     const employeeId = searchParams.get('employeeId') ?? undefined
     const customerId = searchParams.get('customerId') ?? undefined
 
+    const { getScanReport } = await import('@/lib/actions/scan-report.actions')
     const result = await getScanReport(dateFrom, dateTo, { employeeId, customerId })
     if (!result.success) return Response.json({ error: result.error }, { status: 400 })
     return Response.json(result.data)
@@ -30,6 +30,7 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
     const { dateFrom, dateTo, employeeId, customerId } = body
 
+    const { getScanReport } = await import('@/lib/actions/scan-report.actions')
     const result = await getScanReport(dateFrom, dateTo, { employeeId, customerId })
     if (!result.success || !result.data) return Response.json({ error: result.error }, { status: 400 })
 

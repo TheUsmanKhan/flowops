@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
-import { dispatchExchangeNewItem } from '@/lib/actions/exchange.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -27,6 +26,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const { dispatchExchangeNewItem } = await import('@/lib/actions/exchange.actions')
     // Body is optional — read silently if present (the modal sends it, the
     // immediate-dispatch button on the exchange detail page may not).
     let body: DispatchNewItemBody = {}

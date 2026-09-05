@@ -3,7 +3,6 @@ import { db } from '@/lib/db'
 import { getWorkspace, handleError, readBody, ApiError, requirePermission } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processOrderReturn } from '@/lib/actions/order-return.actions'
 import { recordStockLoss } from '@/lib/stock-loss'
 
 export const runtime = 'nodejs'
@@ -70,6 +69,7 @@ export async function POST(req: NextRequest) {
     }
 
     // ── 2. Confirm RTO (processOrderReturn adds stock back) ──
+    const { processOrderReturn } = await import('@/lib/actions/order-return.actions')
     const returnResult = await processOrderReturn(body.orderId, body.returnReason.trim())
     if (!returnResult.success) {
       throw new ApiError(400, returnResult.error ?? 'Failed to process return')

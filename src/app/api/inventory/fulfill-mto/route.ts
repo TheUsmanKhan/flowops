@@ -1,6 +1,5 @@
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
-import { checkAndFulfillMadeToOrderVariant } from '@/lib/inventory'
 import { fulfillMadeToOrderSchema } from '@/lib/validations/inventory'
 
 export const runtime = 'nodejs'
@@ -22,6 +21,9 @@ export async function POST(req: Request) {
     const body = await readBody(req)
     const parsed = fulfillMadeToOrderSchema.safeParse(body)
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
+
+    // Lazy-load inventory module to avoid heavy top-level import on Hostinger
+    const { checkAndFulfillMadeToOrderVariant } = await import('@/lib/inventory')
 
     const result = await checkAndFulfillMadeToOrderVariant(
       parsed.data.org_variant_id,

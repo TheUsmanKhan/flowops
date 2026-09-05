@@ -1,5 +1,4 @@
 import { getWorkspace, ApiError, handleError, readBody } from '@/lib/workspace'
-import { updatePaymentScreenshot } from '@/lib/actions/order.actions'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -38,6 +37,7 @@ export async function POST(
 
     const body = await readBody<{ advance_payment_screenshot_url?: string }>(req)
 
+    const { updatePaymentScreenshot } = await import('@/lib/actions/order.actions')
     const result = await updatePaymentScreenshot({
       order_id: id,
       advance_payment_screenshot_url: body.advance_payment_screenshot_url ?? '',

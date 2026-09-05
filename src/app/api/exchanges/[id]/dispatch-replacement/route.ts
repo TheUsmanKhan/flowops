@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError, readBody } from '@/lib/workspace'
-import { dispatchReplacementForSelfReturnExchange } from '@/lib/actions/exchange.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -27,6 +26,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const { dispatchReplacementForSelfReturnExchange } = await import('@/lib/actions/exchange.actions')
     let body: DispatchReplacementBody = {}
     try {
       body = await readBody<DispatchReplacementBody>(req)

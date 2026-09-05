@@ -1,6 +1,5 @@
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
-import { correctReturnItemCondition } from '@/lib/actions/order-return.actions'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -42,6 +41,7 @@ export async function POST(
       notes?: string
     }>(req).catch(() => ({}))
 
+    const { correctReturnItemCondition } = await import('@/lib/actions/order-return.actions')
     const result = await correctReturnItemCondition(orderItemId, 'damaged', {
       damageType: body?.damage_type,
       responsibleParty: body?.responsible_party,

@@ -4,7 +4,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction } from '@/lib/inventory'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -269,6 +268,9 @@ export async function PATCH(
     }
 
     if (action === 'approve') {
+      // Lazy-load inventory module to avoid heavy top-level import on Hostinger
+      const { processInventoryTransaction } = await import('@/lib/inventory')
+
       // Process items with discrepancies
       const items = await db.cycleCountItem.findMany({
         where: { cycleCountId: id, countedQuantity: { not: null } },

@@ -4,7 +4,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction } from '@/lib/inventory'
 import { receiveStockSchema } from '@/lib/validations/inventory'
 
 export const runtime = 'nodejs'
@@ -50,6 +49,9 @@ export async function POST(req: Request) {
     // directly (no idempotency key, backwards-compatible) or via
     // withIdempotency() (prevents duplicate receive-stock submissions).
     const receiveStock = async () => {
+      // Lazy-load inventory module to avoid heavy top-level import on Hostinger
+      const { processInventoryTransaction } = await import('@/lib/inventory')
+
       const transactionIds: string[] = []
       let preMadeStitchedStockAdded = false
 

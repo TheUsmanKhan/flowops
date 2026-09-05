@@ -4,7 +4,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction } from '@/lib/inventory'
 import { z } from 'zod'
 import { NextRequest } from 'next/server'
 
@@ -72,6 +71,9 @@ export async function POST(
     const parsed = receiveSchema.safeParse(body)
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     const d = parsed.data
+
+    // Lazy-load inventory module to avoid heavy top-level import on Hostinger
+    const { processInventoryTransaction } = await import('@/lib/inventory')
 
     // Create the receipt header
     const receipt = await db.purchaseOrderReceipt.create({

@@ -1,6 +1,5 @@
 import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError } from '@/lib/workspace'
-import { getProductInventorySummary } from '@/lib/inventory'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -21,6 +20,9 @@ export async function GET(req: NextRequest) {
     const url = new URL(req.url)
     const productId = url.searchParams.get('product_id')
     if (!productId) throw new ApiError(400, 'product_id query parameter is required.')
+
+    // Lazy-load inventory module to avoid heavy top-level import on Hostinger
+    const { getProductInventorySummary } = await import('@/lib/inventory')
 
     const summary = await getProductInventorySummary(productId)
     return Response.json({ variants: summary })

@@ -1,6 +1,5 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { confirmCustomerShippedOldItem } from '@/lib/actions/exchange.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -12,6 +11,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const { confirmCustomerShippedOldItem } = await import('@/lib/actions/exchange.actions')
     const body = await readBody<Record<string, unknown>>(req)
     const result = await confirmCustomerShippedOldItem({
       exchange_id: id,
