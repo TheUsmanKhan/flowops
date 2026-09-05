@@ -8,6 +8,11 @@ import type { CreateManualOrderInput } from '@/lib/validations/order.schemas'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
+// Module load-time health check — if this fails, the route returns a raw 500.
+// This log helps diagnose whether the module itself loads on Hostinger.
+// eslint-disable-next-line no-console
+console.log('[orders route] module loaded at', new Date().toISOString())
+
 /**
  * Parse a query parameter that may be either comma-separated
  * ("statuses=pending,confirmed") or repeated ("statuses=pending&statuses=confirmed")
@@ -48,6 +53,8 @@ export async function GET(req: Request) {
 
     // Multi-select filters (preferred)
     const statuses = parseArrayParam(url, 'statuses')
+    // eslint-disable-next-line no-console
+    console.log('[orders GET] params:', { url: url.pathname, search: url.search })
     const paymentTypes = parseArrayParam(url, 'payment_types')
     const paymentStatuses = parseArrayParam(url, 'payment_statuses')
     const orderSources = parseArrayParam(url, 'order_sources')
@@ -81,6 +88,8 @@ export async function GET(req: Request) {
       ? Number(url.searchParams.get('offset'))
       : undefined
 
+    // eslint-disable-next-line no-console
+    console.log('[orders GET] calling listOrders...')
     const result = await listOrders({
       // Multi-select (preferred)
       statuses: statuses.length > 0 ? statuses : undefined,
@@ -110,10 +119,16 @@ export async function GET(req: Request) {
     })
 
     if (!result.success) {
+      // eslint-disable-next-line no-console
+      console.error('[orders GET] listOrders returned failure:', result.error)
       throw new ApiError(400, result.error ?? 'Failed to list orders')
     }
+    // eslint-disable-next-line no-console
+    console.log('[orders GET] success, returning', result.data?.orders?.length ?? 0, 'orders')
     return Response.json(result.data)
   } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[orders GET] UNHANDLED ERROR:', err instanceof Error ? err.stack : err)
     return handleError(err)
   }
 }
