@@ -1,30 +1,108 @@
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { db } from '@/lib/db'
 import {
-  listAvailableProviders,
-  listCompanyIntegrations,
-  connectIntegration,
-} from '@/lib/actions/integration.actions'
+  getWorkspace,
+  requirePermission,
+  handleError,
+  readBody,
+  ApiError,
+} from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-/** GET /api/integrations?category=courier|ecommerce */
+/**
+ * GET /api/integrations?category=courier|ecommerce
+ *
+ * Inlined from integration.actions.ts to avoid loading the 800-line module
+ * (which has deep transitive deps — courier adapters, registry, logged-call,
+ * encryption — that fail on Hostinger production).
+ */
 export async function GET(req: Request) {
   try {
     const url = new URL(req.url)
-    const category = url.searchParams.get('category') as 'courier' | 'ecommerce' | null
+    const category = url.searchParams.get('category') as
+      | 'courier'
+      | 'ecommerce'
+      | null
 
-    const [providersResult, integrationsResult] = await Promise.all([
-      listAvailableProviders(category ?? undefined),
-      listCompanyIntegrations(category ?? undefined),
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_VIEW)
+
+    // Dynamic import — registry is needed for adapter status but is heavy
+    const { getAdapterStatus } = await import('@/lib/integrations/registry')
+
+    const providerWhere: { category?: string; isActive: boolean } = {
+      isActive: true,
+    }
+    if (category) providerWhere.category = category
+
+    const [providers, integrations] = await Promise.all([
+      db.integrationProvider.findMany({
+        where: providerWhere,
+        orderBy: { category: 'asc' },
+      }),
+      db.companyIntegration.findMany({
+        where: {
+          companyId: ctx.company.id,
+          ...(category ? { provider: { category } } : {}),
+        },
+        include: {
+          provider: {
+            select: {
+              id: true,
+              providerKey: true,
+              providerName: true,
+              category: true,
+              logoUrl: true,
+              authType: true,
+              supportsWebhook: true,
+              configSchema: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
     ])
 
-    if (!providersResult.success) throw new ApiError(400, providersResult.error ?? 'Failed')
-    if (!integrationsResult.success) throw new ApiError(400, integrationsResult.error ?? 'Failed')
+    const appUrl = process.env.APP_URL || 'http://localhost:3000'
 
     return Response.json({
-      providers: providersResult.data!.providers,
-      integrations: integrationsResult.data!.integrations,
+      providers: providers.map((p) => ({
+        id: p.id,
+        providerKey: p.providerKey,
+        providerName: p.providerName,
+        category: p.category,
+        logoUrl: p.logoUrl,
+        authType: p.authType,
+        supportsWebhook: p.supportsWebhook,
+        configSchema: p.configSchema,
+        capabilities: p.capabilities,
+        adapterStatus: getAdapterStatus(p.providerKey),
+      })),
+      integrations: integrations.map((i) => ({
+        id: i.id,
+        connectionName: i.connectionName,
+        isActive: i.isActive,
+        isDefault: i.isDefault,
+        connectionStatus: i.connectionStatus,
+        lastSyncAt: i.lastSyncAt,
+        lastError: i.lastError,
+        webhookEndpointId: i.webhookEndpointId,
+        webhookUrl: i.webhookEndpointId
+          ? `${appUrl}/api/webhooks/${i.provider.providerKey}/${i.webhookEndpointId}`
+          : null,
+        createdAt: i.createdAt,
+        provider: {
+          id: i.provider.id,
+          providerKey: i.provider.providerKey,
+          providerName: i.provider.providerName,
+          category: i.provider.category,
+          logoUrl: i.provider.logoUrl,
+          authType: i.provider.authType,
+          supportsWebhook: i.provider.supportsWebhook,
+        },
+      })),
     })
   } catch (err) {
     return handleError(err)
@@ -37,13 +115,12 @@ export async function POST(req: Request) {
     const body = await readBody<Record<string, unknown>>(req)
     const idempotencyKey = req.headers.get('Idempotency-Key')
 
-    // If an idempotency key is provided, wrap the creation in withIdempotency()
-    // to prevent duplicate integrations from rapid double-clicks. The
-    // find-or-reactivate logic inside connectIntegration() has a check-then-act
-    // race window (findFirst then create/update) — withIdempotency closes
-    // this gap at the DB unique-constraint level.
+    // Dynamic import — connectIntegration is heavy (encryption, adapter init)
+    const { connectIntegration } = await import(
+      '@/lib/actions/integration.actions'
+    )
+
     if (idempotencyKey) {
-      const { getWorkspace } = await import('@/lib/workspace')
       const ctx = await getWorkspace()
       const { withIdempotency } = await import('@/lib/idempotency')
       const { result, wasReplay } = await withIdempotency({
@@ -58,7 +135,10 @@ export async function POST(req: Request) {
             credentials: (body.credentials as Record<string, string>) ?? {},
           })
           if (!res.success || !res.data) {
-            throw new ApiError(400, res.error ?? 'Failed to connect integration')
+            throw new ApiError(
+              400,
+              res.error ?? 'Failed to connect integration',
+            )
           }
           return res.data
         },
@@ -66,7 +146,6 @@ export async function POST(req: Request) {
       return Response.json(result, { status: wasReplay ? 200 : 201 })
     }
 
-    // No idempotency key — normal flow (backwards-compatible)
     const result = await connectIntegration({
       providerId: String(body.provider_id ?? ''),
       connectionName: String(body.connection_name ?? ''),
