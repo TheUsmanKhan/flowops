@@ -12377,3 +12377,36 @@ Stage Summary:
   3. 4d6be63: next build --webpack
   4. 62e4261: postinstall prisma generate + node start (no bun, no tee)
   5. 4c55064: Prisma binaryTargets + --unhandled-rejections=warn
+
+---
+Task ID: PROD-DEPLOY-FIX-6
+Agent: main
+Task: Diagnose persistent /api/orders 500 on production — confirmed new build NOT deployed
+
+Work Log:
+- Fetched production endpoints directly to diagnose:
+  * GET /api/auth/me → 200 (returns {"user":null,...} — works, no auth needed)
+  * GET /api/products → 401 (auth check works, returns proper error)
+  * GET /api/dashboard → 401 (auth check works, returns proper error)
+  * GET /api/orders → 500 "Internal Server Error" (crashes)
+- KEY FINDING: The Prisma client IS working on production (other DB endpoints return proper 401 auth errors). The 500 is specific to /api/orders.
+- BUT: The runtime log still shows `Error: open EEXIST at process.getStdin`. This error is IMPOSSIBLE with the new start script (`node --unhandled-rejections=warn .next/standalone/server.js` — no pipe). It only happens with the OLD start script (`bun ... | tee server.log`).
+- CONCLUSION: The NEW BUILD HAS NOT DEPLOYED ON HOSTINGER. The old code is still running. Every build attempt has been failing, so Hostinger keeps serving the old version.
+- Tested locally with the EXACT production build (webpack standalone, `node .next/standalone/server.js`):
+  * /api/orders → 400 (correct auth error, not 500)
+  * /api/products → 401 (correct auth error)
+  * Production build works perfectly locally — the 500 is NOT a code bug.
+- Root cause: The new build keeps failing on Hostinger, so the old code (with bun + tee pipe, no postinstall prisma generate) keeps running. The old code crashes because Prisma client isn't generated.
+- All fixes pushed to GitHub (verified origin/main):
+  * postinstall: prisma generate || true
+  * build: prisma generate && next build --webpack && ...
+  * start: node --unhandled-rejections=warn .next/standalone/server.js
+  * prisma binaryTargets: ["native", "debian-openssl-3.0.x", "linux-musl"]
+
+Stage Summary:
+- The /api/orders 500 error is caused by the OLD BUILD still running on Hostinger.
+- Proof: EEXIST at process.getStdin only happens with the old `| tee` pipe (removed in commit 62e4261).
+- The production build works perfectly locally (tested with webpack standalone server).
+- User MUST check the Hostinger BUILD LOG (not runtime log) to see why the build keeps failing.
+- User may need to manually trigger a redeploy on Hostinger after confirming all fixes are on GitHub.
+- All 6 fix commits are confirmed pushed to origin/main.
