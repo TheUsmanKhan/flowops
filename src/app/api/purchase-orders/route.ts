@@ -4,7 +4,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { generatePoNumber } from '@/lib/inventory'
 import { z } from 'zod'
 
 export const runtime = 'nodejs'
@@ -135,6 +134,7 @@ export async function POST(req: Request) {
       if (!location) throw new ApiError(404, 'Delivery location not found.')
 
       // Generate PO number
+      const { generatePoNumber } = await import('@/lib/inventory')
       const poNumber = await generatePoNumber(orgId)
 
       // Create PO + items

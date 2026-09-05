@@ -3,7 +3,6 @@ import { getCurrentUser } from '@/lib/session'
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction } from '@/lib/inventory'
 import { z } from 'zod'
 
 export const runtime = 'nodejs'
@@ -115,6 +114,7 @@ export async function POST(req: Request) {
     const fabricCost = Number(fabricPool.avgCost) * d.quantity
 
     // Process the fabric consumption transaction
+    const { processInventoryTransaction } = await import('@/lib/inventory')
     const txnResult = await processInventoryTransaction({
       orgVariantId: d.fabric_variant_id,
       locationId: d.fabric_location_id,

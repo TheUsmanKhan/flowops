@@ -4,7 +4,6 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction } from '@/lib/inventory'
 import { z } from 'zod'
 
 export const runtime = 'nodejs'
@@ -101,6 +100,7 @@ export async function POST(req: Request) {
     // withIdempotency() (prevents duplicate supplier-return submissions).
     const createSupplierReturn = async () => {
       // Process the inventory transaction (reduces on_hand using existing avg_cost)
+      const { processInventoryTransaction } = await import('@/lib/inventory')
       const txnResult = await processInventoryTransaction({
         orgVariantId: d.org_variant_id,
         locationId: d.location_id,

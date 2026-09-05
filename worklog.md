@@ -12483,3 +12483,23 @@ Stage Summary:
 - FIX: Inlined the listOrders query directly in the route using db (like /api/orders/[id] and /api/orders/pending do). POST uses dynamic import().
 - This explains EVERYTHING: why only /api/orders failed, why other routes worked, why the error was text/plain (module load failure), and why my diagnostic logs never appeared (the module never loaded).
 - All 8 deployment fixes now pushed. The orders page should work after Hostinger auto-deploys ba2bd08.
+
+---
+Task ID: FIX-3-ROUTES
+Agent: general-purpose
+Task: Fix 3 API routes (production-orders, purchase-orders, supplier-returns) — move @/lib/inventory to dynamic import
+
+Work Log:
+- Read worklog.md to understand prior context (orders route already fixed via same pattern; root cause = top-level @/lib/inventory import fails to load on Hostinger, crashing the whole route including GET).
+- Read all 3 target route files to confirm structure and locate the exact call sites.
+- production-orders/route.ts: removed top-level `import { processInventoryTransaction } from '@/lib/inventory'`; added `const { processInventoryTransaction } = await import('@/lib/inventory')` immediately before the call in the POST handler (line 117). GET handler untouched.
+- purchase-orders/route.ts: removed top-level `import { generatePoNumber } from '@/lib/inventory'`; added `const { generatePoNumber } = await import('@/lib/inventory')` immediately before the call inside the createPo closure in POST (line 137). GET handler untouched.
+- supplier-returns/route.ts: removed top-level `import { processInventoryTransaction } from '@/lib/inventory'`; added `const { processInventoryTransaction } = await import('@/lib/inventory')` immediately before the call inside the createSupplierReturn closure in POST (line 103). GET handler untouched.
+- Verified with grep that each file now contains exactly one dynamic `import('@/lib/inventory')` and no top-level reference.
+- Ran `bun run lint` — 0 errors, only 12 pre-existing warnings (react-hooks in dashboard.tsx, unrelated to these routes).
+
+Stage Summary:
+- All 3 routes (production-orders, purchase-orders, supplier-returns) now lazily load @/lib/inventory inside their POST handlers, mirroring the proven /api/orders fix.
+- GET handlers are now decoupled from @/lib/inventory and will no longer crash with 500 on Hostinger when the inventory module fails to load at boot.
+- POST handlers retain identical logic; only the import mechanism changed (static → dynamic await import).
+- Lint clean (0 errors). Ready for commit + Hostinger redeploy.
