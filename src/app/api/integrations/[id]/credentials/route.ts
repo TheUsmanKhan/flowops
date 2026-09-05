@@ -1,6 +1,5 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { updateIntegrationCredentials } from '@/lib/actions/integration.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -13,6 +12,8 @@ export async function PATCH(
   try {
     const { id } = await params
     const body = await readBody<Record<string, unknown>>(req)
+    // Dynamic import — integration.actions has heavy transitive deps
+    const { updateIntegrationCredentials } = await import('@/lib/actions/integration.actions')
     const result = await updateIntegrationCredentials(
       id,
       (body.credentials as Record<string, string>) ?? {},

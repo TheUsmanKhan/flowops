@@ -1,6 +1,5 @@
 import { ApiError, handleError } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { disconnectIntegration } from '@/lib/actions/integration.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -12,6 +11,8 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    // Dynamic import — integration.actions has heavy transitive deps
+    const { disconnectIntegration } = await import('@/lib/actions/integration.actions')
     const result = await disconnectIntegration(id)
     if (!result.success) throw new ApiError(400, result.error ?? 'Failed')
     return Response.json({ ok: true })

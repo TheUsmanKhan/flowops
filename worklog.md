@@ -12664,3 +12664,29 @@ Stage Summary:
 - IMPORTANT: User must LOG OUT and LOG BACK IN for new permissions to take effect
   (session payload with permissions is built on login).
 - Dev server running locally for user to verify in Preview Panel.
+
+---
+Task ID: FIX-INTEGRATION-ROUTES
+Agent: general-purpose
+Task: Fix 3 integration sub-routes — move integration.actions import to dynamic import
+
+Work Log:
+- Read worklog.md and confirmed the proven /api/orders + /api/exchanges pattern (top-level `@/lib/actions/*` import → dynamic `await import()` inside handler).
+- Read all 3 target files to identify the top-level import + the call site for each function:
+  1. credentials/route.ts → `updateIntegrationCredentials` called in PATCH handler.
+  2. disconnect/route.ts → `disconnectIntegration` called in POST handler.
+  3. set-default/route.ts → `setDefaultIntegration` called in POST handler.
+- For each file: removed the top-level `import { fn } from '@/lib/actions/integration.actions'` line, leaving all other imports (`@/lib/workspace`, `next/server`) untouched.
+- Added `const { fn } = await import('@/lib/actions/integration.actions')` INSIDE the try block of each handler, immediately before the function call (after `const { id } = await params`, and after `readBody` in the credentials route where applicable).
+- Verified no other handler logic was modified.
+- Cross-checked the new pattern against existing fixed routes (orders/route.ts:291, exchanges/route.ts:118) to ensure consistency.
+- Ran `bun run lint` → 0 errors, 12 pre-existing warnings (none in the edited files).
+
+Stage Summary:
+- 3 integration sub-routes fixed:
+  • src/app/api/integrations/[id]/credentials/route.ts
+  • src/app/api/integrations/[id]/disconnect/route.ts
+  • src/app/api/integrations/[id]/set-default/route.ts
+- All three now lazy-load `integration.actions` via dynamic `import()` inside the handler, avoiding the top-level import that was failing on Hostinger production.
+- Lint passes cleanly (0 errors). Same proven pattern as the /api/orders and /api/exchanges fixes.
+- Next: deploy to Hostinger and verify the three endpoints (PATCH credentials, POST disconnect, POST set-default) respond successfully.
