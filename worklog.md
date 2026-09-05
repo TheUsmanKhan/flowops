@@ -12451,3 +12451,35 @@ Stage Summary:
 - /api/orders specifically returns raw 500 — all other API routes work.
 - Diagnostic logging pushed to identify the exact error.
 - User needs to check Hostinger runtime log after auto-deploy and share the [orders route] and [orders GET] log lines.
+
+---
+Task ID: PROD-DEPLOY-FIX-8
+Agent: main
+Task: Fix /api/orders 500 — eliminate order.actions.ts import (root cause found)
+
+Work Log:
+- KEY DIAGNOSTIC: Tested all production endpoints after successful build:
+  * /api/health → 200 {"status":"healthy","db":"connected"} (server IS running, DB IS connected!)
+  * /api/products → 401 JSON (works)
+  * /api/customers → 400 JSON (works)
+  * /api/orders/[id] → 401 JSON (order DETAIL works!)
+  * /api/orders/pending → 401 JSON (works)
+  * /api/orders → 500 text/plain "Internal Server Error" (ONLY this route crashes)
+- ROOT CAUSE IDENTIFIED: /api/orders/route.ts imports listOrders + createManualOrder from order.actions.ts (a 2800-line file). This massive module has deep transitive dependencies (inventory, customer.actions, employee-stats, countries, etc.). The module fails to load on Hostinger, causing a raw 500.
+- Evidence: /api/orders/[id] works because it imports from @/lib/db DIRECTLY (not order.actions.ts). /api/orders/pending works for the same reason. ONLY /api/orders (the list route) imports from order.actions.ts → only it crashes.
+- The text/plain response (not JSON) confirms the route MODULE fails to load — handleError() (which returns JSON) is never called.
+- FIX: Refactored /api/orders/route.ts to eliminate the order.actions.ts import entirely:
+  1. GET handler: inlined the listOrders query using db.order.findMany directly (same logic, same Prisma where clause, same response shape)
+  2. POST handler: uses dynamic import() for createManualOrder (heavy module only loads when POST is called, not at route init time)
+  3. Route now only imports: @/lib/db, @/lib/workspace (small files), @prisma/client (type only)
+- Verified locally with PRODUCTION build (webpack standalone):
+  * /api/orders → 401 JSON (proper auth error — was 500!)
+  * /api/products → 401 JSON (unchanged, still works)
+  * Build succeeds, standalone server starts cleanly
+- Committed as ba2bd08, pushed to GitHub. Hostinger auto-deploy will trigger.
+
+Stage Summary:
+- ROOT CAUSE: The /api/orders route imported order.actions.ts (2800 lines, massive transitive deps). This module failed to load on Hostinger → raw 500.
+- FIX: Inlined the listOrders query directly in the route using db (like /api/orders/[id] and /api/orders/pending do). POST uses dynamic import().
+- This explains EVERYTHING: why only /api/orders failed, why other routes worked, why the error was text/plain (module load failure), and why my diagnostic logs never appeared (the module never loaded).
+- All 8 deployment fixes now pushed. The orders page should work after Hostinger auto-deploys ba2bd08.
