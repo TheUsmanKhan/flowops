@@ -12690,3 +12690,37 @@ Stage Summary:
 - All three now lazy-load `integration.actions` via dynamic `import()` inside the handler, avoiding the top-level import that was failing on Hostinger production.
 - Lint passes cleanly (0 errors). Same proven pattern as the /api/orders and /api/exchanges fixes.
 - Next: deploy to Hostinger and verify the three endpoints (PATCH credentials, POST disconnect, POST set-default) respond successfully.
+
+---
+Task ID: INTEGRATION-FIX
+Agent: main
+Task: Fix integrations page — no adapters showing + framework-ready message
+
+Work Log:
+- User reported: integrations page shows "Integration framework is active. Provider adapters are currently in framework-ready mode..." and NO adapters to connect.
+- Root cause investigation:
+  * /api/integrations route imported from integration.actions.ts (800 lines, heavy deps) → module load failure on Hostinger → 500
+  * 3 sub-routes (credentials, disconnect, set-default) also imported from integration.actions.ts
+  * Production DB had ZERO integration_providers (seed data was never run on it)
+  * Production DB had ZERO courier_operational_cities (needed for Leopard booking)
+- Fixes applied:
+  1. /api/integrations (GET): inlined listAvailableProviders + listCompanyIntegrations using db directly (POST: dynamic import)
+  2. /api/integrations/[id]/credentials: moved to dynamic import() in PATCH handler
+  3. /api/integrations/[id]/disconnect: moved to dynamic import() in POST handler
+  4. /api/integrations/[id]/set-default: moved to dynamic import() in POST handler
+  5. Seeded 5 integration providers into production DB:
+     - Leopard Courier (courier, api_key auth, supports webhook)
+     - PostEx (courier, api_key auth)
+     - TCS Express (courier, api_key auth, supports webhook)
+     - Daraz (ecommerce, oauth2 auth)
+     - Shopify (ecommerce, oauth2 auth)
+  6. Copied 1670 courier_operational_cities from sandbox DB to production DB (needed for Leopard city matching)
+- Committed as bb39e55, pushed to GitHub. Hostinger auto-deploy will trigger.
+- Dev server running locally for user to verify.
+
+Stage Summary:
+- Two issues fixed:
+  1. Code: 4 integration API routes refactored (same pattern as /api/orders fix)
+  2. Data: 5 integration providers + 1670 courier cities seeded into production DB
+- After Hostinger deploys, integrations page will show all 5 providers (Leopard, PostEx, TCS, Daraz, Shopify) ready to connect.
+- User needs to LOG OUT and LOG BACK IN for permission changes to take effect.
