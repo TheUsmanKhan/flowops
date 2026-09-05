@@ -65,3 +65,9 @@ server.log
 # "test" (e.g. src/app/api/integrations/[id]/test/route.ts). Use /test/
 # to only ignore the top-level test directory.
 /test/
+
+# Generated PDFs and uploads (should not be in git)
+/public/uploads/
+
+# Tool results (temp files)
+/tool-results/
