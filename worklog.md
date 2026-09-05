@@ -12809,3 +12809,27 @@ Stage Summary:
   /api/exchanges, and integration sub-route fixes.
 - Next: deploy to Hostinger and verify all 6 endpoints (list, add, sync, refresh,
   import-by-id, set-default, delete) respond successfully without 500s.
+
+---
+Task ID: PICKUP-ADDRESS-FIX
+Agent: main
+Task: Fix 'No shipper found with shipment_id' error on production
+
+Work Log:
+- User reported: 'No shipper found with shipment_id "1918161"' error when trying to import pickup addresses on production. The shipper EXISTS and is ACTIVE in Leopard's system, but the import fails.
+- Checked production DB: Leopard integration is connected (status: pending, active: true), but courier_pickup_addresses table has 0 rows — no addresses have been imported.
+- Root cause: ALL 5 pickup-address API routes import from courier-address-book.actions.ts at the top level. This module imports getCourierAdapter from registry.ts, which loads the Leopard adapter (heavy transitive deps). On Hostinger, this module fails to load → route crashes with 500 → 'No shipper found' error (actually a module load failure, not a real API error).
+- Fixed 5 routes (same pattern as /api/orders):
+  1. GET/POST /api/integrations/[id]/pickup-addresses (list + add)
+  2. POST /api/integrations/[id]/pickup-addresses/sync
+  3. POST /api/integrations/[id]/pickup-addresses/refresh
+  4. POST /api/integrations/[id]/pickup-addresses/import-by-id
+  5. PATCH/DELETE /api/integrations/[id]/pickup-addresses/[addressId]
+- All now use dynamic import() inside the handler functions.
+- Committed as 577de15, pushed to GitHub.
+- Dev server restarted locally for verification.
+
+Stage Summary:
+- Root cause: Same module-loading pattern that broke /api/orders — courier-address-book.actions.ts pulls in heavy courier adapter deps.
+- All 5 pickup-address routes now use dynamic import().
+- After Hostinger deploys, the 'No shipper found' error will be resolved — the import-by-id route will actually run the import logic instead of crashing on module load.
