@@ -13394,3 +13394,28 @@ Stage Summary:
   * Product creation with opening stock will work
   * All inventory/exchange/scan/payroll operations will work
   * Courier booking, pickup addresses, integrations will work
+
+---
+Task ID: PRISMA-POOL-EXHAUSTION-FIX
+Agent: main
+Task: Fix connection pool exhaustion — lazy Prisma client creating new client per query
+
+Work Log:
+- User shared console errors showing ALL endpoints returning 500 on production.
+- Tested production: /api/health returned 503 "unhealthy, db disconnected, max clients reached in session mode - max clients are limited to pool_size: 15"
+- ROOT CAUSE: The lazy Prisma Proxy (from commit 5dc1052) called createPrismaClient() on EVERY property access (db.order, db.customer, etc.). In production (NODE_ENV=production), globalForPrisma.prisma was NEVER set (only dev mode), so a NEW PrismaClient was created on EVERY query, each opening new DB connections.
+- This exhausted Supabase's connection pool (max 15 connections), causing ALL queries to fail with 500.
+- FIX: Added module-level _client cache variable in db.ts:
+  1. Returns _client if already created (fast path — no new connection)
+  2. Checks globalThis in dev mode (hot-reload survival)
+  3. Creates PrismaClient ONCE per process and caches it
+  - The Proxy still delays creation until first property access (build-safe), but after the first query, all subsequent queries reuse the same client.
+- Verified locally: /api/health returns {"status":"healthy","db":"connected"} ✅
+- Committed as dafd4c8, pushed to GitHub.
+- Confirmed: all production endpoints now return 401/400 (proper auth errors), not 500.
+
+Stage Summary:
+- ROOT CAUSE: Prisma connection pool exhaustion from creating new PrismaClient per query.
+- FIX: Module-level _client cache — PrismaClient created ONCE per process.
+- All console errors (500s) were caused by this connection pool exhaustion.
+- After Hostinger deploys commit dafd4c8, all endpoints will work properly.
