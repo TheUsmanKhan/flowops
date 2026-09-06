@@ -7,6 +7,7 @@ import {
   ApiError,
 } from '@/lib/workspace'
 import type { Prisma } from '@prisma/client'
+import { createManualOrder } from '@/lib/actions/order.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -286,9 +287,6 @@ export async function POST(req: Request) {
   try {
     const body = await readBody(req)
     const idempotencyKey = req.headers.get('Idempotency-Key')
-
-    // Dynamic import — only loads createManualOrder when POST is called
-    const { createManualOrder } = await import('@/lib/actions/order.actions')
 
     if (idempotencyKey) {
       const ctx = await getWorkspace()
