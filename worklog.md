@@ -12108,3 +12108,59 @@ Stage Summary:
 - NOT pushed to GitHub — local only.
 - Dev server running locally, all endpoints working.
 - User can now proceed with VPS deployment using the original code.
+
+---
+Task ID: PUSH-PRE-HOSTINGER-TO-GITHUB
+Agent: main
+Task: Push pre-Hostinger code to GitHub main + preserve Hostinger code in backup branch
+
+Work Log:
+- User requested: push the reset (pre-Hostinger) code to GitHub as the main version.
+- Step 1: Fetched origin/main to get the Hostinger-compatible code.
+- Step 2: Created 'hostinger-backup' branch pointing to origin/main (commit 02de0ef) — preserves ALL Hostinger fixes.
+- Step 3: Pushed 'hostinger-backup' branch to GitHub — Hostinger code is now safely backed up.
+- Step 4: Force-pushed current HEAD (45f35a6, pre-Hostinger code) to main — overwrote Hostinger-compatible main.
+- Verified GitHub main now has:
+  * package.json: start = "bun .next/standalone/server.js" (NOT node)
+  * package.json: build = "next build" (NOT --webpack)
+  * package.json: postinstall = NONE (good)
+  * next.config.mjs: original (no serverExternalPackages)
+  * bootstrap.js: does NOT exist
+  * No Hostinger-specific files
+- Hostinger-compatible code preserved in 'hostinger-backup' branch (commit 02de0ef).
+
+Stage Summary:
+- GitHub main: pre-Hostinger code (bun runtime, Turbopack, direct imports, original db.ts)
+- GitHub hostinger-backup: Hostinger-compatible code (all 86 Hostinger fix commits)
+- User can switch between branches if needed:
+  * git checkout main → pre-Hostinger (VPS-ready)
+  * git checkout hostinger-backup → Hostinger-compatible
+- Docker files (Dockerfile, docker-compose.yml, .dockerignore) preserved — original bun/docker system intact.
+
+---
+Task ID: CREATE-VERSION-V1.0.0
+Agent: main
+Task: Create version v1.0.0 for pre-Hostinger code on GitHub
+
+Work Log:
+- User requested: create a proper version of the pre-Hostinger code on GitHub so latest version = pre-Hostinger code.
+- Step 1: Verified pre-Hostinger code is already on main (force-pushed in previous task).
+- Step 2: Updated package.json:
+  * name: "nextjs_tailwind_shadcn_ts" → "flowops-erp"
+  * version: "0.2.0" → "1.0.0"
+- Step 3: Committed as "release: v1.0.0 — pre-Hostinger production codebase (bun/docker/VPS-ready)"
+- Step 4: Created annotated git tag v1.0.0 with full description of features and tech stack.
+- Step 5: Pushed tag to GitHub — release available at https://github.com/TheUsmanKhan/flowops/releases/tag/v1.0.0
+- Verified:
+  * GitHub main: v1.0.0 (pre-Hostinger code) ✅
+  * GitHub tag: v1.0.0 ✅
+  * No Hostinger files (no bootstrap.js, no package-lock.json) ✅
+  * Docker files preserved (Dockerfile, docker-compose.yml, .dockerignore) ✅
+  * hostinger-backup branch preserved (if ever needed) ✅
+- Dev server running locally on sandbox DB.
+
+Stage Summary:
+- GitHub main is now version 1.0.0 (pre-Hostinger code).
+- Tag v1.0.0 marks this as the official release.
+- Hostinger-compatible code preserved in hostinger-backup branch.
+- User can clone fresh from GitHub main and get the clean pre-Hostinger code.
