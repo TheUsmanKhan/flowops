@@ -1,6 +1,6 @@
 {
-  "name": "nextjs_tailwind_shadcn_ts",
-  "version": "0.2.0",
+  "name": "flowops-erp",
+  "version": "1.0.0",
   "private": true,
   "scripts": {
     "predev": "node -e \"const fs=require('fs');const e=fs.readFileSync('.env','utf8');if(e.includes('file:')||!e.includes('postgresql://')){console.error('❌ .env has invalid DATABASE_URL — must be postgresql://, not file:. Fix .env before starting.');process.exit(1);}console.log('✅ .env verified — using PostgreSQL');\"",
