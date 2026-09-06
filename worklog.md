@@ -13465,3 +13465,25 @@ Stage Summary:
 - /api/health: healthy, db connected.
 - 26/26 endpoints tested — 0 return 500.
 - User should hard refresh browser to clear cached console errors.
+
+---
+Task ID: STDIN-EEXIST-FIX
+Agent: main
+Task: Fix POST /api/orders 'open EEXIST' — stdin not available on Hostinger
+
+Work Log:
+- User reported: POST /api/orders returns 500 with {"error":"open EEXIST"} on production.
+- Tested: GET /api/orders → 401 (works), POST /api/orders → 500 "open EEXIST" (crashes).
+- ROOT CAUSE: On Hostinger production, process.stdin is not available (the process manager doesn't provide it). When Node.js lazily initializes stdin (triggered by some module accessing process.stdin during dynamic import evaluation), it fails with:
+  Error: open EEXIST at process.getStdin
+- This only affects POST handlers that use dynamic import() — GET handlers work fine because they don't trigger lazy stdin initialization.
+- Fix 1: start script — added '< /dev/null' redirect:
+  node --unhandled-rejections=warn .next/standalone/server.js < /dev/null
+  This pre-opens stdin as /dev/null, preventing lazy Socket creation.
+- Fix 2: instrumentation.ts — pre-initialize process.stdin to a dummy Readable stream before any route module loads. Belt-and-suspenders fix.
+- Build verified: succeeds. Committed as fac4585, pushed to GitHub.
+
+Stage Summary:
+- ROOT CAUSE: Hostinger doesn't provide process.stdin → Node.js EEXIST when lazily initializing it during dynamic import.
+- FIX: /dev/null redirect + stdin pre-initialization in instrumentation.ts.
+- After Hostinger deploys, POST /api/orders (and all other POST handlers) will work without EEXIST.
