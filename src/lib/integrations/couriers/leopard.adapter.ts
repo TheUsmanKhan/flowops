@@ -145,8 +145,18 @@ export class LeopardAdapter implements CourierAdapter {
     if (!this.apiKey || !this.apiPassword) {
       throw new Error('Leopard adapter requires both api_key and api_password in credentials.')
     }
-    // Use production if credentials explicitly say so, otherwise staging
-    this.baseUrl = credentials.isProduction === 'true' ? LEOPARD_PRODUCTION_BASE : LEOPARD_STAGING_BASE
+    // Use production if credentials explicitly say so, otherwise staging.
+    // The isProduction field is a boolean in configSchema, but it can arrive as:
+    //   - "true" / "false" (string from JSON)
+    //   - true / false (boolean — JSON.parse keeps it as boolean)
+    //   - "on" (HTML checkbox default)
+    //   - undefined (field left empty — defaults to staging)
+    const isProd = credentials.isProduction === true
+      || credentials.isProduction === 'true'
+      || credentials.isProduction === 'on'
+      || credentials.isProduction === '1'
+      || credentials.isProduction === 1
+    this.baseUrl = isProd ? LEOPARD_PRODUCTION_BASE : LEOPARD_STAGING_BASE
   }
 
   // ──────────────────────────────────────────────────────────────
@@ -639,15 +649,26 @@ export class LeopardAdapter implements CourierAdapter {
       // request_param and request_value are optional — if omitted, returns all shippers
     }
 
-    const resp = await this.getWithParams<LeopardShipper[]>('getShipperDetails', params)
+    const resp = await this.getWithParams<LeopardShipper[] | LeopardShipper>('getShipperDetails', params)
 
     if (resp.status !== 1 && resp.status !== '1') {
       throw new Error(this.extractError(resp))
     }
 
-    const shippers = resp.data
-    if (!shippers || !Array.isArray(shippers)) {
+    // Leopard's API returns data as either:
+    // - An array of shippers (when fetching all)
+    // - A SINGLE shipper object (when filtering or only one shipper exists)
+    // We must handle BOTH shapes.
+    const data = resp.data
+    if (!data) {
       return []
+    }
+
+    let shippers: LeopardShipper[] = []
+    if (Array.isArray(data)) {
+      shippers = data
+    } else if (typeof data === 'object') {
+      shippers = [data]
     }
 
     return shippers.map((s) => this.mapShipper(s))
@@ -679,18 +700,33 @@ export class LeopardAdapter implements CourierAdapter {
       request_value: shipmentId,
     }
 
-    const resp = await this.getWithParams<LeopardShipper[]>('getShipperDetails', params)
+    const resp = await this.getWithParams<LeopardShipper[] | LeopardShipper>('getShipperDetails', params)
 
     if (resp.status !== 1 && resp.status !== '1') {
       throw new Error(this.extractError(resp))
     }
 
-    const shippers = resp.data
-    if (!shippers || !Array.isArray(shippers) || shippers.length === 0) {
+    // Leopard's API returns data as either:
+    // - An array of shippers (when fetching all)
+    // - A SINGLE shipper object (when filtering by request_param=request_value)
+    // We must handle BOTH shapes.
+    const data = resp.data
+    if (!data) {
       return null
     }
 
-    return this.mapShipper(shippers[0])
+    let shipper: LeopardShipper | null = null
+    if (Array.isArray(data)) {
+      // Array response — take the first match
+      if (data.length === 0) return null
+      shipper = data[0]
+    } else if (typeof data === 'object') {
+      // Single object response (the common case for request_param filtering)
+      shipper = data
+    }
+
+    if (!shipper) return null
+    return this.mapShipper(shipper)
   }
 
   // ──────────────────────────────────────────────────────────────
