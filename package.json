@@ -6,7 +6,7 @@
     "predev": "node -e \"const fs=require('fs');const e=fs.readFileSync('.env','utf8');if(e.includes('file:')||!e.includes('postgresql://')){console.error('❌ .env has invalid DATABASE_URL — must be postgresql://, not file:. Fix .env before starting.');process.exit(1);}console.log('✅ .env verified — using PostgreSQL');\"",
     "dev": "next dev -p 3000",
     "postinstall": "prisma generate || true",
-    "build": "prisma generate && next build --webpack && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/ && cp bootstrap.js .next/standalone/",
+    "build": "prisma generate && next build --webpack && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/ && node -e \"const fs=require('fs');const f='.next/standalone/server.js';let s=fs.readFileSync(f,'utf8');const patch='try{const{Readable}=require(\\\"stream\\\");const d=new Readable({read(){}});d.push(null);Object.defineProperty(process,\\\"stdin\\\",{value:d,writable:false,configurable:false,enumerable:true})}catch(e){}';if(!s.includes('Object.defineProperty(process')){s=patch+'\\n'+s;fs.writeFileSync(f,s);console.log('✅ server.js patched with stdin fix')}else{console.log('✅ server.js already patched')}\"",
     "start": "node --require ./bootstrap.js --unhandled-rejections=warn .next/standalone/server.js < /dev/null",
     "lint": "eslint .",
     "db:push": "prisma db push",
