@@ -1,5 +1,4 @@
 import { handleError } from '@/lib/workspace'
-import { getOwnAdvances } from '@/lib/actions/advance.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -12,6 +11,7 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET() {
   try {
+    const { getOwnAdvances } = await import('@/lib/actions/advance.actions')
     const result = await getOwnAdvances()
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

@@ -1,12 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError, readBody } from '@/lib/workspace'
-import {
-  getPayrollRunDetail,
-  finalizePayrollRun,
-  markAllPayslipsPaid,
-  adjustPayslip,
-  markPayslipPaid,
-} from '@/lib/actions/payroll.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -18,6 +11,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params
+    const { getPayrollRunDetail } = await import('@/lib/actions/payroll.actions')
     const result = await getPayrollRunDetail(id)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })
@@ -42,6 +36,7 @@ export async function PATCH(
     }>(req)
 
     if (body.action === 'finalize') {
+      const { finalizePayrollRun } = await import('@/lib/actions/payroll.actions')
       const result = await finalizePayrollRun(id)
       if (!result.success) {
         return Response.json({ error: result.error }, { status: 400 })
@@ -50,6 +45,7 @@ export async function PATCH(
     }
 
     if (body.action === 'mark_all_paid') {
+      const { markAllPayslipsPaid } = await import('@/lib/actions/payroll.actions')
       const result = await markAllPayslipsPaid(id, {
         paymentMethod: body.paymentMethod,
         paymentReference: body.paymentReference,
@@ -83,6 +79,7 @@ export async function PUT(
     }>(req)
 
     if (body.action === 'adjust') {
+      const { adjustPayslip } = await import('@/lib/actions/payroll.actions')
       const result = await adjustPayslip(body.payslipId, {
         otherAllowances: body.otherAllowances,
         otherDeductions: body.otherDeductions,
@@ -94,6 +91,7 @@ export async function PUT(
     }
 
     if (body.action === 'mark_paid') {
+      const { markPayslipPaid } = await import('@/lib/actions/payroll.actions')
       const result = await markPayslipPaid(body.payslipId, {
         paymentMethod: body.paymentMethod,
         paymentReference: body.paymentReference,

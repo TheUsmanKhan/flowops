@@ -2,7 +2,6 @@ import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
 import { ApiError, handleError, readBody, getWorkspace, requirePermission } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
-import { bookOrderWithCourier, bookExchangeShipmentWithCourier } from '@/lib/actions/booking.actions'
 import { decryptCredentials } from '@/lib/utils/encryption'
 import { getCourierAdapter } from '@/lib/integrations/registry'
 import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
@@ -62,6 +61,7 @@ export async function POST(req: NextRequest) {
 
     // ── ORDER booking: delegate to the server action ──
     if (body.orderId) {
+      const { bookOrderWithCourier } = await import('@/lib/actions/booking.actions')
       const result = await bookOrderWithCourier({
         orderId: body.orderId,
         companyIntegrationId: body.companyIntegrationId,
@@ -88,6 +88,7 @@ export async function POST(req: NextRequest) {
     // defined in this route file (duplicate logic that drifted from
     // bookExchangeShipmentWithCourier in booking.actions.ts). Now delegates
     // to the proper action for consistency.
+    const { bookExchangeShipmentWithCourier } = await import('@/lib/actions/booking.actions')
     const shipmentResult = await bookExchangeShipmentWithCourier(
       body.entity_id,
       body.courier_company_integration_id,

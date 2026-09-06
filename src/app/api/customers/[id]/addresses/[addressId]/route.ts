@@ -1,6 +1,5 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { updateCustomerAddress, removeCustomerAddress } from '@/lib/actions/customer.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -13,6 +12,7 @@ export async function PATCH(
   try {
     const { addressId } = await params
     const body = await readBody<Record<string, unknown>>(req)
+    const { updateCustomerAddress } = await import('@/lib/actions/customer.actions')
     const result = await updateCustomerAddress(addressId, {
       label: typeof body.label === 'string' ? body.label : undefined,
       address: typeof body.address === 'string' ? body.address : '',
@@ -35,6 +35,7 @@ export async function DELETE(
 ) {
   try {
     const { addressId } = await params
+    const { removeCustomerAddress } = await import('@/lib/actions/customer.actions')
     const result = await removeCustomerAddress(addressId)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to remove address')

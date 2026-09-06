@@ -1,6 +1,5 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { markExchangeShipmentRto } from '@/lib/actions/exchange-shipment.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -29,6 +28,7 @@ export async function POST(
     const returnReason =
       typeof body?.returnReason === 'string' ? body.returnReason : undefined
 
+    const { markExchangeShipmentRto } = await import('@/lib/actions/exchange-shipment.actions')
     const result = await markExchangeShipmentRto(id, returnReason)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to mark as RTO')

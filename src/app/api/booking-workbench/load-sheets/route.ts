@@ -1,6 +1,5 @@
 import { ApiError, handleError } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { listLoadSheetHistory } from '@/lib/actions/load-sheet.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -17,6 +16,7 @@ export async function GET(req: NextRequest) {
     const limitParam = url.searchParams.get('limit')
     const limit = limitParam ? Math.min(parseInt(limitParam, 10) || 20, 100) : 20
 
+    const { listLoadSheetHistory } = await import('@/lib/actions/load-sheet.actions')
     const result = await listLoadSheetHistory(limit)
     if (!result.success) throw new ApiError(400, result.error ?? 'Failed')
     return Response.json(result.data)

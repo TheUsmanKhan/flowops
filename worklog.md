@@ -13028,3 +13028,326 @@ Stage Summary:
 - Also fixes shipper-advice, cycle-counts, stock-loss endpoints
 - Total routes fixed across all commits: 36+ (6 in prior commits + 30 in this commit)
 - The cron routes (sync-cities, poll-postex, poll-leopard-safety-net, generate-scan-reports) were NOT touched — they run via background instrumentation, not user-facing.
+
+---
+Task ID: FIX-FINAL-ALL-ROUTES
+Agent: general-purpose
+Task: Fix ALL remaining API routes with heavy top-level imports (29 routes)
+
+Work Log:
+- Read worklog.md and confirmed the proven pattern: top-level
+  `@/lib/actions/*.actions` import → dynamic `await import()` inside the
+  handler body, before the function call. Same pattern as the previously-fixed
+  /api/orders, /api/exchanges, /api/integrations, /api/pickup-addresses,
+  /api/inventory/*, /api/exchanges/[id]/*, /api/scan, /api/shipper-advice,
+  and /api/orders/[id]/returns/review/* routes.
+- Read EACH of the 29 target route files FIRST to identify:
+  • exact top-level import line(s) to remove
+  • which handler(s) (GET/POST/PATCH/DELETE) use the function(s)
+  • the precise call sites where the dynamic import should be placed
+  • whether multiple functions from the same module are used (combine into
+    ONE dynamic import) or different modules are used (separate dynamic
+    imports per call site or per branch)
+- Applied the fix to ALL 29 files:
+
+  Batch 1 — Booking workbench (5 files):
+  1. booking-workbench/book-batch/route.ts — `bookOrdersBatch` from
+     booking.actions (POST, after validation guards, before call)
+  2. booking-workbench/load-sheets/route.ts — `listLoadSheetHistory` from
+     load-sheet.actions (GET, after limit param parse, before call)
+  3. booking-workbench/load-sheet-ready/route.ts — `listLoadSheetReady` from
+     load-sheet.actions (GET, after companyIntegrationId validation, before
+     call)
+  4. booking-workbench/load-sheet/route.ts — `generateLoadSheet` from
+     load-sheet.actions (POST, after entityRefs validation, before call)
+  5. booking-workbench/book/route.ts — `bookOrderWithCourier` AND
+     `bookExchangeShipmentWithCourier` from booking.actions (POST, two
+     separate dynamic imports — one inside the order-booking branch, one
+     inside the exchange-shipment-booking branch, since only one branch
+     runs per request)
+
+  Batch 2 — Advances & Payroll (5 files):
+  6. advances/own/route.ts — `getOwnAdvances` from advance.actions
+     (GET, at start of try block)
+  7. advances/route.ts — `listAdvances` (GET, after status param parse)
+     AND `recordAdvance` (POST, inside the `runCreate` closure that's
+     also called by idempotency replay) — both dynamically imported from
+     advance.actions
+  8. payroll/route.ts — `listPayrollRuns` (GET, at start of try block)
+     AND `generatePayrollRun` (POST, inside the `runCreate` closure) —
+     both dynamically imported from payroll.actions
+  9. payroll/[id]/route.ts — `getPayrollRunDetail` (GET),
+     `finalizePayrollRun` (PATCH, finalize branch), `markAllPayslipsPaid`
+     (PATCH, mark_all_paid branch), `adjustPayslip` (PUT, adjust branch),
+     `markPayslipPaid` (PUT, mark_paid branch) — all 5 dynamically imported
+     inside their respective branches from payroll.actions
+  10. payroll/payslips/own/route.ts — `getOwnPayslips` from payroll.actions
+      (GET, at start of try block)
+
+  Batch 3 — Products drafts & courier-cancel (2 files):
+  11. products/drafts/route.ts — `saveProductDraft` from
+      @/lib/actions/drafts/save-draft (POST, after readBody, before call)
+  12. courier-cancel/route.ts — `cancelCourierBooking` from
+      courier-cancel.actions (POST, after entityType/entityId validation,
+      before call)
+
+  Batch 4 — Exchange shipments (5 files, all simple single-handler routes):
+  13. exchange-shipments/[id]/cod-collected/route.ts —
+      `markExchangeShipmentCodCollected` from exchange-shipment.actions
+      (POST, after body parse with .catch fallback, before call)
+  14. exchange-shipments/[id]/reserve/route.ts — `reserveExchangeShipmentStock`
+      (POST, after `const { id } = await params`)
+  15. exchange-shipments/[id]/cancel/route.ts — `cancelExchangeShipment`
+      (POST, after body readBody, before call)
+  16. exchange-shipments/[id]/dispatch/route.ts — `dispatchExchangeShipment`
+      (POST, after body readBody, before call)
+  17. exchange-shipments/[id]/rto/route.ts — `markExchangeShipmentRto`
+      (POST, after returnReason extraction, before call)
+
+  Batch 5 — Orders sub-routes (11 files):
+  18. orders/[id]/convert-payment/route.ts — `convertPaymentStatus` from
+      order.actions (POST, after body parse, before call)
+  19. orders/[id]/cod-collected/route.ts — `markCodCollected` (POST,
+      after collectedAmount validation, before call)
+  20. orders/[id]/packed/route.ts — `markOrderPacked` (POST, after
+      `const { id } = await params`)
+  21. orders/[id]/confirm/route.ts — `confirmOrder` (POST, after auth check +
+      `const { id } = await params`)
+  22. orders/[id]/processing/route.ts — `markOrderProcessing` (POST, after
+      `const { id } = await params`)
+  23. orders/[id]/cancel/route.ts — `cancelOrder` (POST, after reason
+      length validation, before call)
+  24. orders/[id]/refresh-status/route.ts — `trackSingleOrderStatus` from
+      postex-status-poll.actions (POST, after `const { id } = await params`)
+  25. orders/[id]/delivered/route.ts — `markOrderDelivered` (POST, after
+      `const { id } = await params`)
+  26. orders/[id]/un-cancel/route.ts — `unCancelOrder` (POST, after
+      `const { id } = await params`)
+  27. orders/[id]/dispatch/route.ts — `dispatchOrderAction` (POST, after
+      trackingNumber validation, before call)
+  28. orders/[id]/rto/route.ts — `processOrderReturn` from
+      order-return.actions (POST, after reason length validation, before
+      call)
+
+  Batch 6 — Webhooks (1 file, 4 imports from different modules):
+  29. webhooks/[provider_key]/[webhook_endpoint_id]/route.ts — converted
+      ALL 4 top-level imports to dynamic imports inside the
+      `executeLoggedIntegrationAction` fn closure:
+      • `processLeopardWebhookUpdates` from leopard-webhook.actions —
+        imported inside the `if (providerKey === 'leopard')` branch right
+        before the call
+      • `markOrderDelivered` from order.actions — imported inside the
+        `if (statusUpdate.status === 'delivered' && order.status === 'dispatched')`
+        branch
+      • `processOrderReturn` from order-return.actions — imported inside
+        the `else if (statusUpdate.status === 'returned' && order.status !== 'rto')`
+        branch
+      • `matchOrCreateExternalCustomer` from customer.actions — imported
+        inside the `else if (category === 'ecommerce')` branch right
+        before the call
+
+- For EACH file: removed ONLY the top-level import line(s) for the heavy
+  `@/lib/actions/*.actions` modules. Left ALL other imports (next/server,
+  @/lib/db, @/lib/session, @/lib/workspace, @/lib/audit, @/lib/metrics,
+  @/lib/permissions, @/lib/validations/*, @/lib/idempotency, @/lib/utils/*,
+  @/lib/integrations/*, zod, etc.) completely untouched.
+- Did NOT change any handler logic except adding the dynamic import line(s).
+- For files where ONE handler uses multiple functions from the SAME module
+  in different branches, added ONE dynamic import per branch (each branch
+  only runs once per request — keeps imports lazy per code path).
+- For files with multiple handlers (GET/POST/PATCH/PUT), added the dynamic
+  import inside each handler that needs it (e.g., advances/route.ts GET
+  uses listAdvances, POST uses recordAdvance — separate dynamic imports
+  per handler).
+- Verified ALL 29 edited files via ripgrep: NONE of them still contain a
+  top-level `import ... from '@/lib/actions/*.actions'` line.
+- Ran `bun run lint` → 0 errors, 12 pre-existing warnings (all in
+  unrelated React Hook Form component files — none in the 29 edited routes).
+  Same baseline as previous agent's run.
+- Did NOT run `git commit` — leaving the 29 staged-but-uncommitted
+  modifications for the main agent to review and commit as one atomic
+  deploy unit.
+
+Stage Summary:
+- ALL 29 API routes that imported from `@/lib/actions/*.actions` at the
+  top level (as specified in the task) have been converted to dynamic
+  `await import()` inside the handler functions.
+- Same proven pattern as the previously-fixed /api/orders,
+  /api/exchanges, /api/integrations, /api/pickup-addresses,
+  /api/inventory/*, /api/exchanges/[id]/*, /api/scan, /api/shipper-advice,
+  and /api/orders/[id]/returns/review/* routes — verified to fix 500
+  errors on Hostinger production.
+- Lint passes cleanly: 0 errors, 12 pre-existing warnings (unchanged
+  baseline, none in edited routes).
+- All 29 modified files are unstaged in git — ready for the main agent
+  to commit + push + deploy to Hostinger.
+- After deploy: every user-facing booking-workbench, advances, payroll,
+  products/drafts, courier-cancel, exchange-shipment, order sub-action
+  (convert-payment, cod-collected, packed, confirm, processing, cancel,
+  refresh-status, delivered, un-cancel, dispatch, rto), and webhook
+  endpoint should respond without 500 module-load errors.
+- NOTE: 4 cron routes (cron/sync-cities, cron/poll-postex,
+  cron/poll-leopard-safety-net, cron/generate-scan-reports) STILL have
+  top-level @/lib/actions imports but were intentionally left alone —
+  previous agents confirmed these run via background instrumentation
+  (not page-data-collection path) so they don't trigger the Hostinger
+  build failure.
+- NOTE: 5 customers/* routes, 2 couriers/postex/* routes, and
+  drafts/route.ts + orders/drafts/route.ts also still have top-level
+  @/lib/actions imports but were NOT in the task list. If they later
+  trigger 500 errors on Hostinger, they can be fixed with the same
+  pattern.
+- Next: deploy to Hostinger and verify each affected endpoint returns
+  non-500 responses (especially the previously-broken booking workbench
+  batch booking, payroll run generation, exchange-shipment RTO/dispatch,
+  and order sub-action buttons).
+
+---
+Task ID: FIX-LAST-REMAINING
+Agent: sub-agent (general-purpose)
+Task: Fix last remaining heavy top-level imports in 12 API routes
+
+Work Log:
+- Read /home/z/my-project/worklog.md (full context — the previous agent
+  converted 29 routes to dynamic imports, leaving 12 more files flagged as
+  follow-up because they still had top-level `import ... from
+  '@/lib/actions/*.actions'` or `'@/lib/stock-loss'`).
+
+- Read EACH of the 12 target files FIRST (in full) before any edit.
+
+- For EACH file:
+  • Removed ONLY the top-level import line(s) for the heavy module
+    (`@/lib/actions/customer.actions`, `@/lib/actions/drafts/save-draft`,
+    `@/lib/actions/postex-status-poll.actions`, `@/lib/stock-loss`).
+  • Left ALL other imports (next/server, @/lib/db, @/lib/workspace,
+    @/lib/audit, @/lib/permissions, @/lib/validations/*, type-only
+    imports, etc.) completely untouched.
+  • Added `const { fn } = await import('@/lib/...')` inside the handler
+    before the function is called. When a handler needed multiple
+    functions from the SAME module, destructured them all from ONE
+    dynamic import call (single await import per handler).
+
+- File-by-file detail:
+
+  1. src/app/api/orders/drafts/route.ts (POST handler)
+     • Removed top-level `import { saveOrderDraft } from '@/lib/actions/drafts/save-draft'`
+     • Added `const { saveOrderDraft } = await import('@/lib/actions/drafts/save-draft')`
+       right after `readBody()` in the POST try block.
+
+  2. src/app/api/drafts/route.ts (GET + DELETE handlers)
+     • Removed top-level `import { listDrafts, countDrafts, deleteDraft, getDraft } from '@/lib/actions/drafts/save-draft'`
+     • In GET: added `const { listDrafts, countDrafts, getDraft } = await import('@/lib/actions/drafts/save-draft')`
+       right after `id = url.searchParams.get('id')` — one combined
+       import for all 3 functions used by GET branches.
+     • In DELETE: added `const { deleteDraft } = await import('@/lib/actions/drafts/save-draft')`
+       after the `id` required check.
+
+  3. src/app/api/couriers/postex/poll/route.ts (POST handler)
+     • Removed top-level `import { pollPostExOrderStatuses } from '@/lib/actions/postex-status-poll.actions'`
+     • Added `const { pollPostExOrderStatuses } = await import('@/lib/actions/postex-status-poll.actions')`
+       right before the call (after the elevated-role guard).
+
+  4. src/app/api/couriers/postex/load-sheet/route.ts (POST handler)
+     • Removed top-level `import { generatePostExLoadSheet } from '@/lib/actions/postex-status-poll.actions'`
+     • Added `const { generatePostExLoadSheet } = await import('@/lib/actions/postex-status-poll.actions')`
+       right before the call (after the body validation block).
+
+  5. src/app/api/customers/backfill-stats/route.ts (POST handler)
+     • Removed top-level `import { updateCustomerStats } from '@/lib/actions/customer.actions'`
+     • Added `const { updateCustomerStats } = await import('@/lib/actions/customer.actions')`
+       after the loop accumulator vars are declared, before the
+       `for (const c of customers)` loop.
+
+  6. src/app/api/customers/[id]/addresses/route.ts (POST handler)
+     • Removed top-level `import { addCustomerAddress } from '@/lib/actions/customer.actions'`
+     • Added `const { addCustomerAddress } = await import('@/lib/actions/customer.actions')`
+       after `readBody()` and before the call.
+
+  7. src/app/api/customers/[id]/addresses/[addressId]/route.ts (PATCH + DELETE)
+     • Removed top-level `import { updateCustomerAddress, removeCustomerAddress } from '@/lib/actions/customer.actions'`
+     • In PATCH: added `const { updateCustomerAddress } = await import('@/lib/actions/customer.actions')`
+       after `readBody()`.
+     • In DELETE: added `const { removeCustomerAddress } = await import('@/lib/actions/customer.actions')`
+       after the `addressId` destructuring.
+     • (Two separate dynamic imports — one per handler — because only
+       one handler runs per request and each handler only uses its own
+       function. Each is a "single dynamic import" per the
+       instructions.)
+
+  8. src/app/api/customers/[id]/route.ts (GET + PATCH handlers)
+     • Removed top-level `import { getCustomerDetail, updateCustomer } from '@/lib/actions/customer.actions'`
+     • In GET: added `const { getCustomerDetail } = await import('@/lib/actions/customer.actions')`
+       right after `const { id } = await params`.
+     • In PATCH: added `const { updateCustomer } = await import('@/lib/actions/customer.actions')`
+       after `readBody()`.
+
+  9. src/app/api/customers/[id]/phones/route.ts (POST handler)
+     • Removed top-level `import { addCustomerPhone } from '@/lib/actions/customer.actions'`
+     • Added `const { addCustomerPhone } = await import('@/lib/actions/customer.actions')`
+       after `readBody()`.
+
+  10. src/app/api/customers/[id]/phones/[phoneId]/route.ts (DELETE handler)
+      • Removed top-level `import { removeCustomerPhone } from '@/lib/actions/customer.actions'`
+      • Added `const { removeCustomerPhone } = await import('@/lib/actions/customer.actions')`
+        after `const { phoneId } = await params`.
+
+  11. src/app/api/customers/route.ts (GET + POST handlers — 5 functions)
+      • Removed top-level `import { listCustomers, createCustomer, searchCustomersDetailed, flagCustomer, unflagCustomer } from '@/lib/actions/customer.actions'`
+      • In GET: added ONE combined
+        `const { listCustomers, searchCustomersDetailed } = await import('@/lib/actions/customer.actions')`
+        at the very top of the GET try block (both functions used in
+        different branches of GET).
+      • In POST: added ONE combined
+        `const { flagCustomer, unflagCustomer, createCustomer } = await import('@/lib/actions/customer.actions')`
+        at the very top of the POST try block. `createCustomer` is
+        referenced both inside the idempotency closure AND in the
+        no-idempotency-key fallback path; the single destructuring at
+        the top of try covers both code paths via lexical capture.
+        Left the existing `await import('@/lib/workspace')` and
+        `await import('@/lib/idempotency')` calls unchanged (those are
+        already dynamic).
+
+  12. src/app/api/scan/confirm-return/route.ts (POST handler)
+      • Removed top-level `import { recordStockLoss } from '@/lib/stock-loss'`
+      • Added `const { recordStockLoss } = await import('@/lib/stock-loss')`
+        at the start of the `if (body.condition === 'damaged')` branch,
+        BEFORE the `for` loop — so it runs ONCE per damaged-return
+        request, not once per order item.
+      • Left the pre-existing dynamic `await import('@/lib/actions/order-return.actions')`
+        for `processOrderReturn` exactly as it was (line 72 — already
+        lazy).
+
+- Verified via ripgrep: NONE of the 12 edited files still contain a
+  top-level `import ... from '@/lib/actions/*.actions'` or
+  `import ... from '@/lib/stock-loss'` line.
+
+- Ran `bun run lint` → 0 errors, 12 pre-existing warnings (all in
+  unrelated React Hook Form component files — same baseline as the
+  previous agent's run, none in the 12 edited routes).
+
+- Did NOT change any handler logic, validation, error handling, or
+  response shape — only added dynamic import lines and removed the
+  corresponding top-level imports.
+
+- Did NOT touch any cron routes (cron/sync-cities, cron/poll-postex,
+  cron/poll-leopard-safety-net, cron/generate-scan-reports) — those
+  were intentionally left alone by the previous agent because they
+  run via background instrumentation, not the page-data-collection
+  path that triggers the Hostinger build failure.
+
+Stage Summary:
+- ALL 12 remaining API routes that imported from @/lib/actions/*.actions
+  or @/lib/stock-loss at the top level have been converted to dynamic
+  `await import()` inside their handlers.
+- Combined with the 29 routes fixed by the previous agent, this
+  completes the full sweep of every API route in /api/* that was
+  importing heavy lib modules at module-load time.
+- Lint passes cleanly: 0 errors, 12 pre-existing warnings (unchanged
+  baseline).
+- Files are unstaged in git — ready for the main agent to commit +
+  push + deploy to Hostinger.
+- After deploy: customer management (list/search/create/flag/unflag,
+  detail/edit, phone add/remove, address add/update/remove, stats
+  backfill), drafts list/count/delete/get + order drafts save,
+  PostEx poll + load-sheet generation, and one-go damaged-return scan
+  confirmation should all respond without 500 module-load errors.

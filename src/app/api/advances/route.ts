@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { ApiError, handleError, readBody, getWorkspace } from '@/lib/workspace'
-import { recordAdvance, listAdvances } from '@/lib/actions/advance.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -12,6 +11,7 @@ export async function GET(req: NextRequest) {
     const employeeId = url.searchParams.get('employeeId') || undefined
     const status = url.searchParams.get('status') as 'active' | 'settled' | undefined
 
+    const { listAdvances } = await import('@/lib/actions/advance.actions')
     const result = await listAdvances({
       employeeId: employeeId || undefined,
       status: status || undefined,
@@ -41,6 +41,7 @@ export async function POST(req: NextRequest) {
     // Core creation logic — calls the action function and throws on failure
     // so withIdempotency marks the ticket as 'failed' (allowing genuine retry).
     const runCreate = async () => {
+      const { recordAdvance } = await import('@/lib/actions/advance.actions')
       const result = await recordAdvance(body)
       if (!result.success) {
         throw new ApiError(400, result.error ?? 'Failed to record advance')

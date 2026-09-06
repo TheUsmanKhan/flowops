@@ -1,7 +1,6 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
 import { ApiError, handleError, readBody, getWorkspace } from '@/lib/workspace'
-import { generatePostExLoadSheet } from '@/lib/actions/postex-status-poll.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -31,6 +30,7 @@ export async function POST(req: NextRequest) {
       )
     }
 
+    const { generatePostExLoadSheet } = await import('@/lib/actions/postex-status-poll.actions')
     const result = await generatePostExLoadSheet(
       body.companyIntegrationId,
       body.trackingNumbers,

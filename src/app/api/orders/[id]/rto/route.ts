@@ -1,5 +1,4 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
-import { processOrderReturn } from '@/lib/actions/order-return.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -16,6 +15,7 @@ export async function POST(
     if (reason.length < 3) {
       throw new ApiError(400, 'Return reason is required (min 3 chars)')
     }
+    const { processOrderReturn } = await import('@/lib/actions/order-return.actions')
     const result = await processOrderReturn(id, reason)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to process return')

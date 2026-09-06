@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError, readBody } from '@/lib/workspace'
-import { cancelCourierBooking } from '@/lib/actions/courier-cancel.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -23,6 +22,7 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       )
     }
+    const { cancelCourierBooking } = await import('@/lib/actions/courier-cancel.actions')
     const result = await cancelCourierBooking(body.entityType, body.entityId)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

@@ -1,5 +1,4 @@
 import { getWorkspace, ApiError, handleError, readBody } from '@/lib/workspace'
-import { dispatchOrderAction } from '@/lib/actions/order.actions'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -27,6 +26,7 @@ export async function POST(
       throw new ApiError(400, 'Tracking number is required')
     }
 
+    const { dispatchOrderAction } = await import('@/lib/actions/order.actions')
     const result = await dispatchOrderAction(
       id,
       trackingNumber,

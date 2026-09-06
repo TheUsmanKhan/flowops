@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError, readBody } from '@/lib/workspace'
-import { cancelExchangeShipment } from '@/lib/actions/exchange-shipment.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -13,6 +12,7 @@ export async function POST(
   try {
     const { id } = await params
     const body = await readBody<{ reason: string }>(req)
+    const { cancelExchangeShipment } = await import('@/lib/actions/exchange-shipment.actions')
     const result = await cancelExchangeShipment(id, body.reason ?? 'Cancelled by staff')
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

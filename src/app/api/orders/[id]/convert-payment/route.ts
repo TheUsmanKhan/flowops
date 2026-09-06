@@ -1,5 +1,4 @@
 import { getWorkspace, ApiError, handleError, readBody } from '@/lib/workspace'
-import { convertPaymentStatus } from '@/lib/actions/order.actions'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -25,6 +24,7 @@ export async function POST(
       advance_payment_screenshot_url?: string
     }>(req)
 
+    const { convertPaymentStatus } = await import('@/lib/actions/order.actions')
     const result = await convertPaymentStatus({
       order_id: id,
       new_payment_type: body.new_payment_type,

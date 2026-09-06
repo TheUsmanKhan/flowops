@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError } from '@/lib/workspace'
-import { unCancelOrder } from '@/lib/actions/order.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -21,6 +20,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const { unCancelOrder } = await import('@/lib/actions/order.actions')
     const result = await unCancelOrder(id)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

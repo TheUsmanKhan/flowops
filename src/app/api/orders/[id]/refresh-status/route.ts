@@ -1,6 +1,5 @@
 import { ApiError, handleError } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { trackSingleOrderStatus } from '@/lib/actions/postex-status-poll.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -27,6 +26,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const { trackSingleOrderStatus } = await import('@/lib/actions/postex-status-poll.actions')
     const result = await trackSingleOrderStatus(id)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to refresh status')

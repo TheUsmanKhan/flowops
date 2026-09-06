@@ -1,6 +1,5 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { getCustomerDetail, updateCustomer } from '@/lib/actions/customer.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -18,6 +17,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params
+    const { getCustomerDetail } = await import('@/lib/actions/customer.actions')
     const result = await getCustomerDetail(id)
     if (!result.success) {
       throw new ApiError(404, result.error ?? 'Customer not found')
@@ -36,6 +36,7 @@ export async function PATCH(
   try {
     const { id } = await params
     const body = await readBody<Record<string, unknown>>(req)
+    const { updateCustomer } = await import('@/lib/actions/customer.actions')
     const result = await updateCustomer({
       customer_id: id,
       name: typeof body.name === 'string' ? body.name : undefined,

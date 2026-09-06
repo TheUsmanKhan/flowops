@@ -3,7 +3,6 @@ import { db } from '@/lib/db'
 import { getWorkspace, handleError, readBody, ApiError, requirePermission } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
-import { recordStockLoss } from '@/lib/stock-loss'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -87,6 +86,7 @@ export async function POST(req: NextRequest) {
         throw new ApiError(400, 'Order has no dispatch location — cannot record damage.')
       }
 
+      const { recordStockLoss } = await import('@/lib/stock-loss')
       for (const item of order.items) {
         if (!item.orgVariantId) continue
 

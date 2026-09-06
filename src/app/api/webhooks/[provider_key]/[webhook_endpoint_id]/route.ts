@@ -3,10 +3,6 @@ import { db } from '@/lib/db'
 import { decryptCredentials } from '@/lib/utils/encryption'
 import { getCourierAdapter, getEcommerceAdapter, getAdapterCategory } from '@/lib/integrations/registry'
 import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
-import { markOrderDelivered } from '@/lib/actions/order.actions'
-import { processOrderReturn } from '@/lib/actions/order-return.actions'
-import { matchOrCreateExternalCustomer } from '@/lib/actions/customer.actions'
-import { processLeopardWebhookUpdates } from '@/lib/actions/leopard-webhook.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -102,6 +98,7 @@ export async function POST(
           if (providerKey === 'leopard') {
             const payload = rawPayload as { data?: Array<{ cn_number: string; status: string; receiver_name?: string; reason?: string; activity_date?: string }> }
             if (payload?.data && Array.isArray(payload.data) && payload.data.length > 0) {
+              const { processLeopardWebhookUpdates } = await import('@/lib/actions/leopard-webhook.actions')
               const result = await processLeopardWebhookUpdates(integration.id, payload.data)
               return { processed: result.data?.processed ?? 0, errors: result.data?.errors ?? [] }
             }
@@ -122,8 +119,10 @@ export async function POST(
 
           // Update order status based on the webhook — reuse existing OMS functions
           if (statusUpdate.status === 'delivered' && order.status === 'dispatched') {
+            const { markOrderDelivered } = await import('@/lib/actions/order.actions')
             await markOrderDelivered(order.id)
           } else if (statusUpdate.status === 'returned' && order.status !== 'rto') {
+            const { processOrderReturn } = await import('@/lib/actions/order-return.actions')
             await processOrderReturn(order.id, 'Courier returned (RTO)')
           }
 
@@ -146,6 +145,7 @@ export async function POST(
           const order = parsed.parsedOrder
 
           // Match or create the customer via the Customer Management System
+          const { matchOrCreateExternalCustomer } = await import('@/lib/actions/customer.actions')
           const customerId = await matchOrCreateExternalCustomer({
             platform: providerKey as 'shopify' | 'daraz' | 'instagram',
             external_customer_id: order.externalOrderId,

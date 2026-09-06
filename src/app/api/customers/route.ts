@@ -1,11 +1,4 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
-import {
-  listCustomers,
-  createCustomer,
-  searchCustomersDetailed,
-  flagCustomer,
-  unflagCustomer,
-} from '@/lib/actions/customer.actions'
 import type { CreateCustomerInput } from '@/lib/validations/customer.schemas'
 
 export const runtime = 'nodejs'
@@ -31,6 +24,7 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET(req: Request) {
   try {
+    const { listCustomers, searchCustomersDetailed } = await import('@/lib/actions/customer.actions')
     const url = new URL(req.url)
     const search = url.searchParams.get('search') ?? ''
     const isFlagged = url.searchParams.get('is_flagged')
@@ -95,6 +89,7 @@ export async function GET(req: Request) {
  */
 export async function POST(req: Request) {
   try {
+    const { flagCustomer, unflagCustomer, createCustomer } = await import('@/lib/actions/customer.actions')
     const body = await readBody<Record<string, unknown>>(req)
 
     // ── Flag/unflag flow ──────────────────────────────────────────────────

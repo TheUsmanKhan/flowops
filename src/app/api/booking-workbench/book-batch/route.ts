@@ -2,7 +2,6 @@ import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
 
 import { ApiError, handleError, readBody, getWorkspace } from '@/lib/workspace'
-import { bookOrdersBatch } from '@/lib/actions/booking.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -54,6 +53,7 @@ export async function POST(req: NextRequest) {
       throw new ApiError(400, 'At least one item is required')
     }
 
+    const { bookOrdersBatch } = await import('@/lib/actions/booking.actions')
     const result = await bookOrdersBatch(body.companyIntegrationId, body.items)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Batch booking failed')

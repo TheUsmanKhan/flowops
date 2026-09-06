@@ -1,6 +1,5 @@
 import { ApiError, handleError } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { listLoadSheetReady } from '@/lib/actions/load-sheet.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -21,6 +20,7 @@ export async function GET(req: NextRequest) {
     if (!companyIntegrationId) {
       throw new ApiError(400, 'companyIntegrationId query parameter is required')
     }
+    const { listLoadSheetReady } = await import('@/lib/actions/load-sheet.actions')
     const result = await listLoadSheetReady(companyIntegrationId)
     if (!result.success) throw new ApiError(400, result.error ?? 'Failed')
     return Response.json(result.data)

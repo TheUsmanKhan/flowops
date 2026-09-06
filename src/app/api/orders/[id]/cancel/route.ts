@@ -1,5 +1,4 @@
 import { getWorkspace, ApiError, handleError, readBody } from '@/lib/workspace'
-import { cancelOrder } from '@/lib/actions/order.actions'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -20,6 +19,7 @@ export async function POST(
       throw new ApiError(400, 'Cancellation reason must be at least 3 characters')
     }
 
+    const { cancelOrder } = await import('@/lib/actions/order.actions')
     const result = await cancelOrder({ order_id: id, cancellation_reason: reason })
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to cancel order')

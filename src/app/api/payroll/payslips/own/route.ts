@@ -1,5 +1,4 @@
 import { handleError } from '@/lib/workspace'
-import { getOwnPayslips } from '@/lib/actions/payroll.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -12,6 +11,7 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET() {
   try {
+    const { getOwnPayslips } = await import('@/lib/actions/payroll.actions')
     const result = await getOwnPayslips()
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

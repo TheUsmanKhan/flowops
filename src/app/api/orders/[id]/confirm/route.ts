@@ -1,5 +1,4 @@
 import { getWorkspace, ApiError, handleError } from '@/lib/workspace'
-import { confirmOrder } from '@/lib/actions/order.actions'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -14,6 +13,7 @@ export async function POST(
     const ctx = await getWorkspace()
     if (!ctx) throw new ApiError(401, 'Not authenticated')
     const { id } = await params
+    const { confirmOrder } = await import('@/lib/actions/order.actions')
     const result = await confirmOrder(id)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to confirm order')

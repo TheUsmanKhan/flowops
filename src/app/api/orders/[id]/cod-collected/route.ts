@@ -1,5 +1,4 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
-import { markCodCollected } from '@/lib/actions/order.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -16,6 +15,7 @@ export async function POST(
     if (!Number.isFinite(collectedAmount) || collectedAmount < 0) {
       throw new ApiError(400, 'collected_amount must be a non-negative number')
     }
+    const { markCodCollected } = await import('@/lib/actions/order.actions')
     const result = await markCodCollected({
       order_id: id,
       collected_amount: collectedAmount,

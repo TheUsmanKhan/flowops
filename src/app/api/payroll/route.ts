@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { ApiError, handleError, readBody, getWorkspace } from '@/lib/workspace'
-import { generatePayrollRun, listPayrollRuns } from '@/lib/actions/payroll.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -8,6 +7,7 @@ export const dynamic = 'force-dynamic'
 /** GET /api/payroll — list all payroll runs for the company */
 export async function GET() {
   try {
+    const { listPayrollRuns } = await import('@/lib/actions/payroll.actions')
     const result = await listPayrollRuns()
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })
@@ -27,6 +27,7 @@ export async function POST(req: NextRequest) {
     // Core creation logic — calls the action function and throws on failure
     // so withIdempotency marks the ticket as 'failed' (allowing genuine retry).
     const runCreate = async () => {
+      const { generatePayrollRun } = await import('@/lib/actions/payroll.actions')
       const result = await generatePayrollRun(body.periodMonth, body.periodYear)
       if (!result.success) {
         throw new ApiError(400, result.error ?? 'Failed to generate payroll run')

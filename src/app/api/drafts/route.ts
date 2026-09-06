@@ -1,5 +1,4 @@
 import { ApiError, handleError } from '@/lib/workspace'
-import { listDrafts, countDrafts, deleteDraft, getDraft } from '@/lib/actions/drafts/save-draft'
 import { db } from '@/lib/db'
 
 export const runtime = 'nodejs'
@@ -18,6 +17,7 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url)
     const id = url.searchParams.get('id')
+    const { listDrafts, countDrafts, getDraft } = await import('@/lib/actions/drafts/save-draft')
 
     // Single draft fetch (for resume/edit flow)
     if (id) {
@@ -61,6 +61,7 @@ export async function DELETE(req: Request) {
     const id = url.searchParams.get('id')
     if (!id) throw new ApiError(400, 'id is required')
 
+    const { deleteDraft } = await import('@/lib/actions/drafts/save-draft')
     const result = await deleteDraft(id)
     if (!result.success) throw new ApiError(400, result.error ?? 'Failed')
     return Response.json({ ok: true })

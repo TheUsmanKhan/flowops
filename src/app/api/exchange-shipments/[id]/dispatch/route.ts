@@ -1,6 +1,5 @@
 import { NextRequest } from 'next/server'
 import { handleError, readBody } from '@/lib/workspace'
-import { dispatchExchangeShipment } from '@/lib/actions/exchange-shipment.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -13,6 +12,7 @@ export async function POST(
   try {
     const { id } = await params
     const body = await readBody<{ trackingNumber: string; courierCompanyIntegrationId: string }>(req)
+    const { dispatchExchangeShipment } = await import('@/lib/actions/exchange-shipment.actions')
     const result = await dispatchExchangeShipment(id, body.trackingNumber, body.courierCompanyIntegrationId)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

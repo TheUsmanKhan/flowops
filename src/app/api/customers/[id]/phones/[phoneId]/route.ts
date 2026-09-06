@@ -1,6 +1,5 @@
 import { ApiError, handleError } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { removeCustomerPhone } from '@/lib/actions/customer.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -12,6 +11,7 @@ export async function DELETE(
 ) {
   try {
     const { phoneId } = await params
+    const { removeCustomerPhone } = await import('@/lib/actions/customer.actions')
     const result = await removeCustomerPhone(phoneId)
     if (!result.success) {
       throw new ApiError(400, result.error ?? 'Failed to remove phone')

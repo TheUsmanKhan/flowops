@@ -1,6 +1,5 @@
 import { ApiError, handleError } from '@/lib/workspace'
 import { db } from '@/lib/db'
-import { updateCustomerStats } from '@/lib/actions/customer.actions'
 import { getWorkspace, requirePermission } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
 
@@ -33,6 +32,7 @@ export async function POST() {
     let updated = 0
     const errors: Array<{ customerId: string; error: string }> = []
 
+    const { updateCustomerStats } = await import('@/lib/actions/customer.actions')
     for (const c of customers) {
       processed++
       const result = await updateCustomerStats(c.id)

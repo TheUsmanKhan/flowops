@@ -1,7 +1,6 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
 import { ApiError, handleError, getWorkspace } from '@/lib/workspace'
-import { pollPostExOrderStatuses } from '@/lib/actions/postex-status-poll.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -24,6 +23,7 @@ export async function POST(_req: NextRequest) {
       throw new ApiError(403, 'Only elevated roles can trigger polling.')
     }
 
+    const { pollPostExOrderStatuses } = await import('@/lib/actions/postex-status-poll.actions')
     const result = await pollPostExOrderStatuses()
     return Response.json(result)
   } catch (err) {

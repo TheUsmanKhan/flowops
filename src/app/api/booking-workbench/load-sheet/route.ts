@@ -1,6 +1,5 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { generateLoadSheet } from '@/lib/actions/load-sheet.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -35,6 +34,7 @@ export async function POST(req: NextRequest) {
     if (!providerKey) throw new ApiError(400, 'providerKey is required')
     if (entityRefs.length === 0) throw new ApiError(400, 'At least one entity is required')
 
+    const { generateLoadSheet } = await import('@/lib/actions/load-sheet.actions')
     const result = await generateLoadSheet(providerKey, entityRefs, pickupAddressId)
     if (!result.success) throw new ApiError(400, result.error ?? 'Failed')
     return Response.json(result.data, { status: 201 })

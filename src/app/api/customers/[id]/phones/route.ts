@@ -1,6 +1,5 @@
 import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { NextRequest } from 'next/server'
-import { addCustomerPhone } from '@/lib/actions/customer.actions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -13,6 +12,7 @@ export async function POST(
   try {
     const { id } = await params
     const body = await readBody<Record<string, unknown>>(req)
+    const { addCustomerPhone } = await import('@/lib/actions/customer.actions')
     const result = await addCustomerPhone(id, {
       phone: typeof body.phone === 'string' ? body.phone : '',
       label: typeof body.label === 'string' ? body.label : undefined,
