@@ -37,6 +37,31 @@ export async function register() {
   if (pollerStarted) return
   pollerStarted = true
 
+  // ─── Hostinger stdin fix ────────────────────────────────────────
+  // On Hostinger production, process.stdin is not available (the process
+  // manager doesn't provide it). When Node.js lazily initializes stdin
+  // (triggered by some module accessing process.stdin), it fails with
+  // "Error: open EEXIST at process.getStdin". This crashes POST handlers
+  // that use dynamic import() to load heavy modules.
+  // Fix: Pre-initialize process.stdin to a dummy stream so lazy access
+  // doesn't trigger Socket creation.
+  try {
+    if (!process.stdin || !process.stdin.readable) {
+      const { Readable } = require('stream')
+      // Only patch if stdin isn't already a proper readable stream
+      const stdinDescriptor = Object.getOwnPropertyDescriptor(process, 'stdin')
+      if (stdinDescriptor && stdinDescriptor.get) {
+        Object.defineProperty(process, 'stdin', {
+          value: new Readable({ read() {} }),
+          writable: false,
+          configurable: true,
+        })
+      }
+    }
+  } catch {
+    // Ignore — best effort patch
+  }
+
   // ─── Phase 3: Horizontal scaling toggle ───────────────────────────
   // Default: 'true' (poller runs in-process, current behavior).
   // Set ENABLE_IN_PROCESS_POLLER=false to disable (for multi-replica
