@@ -7,7 +7,9 @@ import {
   ApiError,
 } from '@/lib/workspace'
 import type { Prisma } from '@prisma/client'
-import { createManualOrder } from '@/lib/actions/order.actions'
+// order.actions.ts is loaded via dynamic import in POST handler to avoid
+// module load failures on Hostinger (the 2800-line module with heavy
+// transitive deps crashes during route module initialization on Hostinger).
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -287,6 +289,11 @@ export async function POST(req: Request) {
   try {
     const body = await readBody(req)
     const idempotencyKey = req.headers.get('Idempotency-Key')
+
+    // Dynamic import — order.actions.ts is 2800 lines with heavy transitive deps.
+    // The stdin patch in server.js prevents the EEXIST crash that previously
+    // occurred during dynamic import evaluation on Hostinger.
+    const { createManualOrder } = await import('@/lib/actions/order.actions')
 
     if (idempotencyKey) {
       const ctx = await getWorkspace()
