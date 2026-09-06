@@ -12164,3 +12164,45 @@ Stage Summary:
 - Tag v1.0.0 marks this as the official release.
 - Hostinger-compatible code preserved in hostinger-backup branch.
 - User can clone fresh from GitHub main and get the clean pre-Hostinger code.
+
+---
+Task ID: LEOPARD-API-FIXES-V1.0
+Agent: main
+Task: Fix Leopard API — production toggle + object response shape
+
+Work Log:
+- Read Leopard API PDF (eCom-Merchant-APIs-V2, 94 pages):
+  * Staging: https://merchantapistaging.leopardscourier.com/api/
+  * Production: https://merchantapi.leopardscourier.com/api/
+  * Auth: api_key + api_password
+- Tested Leopard API directly with production credentials:
+  * Staging: returns error (staging credentials don't match)
+  * Production: returns SUCCESS — data is OBJECT (not array)
+- Found 3 bugs in leopard.adapter.ts (pre-Hostinger code):
+
+Bug 1: isProduction toggle only checked string 'true'
+  - credentials.isProduction === 'true' missed boolean true, 'on', '1', 1
+  - Fix: handle all boolean formats
+
+Bug 2: fetchShipperById only checked Array.isArray(data)
+  - Leopard returns OBJECT when filtering by request_param
+  - Code returned null → 'No shipper found' error
+  - Fix: handle both array and single object responses
+
+Bug 3: fetchExistingPickupAddresses same issue
+  - Was returning empty array when API returned single object
+  - Fix: same response shape handling
+
+Bug 4: ConnectDialog rendered isProduction as text input
+  - Users had to type 'true' manually — confusing UX
+  - Fix: boolean fields now render as Switch toggle with description
+  - ON = production, OFF = staging
+
+- Verified locally: lint 0 errors, server healthy
+- Committed as 329b856, pushed to GitHub main (v1.0.0+)
+
+Stage Summary:
+- 3 Leopard API bugs fixed on pre-Hostinger codebase.
+- Production toggle now works correctly (Switch UI + all boolean formats).
+- Shipper import now works (handles object response from API).
+- Tested with real production credentials (shipment_id=1918161): returns SHINE IN shipper.
