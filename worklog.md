@@ -14107,3 +14107,34 @@ NEXT ACTIONS (recommended order):
   7. Fix P3 #11 — enforce city autocomplete in order form, reject raw
      numeric strings.
 
+
+---
+Task ID: COURIER-INTEGRATION-FIX
+Agent: main
+Task: Fix courier integration — pending status bug + permission fixes
+
+Work Log:
+- Comprehensive audit found root cause of "pending" status:
+  Test route set connectionStatus='active', but StatusBadge UI config
+  only recognized 'connected' (not 'active'). So successfully-tested
+  integrations showed as 'Pending' instead of 'Connected'.
+- Fix 1: Test route — connectionStatus='active' → 'connected'
+- Fix 2: StatusBadge — added 'active' → 'Connected' mapping (backward compat)
+- Fix 3: DB migration — updated 4 existing rows from 'active' → 'connected'
+- Fix 4: sync-cities route — replaced elevated-only with requirePermission(INTEGRATIONS_MANAGE)
+- Fix 5: integrations/logs route — replaced isElevated() with requirePermission(INTEGRATIONS_VIEW)
+- Verified end-to-end:
+  ✅ Leopard connect → status 'pending'
+  ✅ Test connection → status 'connected' (was 'active' → showed 'pending')
+  ✅ StatusBadge shows 'Connected' (was 'Pending')
+  ✅ City sync: 774 Leopard cities synced
+  ✅ Shipper import: 1918161 → SHINE IN imported
+  ✅ Integration logs: 2 logs created (ping_connection, fetch_shipper_by_id)
+  ✅ Logs endpoint accessible with INTEGRATIONS_VIEW permission
+- Committed as 3f7d80f, pushed to GitHub.
+
+Stage Summary:
+- ROOT CAUSE: Test route wrote 'active', UI only recognized 'connected'
+- FIX: Changed 'active' → 'connected' + added backward compat in UI
+- Permission fixes: sync-cities + logs now use requirePermission (not isElevated)
+- All integration features working: connect, test, city sync, shipper import, logs
