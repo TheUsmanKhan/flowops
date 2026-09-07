@@ -12206,3 +12206,649 @@ Stage Summary:
 - Production toggle now works correctly (Switch UI + all boolean formats).
 - Shipper import now works (handles object response from API).
 - Tested with real production credentials (shipment_id=1918161): returns SHINE IN shipper.
+
+---
+Task ID: PERMISSIONS-AUDIT
+Agent: explore
+Task: Comprehensive audit of the FlowOps permission & roles system (RESEARCH ONLY — no files modified)
+
+Work Log:
+- Read /src/lib/permissions.ts (catalog + grouped catalog).
+- Read /src/lib/seed-default-roles.ts (5 default custom roles).
+- Read /src/lib/workspace.ts (getWorkspace / hasPermission / requirePermission / isElevated).
+- Read /src/stores/app-store.ts (useCan client hook).
+- Read /src/components/roles/* (role editor UI).
+- Read /src/components/layout/sidebar.tsx (frontend nav gating).
+- Grepped all /src/app/api/**/route.ts + /src/lib/actions/*.ts for requirePermission(), hasPermission(), isElevated(), and getWorkspace() calls.
+- Grepped all /src/components/**/*.tsx for useCan() and can(PERMISSIONS.*) gates.
+- Manually inspected 30+ representative routes (orders, customers, products, inventory, stock-loss, cycle-counts, purchase-orders, suppliers, integrations, exchanges, employees, payroll, drafts, scan, dashboard, audit-logs, company, roles) to determine which enforce permissions and which don't.
+- Cross-referenced every permission key in PERMISSIONS against (a) what's in PERMISSION_GROUPS, (b) which routes/actions check it, and (c) which frontend buttons gate on it.
+
+═══════════════════════════════════════════════════════════════════
+SECTION 1 — PERMISSION CATALOG
+═══════════════════════════════════════════════════════════════════
+
+Total keys defined in PERMISSIONS object: 41
+
+By module:
+  Inventory (14):  view, create, adjust, delete, receive, report_loss, manage_loss,
+                   manage_locations, manage_suppliers, transfer, manage_purchase_orders,
+                   manage_supplier_returns, cycle_count, manage_production
+  Products   (7):   view, create, edit, manage_catalog, subscribe, pricing, promote
+  Orders     (5):   view, create, fulfill, cancel, manage
+  Customers (3):    view, create, edit
+  Scan       (2):   operate, view_reports
+  Employees (6):    view, invite, terminate, manage, manage_salary, view_salary
+  Payroll    (3):   manage, view_all, manage_advances
+  Finance    (2):   view, manage
+  Reports    (2):   view, export
+  Settings   (3):   company.view, company.edit, roles.manage
+  Integrations (2): view, manage
+  KPI        (2):   view, manage
+  Audit      (1):   view
+
+═══════════════════════════════════════════════════════════════════
+SECTION 2 — PERMISSION_GROUPS (Role Editor visibility)
+═══════════════════════════════════════════════════════════════════
+
+ALL_PERMISSION_KEYS is derived from PERMISSION_GROUPS (flatMap).
+Keys exposed in the role editor (counted): 26  (out of 41 catalog keys)
+
+MISSING from PERMISSION_GROUPS (15 keys — CANNOT be granted via role editor UI):
+
+  INVENTORY_DELETE              — catalog has it; editor doesn't show it (no UI to grant)
+  INVENTORY_REPORT_LOSS         — Loss report button permission; not grantable in editor
+  INVENTORY_MANAGE_LOSS         — Resolve/close loss investigations; not grantable in editor
+  INVENTORY_MANAGE_LOCATIONS    — Manage warehouses; not grantable in editor
+  INVENTORY_MANAGE_SUPPLIERS    — Create/edit suppliers; not grantable in editor
+  INVENTORY_TRANSFER            — Stock transfers; not grantable in editor
+  INVENTORY_MANAGE_PURCHASE_ORDERS — Not grantable in editor
+  INVENTORY_MANAGE_SUPPLIER_RETURNS — Not grantable in editor
+  INVENTORY_CYCLE_COUNT         — Not grantable in editor
+  INVENTORY_MANAGE_PRODUCTION   — Not grantable in editor
+  PRODUCTS_SUBSCRIBE            — Not grantable in editor
+  PRODUCTS_PRICING              — Not grantable in editor
+  PRODUCTS_PROMOTE              — Not grantable in editor
+  KPI_MANAGE                    — Not grantable in editor
+  FINANCE_MANAGE                — Not grantable in editor
+
+Inventory group in editor only exposes 4 of 14 inventory permissions.
+Products group in editor only exposes 4 of 7 product permissions.
+KPI & Audit group exposes 2 of 3 (AUDIT_VIEW + KPI_VIEW — missing KPI_MANAGE).
+Finance group exposes 1 of 2 (FINANCE_VIEW only — missing FINANCE_MANAGE).
+
+IMPACT: A custom role that needs PO/transfer/cycle-count/production management
+permissions cannot be configured through the role editor UI. The Owner must hand-
+edit via API or a custom role grant was never going to be usable for these use
+cases. The 5 default roles (Sales, Sales Manager, Inventory Manager, Warehouse
+Staff, Manager) DO seed these permissions — but if a user deletes one of these
+default roles and tries to recreate it via the editor, those permissions can't
+be re-granted. Editor's "Select all" only grants the 26 visible keys (not all 41).
+
+═══════════════════════════════════════════════════════════════════
+SECTION 3 — SYSTEM ROLES (seed-default-roles.ts + create-company/create-org routes)
+═══════════════════════════════════════════════════════════════════
+
+9 system-seeded roles per company:
+
+ELEVATED SYSTEM ROLES (4) — isSystemRole=true, roleTier='elevated', bypass all checks:
+  Owner        (systemRoleKey='owner')
+  Founder      (systemRoleKey='founder')
+  Co-Founder   (systemRoleKey='co_founder')
+  Investor     (systemRoleKey='investor')
+  These are seeded by /api/organizations/create and /api/companies/create
+  (and the legacy /api/onboarding/create-company route).
+  None of them receive permission grants — they pass every requirePermission()
+  call via the isElevated() short-circuit in workspace.ts.
+  roleTier='elevated' is CORRECT.
+
+STANDARD CUSTOM ROLES (5) — isSystemRole=false, roleTier='standard', fully editable/deletable:
+  Sales            ordersDataScope='own'  — 6 perms (ORDERS_VIEW, ORDERS_CREATE,
+                                            CUSTOMERS_VIEW, CUSTOMERS_CREATE,
+                                            CUSTOMERS_EDIT, PRODUCTS_VIEW)
+  Sales Manager    ordersDataScope='all'  — 13 perms (ORDERS_VIEW/CREATE/FULFILL/
+                                            CANCEL/MANAGE, CUSTOMERS_*, PRODUCTS_VIEW,
+                                            INVENTORY_VIEW, FINANCE_VIEW, REPORTS_VIEW,
+                                            KPI_VIEW, EMPLOYEES_VIEW_SALARY)
+  Inventory Mgr    ordersDataScope='all'  — 17 perms (full INVENTORY_* except DELETE,
+                                            PRODUCTS_VIEW/EDIT, ORDERS_VIEW, REPORTS_VIEW,
+                                            KPI_VIEW)
+  Warehouse Staff  ordersDataScope='own'  — 5 perms (INVENTORY_VIEW, INVENTORY_RECEIVE,
+                                            INVENTORY_TRANSFER, INVENTORY_CYCLE_COUNT,
+                                            SCAN_OPERATE)
+  Manager          ordersDataScope='all'  — 15 perms (broad operational access incl.
+                                            ORDERS_*, PRODUCTS_VIEW/EDIT, INVENTORY_VIEW/
+                                            ADJUST, FINANCE_VIEW, REPORTS_VIEW/EXPORT,
+                                            KPI_VIEW, AUDIT_VIEW)
+
+ROLE-TIER AUDIT:
+  ✓ All 4 elevated roles correctly tagged roleTier='elevated'.
+  ✓ All 5 default roles correctly tagged roleTier='standard'.
+  No tier mismatches found.
+
+ROLE-PERMISSION BALANCE AUDIT:
+  ⚠ Warehouse Staff has ORDERS_VIEW = ABSENT. They can't open the Orders nav at all
+    even though they may need to fulfill orders. The "order-scan" view requires
+    ORDERS_FULFILL (which they also lack — only have SCAN_OPERATE). The scan action
+    in lib/actions/scan.actions.ts:64 actually requires ORDERS_FULFILL, so a pure
+    Warehouse Staff user can't run the scan station. MISMATCH — either scan should
+    accept SCAN_OPERATE OR Warehouse Staff should also receive ORDERS_FULFILL.
+  ⚠ Sales role lacks ORDERS_FULFILL — Sales agents can create orders but cannot
+    mark them packed/dispatched. Intentional (managers do fulfillment) but worth noting.
+  ⚠ Sales role lacks ORDERS_MANAGE — cannot confirm orders or convert payment.
+    May be intentional.
+  ⚠ Manager role lacks EMPLOYEES_VIEW — surprising for a "General Manager" role
+    description that promises "broad operational access". Manager can't see the
+    employee directory.
+  ⚠ Manager role lacks INVENTORY_MANAGE_LOSS — cannot resolve stock loss investigations
+    even though they have AUDIT_VIEW. May be intentional (loss resolution is reserved
+    for Inventory Manager / elevated).
+  ⚠ None of the 5 standard roles include SETTINGS_COMPANY_VIEW or SETTINGS_ROLES_MANAGE
+    — only elevated can manage company/role config. CORRECT per design.
+
+═══════════════════════════════════════════════════════════════════
+SECTION 4 — ROUTE PERMISSION CHECKS
+═══════════════════════════════════════════════════════════════════
+
+Direct requirePermission() call sites (in src/lib + src/app/api):
+  71 call sites across 18 files. Audit-Logs, Brands, Categories, Company, Employees
+  (list/detail), Integrations (list + preferences), Orders ([id] GET, cancel, confirm,
+  convert-payment, dispatch, packed, delivered, processing, cod-collected, payment-proof,
+  un-cancel, returns/review), Products (list, create, edit, pricing, subscribe, promote),
+  Roles (list/create/update/delete), Scan (process + confirm-return + confirm-unpack),
+  Booking Workbench (book), plus all action-layer checks in lib/actions/*.ts.
+
+Pattern A — Route calls requirePermission directly (clean, recommended):
+  /api/orders/[id]/route.ts GET              → ORDERS_VIEW
+  /api/employees/route.ts GET/POST           → EMPLOYEES_VIEW / EMPLOYEES_INVITE
+  /api/employees/[id]/route.ts GET           → EMPLOYEES_VIEW
+  /api/employees/[id]/terminate/route.ts     → EMPLOYEES_TERMINATE / EMPLOYEES_MANAGE
+  /api/employees/[id]/salary/route.ts        → EMPLOYEES_VIEW_SALARY / EMPLOYEES_MANAGE_SALARY
+  /api/employees/[id]/commission-rules/route.ts → EMPLOYEES_VIEW_SALARY / EMPLOYEES_MANAGE_SALARY
+  /api/employees/[id]/commission-preview/route.ts → EMPLOYEES_VIEW_SALARY
+  /api/employees/[id]/performance/route.ts   → EMPLOYEES_VIEW or KPI_VIEW
+  /api/roles/route.ts GET/POST               → SETTINGS_ROLES_MANAGE
+  /api/roles/[id]/route.ts PATCH/DELETE       → SETTINGS_ROLES_MANAGE
+  /api/company/route.ts GET                  → SETTINGS_COMPANY_VIEW
+  /api/company/route.ts PATCH                → SETTINGS_COMPANY_EDIT
+  /api/brands/route.ts POST                  → PRODUCTS_MANAGE_CATALOG
+  /api/categories/route.ts POST              → PRODUCTS_MANAGE_CATALOG
+  /api/products/route.ts GET/POST            → PRODUCTS_VIEW / PRODUCTS_CREATE
+  /api/products/[id]/route.ts PATCH          → PRODUCTS_EDIT (inline)
+  /api/products/[id]/pricing/route.ts POST   → PRODUCTS_PRICING (inline)
+  /api/products/[id]/subscribe/route.ts POST → PRODUCTS_SUBSCRIBE (inline)
+  /api/booking-workbench/book/route.ts POST → ORDERS_FULFILL
+  /api/integrations/[id]/preferences/route.ts → INTEGRATIONS_MANAGE
+  /api/scan/confirm-return/route.ts         → ORDERS_FULFILL
+  /api/audit-logs/route.ts GET               → AUDIT_VIEW (inline)
+  /api/dashboard/route.ts GET                → hasPermission(AUDIT_VIEW) for conditional fetch
+  /api/orders/{returns, ready-to-dispatch, pending, backordered, awaiting-production,
+               cancelled}/route.ts (via resolveOrderScope()) → ORDERS_VIEW
+
+Pattern B — Route delegates to lib/actions/*.ts function that calls requirePermission():
+  All /api/orders/[id]/{cancel,confirm,convert-payment,packed,delivered,processing,
+  cod-collected,payment-proof,un-cancel,rto} POST routes
+  All /api/orders/returns/review/{dismiss,correct}
+  All /api/exchanges/** routes (create, list, dispatch-new-item, confirm-shipped,
+       verify-old-item, settle-price-difference, mark-not-returned, cancel)
+  All /api/exchange-shipments/** routes (create, reserve, dispatch, cancel,
+       cod-collected, rto, mark-delivered)
+  All /api/payroll/** routes (manage / view-all / list / detail / finalize /
+       mark-paid / adjust-payslip / own-payslips)
+  /api/advances + /api/advances/own
+  /api/customers (list/create/update/flag/unflag/backfill-stats)
+  /api/customers/[id] (GET/PATCH)
+  /api/customers/[id]/{phones,addresses}/*
+  /api/scan/route.ts (processScan / confirmPhysicalUnpack / confirmCancelAfterScan)
+  /api/booking-workbench/{bookable, activity, load-sheet, load-sheet-ready, load-sheets,
+                          book-batch}
+  /api/integrations + /api/integrations/[id]/{credentials,disconnect,set-default,test}
+  /api/integrations/[id]/pickup-addresses/*
+  /api/orders/[id]/refresh-status (trackSingleOrderStatus)
+
+Pattern C — Inline elevated/permission check (NOT via requirePermission helper):
+  ~30 routes in /src/app/api/{inventory,cycle-counts,suppliers,inventory-locations,
+                              stock-loss,returned-stitched,purchase-orders,supplier-returns,
+                              production-orders,products/[id]/*}/route.ts implement the
+  same boilerplate:
+    const caller = await db.employee.findFirst({...})
+    const allowed = caller.role.roleTier === 'elevated' ||
+                    (await db.rolePermission.count({...})) > 0
+    if (!allowed) throw new ApiError(403, 'You lack permission to ...')
+  This works but duplicates the helper logic and bypasses the workspace cache (one extra
+  DB round-trip per request). Refactor opportunity: replace with requirePermission().
+
+Pattern D — NO PERMISSION CHECK (routes that should require one but don't):
+
+  HIGH-SEVERITY (data exfiltration / cross-company access):
+  /api/inventory/dashboard/route.ts GET            — returns org-wide inventory pools
+                                                       + value summary to ANY employee
+                                                       (no company filter; no INVENTORY_VIEW
+                                                        check). Cross-company leak inside org.
+  /api/inventory/summary/route.ts GET              — product inventory summary; no
+                                                       PRODUCTS_VIEW or INVENTORY_VIEW check.
+  /api/orders/route.ts GET                          — listOrders() calls getWorkspace() but
+                                                       NEVER requirePermission(ORDERS_VIEW).
+                                                       Frontend hides the page but API is open.
+  /api/orders/revenue-summary/route.ts GET          — currency-aware revenue breakdown;
+                                                       no ORDERS_VIEW check.
+  /api/exchanges/route.ts GET                       — listExchanges() no ORDERS_VIEW check.
+  /api/exchanges/[id]/route.ts GET                  — getExchangeDetail() no ORDERS_VIEW check.
+  /api/exchange-shipments list & detail             — listExchangeShipments /
+                                                       getExchangeShipmentDetail — no check.
+  /api/scan/reports/route.ts GET + POST             — getScanReport() no SCAN_VIEW_REPORTS
+                                                       check (catalog has the key, unused).
+  /api/integrations/[id]/test/route.ts POST         — re-implements test inline; bypasses the
+                                                       isElevated check that testIntegration
+                                                       Connection() action would have enforced.
+                                                       Any employee can call.
+  /api/integrations/[id]/pickup-addresses/* (5 routes) — list/add/update/delete/refresh/sync/
+                                                       import — no permission check at all in
+                                                       the route (the actions use isElevated()
+                                                       but routes re-implement and skip).
+  /api/orders/[id]/self-fulfilled-slip/route.ts POST — generates an internal PDF slip; no check.
+
+  MEDIUM-SEVERITY (read endpoints for mutations that ARE gated):
+  /api/inventory-locations/route.ts GET             — list locations; no check.
+  /api/inventory-locations/[id]/route.ts GET        — location detail + pool + txn history;
+                                                       no check.
+  /api/cycle-counts/route.ts GET                   — list cycle counts; no check.
+  /api/cycle-counts/[id]/route.ts GET              — cycle count detail; no check.
+  /api/suppliers/route.ts GET                       — list suppliers; no check.
+  /api/suppliers/[id]/route.ts GET                  — supplier detail (not in my read but
+                                                       pattern matches — verify).
+  /api/stock-loss/route.ts GET                     — list loss records; no check.
+  /api/stock-loss/[id]/route.ts GET                — loss record detail; no check.
+  /api/stock-loss/stats/route.ts GET                — loss stats; no check.
+  /api/purchase-orders/route.ts GET                — list POs; no check.
+  /api/purchase-orders/[id]/route.ts GET            — PO detail; no check.
+  /api/returned-stitched/route.ts GET              — list returned stitched; no check.
+  /api/returned-stitched/[id]/route.ts GET          — detail; no check.
+  /api/returned-stitched/stats/route.ts GET         — stats; no check.
+  /api/production-orders/route.ts GET              — list production orders; no check.
+  /api/production-orders/[id]/route.ts GET          — detail; no check.
+  /api/supplier-returns/route.ts GET               — list supplier returns; no check.
+  /api/supplier-returns/[id]/route.ts GET           — detail; no check.
+  /api/brands/route.ts GET                          — list brands (POST is gated); no check.
+  /api/categories/route.ts GET                      — list categories (POST is gated); no check.
+  /api/products/[id]/route.ts GET                    — product detail; no check.
+  /api/booking-workbench/{bookable,activity}/route.ts GET — list bookable orders / activity
+                                                       feed; no ORDERS_VIEW check.
+  /api/booking-workbench/load-sheet-ready/route.ts GET — listLoadSheetReady; no check.
+  /api/booking-workbench/load-sheets/route.ts GET  — listLoadSheetHistory; no check.
+
+  LOW-SEVERITY (mutations already gated at the action layer — but the LIST routes above
+  share the action file and the list helper skips the check):
+  /api/orders/returns/review/route.ts GET          — uses resolveOrderItemScope() which
+                                                       DOES enforce ORDERS_VIEW (OK).
+                                                       (Note: listReturnsNeedingReview
+                                                       inside order-return.actions.ts does
+                                                       NOT check — but the route doesn't
+                                                       call it; it queries directly.)
+
+ROUTES THAT CHECK PERMISSIONS THAT DON'T EXIST IN CATALOG:
+  None found. All permission strings referenced via PERMISSIONS.* exist in the catalog.
+  However many routes bypass the catalog entirely and use isElevated() only — these are
+  "over-gated" rather than "non-existent permission" issues.
+
+═══════════════════════════════════════════════════════════════════
+SECTION 5 — FRONTEND PERMISSION GATES (useCan + can(PERMISSIONS.*))
+═══════════════════════════════════════════════════════════════════
+
+33 components call useCan(). Sidebar gates every nav item with `permission` or
+`elevatedOnly`. Generally good coverage on the inventory, employees, products, and
+orders modules.
+
+FRONTEND GATES PRESENT (correct):
+  Orders view:        canView=ORDERS_VIEW gates the page; canCreate=ORDERS_CREATE gates
+                      Create button.
+  Order detail view:  canManage=ORDERS_MANAGE, canFulfill=ORDERS_FULFILL, canCancel=
+                      ORDERS_CANCEL gate action buttons (confirm/process/pack/dispatch/
+                      mark-delivered/cancel/un-cancel/convert-payment/COD-collected/
+                      flag customer).
+  Customers view:     canManage=ORDERS_MANAGE gates edit actions (mismatch — see below).
+  Pending confirmation view: canManage / canCancel gate buttons.
+  Ready-to-dispatch view: canFulfill gates dispatch.
+  Order scan view:    canFulfill gates scan station.
+  Employees view:     can(EMPLOYEES_INVITE) gates Invite button.
+  Employee detail:    canManage / canTerminate / canManageSalary gate all action buttons.
+  Inventory dashboard: disabled={!can(INVENTORY_RECEIVE/ADJUST/TRANSFER/MANAGE_PO)}
+                        for quick-link buttons.
+  Purchase orders view + detail + create: canManage=INVENTORY_MANAGE_PURCHASE_ORDERS,
+                        canReceive=INVENTORY_RECEIVE gate create/receive buttons.
+  Supplier returns view: canManage=INVENTORY_MANAGE_SUPPLIER_RETURNS.
+  Cycle counts view: canManage=INVENTORY_CYCLE_COUNT.
+  Suppliers view + detail: canManage=INVENTORY_MANAGE_SUPPLIERS.
+  Locations view:    canManage=INVENTORY_MANAGE_LOCATIONS.
+  Production orders view: canManage=INVENTORY_MANAGE_PRODUCTION.
+  Receive/Transfer/Adjust-stock views: canReceive/canTransfer/canAdjust gate submit.
+  Losses view:       canReport=INVENTORY_REPORT_LOSS, canManage=INVENTORY_MANAGE_LOSS
+                      gate report/resolve buttons.
+  Loss detail view:  canManage=INVENTORY_MANAGE_LOSS.
+  Roles view:        canManage=SETTINGS_ROLES_MANAGE gates Create/Edit/Delete buttons.
+  Products view:     canView=PRODUCTS_VIEW (via sidebar); PRODUCT_EDIT/PRICING gates
+                      variant-table inline edits.
+  Product detail:    can(INVENTORY_RECEIVE/ADJUST/TRANSFER) gates inventory action buttons.
+  Attribute selector: canManageCatalog=PRODUCTS_MANAGE_CATALOG gates catalog admin.
+
+MISSING GATES (frontend buttons/links with no permission check):
+
+  /components/orders/orders-returns-review-view.tsx
+    "Dismiss" button                  — should require ORDERS_MANAGE (backend enforces it)
+    "Correct as Damaged" dialog submit — should require INVENTORY_MANAGE_LOSS (backend
+                                          enforces it)
+    Page renders the action buttons to any user who reaches the page; backend will 403
+    them — but UX is bad.
+
+  /components/orders/order-detail-view.tsx (around line 1700+ area)
+    "Refresh courier status" button  — no can() gate; backend uses isElevated() (over-strict)
+    "Self-fulfilled slip download"   — no can() gate; backend has no check
+
+  /components/orders/booking-workbench-view.tsx
+    "Book" buttons / load sheet generation — UI doesn't gate (backend uses isElevated
+                                              for load-sheet, ORDERS_FULFILL for book)
+
+  /components/orders/cancel-courier-booking-button.tsx
+    Cancel courier button              — no can() gate (backend uses ORDERS_CANCEL or
+                                          ORDERS_MANAGE depending on context)
+
+  /components/settings/integrations-view.tsx (and related)
+    Connect / Disconnect / Set Default / Test / Pickup Addresses / Sync Cities buttons
+                                       — UI may not gate (the entire Integrations nav item
+                                          is `elevatedOnly: true` in sidebar — so only
+                                          elevated see the page; this is over-gating,
+                                          not under-gating).
+
+  /components/products/product-detail-view.tsx (around line 1700+)
+    Promote / Demote / Edit product buttons — backend requires elevated (over-strict
+                                              — should use PRODUCTS_PROMOTE)
+    Selective access / variant toggle / image management — verify gating present.
+
+  /components/orders/exchange-detail-view.tsx + send-exchange-shipment-modal.tsx
+    All exchange action buttons (dispatch-new-item, confirm-shipped, verify-old-item,
+    settle-price-difference, cancel) — UI uses `canSubmit` (form-validity) only; no
+    permission gate (backend enforces ORDERS_MANAGE / ORDERS_FULFILL).
+
+OVER-GATED BUTTONS (require elevated when a specific permission exists in catalog):
+  Promote / Demote product           — elevated-only; catalog has PRODUCTS_PROMOTE (unused!)
+  Generate load sheet                 — elevated-only; catalog has ORDERS_FULFILL (unused!)
+  Refresh courier status              — elevated-only; catalog has ORDERS_FULFILL (unused!)
+  Connect / Disconnect / Test integration — elevated-only; catalog has INTEGRATIONS_MANAGE
+                                            (unused!)
+  Manage pickup addresses             — elevated-only; catalog has INTEGRATIONS_MANAGE (unused!)
+  View integration logs               — elevated-only; catalog has INTEGRATIONS_VIEW (unused!)
+  Archive / Delete product             — elevated-only; catalog has INVENTORY_DELETE (unused!)
+  Deactivate inventory location        — elevated-only; catalog has INVENTORY_MANAGE_LOCATIONS
+                                          (unused for the DELETE verb)
+  Deactivate supplier                  — elevated-only; catalog has INVENTORY_MANAGE_SUPPLIERS
+                                          (unused for the DELETE verb)
+  View org catalog                     — elevated-only; catalog has PRODUCTS_MANAGE_CATALOG
+                                          (unused)
+  Order Settings view                  — elevated-only; catalog has SETTINGS_COMPANY_EDIT
+                                          (unused)
+
+═══════════════════════════════════════════════════════════════════
+SECTION 6 — ROLE EDITOR UI (src/components/roles/)
+═══════════════════════════════════════════════════════════════════
+
+Files: role-edit-view.tsx, roles-view.tsx, permission-key-selector.tsx
+
+POSITIVE:
+  ✓ PermissionKeySelector renders grouped permissions with checkbox + label + monospace
+    permission key + description (full UX).
+  ✓ "Select all" / "Clear all" button toggles ALL_PERMISSION_KEYS (the 26 visible ones).
+  ✓ Per-group "select all in this group" checkbox + counter badge (e.g. "3/5").
+  ✓ Collapsible groups.
+  ✓ Elevated roles show a "full access" panel instead of the selector (correct).
+  ✓ Orders-data-scope toggle appears only when role has any orders.* permission (smart).
+  ✓ Delete button hidden for system roles; Edit button hidden when canManage is false.
+  ✓ Permission count display: "{n} of {total} permissions selected" (uses
+    ALL_PERMISSION_KEYS.length — so shows /26 not /41; misleading).
+
+GAPS:
+  ✗ Only 26 of 41 catalog keys are visible — 15 keys CANNOT be granted via UI (listed
+    in Section 2). This is the SINGLE BIGGEST ISSUE in the role editor.
+  ✗ "Select all" grants only the 26 visible keys — a custom role with "Select all"
+    is missing 15 permissions that the system actually uses (PO management, transfers,
+    cycle counts, production, supplier returns, loss reporting/resolution, products
+    pricing/subscribe/promote, KPI manage, finance manage). Even elevated-bypassed,
+    custom roles created via the UI can't replicate the 5 default roles' permission sets.
+  ✗ Editor shows "x of 26" but the catalog has 41 keys — confusing for admins.
+  ✗ No "search permissions" filter — admins scroll through 11 groups to find a key.
+  ✗ No "preset templates" — no quick way to start from "Sales-like" or "Manager-like"
+    when creating a custom role.
+  ✓ Permission descriptions ARE shown (good).
+
+═══════════════════════════════════════════════════════════════════
+SECTION 7 — ORPHAN PERMISSIONS (in catalog but never checked anywhere)
+═══════════════════════════════════════════════════════════════════
+
+The following 6 catalog keys have NO requirePermission() or hasPermission() call in
+the entire codebase (grep confirmed):
+
+  CUSTOMERS_CREATE       — catalog: 'customers.create' — NEVER checked.
+                            All customer mutations use ORDERS_CREATE instead.
+  CUSTOMERS_EDIT         — catalog: 'customers.edit' — NEVER checked.
+                            All customer updates use ORDERS_CREATE (or ORDERS_MANAGE
+                            for flag/unflag).
+  INVENTORY_DELETE       — catalog: 'inventory.delete' — NEVER checked via requirePermission.
+                            Hard-delete / archive paths use elevated-only.
+  PRODUCTS_PROMOTE       — catalog: 'products.promote' — NEVER checked.
+                            Promote/demote routes use elevated-only.
+  KPI_MANAGE             — catalog: 'kpi.manage' — NEVER checked.
+                            No KPI configuration UI exists yet.
+  FINANCE_MANAGE         — catalog: 'finance.manage' — NEVER checked.
+                            No finance transaction module exists yet.
+  SCAN_VIEW_REPORTS      — catalog: 'scan.view_reports' — NEVER checked.
+                            /api/scan/reports GET/POST have no permission check at all.
+
+The "ORDERS_CANCEL vs ORDERS_MANAGE" split for customer flag/unflag is also inconsistent:
+flagCustomer()/unflagCustomer() use ORDERS_MANAGE — but the more natural key for marking
+a customer as fraudulent would be CUSTOMERS_EDIT. Currently, anyone who can manage orders
+can flag customers — and a pure Sales agent (with CUSTOMERS_EDIT via the catalog but no
+ORDERS_MANAGE) couldn't flag.
+
+═══════════════════════════════════════════════════════════════════
+SECTION 8 — FRONTEND/BACKEND PERMISSION MISMATCHES
+═══════════════════════════════════════════════════════════════════
+
+1. CUSTOMERS module:
+   Frontend customer-detail-view + customers-view use can(ORDERS_MANAGE) for edit gates.
+   Backend customer.actions.ts uses requirePermission(ORDERS_CREATE) for create/update/
+   phone/address mutations and ORDERS_MANAGE for flag/unflag.
+   Effect: a user with ORDERS_CREATE but not ORDERS_MANAGE (e.g. "Sales" role) CAN create
+   and edit customers via API but the UI HIDES the buttons. A user with ORDERS_MANAGE but
+   not ORDERS_CREATE (rare combo) would SEE the buttons but API rejects with 403.
+   Fix: BOTH layers should use CUSTOMERS_CREATE + CUSTOMERS_EDIT (the catalog keys that
+   are currently orphans).
+
+2. PAYROLL list:
+   Frontend sidebar shows Payroll nav for users with PAYROLL_VIEW_ALL.
+   Backend listPayrollRuns() requires PAYROLL_MANAGE.
+   Effect: a user with PAYROLL_VIEW_ALL but not PAYROLL_MANAGE sees the menu, lands on
+   the page, and gets a 403 on the list query. Page appears broken.
+   Fix: listPayrollRuns should accept PAYROLL_VIEW_ALL OR PAYROLL_MANAGE.
+
+3. INTEGRATIONS module:
+   Frontend sidebar nav item is `elevatedOnly: true` (hides for non-elevated).
+   Backend actions use isElevated() (rejects non-elevated with INTEGRATIONS_MANAGE perm).
+   Catalog has INTEGRATIONS_VIEW + INTEGRATIONS_MANAGE — both unused.
+   Effect: even a custom role granted INTEGRATIONS_MANAGE cannot access the Integrations
+   page (sidebar hides it; backend rejects).
+   Fix: change sidebar to `permission: PERMISSIONS.INTEGRATIONS_VIEW` and backend to
+   requirePermission(INTEGRATIONS_MANAGE) for mutations, INTEGRATIONS_VIEW for reads.
+
+4. LOAD SHEET generation:
+   Frontend booking-workbench-view shows the "Generate Load Sheet" button to anyone who
+   can see the page (elevated only via sidebar).
+   Backend generateLoadSheet() in load-sheet.actions.ts uses isElevated() only.
+   Catalog has ORDERS_FULFILL — unused for this action.
+   Effect: Sales Manager (with ORDERS_FULFILL) cannot generate load sheets even though
+   they fulfill orders. Should use ORDERS_FULFILL.
+
+5. PRODUCTS_PROMOTE:
+   Frontend product-detail-view shows Promote/Demote to elevated only (or maybe to anyone
+   who can edit the product — verify). Backend uses elevated-only. Catalog has
+   PRODUCTS_PROMOTE — never used. Should be PRODUCTS_PROMOTE.
+
+6. ORDERS_REFRESH_STATUS:
+   Frontend order-detail-view "Refresh courier status" button has no can() gate.
+   Backend trackSingleOrderStatus() uses isElevated() only.
+   Should use ORDERS_FULFILL (or ORDERS_MANAGE).
+
+═══════════════════════════════════════════════════════════════════
+SECTION 9 — RECOMMENDED FIXES (prioritized)
+═══════════════════════════════════════════════════════════════════
+
+PRIORITY P0 (security — fix immediately):
+
+  1. Add requirePermission(ORDERS_VIEW) to listOrders() in lib/actions/order.actions.ts.
+     Currently /api/orders GET is open to any authenticated employee. The ordersDataScope
+     scoping helps but a Sales agent with no ORDERS_VIEW can still hit the endpoint.
+
+  2. Add requirePermission(ORDERS_VIEW) to listExchanges(), getExchangeDetail(),
+     listExchangeShipments(), getExchangeShipmentDetail() in lib/actions/exchange*.ts.
+
+  3. Add requirePermission(INVENTORY_VIEW) to /api/inventory/dashboard/route.ts GET —
+     currently returns ORG-WIDE inventory data to ANY employee (cross-company leak).
+     Also add company filter (currently uses organizationId only).
+
+  4. Add requirePermission(INVENTORY_VIEW or PRODUCTS_VIEW) to /api/inventory/summary,
+     /api/inventory-locations GET, /api/inventory-locations/[id] GET, /api/cycle-counts
+     GET, /api/cycle-counts/[id] GET, /api/suppliers GET, /api/suppliers/[id] GET,
+     /api/stock-loss GET + [id] + stats, /api/purchase-orders GET + [id] GET,
+     /api/returned-stitched GET + [id] + stats, /api/production-orders GET + [id] GET,
+     /api/supplier-returns GET + [id] GET, /api/brands GET, /api/categories GET,
+     /api/products/[id] GET, /api/booking-workbench/{bookable,activity,load-sheet-ready,
+     load-sheets} GET — all are read endpoints with no permission check.
+
+  5. Add requirePermission(SCAN_VIEW_REPORTS) to /api/scan/reports GET + POST. The
+     catalog key exists for exactly this purpose.
+
+  6. /api/integrations/[id]/test/route.ts POST — add requirePermission(INTEGRATIONS_MANAGE).
+     Currently re-implements the test inline and bypasses the isElevated() check that the
+     action function would have enforced — any employee can trigger integration tests.
+
+  7. /api/integrations/[id]/pickup-addresses/* — add permission checks (currently 5 routes
+     with no check; the underlying action functions use isElevated() — but routes call
+     them and skip the gate).
+
+  8. /api/orders/[id]/self-fulfilled-slip POST — add requirePermission(ORDERS_VIEW or
+     ORDERS_FULFILL). Currently any employee can generate internal slip PDFs.
+
+PRIORITY P1 (correctness — fix soon):
+
+  9. Expand PERMISSION_GROUPS in /src/lib/permissions.ts to include ALL 15 missing keys
+     (Section 2 list). Until done, the role editor cannot grant these permissions and
+     "Select all" is misleading.
+
+  10. Wire CUSTOMERS_CREATE + CUSTOMERS_EDIT into customer.actions.ts (replace the
+      ORDERS_CREATE / ORDERS_MANAGE usage). Update frontend customer-detail-view +
+      customers-view to use can(CUSTOMERS_EDIT) for edit buttons and can(CUSTOMERS_CREATE)
+      for create buttons. This fixes the frontend/backend mismatch.
+
+  11. Wire INTEGRATIONS_VIEW into sidebar (replace elevatedOnly) and into integration
+      list/read endpoints. Wire INTEGRATIONS_MANAGE into connect/disconnect/test/credentials/
+      set-default/pickup-addresses mutations (replace isElevated).
+
+  12. Wire ORDERS_FULFILL into generateLoadSheet() (load-sheet.actions.ts:80) and
+      trackSingleOrderStatus() (postex-status-poll.actions.ts:171) — replace isElevated().
+
+  13. Wire PRODUCTS_PROMOTE into /api/products/[id]/promote and /demote routes.
+
+  14. Wire PAYROLL_VIEW_ALL into listPayrollRuns() + getPayrollRunDetail() — currently
+      requires PAYROLL_MANAGE which makes the sidebar nav (PAYROLL_VIEW_ALL) misleading.
+
+  15. Add EMPLOYEES_VIEW to the Manager default role's permission set in
+      /src/lib/seed-default-roles.ts (description promises "broad operational access"
+      but Manager can't see employees).
+
+  16. Decide scan station permission: either change processScan's requirePermission
+      from ORDERS_FULFILL to SCAN_OPERATE (so Warehouse Staff can scan), OR add
+      ORDERS_FULFILL to Warehouse Staff's default permissions. Current state: Warehouse
+      Staff role grants SCAN_OPERATE but scan endpoint requires ORDERS_FULFILL — so
+      Warehouse Staff CANNOT use the scan station at all.
+
+PRIORITY P2 (consistency / cleanup):
+
+  17. Refactor ~30 routes from inline `caller.role.roleTier === 'elevated' ||
+      (await db.rolePermission.count({...})) > 0` boilerplate to use the
+      requirePermission() helper. Saves one DB round-trip per request (uses the cached
+      permission set) and centralizes the logic.
+
+  18. Add frontend can() gates to:
+      - orders-returns-review-view "Dismiss" and "Correct as Damaged" buttons
+      - order-detail-view "Refresh courier status" and "Self-fulfilled slip" buttons
+      - booking-workbench-view "Book" and "Generate load sheet" buttons
+      - exchange-detail-view + send-exchange-shipment-modal action buttons
+
+  19. Add a permission-search filter to PermissionKeySelector (admin types "purchase"
+      and sees only matching keys across groups).
+
+  20. Display "{n} of 41 permissions selected" (catalog total) instead of
+      "{n} of 26 permissions selected" (visible-in-editor total) — currently misleading.
+
+  21. Consider adding preset templates ("Start from Sales", "Start from Manager") to the
+      Create Role dialog — admins today must manually click 10+ checkboxes to recreate
+      a default role.
+
+  22. KPI_MANAGE and FINANCE_MANAGE are catalog keys with no implementation yet — either
+      remove from catalog until the modules exist, OR add the routes that check them.
+
+═══════════════════════════════════════════════════════════════════
+SECTION 10 — SUMMARY METRICS
+═══════════════════════════════════════════════════════════════════
+
+  Permission keys in catalog (PERMISSIONS object):      41
+  Permission keys in PERMISSION_GROUPS (role editor):    26  (63%)
+  Permission keys MISSING from PERMISSION_GROUPS:        15  (37%)
+  Permission keys NEVER checked anywhere (orphan):        7  (CUSTOMERS_CREATE,
+                                                                CUSTOMERS_EDIT,
+                                                                INVENTORY_DELETE,
+                                                                PRODUCTS_PROMOTE,
+                                                                KPI_MANAGE,
+                                                                FINANCE_MANAGE,
+                                                                SCAN_VIEW_REPORTS)
+  System roles (4 elevated + 5 standard):                9
+  Direct requirePermission() call sites:                71
+  API routes with NO permission check:                 ~32  (listed in Section 4
+                                                                Pattern D)
+  Frontend buttons with NO can() gate:                 ~10  (listed in Section 5
+                                                                MISSING GATES)
+  Frontend/backend permission mismatches:                6  (Section 8)
+  Routes using inline permission boilerplate (cleanup): ~30
+
+This audit did NOT modify any files (RESEARCH ONLY). All findings are documented
+above for the implementation team to action.
+
+Stage Summary:
+- Catalog completeness: 41 keys defined, 26 surfaced in role editor. The 15-key gap is
+  the single biggest UX gap — admins cannot grant PO/transfer/cycle-count/production/
+  supplier-returns/loss-management/products-pricing/products-subscribe/products-promote/
+  KPI-manage/finance-manage permissions via the UI.
+- Security: ~32 read endpoints (mostly in /api/inventory, /api/stock-loss, /api/cycle-counts,
+  /api/suppliers, /api/inventory-locations, /api/purchase-orders, /api/returned-stitched,
+  /api/production-orders, /api/supplier-returns, /api/brands, /api/categories,
+  /api/products/[id], /api/booking-workbench/{bookable,activity,load-sheet-*},
+  /api/scan/reports, /api/orders (list), /api/exchanges (list + detail), /api/exchange-
+  shipments (list + detail), /api/orders/revenue-summary, /api/integrations/[id]/test,
+  /api/integrations/[id]/pickup-addresses/*, /api/orders/[id]/self-fulfilled-slip) have
+  NO permission check at all. The /api/inventory/dashboard leak is org-wide (cross-company
+  inside an org).
+- Orphan permissions: 7 catalog keys never enforced anywhere (CUSTOMERS_CREATE,
+  CUSTOMERS_EDIT, INVENTORY_DELETE, PRODUCTS_PROMOTE, KPI_MANAGE, FINANCE_MANAGE,
+  SCAN_VIEW_REPORTS).
+- Frontend/backend mismatches: 6 documented (customers, payroll list, integrations, load
+  sheet, products promote, refresh status). The customers one is the most impactful —
+  UI hides edit buttons for users who actually CAN edit via API.
+- Role editor: well-built UI but only exposes 63% of the permission surface. "Select all"
+  grants only the 26 visible keys.
+- Default roles: 5 standard roles are reasonable. Two issues: Warehouse Staff can't use
+  the scan station (SCAN_OPERATE granted but scan endpoint requires ORDERS_FULFILL), and
+  Manager role lacks EMPLOYEES_VIEW (inconsistent with its "broad operational access"
+  description).
+- Elevated roles (Owner/Founder/Co-Founder/Investor): correctly tier='elevated',
+  correctly bypass all checks. No issues.
+
+Recommended next action: implement P0 fixes (1–8) to close the security holes, then
+tackle P1 (9–16) for correctness, then P2 (17–22) for consistency.
