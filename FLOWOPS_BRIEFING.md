@@ -286,7 +286,7 @@ APP_URL="http://localhost:3000"
 | `OrgProductBundle` | Product bundle composition |
 | `SelectiveProductAccess` | Which companies can subscribe to which org products |
 | `CompanyProductSetting` | Company-level product subscription state |
-| `CompanyVariantPricing` | Company-specific pricing (read ONCE for market seed, then deprecated for order pricing) |
+| `CompanyVariantPricing` | Company-specific pricing (per-company sale price for org-level variants) |
 | `ProductFulfillmentCost` | Per-product fulfillment cost |
 | `ReturnedStitchedInventory` | Returned-stitched inventory bucket (for made-to-order) |
 
@@ -321,7 +321,7 @@ APP_URL="http://localhost:3000"
 | Model | Purpose |
 |---|---|
 | `CompanyOrderSetting` | Company-level order workflow config (requireOrderConfirmation, courierBookingMode, defaultCourier, defaultDispatchLocation) |
-| `Order` | Order header — LARGE model (status, payment, courier, tracking, timestamps, totals, deliveryCountry, fulfillmentChannel, selfFulfilledReferenceNumber, marketResolutionIssue) |
+| `Order` | Order header — LARGE model (status, payment, courier, tracking, timestamps, totals, deliveryCountry, fulfillmentChannel, selfFulfilledReferenceNumber) |
 | `OrderItem` | Order line item (fulfillmentStatus, fulfillmentTypeSnapshot, reservedLocationId, productionOrderId, originalUnitPrice, discountType, discountValue, needsReview, needsReviewReason) |
 
 **Order.status enum**: `pending | confirmed | partially_backordered | processing | dispatched | delivered | rto | cancelled | refunded`
@@ -333,15 +333,6 @@ APP_URL="http://localhost:3000"
 |---|---|
 | `OrderExchange` | Exchange request against an order |
 | `ExchangeShipment` | Replacement shipment for an exchange |
-
-#### Markets (5 models) — Shopify-Markets-style regional system
-| Model | Purpose |
-|---|---|
-| `Market` | Regional pricing/payment/country context within a company. Fields: name, currency, isDefault, allowedPaymentTypes[], isActive, countries[], pricing[], products[]. `@@unique([companyId, name])`. Partial unique index `market_one_default_per_company` enforces exactly one Default per company. |
-| `MarketCountry` | Maps countries to markets. `@@unique([companyId, countryCode])` — a country belongs to at most one market per company. |
-| `MarketVariantPricing` | Per-variant selling price for a specific market. Mirrors CompanyVariantPricing's full cascade/sync structure (salePrice, comparePrice, both sync flags). `@@unique([marketId, variantId])`. |
-| `MarketProduct` | Per-market product enablement. Presence = enabled; absence = not enabled. `@@unique([marketId, productId])`. |
-| `ExchangeRateSnapshot` | Daily exchange rate snapshots (relative to USD). Used for display-only revenue conversion. `@@index([currency, fetchedAt])`. |
 
 #### Integrations / Courier (6 models)
 | Model | Purpose |
@@ -386,7 +377,6 @@ APP_URL="http://localhost:3000"
 | RLS helpers | `get_active_company_id()`, `get_active_org_id()`, `has_permission()`, `is_elevated_employee()` |
 | Triggers | `backfill_order_timestamps()`, `update_*_updatedAt()` |
 | `invitation_pending_email_unique` (partial index) | UNIQUE INDEX on `Invitation(companyId, invitedEmail) WHERE status='pending'` — prevents duplicate pending invites. Applied manually (not in Prisma schema). Documented in `supabase/functions-only.sql`. |
-| `market_one_default_per_company` (partial index) | UNIQUE INDEX on `Market(companyId) WHERE "isDefault"=TRUE` — enforces exactly one Default market per company. Documented in `supabase/functions-only.sql`. |
 | `match_or_create_customer(...)` | Customer matching SQL function (4-layer: exact_identity, phone_match, email_match, create). Now accepts 7 params including `p_country` (alpha-2 code). |
 
 ### Migrations
@@ -973,28 +963,10 @@ Permissions use dot-notation `module.action`. All 51 keys are now visible in the
 | POST/GET | `/api/cron/generate-scan-reports` | `0 1 * * *` (daily 1AM) | Generate scan reports |
 | POST/GET | `/api/cron/refresh-exchange-rates` | `0 2 * * *` (daily 2AM) | Fetch + store exchange rate snapshots |
 
-#### Markets (4)
-| Method | Path | Description |
-|---|---|---|
-| GET/POST | `/api/markets` | List/create markets |
-| GET/PATCH/DELETE/POST | `/api/markets/[id]` | Get/update/delete/promote-to-Default a market |
-| POST | `/api/markets/[id]/copy-pricing-from-default` | Bulk-copy pricing from Default market |
-| GET/PUT | `/api/markets/[id]/products` | List/bulk-enable-disable products for a market |
-
 #### Self-Fulfilled (1)
 | Method | Path | Description |
 |---|---|---|
 | POST | `/api/orders/[id]/self-fulfilled-slip` | Generate internal slip PDF with CODE128 barcode |
-
-#### Market Enablement (1)
-| Method | Path | Description |
-|---|---|---|
-| GET/PUT | `/api/products/[id]/market-enablement` | Get/toggle product enablement per market |
-
-#### Order Market Resolution (1)
-| Method | Path | Description |
-|---|---|---|
-| GET | `/api/orders/market-for-country` | Resolve market for a delivery country (returns gate data) |
 
 #### Revenue Summary (1)
 | Method | Path | Description |
@@ -1755,13 +1727,10 @@ The sandbox exposes one port (81) via Caddy:
 26. **Docker Deployment** — multi-stage Dockerfile (dev + prod), docker-compose files, local DB for testing, PostEx poller toggle (see DOCKER.md)
 27. **International Phone Validation** — libphonenumber-js for international numbers (UK, UAE, US, etc.); normalize_phone() SQL has pass-through fix for `+`-prefixed non-PK numbers; manual creation blocks on invalid; external flags isValidFormat=false
 28. **Country System** — CustomerAddress.country + Order.deliveryCountry (alpha-2 codes, @default("PK")); CountrySelector in AddressSelector + CreateCustomerForm; non-PK addresses skip courier city-matching; phone validation uses address country as a hint (not a hard rule); Shopify fallback: country_code → country name → Company.countryCode
-29. **Self-Fulfilled Channel** — Order.fulfillmentChannel ('courier' | 'self_fulfilled'); SF-YYYY-NNNNN per-company reference via SQL function; auto-defaults to self_fulfilled for non-PK (overridable); skips auto-booking + city-matching; internal slip PDF with CODE128 barcode via jsbarcode → SVG → sharp → PNG; processScan() resolves both trackingNumber + selfFulfilledReferenceNumber; fully independent of Markets system
-30. **Markets System** — Market, MarketCountry, MarketVariantPricing, MarketProduct models; auto-created Default market at company creation; single→multi-market transition backfill; per-market pricing with full cascade/sync (mirrors CompanyVariantPricing); product enablement per market; Markets management UI (list/create/edit/archive/delete/promote); bulk product assignment from market-detail-view
-31. **3-Gate Enforcement** — Gate 1 (variant isActive), Gate 2 (MarketProduct enablement), Gate 3 (MarketVariantPricing exists); first-failing-reason only; manual orders blocked if country not in any market; payment types restricted to market's allowedPaymentTypes (client + server); external orders never blocked — flagged with needsReview + needsReviewReason
-32. **Discount Rework** — client-overridable unit_price removed; originalUnitPrice resolved strictly from MarketVariantPricing (server-side only, never client-writable); per-item discount (percentage/fixed) with validation; Order.discountAmount/discountReason (order-wide) works independently; Shopify total_discounts now captured
-33. **Dashboard Currency Rollup** — shared computeRevenueWithCurrencies() function; per-currency breakdown (always accurate) + estimated total in baseCurrency; daily exchange rate cron; display-only (never touches stored order prices)
-34. **Pricing Tab with Market Sub-Tabs** — product-detail-view Pricing tab renders market sub-tabs (Default first) with completion badges; ParentChildVariantTable scoped by marketId with full cascade/sync; "Copy from Default" bulk action for empty markets
-35. **Permissions System** — 51 keys, all visible in the Role Editor (was 26), 35+ routes protected with `requirePermission()`, 6 orphan permissions now enforced; `Select All` grants all 51
+29. **Self-Fulfilled Channel** — Order.fulfillmentChannel ('courier' | 'self_fulfilled'); SF-YYYY-NNNNN per-company reference via SQL function; auto-defaults to self_fulfilled for non-PK (overridable); skips auto-booking + city-matching; internal slip PDF with CODE128 barcode via jsbarcode → SVG → sharp → PNG; processScan() resolves both trackingNumber + selfFulfilledReferenceNumber
+30. **Discount Rework** — client-overridable unit_price removed; originalUnitPrice resolved strictly from CompanyVariantPricing (server-side only, never client-writable); per-item discount (percentage/fixed) with validation; Order.discountAmount/discountReason (order-wide) works independently; Shopify total_discounts now captured
+31. **Dashboard Currency Rollup** — shared computeRevenueWithCurrencies() function; per-currency breakdown (always accurate) + estimated total in baseCurrency; daily exchange rate cron; display-only (never touches stored order prices)
+32. **Permissions System** — 51 keys, all visible in the Role Editor (was 26), 35+ routes protected with `requirePermission()`, 6 orphan permissions now enforced; `Select All` grants all 51
 36. **Courier integration verified end-to-end** — Leopard + PostEx both verified with real API calls against staging + production; brute-force test of the full Leopard lifecycle (book → track → cancel) succeeded
 37. **Leopard production/staging toggle** — Switch UI in the Connect dialog (ON = production, OFF = staging); adapter handles all boolean formats (`true`, `'true'`, `'on'`, `'1'`, `1`) for backward compatibility
 38. **Connection status lifecycle** — `pending` on connect → `connected` after successful test (FIXED — was `'active'` which the StatusBadge UI rendered as the amber "Pending" badge)
@@ -1797,7 +1766,7 @@ The sandbox exposes one port (81) via Caddy:
 25. **Request payload logging** (FIXED) — `IntegrationActionLog.requestPayload` now populated for all outbound courier calls (book_shipment, cancel_shipment, track_shipment, etc.)
 26. **DB-level uniqueness** (FIXED) — partial unique index on `Invitation(companyId, invitedEmail) WHERE status='pending'`; `@@unique([companyId, providerId])` on `CompanyIntegration`
 27. **Button cursor fix** (FIXED) — `cursor-pointer` on all buttons; `disabled:cursor-not-allowed` replaces `disabled:pointer-events-none`
-28. **Order-create child-component scope leaks** (FIXED) — `order-create-view.tsx` has 6 child function components (`CustomerSection`, `CrmStatsWidget`, `ItemsSection`, `PaymentSection`, `ProofFileInput`, `SummarySection`) declared at module level (NOT closures inside `OrderCreateView`). During the Markets/3-gate feature work, parent-scope variables were referenced directly inside child components without being passed as props, causing `ReferenceError: X is not defined` at runtime. Fixed by passing ALL required variables as props: `isCountryBlocked`, `countryBlockReason`, `fulfillmentChannel`, `setFulfillmentChannel`, `userPickedCourier`, `setUserPickedCourier`, `deliveryCountry`, `enabledProductIdsSet`, `pricedVariantIdsSet`, `resolvedMarketName`. Exhaustive Python audit confirmed all 6 child components are now clean.
+28. **Order-create child-component scope leaks** (FIXED) — `order-create-view.tsx` has 6 child function components (`CustomerSection`, `CrmStatsWidget`, `ItemsSection`, `PaymentSection`, `ProofFileInput`, `SummarySection`) declared at module level (NOT closures inside `OrderCreateView`). Parent-scope variables were referenced directly inside child components without being passed as props, causing `ReferenceError: X is not defined` at runtime. Fixed by passing ALL required variables as props.
 29. **Self-fulfilled slip PDF 404 fix** (FIXED) — The slip PDF API previously returned a URL path (`/uploads/self-fulfilled-slips/...`) and the frontend did `window.open(url)` to open it, but the Caddy gateway didn't serve the static file correctly (404). Fixed: the API now returns the PDF as a **binary response** (`Content-Type: application/pdf`), and the frontend uses `fetch()` → `response.blob()` → `URL.createObjectURL(blob)` → `window.open(blobUrl)` — no static file serving needed, no 404 possible.
 30. **Leopard production/staging toggle** (FIXED) — the adapter previously only checked `credentials.isProduction === 'true'` (strict string match), which silently routed to staging when the value was stored as a boolean `true`. Now normalizes via a `parseBoolean()` helper that accepts `true`, `'true'`, `'on'`, `'1'`, `1`. The Connect dialog renders this as a **Switch UI toggle** (ON = production, OFF = staging) — previously a free-text input where users had to type `'true'` manually.
 31. **Leopard adapter response shape** (FIXED) — `fetchShipperById` + `fetchExistingPickupAddresses` previously returned `null` / empty array when Leopard returned a single OBJECT (filtered by `request_param`) instead of an array. Now handles both shapes via an `Array.isArray()` guard.
@@ -1809,7 +1778,7 @@ The sandbox exposes one port (81) via Caddy:
 ### ❌ Not Yet Built / Needed
 
 1. **TCS Courier Integration** — adapter is a stub, needs real API integration
-2. **Shopify E-commerce Integration** — `createOrderFromShopifyWebhook()` is fully implemented (with 3-gate soft enforcement + total_discounts capture + needsReview flagging). The webhook parsing + customer matching works. However, the adapter that parses Shopify webhooks into the `ShopifyOrderWebhook` payload shape is a stub — needs real webhook signature verification + payload mapping.
+2. **Shopify E-commerce Integration** — `createOrderFromShopifyWebhook()` is fully implemented (with total_discounts capture + needsReview flagging). The webhook parsing + customer matching works. However, the adapter that parses Shopify webhooks into the `ShopifyOrderWebhook` payload shape is a stub — needs real webhook signature verification + payload mapping.
 3. **Daraz E-commerce Integration** — adapter is a stub (`notImplemented`). No order creation path.
 4. **External Scheduler for Cron Jobs** — Vercel cron doesn't fire on this server. Options:
    - External service (cron-job.org, GitHub Actions) hitting the cron endpoints
@@ -1820,7 +1789,7 @@ The sandbox exposes one port (81) via Caddy:
 8. **Finance Module** — `FINANCE_VIEW` / `FINANCE_MANAGE` permissions exist but no finance module is built
 9. **Real-time Notifications** — no websocket/notification system (mini-services/postex-poller/ is a stub; examples/websocket/ is reference only)
 10. **Mobile App** — no mobile app (web-only, but responsive)
-11. ~~**Multi-currency**~~ **BUILT**: Market-level currencies + daily exchange rate cron + per-currency revenue breakdown + estimated converted total. Display-only (never touches stored prices).
+11. ~~**Multi-currency**~~ **BUILT**: Company-level currencies + daily exchange rate cron + per-currency revenue breakdown + estimated converted total. Display-only (never touches stored prices).
 12. **Tax Management** — `taxAmount` / `taxLabel` fields exist but no tax calculation engine
 13. **Email Notifications** — no email sending (forgot-password is a stub)
 14. **SMS Notifications** — no SMS integration
@@ -1925,22 +1894,10 @@ import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-valid
 - Self-fulfilled orders skip auto-booking + city-courier-matching entirely
 - Internal slip PDF: jsbarcode CODE128 barcode → SVG → sharp → PNG → @react-pdf/renderer
 - `processScan()` resolves via `OR: [trackingNumber, selfFulfilledReferenceNumber]`
-- Fully independent of the Markets system (no code coupling)
-
-### Markets System (3-Gate Enforcement)
-- **Gate 1**: `OrgProductVariant.isActive` — toggled-off variants appear DISABLED in picker (not hidden)
-- **Gate 2**: `MarketProduct` enablement for the resolved market
-- **Gate 3**: `MarketVariantPricing` exists for this variant + resolved market
-- First failing reason only (priority: gate 1 → 2 → 3)
-- Manual orders: blocked if country not in any market (server-side rejection)
-- External orders: NEVER blocked — flagged with `needsReview` + `needsReviewReason`
-- Payment types restricted to market's `allowedPaymentTypes` (client + server enforcement)
-- No fallback anywhere — a variant with no explicit market price is simply not sellable
 
 ### Pricing Resolution (Discount Rework)
 - `unit_price` is NO LONGER accepted from the client (removed from schema)
-- Server resolves `originalUnitPrice` STRICTLY from `MarketVariantPricing` for the resolved market
-- If no MVP row exists → server REJECTS with gate-3 error (no CompanyVariantPricing/costPrice fallback)
+- Server resolves `originalUnitPrice` STRICTLY from `CompanyVariantPricing` for the active company
 - Per-item discount (`discountType`/`discountValue`): percentage (0-100) or fixed (≤ originalUnitPrice), clamped at 0
 - `unitPrice = originalUnitPrice - discount` (final charged price)
 - `Order.discountAmount`/`discountReason` (order-wide flat discount) works independently
@@ -1971,7 +1928,7 @@ import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-valid
 8. **PostEx API lag** — parcels may be physically picked up but PostEx's API still shows "Booked" for hours. This is a PostEx issue, not FlowOps
 
 ### Schema
-9. **SQL functions must be applied manually** — `generate_order_number()`, `generate_self_fulfilled_reference()`, `normalize_phone()` (with international pass-through fix), `match_or_create_customer()` (now 7 params), etc. are NOT in the Prisma schema. They must be applied via raw SQL to the DB. A consolidated file `supabase/functions-only.sql` contains all 24+ functions + 2 sequences + 12 triggers + 2 partial unique indexes (`invitation_pending_email_unique` + `market_one_default_per_company`).
+9. **SQL functions must be applied manually** — `generate_order_number()`, `generate_self_fulfilled_reference()`, `normalize_phone()` (with international pass-through fix), `match_or_create_customer()` (now 7 params), etc. are NOT in the Prisma schema. They must be applied via raw SQL to the DB. A consolidated file `supabase/functions-only.sql` contains all 24+ functions + 2 sequences + 12 triggers + 1 partial unique index (`invitation_pending_email_unique`).
 10. **No DB-level RLS** — all multi-tenant isolation is in the app layer. A bug in `getWorkspace()` or a missing `companyId` filter could leak data across tenants
 11. **No `available` column** — `available = onHand - reserved` is computed in app code every time
 12. **Order-create child components are module-level functions** — `CustomerSection`, `ItemsSection`, `PaymentSection`, etc. in `order-create-view.tsx` are declared at the module level (NOT closures inside `OrderCreateView`). Any new state variable used in these child components MUST be passed as a prop — referencing it directly will compile fine but crash at runtime with `ReferenceError`. TypeScript does NOT catch this. When adding new state/hooks to `OrderCreateView` that child components need, always: (1) add it to the child's destructured props, (2) add it to the child's type definition, (3) pass it from `<OrderCreateView>` to `<ChildComponent>`.
@@ -2011,9 +1968,8 @@ When generating prompts for AI assistants working on FlowOps, use these patterns
 - City propagation: corrected cities propagate to CustomerAddress at order creation + booking time
 - IntegrationActionLog: now logs requestPayload (not just responsePayload) for all outbound calls
 - Country system: CustomerAddress.country + Order.deliveryCountry (alpha-2 codes, @default("PK")); CountrySelector in both address forms; non-PK skips city-matching
-- Self-fulfilled: fulfillmentChannel ('courier'|'self_fulfilled'), SF-YYYY-NNNNN per-company ref, jsbarcode CODE128 slip PDF, processScan OR:[trackingNumber, selfFulfilledReferenceNumber]; independent of Markets
-- Markets: Market + MarketCountry + MarketVariantPricing + MarketProduct; 3-gate enforcement (isActive → MarketProduct → MVP); no fallback; manual blocked if country not in market; external flagged not blocked
-- Pricing: originalUnitPrice resolved from MarketVariantPricing ONLY (no client unit_price, no CVP/costPrice fallback); per-item discount (percentage/fixed)
+- Self-fulfilled: fulfillmentChannel ('courier'|'self_fulfilled'), SF-YYYY-NNNNN per-company ref, jsbarcode CODE128 slip PDF, processScan OR:[trackingNumber, selfFulfilledReferenceNumber]
+- Pricing: originalUnitPrice resolved from CompanyVariantPricing ONLY (no client unit_price, no costPrice fallback); per-item discount (percentage/fixed)
 - Currency rollup: computeRevenueWithCurrencies() shared by all 3 sites; per-currency breakdown + estimated total; display-only
 - Exchange rates: daily cron (/api/cron/refresh-exchange-rates) + in-process fallback (ENABLE_IN_PROCESS_FX_REFRESH)
 ```
@@ -2025,7 +1981,6 @@ When generating prompts for AI assistants working on FlowOps, use these patterns
 - **Booking**: `src/lib/actions/booking.actions.ts` — `bookOrderWithCourier`, `maybeAutoBookOrder`
 - **Status polling**: `src/lib/actions/postex-status-poll.actions.ts` + `instrumentation.ts`
 - **Scan**: `src/lib/actions/scan.actions.ts` + `src/components/orders/order-scan-view.tsx`
-- **Markets**: `src/lib/markets.ts` (helpers: isMultiMarketCompany, resolveMarketByCountry, isProductEnabledForMarket, getPricedVariantIdsForMarket, backfillDefaultMarketProducts) + `src/components/markets/markets-view.tsx` + `src/components/markets/market-detail-view.tsx`
 - **Self-fulfilled**: `src/lib/utils/internal-slip-pdf.ts` (jsbarcode + sharp + @react-pdf/renderer) + `src/app/api/orders/[id]/self-fulfilled-slip/route.ts`
 - **Exchange rates**: `src/lib/exchange-rates.ts` (getLatestRates, convertAmount, syncExchangeRates) + `src/app/api/cron/refresh-exchange-rates/route.ts`
 - **Revenue**: `src/lib/analytics/revenue.ts` (computeRevenueWithCurrencies) + `src/app/api/orders/revenue-summary/route.ts`
