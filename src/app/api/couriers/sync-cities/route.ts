@@ -1,7 +1,7 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { getWorkspace, requirePermission, handleError, readBody } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -19,24 +19,12 @@ export const dynamic = 'force-dynamic'
  * list after a few seconds, or invalidate the query cache when the
  * sync completes.
  *
- * Elevated-only (involves making API calls with stored credentials).
+ * Requires INTEGRATIONS_MANAGE permission.
  */
 export async function POST(req: NextRequest) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
-
-    const caller = await db.employee.findFirst({
-      where: { companyId, userId: user.id, status: 'active' },
-      include: { role: true },
-    })
-    if (!caller) throw new ApiError(403, 'Not a member of this company.')
-    if (caller.role.roleTier !== 'elevated') {
-      throw new ApiError(403, 'Only elevated roles can trigger city sync.')
-    }
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
 
     const body = await readBody<{ providerKey?: string }>(req).catch(() => ({ providerKey: undefined }))
 

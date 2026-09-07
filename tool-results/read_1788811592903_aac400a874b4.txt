@@ -1,0 +1,823 @@
+     1→/**
+     2→ * Courier Pickup/Return Address Book — Server Actions.
+     3→ *
+     4→ * Manages the per-company-integration address book. PostEx's API returns
+     5→ * addressType="Pickup/Return Address" (one address serves both), so we do
+     6→ * NOT build separate pickup vs return concepts — one address book serves
+     7→ * both purposes for a given companyIntegration.
+     8→ *
+     9→ * Pattern mirrors integration.actions.ts:
+    10→ *   - getWorkspace() for auth + company scoping
+    11→ *   - isElevated() for credential-affecting operations
+    12→ *   - executeLoggedIntegrationAction() for all adapter calls
+    13→ *   - insertAuditLog + insertMetricEvent for observability
+    14→ */
+    15→
+    16→import { db } from '@/lib/db'
+    17→import { getWorkspace, isElevated, ApiError } from '@/lib/workspace'
+    18→import { insertAuditLog } from '@/lib/audit'
+    19→import { insertMetricEvent } from '@/lib/metrics'
+    20→import { decryptCredentials } from '@/lib/utils/encryption'
+    21→import { getCourierAdapter } from '@/lib/integrations/registry'
+    22→import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
+    23→import type { PickupAddressInput, PickupAddressResult } from '@/lib/integrations/types'
+    24→
+    25→interface ActionResult<T = unknown> {
+    26→  success: boolean
+    27→  data?: T
+    28→  error?: string
+    29→}
+    30→
+    31→// ──────────────────────────────────────────────────────────────
+    32→// Helper: verify integration belongs to caller's company
+    33→// ──────────────────────────────────────────────────────────────
+    34→
+    35→async function verifyIntegrationOwnership(companyIntegrationId: string, companyId: string) {
+    36→  const integration = await db.companyIntegration.findFirst({
+    37→    where: { id: companyIntegrationId, companyId },
+    38→    include: { provider: true },
+    39→  })
+    40→  if (!integration) {
+    41→    throw new ApiError(404, 'Integration not found or does not belong to your company.')
+    42→  }
+    43→  return integration
+    44→}
+    45→
+    46→// ──────────────────────────────────────────────────────────────
+    47→// listPickupAddresses
+    48→// ──────────────────────────────────────────────────────────────
+    49→
+    50→export async function listPickupAddresses(companyIntegrationId: string): Promise<ActionResult<{
+    51→  addresses: Array<{
+    52→    id: string
+    53→    providerAddressCode: string
+    54→    label: string
+    55→    address: string
+    56→    cityName: string
+    57→    contactPersonName: string
+    58→    phone1: string
+    59→    phone2: string | null
+    60→    isDefault: boolean
+    61→    createdAt: string
+    62→  }>
+    63→}>> {
+    64→  try {
+    65→    const ctx = await getWorkspace()
+    66→    await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+    67→
+    68→    const addresses = await db.courierPickupAddress.findMany({
+    69→      where: { companyIntegrationId },
+    70→      orderBy: [{ isDefault: 'desc' }, { createdAt: 'asc' }],
+    71→    })
+    72→
+    73→    return {
+    74→      success: true,
+    75→      data: {
+    76→        addresses: addresses.map((a) => ({
+    77→          id: a.id,
+    78→          providerAddressCode: a.providerAddressCode,
+    79→          label: a.label,
+    80→          address: a.address,
+    81→          cityName: a.cityName,
+    82→          contactPersonName: a.contactPersonName,
+    83→          phone1: a.phone1,
+    84→          phone2: a.phone2,
+    85→          isDefault: a.isDefault,
+    86→          createdAt: a.createdAt.toISOString(),
+    87→        })),
+    88→      },
+    89→    }
+    90→  } catch (err) {
+    91→    return {
+    92→      success: false,
+    93→      error: err instanceof Error ? err.message : 'Failed to list pickup addresses',
+    94→    }
+    95→  }
+    96→}
+    97→
+    98→// ──────────────────────────────────────────────────────────────
+    99→// addPickupAddress
+   100→// ──────────────────────────────────────────────────────────────
+   101→
+   102→export async function addPickupAddress(
+   103→  companyIntegrationId: string,
+   104→  input: PickupAddressInput,
+   105→): Promise<ActionResult<{ addressId: string }>> {
+   106→  try {
+   107→    const ctx = await getWorkspace()
+   108→    if (!isElevated(ctx)) {
+   109→      return { success: false, error: 'Only elevated roles can manage pickup addresses.' }
+   110→    }
+   111→
+   112→    const integration = await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+   113→    const providerKey = integration.provider.providerKey
+   114→
+   115→    // Check if this is the first address (auto-default)
+   116→    const existingCount = await db.courierPickupAddress.count({
+   117→      where: { companyIntegrationId },
+   118→    })
+   119→    const shouldBeDefault = existingCount === 0
+   120→
+   121→    let providerAddressCode: string
+   122→
+   123→    // Try to create the address on the courier's side via the adapter
+   124→    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+   125→    const adapter = getCourierAdapter(providerKey, credentials)
+   126→
+   127→    if (adapter.createPickupAddress) {
+   128→      // Adapter supports address creation — call it via the logged wrapper
+   129→      const createResult = await executeLoggedIntegrationAction<PickupAddressResult>({
+   130→        companyIntegrationId,
+   131→        organizationId: integration.organizationId,
+   132→        actionType: 'create_pickup_address',
+   133→        direction: 'outbound',
+   134→        fn: async () => adapter.createPickupAddress!(input),
+   135→        // Log the pickup address data being sent (no credentials — just business data)
+   136→        requestPayload: input,
+   137→      })
+   138→
+   139→      if (!createResult.success) {
+   140→        return {
+   141→          success: false,
+   142→          error: createResult.error || 'Courier API address creation failed.',
+   143→        }
+   144→      }
+   145→
+   146→      if (createResult.providerAddressCode) {
+   147→        // Courier returned an address code directly — use it
+   148→        providerAddressCode = createResult.providerAddressCode
+   149→      } else if (adapter.fetchExistingPickupAddresses) {
+   150→        // PostEx quirk: create-merchant-address returns success but NO
+   151→        // addressCode. We need to fetch the full list and find the newly-
+   152→        // created address by matching address + city. This is the only
+   153→        // way to get the code PostEx assigned.
+   154→        const existingAddresses = await executeLoggedIntegrationAction<Array<{
+   155→          providerAddressCode: string
+   156→          address: string
+   157→          cityName: string
+   158→        }>>({
+   159→          companyIntegrationId,
+   160→          organizationId: integration.organizationId,
+   161→          actionType: 'fetch_existing_pickup_addresses',
+   162→          direction: 'outbound',
+   163→          fn: async () => adapter.fetchExistingPickupAddresses!(),
+   164→        })
+   165→
+   166→        // Find the matching address by address text + city (case-insensitive)
+   167→        const matched = existingAddresses.find(
+   168→          (a) =>
+   169→            a.address.trim().toLowerCase() === input.address.trim().toLowerCase() &&
+   170→            a.cityName.trim().toLowerCase() === input.cityName.trim().toLowerCase(),
+   171→        )
+   172→
+   173→        if (!matched) {
+   174→          return {
+   175→            success: false,
+   176→            error: 'Address was created on the courier side, but we could not find it in the address list to get its code. Try syncing addresses instead.',
+   177→          }
+   178→        }
+   179→        providerAddressCode = matched.providerAddressCode
+   180→      } else {
+   181→        // No way to get the code — store with a local prefix
+   182→        providerAddressCode = `local-${Date.now()}`
+   183→      }
+   184→    } else if (adapter.fetchExistingPickupAddresses) {
+   185→      return {
+   186→        success: false,
+   187→        error: `Provider '${providerKey}' requires addresses to pre-exist. Use the "Sync from Courier" button to import addresses.`,
+   188→      }
+   189→    } else {
+   190→      providerAddressCode = `local-${Date.now()}`
+   191→    }
+   192→
+   193→    // Store locally
+   194→    const address = await db.courierPickupAddress.create({
+   195→      data: {
+   196→        companyIntegrationId,
+   197→        providerAddressCode,
+   198→        label: input.label,
+   199→        address: input.address,
+   200→        cityName: input.cityName,
+   201→        contactPersonName: input.contactPersonName,
+   202→        phone1: input.phone1,
+   203→        phone2: input.phone2 ?? null,
+   204→        isDefault: shouldBeDefault,
+   205→      },
+   206→    })
+   207→
+   208→    insertAuditLog({
+   209→      action: 'courier_pickup_address_added',
+   210→      entityType: 'company_integration',
+   211→      entityId: companyIntegrationId,
+   212→      companyId: ctx.company.id,
+   213→      organizationId: ctx.company.organizationId,
+   214→      userId: ctx.user.id,
+   215→      employeeId: ctx.employee.id,
+   216→      newValues: { label: input.label, cityName: input.cityName, providerAddressCode, isDefault: shouldBeDefault },
+   217→    })
+   218→
+   219→    insertMetricEvent({
+   220→      companyId: ctx.company.id,
+   221→      entityType: 'company_integration',
+   222→      entityId: companyIntegrationId,
+   223→      metricKey: 'courier_pickup_address_added',
+   224→      numericValue: 1,
+   225→      dimensions: { provider_key: providerKey },
+   226→    })
+   227→
+   228→    return { success: true, data: { addressId: address.id } }
+   229→  } catch (err) {
+   230→    return {
+   231→      success: false,
+   232→      error: err instanceof Error ? err.message : 'Failed to add pickup address',
+   233→    }
+   234→  }
+   235→}
+   236→
+   237→// ──────────────────────────────────────────────────────────────
+   238→// fetchExistingPickupAddresses (for fetch-only adapters)
+   239→// ──────────────────────────────────────────────────────────────
+   240→
+   241→export async function fetchExistingPickupAddresses(
+   242→  companyIntegrationId: string,
+   243→): Promise<ActionResult<{
+   244→  addresses: Array<{
+   245→    providerAddressCode: string
+   246→    label?: string
+   247→    address: string
+   248→    cityName: string
+   249→    contactPersonName: string
+   250→    phone1: string
+   251→    phone2?: string
+   252→  }>
+   253→}>> {
+   254→  try {
+   255→    const ctx = await getWorkspace()
+   256→    const integration = await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+   257→    const providerKey = integration.provider.providerKey
+   258→
+   259→    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+   260→    const adapter = getCourierAdapter(providerKey, credentials)
+   261→
+   262→    if (!adapter.fetchExistingPickupAddresses) {
+   263→      return {
+   264→        success: false,
+   265→        error: `Provider '${providerKey}' does not support fetching existing addresses.`,
+   266→      }
+   267→    }
+   268→
+   269→    const addresses = await executeLoggedIntegrationAction<Array<{
+   270→      providerAddressCode: string
+   271→      label?: string
+   272→      address: string
+   273→      cityName: string
+   274→      contactPersonName: string
+   275→      phone1: string
+   276→      phone2?: string
+   277→    }>>({
+   278→      companyIntegrationId,
+   279→      organizationId: integration.organizationId,
+   280→      actionType: 'fetch_existing_pickup_addresses',
+   281→      direction: 'outbound',
+   282→      fn: async () => adapter.fetchExistingPickupAddresses!(),
+   283→    })
+   284→
+   285→    return { success: true, data: { addresses } }
+   286→  } catch (err) {
+   287→    return {
+   288→      success: false,
+   289→      error: err instanceof Error ? err.message : 'Failed to fetch existing pickup addresses',
+   290→    }
+   291→  }
+   292→}
+   293→
+   294→// ──────────────────────────────────────────────────────────────
+   295→// importPickupAddressById — import a single shipper by shipment_id
+   296→// (Leopard-specific: calls getShipperDetails with request_param=shipment_id
+   297→// & request_value={id} to fetch a SINGLE shipper — NOT fetch-all-filter)
+   298→// ──────────────────────────────────────────────────────────────
+   299→
+   300→export async function importPickupAddressById(
+   301→  companyIntegrationId: string,
+   302→  shipmentId: string,
+   303→): Promise<ActionResult<{
+   304→  addressId: string
+   305→  providerAddressCode: string
+   306→  label: string
+   307→}>> {
+   308→  try {
+   309→    const ctx = await getWorkspace()
+   310→    if (!isElevated(ctx)) {
+   311→      return { success: false, error: 'Only elevated roles can import addresses.' }
+   312→    }
+   313→    const integration = await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+   314→    const providerKey = integration.provider.providerKey
+   315→
+   316→    if (providerKey !== 'leopard') {
+   317→      return { success: false, error: 'Import by ID is only supported for Leopard Courier.' }
+   318→    }
+   319→
+   320→    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+   321→    const adapter = getCourierAdapter(providerKey, credentials)
+   322→
+   323→    // Use the Leopard-specific fetchShipperById method which calls
+   324→    // getShipperDetails?request_param=shipment_id&request_value={id}
+   325→    // — this fetches a SINGLE shipper directly (per PDF page 73-78),
+   326→    // NOT fetch-all-then-filter.
+   327→    // fetchShipperById is NOT on the CourierAdapter interface (it's
+   328→    // Leopard-specific), so we cast to access it.
+   329→    const leopardAdapter = adapter as unknown as {
+   330→      fetchShipperById?: (shipmentId: string) => Promise<{
+   331→        providerAddressCode: string
+   332→        label: string
+   333→        address: string
+   334→        cityName: string
+   335→        contactPersonName: string
+   336→        phone1: string
+   337→        phone2?: string
+   338→      } | null>
+   339→    }
+   340→    if (!leopardAdapter.fetchShipperById) {
+   341→      return { success: false, error: 'Provider does not support importing by ID.' }
+   342→    }
+   343→
+   344→    const found = await executeLoggedIntegrationAction<{
+   345→      providerAddressCode: string
+   346→      label: string
+   347→      address: string
+   348→      cityName: string
+   349→      contactPersonName: string
+   350→      phone1: string
+   351→      phone2?: string
+   352→    } | null>({
+   353→      companyIntegrationId,
+   354→      organizationId: integration.organizationId,
+   355→      actionType: 'fetch_shipper_by_id',
+   356→      direction: 'outbound',
+   357→      fn: async () => leopardAdapter.fetchShipperById!(shipmentId),
+   358→      requestPayload: { shipment_id: shipmentId },
+   359→    })
+   360→
+   361→    if (!found) {
+   362→      return { success: false, error: `No shipper found with shipment_id "${shipmentId}".` }
+   363→    }
+   364→
+   365→    // Check if this address already exists
+   366→    const existing = await db.courierPickupAddress.findFirst({
+   367→      where: { companyIntegrationId, providerAddressCode: found.providerAddressCode },
+   368→    })
+   369→    if (existing) {
+   370→      return {
+   371→        success: false,
+   372→        error: `A shipper with shipment_id "${shipmentId}" already exists in your address book.`,
+   373→      }
+   374→    }
+   375→
+   376→    // Resolve city name from courier_operational_cities (Leopard returns city_id, not name)
+   377→    let cityName = found.cityName
+   378→    const cityRecord = await db.courierOperationalCity.findFirst({
+   379→      where: { providerKey, cityId: found.cityName },
+   380→      select: { cityName: true },
+   381→    })
+   382→    if (cityRecord) {
+   383→      cityName = cityRecord.cityName
+   384→    }
+   385→
+   386→    // Create the pickup address
+   387→    const address = await db.courierPickupAddress.create({
+   388→      data: {
+   389→        companyIntegrationId,
+   390→        providerAddressCode: found.providerAddressCode,
+   391→        label: found.label || `Shipper ${found.providerAddressCode}`,
+   392→        address: found.address,
+   393→        cityName,
+   394→        contactPersonName: found.contactPersonName,
+   395→        phone1: found.phone1,
+   396→        phone2: found.phone2 ?? null,
+   397→        isDefault: false,
+   398→      },
+   399→    })
+   400→
+   401→    insertAuditLog({
+   402→      action: 'pickup_address.imported',
+   403→      entityType: 'company_integration',
+   404→      entityId: companyIntegrationId,
+   405→      companyId: ctx.company.id,
+   406→      organizationId: ctx.company.organizationId,
+   407→      userId: ctx.user.id,
+   408→      employeeId: ctx.employee.id,
+   409→      newValues: { shipmentId, label: address.label },
+   410→    })
+   411→
+   412→    return {
+   413→      success: true,
+   414→      data: {
+   415→        addressId: address.id,
+   416→        providerAddressCode: address.providerAddressCode,
+   417→        label: address.label,
+   418→      },
+   419→    }
+   420→  } catch (err) {
+   421→    return {
+   422→      success: false,
+   423→      error: err instanceof Error ? err.message : 'Failed to import address',
+   424→    }
+   425→  }
+   426→}
+   427→
+   428→// ──────────────────────────────────────────────────────────────
+   429→// setDefaultPickupAddress
+   430→// ──────────────────────────────────────────────────────────────
+   431→
+   432→export async function setDefaultPickupAddress(
+   433→  companyIntegrationId: string,
+   434→  addressId: string,
+   435→): Promise<ActionResult> {
+   436→  try {
+   437→    const ctx = await getWorkspace()
+   438→    if (!isElevated(ctx)) {
+   439→      return { success: false, error: 'Only elevated roles can set default addresses.' }
+   440→    }
+   441→    await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+   442→
+   443→    // Verify the address belongs to this integration
+   444→    const address = await db.courierPickupAddress.findFirst({
+   445→      where: { id: addressId, companyIntegrationId },
+   446→    })
+   447→    if (!address) {
+   448→      return { success: false, error: 'Address not found or does not belong to this integration.' }
+   449→    }
+   450→
+   451→    // Transaction: unset isDefault on all other addresses, set on this one
+   452→    // (same pattern as setDefaultIntegration)
+   453→    await db.$transaction([
+   454→      db.courierPickupAddress.updateMany({
+   455→        where: { companyIntegrationId, id: { not: addressId } },
+   456→        data: { isDefault: false },
+   457→      }),
+   458→      db.courierPickupAddress.update({
+   459→        where: { id: addressId },
+   460→        data: { isDefault: true },
+   461→      }),
+   462→    ])
+   463→
+   464→    insertAuditLog({
+   465→      action: 'courier_pickup_address_set_default',
+   466→      entityType: 'company_integration',
+   467→      entityId: companyIntegrationId,
+   468→      companyId: ctx.company.id,
+   469→      organizationId: ctx.company.organizationId,
+   470→      userId: ctx.user.id,
+   471→      employeeId: ctx.employee.id,
+   472→      newValues: { addressId, label: address.label },
+   473→    })
+   474→
+   475→    return { success: true }
+   476→  } catch (err) {
+   477→    return {
+   478→      success: false,
+   479→      error: err instanceof Error ? err.message : 'Failed to set default pickup address',
+   480→    }
+   481→  }
+   482→}
+   483→
+   484→// ──────────────────────────────────────────────────────────────
+   485→// deletePickupAddress
+   486→// ──────────────────────────────────────────────────────────────
+   487→
+   488→export async function deletePickupAddress(addressId: string): Promise<ActionResult> {
+   489→  try {
+   490→    const ctx = await getWorkspace()
+   491→    if (!isElevated(ctx)) {
+   492→      return { success: false, error: 'Only elevated roles can delete pickup addresses.' }
+   493→    }
+   494→
+   495→    // Find the address and verify ownership through the integration
+   496→    const address = await db.courierPickupAddress.findUnique({
+   497→      where: { id: addressId },
+   498→      include: { companyIntegration: { select: { companyId: true } } },
+   499→    })
+   500→    if (!address) {
+   501→      return { success: false, error: 'Address not found.' }
+   502→    }
+   503→    if (address.companyIntegration.companyId !== ctx.company.id) {
+   504→      return { success: false, error: 'Address does not belong to your company.' }
+   505→    }
+   506→
+   507→    const wasDefault = address.isDefault
+   508→
+   509→    await db.courierPickupAddress.delete({
+   510→      where: { id: addressId },
+   511→    })
+   512→
+   513→    // If the deleted address was the default, promote the first remaining one
+   514→    if (wasDefault) {
+   515→      const nextAddress = await db.courierPickupAddress.findFirst({
+   516→        where: { companyIntegrationId: address.companyIntegrationId },
+   517→        orderBy: { createdAt: 'asc' },
+   518→      })
+   519→      if (nextAddress) {
+   520→        await db.courierPickupAddress.update({
+   521→          where: { id: nextAddress.id },
+   522→          data: { isDefault: true },
+   523→        })
+   524→      }
+   525→    }
+   526→
+   527→    insertAuditLog({
+   528→      action: 'courier_pickup_address_deleted',
+   529→      entityType: 'company_integration',
+   530→      entityId: address.companyIntegrationId,
+   531→      companyId: ctx.company.id,
+   532→      organizationId: ctx.company.organizationId,
+   533→      userId: ctx.user.id,
+   534→      employeeId: ctx.employee.id,
+   535→      oldValues: { label: address.label, wasDefault },
+   536→    })
+   537→
+   538→    return { success: true }
+   539→  } catch (err) {
+   540→    return {
+   541→      success: false,
+   542→      error: err instanceof Error ? err.message : 'Failed to delete pickup address',
+   543→    }
+   544→  }
+   545→}
+   546→
+   547→// ──────────────────────────────────────────────────────────────
+   548→// syncPickupAddresses — fetch all from courier + upsert locally
+   549→// ──────────────────────────────────────────────────────────────
+   550→
+   551→export async function syncPickupAddresses(
+   552→  companyIntegrationId: string,
+   553→): Promise<ActionResult<{
+   554→  fetched: number
+   555→  upserted: number
+   556→}>> {
+   557→  try {
+   558→    const ctx = await getWorkspace()
+   559→    if (!isElevated(ctx)) {
+   560→      return { success: false, error: 'Only elevated roles can sync pickup addresses.' }
+   561→    }
+   562→
+   563→    const integration = await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+   564→    const providerKey = integration.provider.providerKey
+   565→
+   566→    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+   567→    const adapter = getCourierAdapter(providerKey, credentials)
+   568→
+   569→    if (!adapter.fetchExistingPickupAddresses) {
+   570→      return {
+   571→        success: false,
+   572→        error: `Provider '${providerKey}' does not support fetching existing addresses.`,
+   573→      }
+   574→    }
+   575→
+   576→    // Fetch all addresses from the courier
+   577→    const remoteAddresses = await executeLoggedIntegrationAction<Array<{
+   578→      providerAddressCode: string
+   579→      label?: string
+   580→      address: string
+   581→      cityName: string
+   582→      contactPersonName: string
+   583→      phone1: string
+   584→      phone2?: string
+   585→    }>>({
+   586→      companyIntegrationId,
+   587→      organizationId: integration.organizationId,
+   588→      actionType: 'fetch_existing_pickup_addresses',
+   589→      direction: 'outbound',
+   590→      fn: async () => adapter.fetchExistingPickupAddresses!(),
+   591→    })
+   592→
+   593→    // Fetch existing local addresses for this integration (to detect new vs existing)
+   594→    const existingLocal = await db.courierPickupAddress.findMany({
+   595→      where: { companyIntegrationId },
+   596→      select: { id: true, providerAddressCode: true, isDefault: true },
+   597→    })
+   598→    const existingCodes = new Set(existingLocal.map((a) => a.providerAddressCode))
+   599→    const isFirstSync = existingLocal.length === 0
+   600→
+   601→    // Upsert each remote address locally
+   602→    let upserted = 0
+   603→    for (const remote of remoteAddresses) {
+   604→      if (existingCodes.has(remote.providerAddressCode)) {
+   605→        // Update existing address (keep isDefault as-is)
+   606→        await db.courierPickupAddress.updateMany({
+   607→          where: { companyIntegrationId, providerAddressCode: remote.providerAddressCode },
+   608→          data: {
+   609→            label: remote.label || remote.address.substring(0, 50),
+   610→            address: remote.address,
+   611→            cityName: remote.cityName,
+   612→            contactPersonName: remote.contactPersonName,
+   613→            phone1: remote.phone1,
+   614→            phone2: remote.phone2 ?? null,
+   615→          },
+   616→        })
+   617→      } else {
+   618→        // Create new address
+   619→        await db.courierPickupAddress.create({
+   620→          data: {
+   621→            companyIntegrationId,
+   622→            providerAddressCode: remote.providerAddressCode,
+   623→            label: remote.label || remote.address.substring(0, 50),
+   624→            address: remote.address,
+   625→            cityName: remote.cityName,
+   626→            contactPersonName: remote.contactPersonName,
+   627→            phone1: remote.phone1,
+   628→            phone2: remote.phone2 ?? null,
+   629→            // Auto-default the first address on initial sync
+   630→            isDefault: isFirstSync && upserted === 0,
+   631→          },
+   632→        })
+   633→      }
+   634→      upserted++
+   635→    }
+   636→
+   637→    insertAuditLog({
+   638→      action: 'courier_pickup_addresses_synced',
+   639→      entityType: 'company_integration',
+   640→      entityId: companyIntegrationId,
+   641→      companyId: ctx.company.id,
+   642→      organizationId: ctx.company.organizationId,
+   643→      userId: ctx.user.id,
+   644→      employeeId: ctx.employee.id,
+   645→      newValues: { fetched: remoteAddresses.length, upserted },
+   646→    })
+   647→
+   648→    return {
+   649→      success: true,
+   650→      data: { fetched: remoteAddresses.length, upserted },
+   651→    }
+   652→  } catch (err) {
+   653→    return {
+   654→      success: false,
+   655→      error: err instanceof Error ? err.message : 'Failed to sync pickup addresses',
+   656→    }
+   657→  }
+   658→}
+   659→
+   660→// ──────────────────────────────────────────────────────────────
+   661→// refreshAllPickupAddresses — re-fetch each EXISTING local shipper's
+   662→// details from Leopard by their stored shipment_id, and update the
+   663→// local record if anything changed (name, address, phone, city).
+   664→//
+   665→// This is DIFFERENT from sync (which fetches ALL remote shippers and
+   666→// imports new ones). Refresh only updates shippers that are ALREADY
+   667→// in the local address book — it does NOT add new ones. Use Import
+   668→// by ID to add new shippers.
+   669→// ──────────────────────────────────────────────────────────────
+   670→
+   671→export async function refreshAllPickupAddresses(
+   672→  companyIntegrationId: string,
+   673→): Promise<ActionResult<{
+   674→  refreshed: number
+   675→  updated: number
+   676→  errors: string[]
+   677→}>> {
+   678→  try {
+   679→    const ctx = await getWorkspace()
+   680→    if (!isElevated(ctx)) {
+   681→      return { success: false, error: 'Only elevated roles can refresh addresses.' }
+   682→    }
+   683→
+   684→    const integration = await verifyIntegrationOwnership(companyIntegrationId, ctx.company.id)
+   685→    const providerKey = integration.provider.providerKey
+   686→
+   687→    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+   688→    const adapter = getCourierAdapter(providerKey, credentials)
+   689→
+   690→    // fetchShipperById is Leopard-specific (not on the CourierAdapter interface)
+   691→    const leopardAdapter = adapter as unknown as {
+   692→      fetchShipperById?: (shipmentId: string) => Promise<{
+   693→        providerAddressCode: string
+   694→        label: string
+   695→        address: string
+   696→        cityName: string
+   697→        contactPersonName: string
+   698→        phone1: string
+   699→        phone2?: string
+   700→      } | null>
+   701→    }
+   702→
+   703→    if (providerKey === 'leopard' && !leopardAdapter.fetchShipperById) {
+   704→      return { success: false, error: 'Leopard adapter does not support fetchShipperById.' }
+   705→    }
+   706→
+   707→    // Load all locally-stored shippers for this integration
+   708→    const localAddresses = await db.courierPickupAddress.findMany({
+   709→      where: { companyIntegrationId },
+   710→    })
+   711→
+   712→    if (localAddresses.length === 0) {
+   713→      return {
+   714→        success: true,
+   715→        data: { refreshed: 0, updated: 0, errors: [] },
+   716→      }
+   717→    }
+   718→
+   719→    let updated = 0
+   720→    const errors: string[] = []
+   721→
+   722→    for (const local of localAddresses) {
+   723→      try {
+   724→        // Use fetchShipperById (Leopard) or fall back to fetchExistingPickupAddresses
+   725→        // for other providers (none currently, but future-proof)
+   726→        let remote: {
+   727→          label: string
+   728→          address: string
+   729→          cityName: string
+   730→          contactPersonName: string
+   731→          phone1: string
+   732→          phone2?: string
+   733→        } | null = null
+   734→
+   735→        if (providerKey === 'leopard' && leopardAdapter.fetchShipperById) {
+   736→          remote = await executeLoggedIntegrationAction<{
+   737→            providerAddressCode: string
+   738→            label: string
+   739→            address: string
+   740→            cityName: string
+   741→            contactPersonName: string
+   742→            phone1: string
+   743→            phone2?: string
+   744→          } | null>({
+   745→            companyIntegrationId,
+   746→            organizationId: integration.organizationId,
+   747→            actionType: 'refresh_shipper_by_id',
+   748→            direction: 'outbound',
+   749→            fn: async () => leopardAdapter.fetchShipperById!(local.providerAddressCode),
+   750→            requestPayload: { shipment_id: local.providerAddressCode },
+   751→          })
+   752→        }
+   753→
+   754→        if (!remote) {
+   755→          errors.push(`Shipper ${local.providerAddressCode} (${local.label}): not found on Leopard.`)
+   756→          continue
+   757→        }
+   758→
+   759→        // Resolve city name from courier_operational_cities
+   760→        let cityName = remote.cityName
+   761→        const cityRecord = await db.courierOperationalCity.findFirst({
+   762→          where: { providerKey, cityId: remote.cityName },
+   763→          select: { cityName: true },
+   764→        })
+   765→        if (cityRecord) {
+   766→          cityName = cityRecord.cityName
+   767→        }
+   768→
+   769→        // Check if anything actually changed (avoid unnecessary writes)
+   770→        const changed =
+   771→          local.label !== (remote.label || local.label) ||
+   772→          local.address !== remote.address ||
+   773→          local.cityName !== cityName ||
+   774→          local.contactPersonName !== remote.contactPersonName ||
+   775→          local.phone1 !== remote.phone1 ||
+   776→          (local.phone2 ?? null) !== (remote.phone2 ?? null)
+   777→
+   778→        if (changed) {
+   779→          await db.courierPickupAddress.update({
+   780→            where: { id: local.id },
+   781→            data: {
+   782→              label: remote.label || local.label,
+   783→              address: remote.address,
+   784→              cityName,
+   785→              contactPersonName: remote.contactPersonName,
+   786→              phone1: remote.phone1,
+   787→              phone2: remote.phone2 ?? null,
+   788→            },
+   789→          })
+   790→          updated++
+   791→        }
+   792→      } catch (e) {
+   793→        errors.push(
+   794→          `Shipper ${local.providerAddressCode} (${local.label}): ${e instanceof Error ? e.message : 'fetch failed'}`,
+   795→        )
+   796→      }
+   797→    }
+   798→
+   799→    const refreshed = localAddresses.length
+   800→
+   801→    insertAuditLog({
+   802→      action: 'courier_pickup_addresses_refreshed',
+   803→      entityType: 'company_integration',
+   804→      entityId: companyIntegrationId,
+   805→      companyId: ctx.company.id,
+   806→      organizationId: ctx.company.organizationId,
+   807→      userId: ctx.user.id,
+   808→      employeeId: ctx.employee.id,
+   809→      newValues: { refreshed, updated, errors: errors.length },
+   810→    })
+   811→
+   812→    return {
+   813→      success: true,
+   814→      data: { refreshed, updated, errors },
+   815→    }
+   816→  } catch (err) {
+   817→    return {
+   818→      success: false,
+   819→      error: err instanceof Error ? err.message : 'Failed to refresh pickup addresses',
+   820→    }
+   821→  }
+   822→}
+   823→

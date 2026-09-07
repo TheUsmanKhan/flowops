@@ -130,6 +130,7 @@ function StatusBadge({ status, isActive }: { status: string; isActive: boolean }
   }
   const config: Record<string, { label: string; className: string; icon: typeof CheckCircle2 }> = {
     connected: { label: 'Connected', className: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: CheckCircle2 },
+    active: { label: 'Connected', className: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: CheckCircle2 },
     pending: { label: 'Pending', className: 'bg-amber-50 text-amber-700 border-amber-200', icon: Clock },
     error: { label: 'Error', className: 'bg-rose-50 text-rose-700 border-rose-200', icon: AlertCircle },
     expired: { label: 'Expired', className: 'bg-slate-50 text-slate-700 border-slate-200', icon: Clock },

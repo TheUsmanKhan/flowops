@@ -1,5 +1,6 @@
 import { db } from '@/lib/db'
-import { getWorkspace, isElevated, ApiError, handleError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -7,15 +8,14 @@ export const dynamic = 'force-dynamic'
 /**
  * GET /api/integrations/logs
  *
- * Returns integration_action_logs for the active company (elevated only).
+ * Returns integration_action_logs for the active company.
+ * Requires INTEGRATIONS_VIEW permission.
  * Filters: provider_key, action_type, status, date_from, date_to.
  */
 export async function GET(req: Request) {
   try {
     const ctx = await getWorkspace()
-    if (!isElevated(ctx)) {
-      throw new ApiError(403, 'Only elevated employees can view integration logs')
-    }
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_VIEW)
 
     const url = new URL(req.url)
     const providerKey = url.searchParams.get('provider_key')

@@ -1,0 +1,799 @@
+     1→/**
+     2→ * Integration Framework — server actions.
+     3→ *
+     4→ * Credential management for company integrations: list available providers,
+     5→ * list/ connect/ update/ disconnect/ set-default/ test-connection.
+     6→ *
+     7→ * CRITICAL RULES:
+     8→ *   1. Never return credentials_encrypted (even encrypted) to the client.
+     9→ *   2. All adapter calls go through executeLoggedIntegrationAction().
+    10→ *   3. Connecting/configuring integrations requires INTEGRATIONS_MANAGE permission
+    11→ *      (involves credentials).
+    12→ */
+    13→
+    14→import { db } from '@/lib/db'
+    15→import { getWorkspace, requirePermission, ApiError } from '@/lib/workspace'
+    16→import { insertAuditLog } from '@/lib/audit'
+    17→import { PERMISSIONS } from '@/lib/permissions'
+    18→import {
+    19→  encryptCredentials,
+    20→  decryptCredentials,
+    21→  generateWebhookEndpointId,
+    22→  generateWebhookSecret,
+    23→} from '@/lib/utils/encryption'
+    24→import { getCourierAdapter, getEcommerceAdapter, getAdapterCategory, getAdapterStatus } from '@/lib/integrations/registry'
+    25→import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
+    26→
+    27→interface ActionResult<T = unknown> {
+    28→  success: boolean
+    29→  data?: T
+    30→  error?: string
+    31→}
+    32→
+    33→// ──────────────────────────────────────────────────────────────
+    34→// listAvailableProviders
+    35→// ──────────────────────────────────────────────────────────────
+    36→
+    37→export async function listAvailableProviders(category?: 'courier' | 'ecommerce'): Promise<ActionResult<{
+    38→  providers: Array<{
+    39→    id: string
+    40→    providerKey: string
+    41→    providerName: string
+    42→    category: string
+    43→    logoUrl: string | null
+    44→    authType: string
+    45→    supportsWebhook: boolean
+    46→    configSchema: string
+    47→    capabilities: string
+    48→    adapterStatus: string // 'live' | 'framework_ready' | 'stub' — from registry
+    49→  }>
+    50→}>> {
+    51→  try {
+    52→    const ctx = await getWorkspace()
+    53→    const where: { category?: string; isActive: boolean } = { isActive: true }
+    54→    if (category) where.category = category
+    55→
+    56→    const providers = await db.integrationProvider.findMany({
+    57→      where,
+    58→      orderBy: { category: 'asc' },
+    59→    })
+    60→
+    61→    return {
+    62→      success: true,
+    63→      data: {
+    64→        providers: providers.map((p) => ({
+    65→          id: p.id,
+    66→          providerKey: p.providerKey,
+    67→          providerName: p.providerName,
+    68→          category: p.category,
+    69→          logoUrl: p.logoUrl,
+    70→          authType: p.authType,
+    71→          supportsWebhook: p.supportsWebhook,
+    72→          configSchema: p.configSchema,
+    73→          capabilities: p.capabilities,
+    74→          adapterStatus: getAdapterStatus(p.providerKey),
+    75→        })),
+    76→      },
+    77→    }
+    78→  } catch (err) {
+    79→    return {
+    80→      success: false,
+    81→      error: err instanceof Error ? err.message : 'Failed to list providers',
+    82→    }
+    83→  }
+    84→}
+    85→
+    86→// ──────────────────────────────────────────────────────────────
+    87→// listCompanyIntegrations
+    88→// ──────────────────────────────────────────────────────────────
+    89→
+    90→export async function listCompanyIntegrations(category?: 'courier' | 'ecommerce'): Promise<ActionResult<{
+    91→  integrations: Array<{
+    92→    id: string
+    93→    connectionName: string
+    94→    isActive: boolean
+    95→    isDefault: boolean
+    96→    connectionStatus: string
+    97→    lastSyncAt: Date | null
+    98→    lastError: string | null
+    99→    webhookEndpointId: string | null
+   100→    webhookUrl: string | null
+   101→    createdAt: Date
+   102→    provider: {
+   103→      id: string
+   104→      providerKey: string
+   105→      providerName: string
+   106→      category: string
+   107→      logoUrl: string | null
+   108→      authType: string
+   109→      supportsWebhook: boolean
+   110→    }
+   111→  }>
+   112→}>> {
+   113→  try {
+   114→    const ctx = await getWorkspace()
+   115→    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_VIEW)
+   116→
+   117→    const integrations = await db.companyIntegration.findMany({
+   118→      where: {
+   119→        companyId: ctx.company.id,
+   120→        ...(category ? { provider: { category } } : {}),
+   121→      },
+   122→      include: {
+   123→        provider: {
+   124→          select: {
+   125→            id: true,
+   126→            providerKey: true,
+   127→            providerName: true,
+   128→            category: true,
+   129→            logoUrl: true,
+   130→            authType: true,
+   131→            supportsWebhook: true,
+   132→            configSchema: true, // needed by ReconnectDialog to render credential fields
+   133→          },
+   134→        },
+   135→      },
+   136→      orderBy: { createdAt: 'desc' },
+   137→    })
+   138→
+   139→    const appUrl = process.env.APP_URL || 'http://localhost:3000'
+   140→
+   141→    return {
+   142→      success: true,
+   143→      data: {
+   144→        integrations: integrations.map((i) => ({
+   145→          id: i.id,
+   146→          connectionName: i.connectionName,
+   147→          isActive: i.isActive,
+   148→          isDefault: i.isDefault,
+   149→          connectionStatus: i.connectionStatus,
+   150→          lastSyncAt: i.lastSyncAt,
+   151→          lastError: i.lastError,
+   152→          webhookEndpointId: i.webhookEndpointId,
+   153→          webhookUrl: i.webhookEndpointId
+   154→            ? `${appUrl}/api/webhooks/${i.provider.providerKey}/${i.webhookEndpointId}`
+   155→            : null,
+   156→          createdAt: i.createdAt,
+   157→          provider: i.provider,
+   158→          // NOTE: credentialsEncrypted is intentionally EXCLUDED — never
+   159→          // send encrypted credentials to the client, even encrypted.
+   160→        })),
+   161→      },
+   162→    }
+   163→  } catch (err) {
+   164→    return {
+   165→      success: false,
+   166→      error: err instanceof Error ? err.message : 'Failed to list integrations',
+   167→    }
+   168→  }
+   169→}
+   170→
+   171→// ──────────────────────────────────────────────────────────────
+   172→// connectIntegration
+   173→// ──────────────────────────────────────────────────────────────
+   174→
+   175→export async function connectIntegration(input: {
+   176→  providerId: string
+   177→  connectionName: string
+   178→  credentials: Record<string, string>
+   179→}): Promise<ActionResult<{
+   180→  companyIntegrationId: string
+   181→  webhookUrl?: string
+   182→}>> {
+   183→  try {
+   184→    const ctx = await getWorkspace()
+   185→    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+   186→
+   187→    // Fetch the provider to get config_schema + supports_webhook
+   188→    const provider = await db.integrationProvider.findUnique({
+   189→      where: { id: input.providerId },
+   190→    })
+   191→    if (!provider) return { success: false, error: 'Provider not found' }
+   192→
+   193→    // Validate required credential fields from config_schema
+   194→    let configFields: Array<{ key: string; label: string; type: string; required: boolean }> = []
+   195→    try {
+   196→      configFields = JSON.parse(provider.configSchema)
+   197→    } catch {
+   198→      return { success: false, error: 'Provider config_schema is invalid' }
+   199→    }
+   200→
+   201→    for (const field of configFields) {
+   202→      if (field.required) {
+   203→        const value = input.credentials[field.key]
+   204→        if (!value || !value.trim()) {
+   205→          return { success: false, error: `Missing required field: ${field.label}` }
+   206→        }
+   207→      }
+   208→    }
+   209→
+   210→    // Encrypt credentials
+   211→    const credentialsEncrypted = encryptCredentials(input.credentials)
+   212→
+   213→    // ── Find-or-reactivate ──
+   214→    // If there's an EXISTING integration for this provider + company
+   215→    // (including disconnected ones), reactivate it with the new credentials.
+   216→    // This gives users a clean "connect from scratch" experience after
+   217→    // disconnecting — the provider appears in "Available to Connect",
+   218→    // they click Connect, enter new credentials, and the old row is
+   219→    // reactivated (preserving audit history) instead of creating a duplicate.
+   220→    const existing = await db.companyIntegration.findFirst({
+   221→      where: { companyId: ctx.company.id, providerId: input.providerId },
+   222→      select: { id: true, isActive: true },
+   223→    })
+   224→
+   225→    let integration: { id: string }
+   226→    let webhookEndpointId: string | null = null
+   227→    let isNewConnection = false
+   228→
+   229→    if (existing) {
+   230→      // Reactivate the existing integration with new credentials.
+   231→      // Generate new webhook endpoint ID + secret if the provider supports
+   232→      // webhooks and the old ones were wiped on disconnect.
+   233→      let webhookSecret: string | null = null
+   234→      if (provider.supportsWebhook) {
+   235→        webhookEndpointId = generateWebhookEndpointId()
+   236→        webhookSecret = generateWebhookSecret()
+   237→      }
+   238→
+   239→      integration = await db.companyIntegration.update({
+   240→        where: { id: existing.id },
+   241→        data: {
+   242→          connectionName: input.connectionName,
+   243→          credentialsEncrypted,
+   244→          isActive: true,
+   245→          connectionStatus: 'pending',
+   246→          lastError: null,
+   247→          webhookEndpointId,
+   248→          webhookSecret,
+   249→          // Shopify Adapter Foundation: track the employee re-connecting this
+   250→          // integration (used by the webhook route to build an injected
+   251→          // WorkspaceContext for webhook-triggered actions).
+   252→          connectedByEmployeeId: ctx.employee.id,
+   253→        },
+   254→        select: { id: true },
+   255→      })
+   256→
+   257→      insertAuditLog({
+   258→        action: existing.isActive ? 'integration.credentials_updated' : 'integration.reconnected',
+   259→        entityType: 'company_integration',
+   260→        entityId: integration.id,
+   261→        companyId: ctx.company.id,
+   262→        organizationId: ctx.company.organizationId,
+   263→        userId: ctx.user.id,
+   264→        employeeId: ctx.employee.id,
+   265→        newValues: {
+   266→          provider: provider.providerKey,
+   267→          connectionName: input.connectionName,
+   268→          supportsWebhook: provider.supportsWebhook,
+   269→        },
+   270→      })
+   271→    } else {
+   272→      // No existing integration — create a fresh one.
+   273→      let webhookSecret: string | null = null
+   274→      if (provider.supportsWebhook) {
+   275→        webhookEndpointId = generateWebhookEndpointId()
+   276→        webhookSecret = generateWebhookSecret()
+   277→      }
+   278→
+   279→      try {
+   280→        integration = await db.companyIntegration.create({
+   281→          data: {
+   282→            companyId: ctx.company.id,
+   283→            organizationId: ctx.company.organizationId,
+   284→            providerId: input.providerId,
+   285→            connectionName: input.connectionName,
+   286→            credentialsEncrypted,
+   287→            webhookEndpointId,
+   288→            webhookSecret,
+   289→            connectionStatus: 'pending',
+   290→            createdBy: ctx.employee.id,
+   291→            // Shopify Adapter Foundation: track the employee connecting this
+   292→            // integration (used by the webhook route to build an injected
+   293→            // WorkspaceContext for webhook-triggered actions).
+   294→            connectedByEmployeeId: ctx.employee.id,
+   295→          },
+   296→          select: { id: true },
+   297→        })
+   298→        isNewConnection = true
+   299→
+   300→        insertAuditLog({
+   301→          action: 'integration.connected',
+   302→          entityType: 'company_integration',
+   303→          entityId: integration.id,
+   304→          companyId: ctx.company.id,
+   305→          organizationId: ctx.company.organizationId,
+   306→          userId: ctx.user.id,
+   307→          employeeId: ctx.employee.id,
+   308→          newValues: {
+   309→            provider: provider.providerKey,
+   310→            connectionName: input.connectionName,
+   311→            supportsWebhook: provider.supportsWebhook,
+   312→          },
+   313→        })
+   314→      } catch (createErr: unknown) {
+   315→        // Catch the @@unique([companyId, providerId]) constraint violation.
+   316→        // This means another concurrent request just created this integration
+   317→        // (genuine race between two different sessions — the idempotency key
+   318→        // system only protects same-session double-clicks). Re-fetch the
+   319→        // now-existing row and run the same reactivation logic as the
+   320→        // findFirst-then-update path above.
+   321→        if (
+   322→          createErr &&
+   323→          typeof createErr === 'object' &&
+   324→          'code' in createErr &&
+   325→          (createErr as { code: string }).code === 'P2002'
+   326→        ) {
+   327→          // Re-fetch the row the winner created
+   328→          const raceExisting = await db.companyIntegration.findFirst({
+   329→            where: { companyId: ctx.company.id, providerId: input.providerId },
+   330→            select: { id: true, isActive: true },
+   331→          })
+   332→          if (!raceExisting) {
+   333→            // Extremely unlikely: the row was deleted between the constraint
+   334→            // violation and this re-fetch. Let the error propagate.
+   335→            throw createErr
+   336→          }
+   337→          // Reactivate the row (same logic as the existing-update path above)
+   338→          let raceWebhookSecret: string | null = null
+   339→          if (provider.supportsWebhook) {
+   340→            webhookEndpointId = generateWebhookEndpointId()
+   341→            raceWebhookSecret = generateWebhookSecret()
+   342→          }
+   343→          integration = await db.companyIntegration.update({
+   344→            where: { id: raceExisting.id },
+   345→            data: {
+   346→              connectionName: input.connectionName,
+   347→              credentialsEncrypted,
+   348→              isActive: true,
+   349→              connectionStatus: 'pending',
+   350→              lastError: null,
+   351→              webhookEndpointId,
+   352→              webhookSecret: raceWebhookSecret,
+   353→              // Shopify Adapter Foundation: track the employee connecting this
+   354→              // integration (race-recovery path — same as the main create path).
+   355→              connectedByEmployeeId: ctx.employee.id,
+   356→            },
+   357→            select: { id: true },
+   358→          })
+   359→          insertAuditLog({
+   360→            action: raceExisting.isActive ? 'integration.credentials_updated' : 'integration.reconnected',
+   361→            entityType: 'company_integration',
+   362→            entityId: integration.id,
+   363→            companyId: ctx.company.id,
+   364→            organizationId: ctx.company.organizationId,
+   365→            userId: ctx.user.id,
+   366→            employeeId: ctx.employee.id,
+   367→            newValues: {
+   368→              provider: provider.providerKey,
+   369→              connectionName: input.connectionName,
+   370→              supportsWebhook: provider.supportsWebhook,
+   371→            },
+   372→          })
+   373→        } else {
+   374→          throw createErr
+   375→        }
+   376→      }
+   377→    }
+   378→
+   379→    const appUrl = process.env.APP_URL || 'http://localhost:3000'
+   380→    const webhookUrl = webhookEndpointId
+   381→      ? `${appUrl}/api/webhooks/${provider.providerKey}/${webhookEndpointId}`
+   382→      : undefined
+   383→
+   384→    return {
+   385→      success: true,
+   386→      data: { companyIntegrationId: integration.id, webhookUrl },
+   387→    }
+   388→  } catch (err) {
+   389→    return {
+   390→      success: false,
+   391→      error: err instanceof Error ? err.message : 'Failed to connect integration',
+   392→    }
+   393→  }
+   394→}
+   395→
+   396→// ──────────────────────────────────────────────────────────────
+   397→// updateIntegrationCredentials
+   398→// ──────────────────────────────────────────────────────────────
+   399→
+   400→export async function updateIntegrationCredentials(
+   401→  companyIntegrationId: string,
+   402→  credentials: Record<string, string>,
+   403→): Promise<ActionResult> {
+   404→  try {
+   405→    const ctx = await getWorkspace()
+   406→    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+   407→
+   408→    const integration = await db.companyIntegration.findFirst({
+   409→      where: { id: companyIntegrationId, companyId: ctx.company.id },
+   410→      include: { provider: true },
+   411→    })
+   412→    if (!integration) return { success: false, error: 'Integration not found' }
+   413→
+   414→    // Validate required fields
+   415→    let configFields: Array<{ key: string; required: boolean; label: string }> = []
+   416→    try {
+   417→      configFields = JSON.parse(integration.provider.configSchema)
+   418→    } catch {
+   419→      return { success: false, error: 'Provider config_schema is invalid' }
+   420→    }
+   421→    for (const field of configFields) {
+   422→      if (field.required && (!credentials[field.key] || !credentials[field.key].trim())) {
+   423→        return { success: false, error: `Missing required field: ${field.label}` }
+   424→      }
+   425→    }
+   426→
+   427→    const credentialsEncrypted = encryptCredentials(credentials)
+   428→
+   429→    // Reactivate the integration if it was disconnected. This makes the
+   430→    // credentials PATCH route double as the "reconnect" endpoint — the UI's
+   431→    // Reconnect button calls this route with new credentials, and the
+   432→    // integration flips back to isActive=true + connectionStatus='pending'.
+   433→    // If the integration was already active, this is a no-op on isActive
+   434→    // (just a credential refresh).
+   435→    const wasDisconnected = !integration.isActive
+   436→
+   437→    await db.companyIntegration.update({
+   438→      where: { id: companyIntegrationId },
+   439→      data: {
+   440→        credentialsEncrypted,
+   441→        isActive: true, // reactivate if disconnected
+   442→        connectionStatus: 'pending', // reset to pending — needs re-test
+   443→        lastError: null,
+   444→        // Shopify Adapter Foundation: this route doubles as the Reconnect
+   445→        // button's handler — the employee clicking Reconnect is connecting
+   446→        // Shopify, so update connectedByEmployeeId here too.
+   447→        connectedByEmployeeId: ctx.employee.id,
+   448→      },
+   449→    })
+   450→
+   451→    insertAuditLog({
+   452→      action: wasDisconnected ? 'integration.reconnected' : 'integration.credentials_updated',
+   453→      entityType: 'company_integration',
+   454→      entityId: companyIntegrationId,
+   455→      companyId: ctx.company.id,
+   456→      organizationId: ctx.company.organizationId,
+   457→      userId: ctx.user.id,
+   458→      employeeId: ctx.employee.id,
+   459→    })
+   460→
+   461→    return { success: true }
+   462→  } catch (err) {
+   463→    return {
+   464→      success: false,
+   465→      error: err instanceof Error ? err.message : 'Failed to update credentials',
+   466→    }
+   467→  }
+   468→}
+   469→
+   470→// ──────────────────────────────────────────────────────────────
+   471→// disconnectIntegration
+   472→// ──────────────────────────────────────────────────────────────
+   473→
+   474→export async function disconnectIntegration(companyIntegrationId: string): Promise<ActionResult> {
+   475→  try {
+   476→    const ctx = await getWorkspace()
+   477→    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+   478→
+   479→    const integration = await db.companyIntegration.findFirst({
+   480→      where: { id: companyIntegrationId, companyId: ctx.company.id },
+   481→      select: { id: true, isActive: true, provider: { select: { category: true } } },
+   482→    })
+   483→    if (!integration) return { success: false, error: 'Integration not found' }
+   484→
+   485→    // Idempotency guard — if already disconnected, return success without
+   486→    // inserting a duplicate audit log.
+   487→    if (!integration.isActive) {
+   488→      return { success: true }
+   489→    }
+   490→
+   491→    // ── Full disconnect in a single transaction ──
+   492→    // 1. Deactivate the integration + update connectionStatus to 'expired'
+   493→    //    (the CHECK constraint allows 'pending' | 'connected' | 'error' | 'expired'
+   494→    //    — 'expired' is the closest semantic to "disconnected" without a migration).
+   495→    // 2. Wipe credentials + webhook info (security — no lingering API keys).
+   496→    // 3. Clear lastError + lastSyncAt (stale state from before disconnect).
+   497→    // 4. If this integration was the company's default courier, clear that FK
+   498→    //    so auto-booking doesn't silently fail on future orders.
+   499→    // 5. Audit log (in the same transaction so we never have a deactivation
+   500→    //    without an audit trail).
+   501→    await db.$transaction(async (tx) => {
+   502→      await tx.companyIntegration.update({
+   503→        where: { id: companyIntegrationId },
+   504→        data: {
+   505→          isActive: false,
+   506→          isDefault: false,
+   507→          connectionStatus: 'expired',
+   508→          credentialsEncrypted: null,
+   509→          webhookEndpointId: null,
+   510→          webhookSecret: null,
+   511→          lastError: null,
+   512→          lastSyncAt: null,
+   513→        },
+   514→      })
+   515→
+   516→      // Clear the default courier FK if it points at this integration.
+   517→      // This prevents auto-booking from silently failing with "integration
+   518→      // not found or inactive" on every future manual order.
+   519→      if (integration.provider.category === 'courier') {
+   520→        await tx.companyOrderSetting.updateMany({
+   521→          where: {
+   522→            companyId: ctx.company.id,
+   523→            defaultCourierCompanyIntegrationId: companyIntegrationId,
+   524→          },
+   525→          data: {
+   526→            defaultCourierCompanyIntegrationId: null,
+   527→          },
+   528→        })
+   529→      }
+   530→
+   531→      await tx.auditLog.create({
+   532→        data: {
+   533→          action: 'integration.disconnected',
+   534→          entityType: 'company_integration',
+   535→          entityId: companyIntegrationId,
+   536→          companyId: ctx.company.id,
+   537→          organizationId: ctx.company.organizationId,
+   538→          userId: ctx.user.id,
+   539→          employeeId: ctx.employee.id,
+   540→        },
+   541→      })
+   542→    })
+   543→
+   544→    return { success: true }
+   545→  } catch (err) {
+   546→    return {
+   547→      success: false,
+   548→      error: err instanceof Error ? err.message : 'Failed to disconnect integration',
+   549→    }
+   550→  }
+   551→}
+   552→
+   553→// ──────────────────────────────────────────────────────────────
+   554→// setDefaultIntegration
+   555→// ──────────────────────────────────────────────────────────────
+   556→
+   557→export async function setDefaultIntegration(companyIntegrationId: string): Promise<ActionResult> {
+   558→  try {
+   559→    const ctx = await getWorkspace()
+   560→    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+   561→
+   562→    // Fetch the integration + its provider's category
+   563→    const integration = await db.companyIntegration.findFirst({
+   564→      where: { id: companyIntegrationId, companyId: ctx.company.id },
+   565→      include: { provider: { select: { category: true } } },
+   566→    })
+   567→    if (!integration) return { success: false, error: 'Integration not found' }
+   568→
+   569→    // Unset is_default for all other integrations in the SAME category
+   570→    // for this company (join through provider to determine category)
+   571→    const sameCategoryIntegrations = await db.companyIntegration.findMany({
+   572→      where: {
+   573→        companyId: ctx.company.id,
+   574→        id: { not: companyIntegrationId },
+   575→        provider: { category: integration.provider.category },
+   576→      },
+   577→      select: { id: true },
+   578→    })
+   579→
+   580→    await db.$transaction([
+   581→      // Unset others
+   582→      db.companyIntegration.updateMany({
+   583→        where: { id: { in: sameCategoryIntegrations.map((i) => i.id) } },
+   584→        data: { isDefault: false },
+   585→      }),
+   586→      // Set this one
+   587→      db.companyIntegration.update({
+   588→        where: { id: companyIntegrationId },
+   589→        data: { isDefault: true },
+   590→      }),
+   591→    ])
+   592→
+   593→    insertAuditLog({
+   594→      action: 'integration.set_default',
+   595→      entityType: 'company_integration',
+   596→      entityId: companyIntegrationId,
+   597→      companyId: ctx.company.id,
+   598→      organizationId: ctx.company.organizationId,
+   599→      userId: ctx.user.id,
+   600→      employeeId: ctx.employee.id,
+   601→      newValues: { category: integration.provider.category },
+   602→    })
+   603→
+   604→    return { success: true }
+   605→  } catch (err) {
+   606→    return {
+   607→      success: false,
+   608→      error: err instanceof Error ? err.message : 'Failed to set default integration',
+   609→    }
+   610→  }
+   611→}
+   612→
+   613→// ──────────────────────────────────────────────────────────────
+   614→// testIntegrationConnection
+   615→// ──────────────────────────────────────────────────────────────
+   616→
+   617→export async function testIntegrationConnection(companyIntegrationId: string): Promise<ActionResult<{
+   618→  status: string
+   619→  error?: string
+   620→}>> {
+   621→  try {
+   622→    const ctx = await getWorkspace()
+   623→    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+   624→
+   625→    const integration = await db.companyIntegration.findFirst({
+   626→      where: { id: companyIntegrationId, companyId: ctx.company.id },
+   627→      include: { provider: true },
+   628→    })
+   629→    if (!integration) return { success: false, error: 'Integration not found' }
+   630→    if (!integration.credentialsEncrypted) {
+   631→      return { success: false, error: 'No credentials stored for this integration' }
+   632→    }
+   633→
+   634→    // Decrypt credentials
+   635→    const credentials = decryptCredentials(integration.credentialsEncrypted)
+   636→
+   637→    // Get the appropriate adapter via the registry
+   638→    const providerKey = integration.provider.providerKey
+   639→    const category = getAdapterCategory(providerKey)
+   640→    if (!category) {
+   641→      return { success: false, error: `No adapter registered for provider '${providerKey}'` }
+   642→    }
+   643→
+   644→    // Call a lightweight, read-only capability check via the logged wrapper.
+   645→    //
+   646→    // PROVIDER-DISPATCH PATTERN (not PostEx-hardcoded):
+   647→    //   1. If the adapter implements pingConnection() → use it (preferred).
+   648→    //      PostEx implements this (calls fetchOperationalCities — read-only).
+   649→    //      Leopard/TCS will automatically pick this up once their adapters
+   650→    //      implement pingConnection() — no changes needed here.
+   651→    //   2. Else if the adapter supports fetchOperationalCities() → use it
+   652→    //      (covers couriers that have a cities endpoint but no explicit ping).
+   653→    //   3. Else fall back to calculateRate() (legacy path — some couriers
+   654→    //      expose a rate endpoint that validates credentials).
+   655→    //   4. Else surface a clear "not supported" error.
+   656→    //
+   657→    // For ecommerce adapters: no standard "ping" — parseWebhookOrder with an
+   658→    // empty payload is the minimal "does the adapter work" test.
+   659→    try {
+   660→      const testResult = await executeLoggedIntegrationAction<{ success: boolean; error?: string }>({
+   661→        companyIntegrationId,
+   662→        organizationId: ctx.company.organizationId,
+   663→        actionType: 'test_connection',
+   664→        direction: 'outbound',
+   665→        fn: async () => {
+   666→          if (category === 'courier') {
+   667→            const adapter = getCourierAdapter(providerKey, credentials)
+   668→
+   669→            // Preferred: adapter implements pingConnection()
+   670→            if (typeof adapter.pingConnection === 'function') {
+   671→              return adapter.pingConnection()
+   672→            }
+   673→
+   674→            // Fallback 1: adapter supports fetchOperationalCities() (read-only)
+   675→            if (typeof adapter.fetchOperationalCities === 'function') {
+   676→              const cities = await adapter.fetchOperationalCities()
+   677→              if (cities.length === 0) {
+   678→                return {
+   679→                  success: false,
+   680→                  error: `${providerKey} accepted the credentials but returned 0 cities.`,
+   681→                }
+   682→              }
+   683→              return { success: true }
+   684→            }
+   685→
+   686→            // Fallback 2: calculateRate() (legacy — unsupported by PostEx)
+   687→            if (typeof adapter.calculateRate === 'function') {
+   688→              try {
+   689→                const rateResult = await adapter.calculateRate({
+   690→                  fromCity: 'Karachi',
+   691→                  toCity: 'Lahore',
+   692→                  weightGrams: 500,
+   693→                })
+   694→                return {
+   695→                  success: rateResult.success,
+   696→                  error: rateResult.success ? undefined : rateResult.error,
+   697→                }
+   698→              } catch (rateErr) {
+   699→                return {
+   700→                  success: false,
+   701→                  error: rateErr instanceof Error ? rateErr.message : 'calculateRate failed',
+   702→                }
+   703→              }
+   704→            }
+   705→
+   706→            // No read-only test method available
+   707→            return {
+   708→              success: false,
+   709→              error: `The ${providerKey} adapter does not implement a read-only connectivity check (pingConnection, fetchOperationalCities, or calculateRate). Test not supported.`,
+   710→            }
+   711→          } else {
+   712→            const adapter = getEcommerceAdapter(providerKey, credentials)
+   713→            // Ecommerce: no standard "ping" — use parseWebhookOrder with
+   714→            // an empty payload as a minimal "does the adapter work" test
+   715→            try {
+   716→              const parsed = await adapter.parseWebhookOrder({})
+   717→              return {
+   718→                success: parsed.success,
+   719→                error: parsed.success ? undefined : parsed.error,
+   720→              }
+   721→            } catch (parseErr) {
+   722→              return {
+   723→                success: false,
+   724→                error: parseErr instanceof Error ? parseErr.message : 'parseWebhookOrder failed',
+   725→              }
+   726→            }
+   727→          }
+   728→        },
+   729→      })
+   730→
+   731→      // executeLoggedIntegrationAction throws on failure; if we reach here
+   732→      // with testResult.success=true, the connection is good.
+   733→      if (testResult.success) {
+   734→        await db.companyIntegration.update({
+   735→          where: { id: companyIntegrationId },
+   736→          data: { connectionStatus: 'connected', lastSyncAt: new Date(), lastError: null },
+   737→        })
+   738→        return { success: true, data: { status: 'connected' } }
+   739→      }
+   740→
+   741→      // The ping call returned a structured failure (not an exception).
+   742→      // Surface the error but DON'T mark the integration as broken — a single
+   743→      // failed test ping may be transient (network blip, rate limit, etc.).
+   744→      // We update lastError + connectionStatus='error' for visibility, but
+   745→      // isActive stays true so the integration remains usable.
+   746→      const errorMsg = testResult.error || 'Connection test failed'
+   747→      await db.companyIntegration.update({
+   748→        where: { id: companyIntegrationId },
+   749→        data: { connectionStatus: 'error', lastError: errorMsg },
+   750→      })
+   751→      return { success: false, error: errorMsg, data: { status: 'error', error: errorMsg } }
+   752→    } catch (testErr) {
+   753→      const errorMsg = testErr instanceof Error ? testErr.message : String(testErr)
+   754→      // Same non-destructive policy: log the error, don't disable the integration.
+   755→      await db.companyIntegration.update({
+   756→        where: { id: companyIntegrationId },
+   757→        data: { connectionStatus: 'error', lastError: errorMsg },
+   758→      }).catch(() => {}) // don't let a DB failure mask the original test error
+   759→      // Return success=false but with the error message (don't throw —
+   760→      // the caller wants to display it in the UI)
+   761→      return { success: false, error: errorMsg, data: { status: 'error', error: errorMsg } }
+   762→    }
+   763→  } catch (err) {
+   764→    return {
+   765→      success: false,
+   766→      error: err instanceof Error ? err.message : 'Failed to test connection',
+   767→    }
+   768→  }
+   769→}
+   770→
+   771→// ──────────────────────────────────────────────────────────────
+   772→// Internal helper: get a decrypted-credentials + adapter combo
+   773→// for use by other server actions (courier booking, etc.)
+   774→// ──────────────────────────────────────────────────────────────
+   775→
+   776→export async function getIntegrationAdapter(companyIntegrationId: string): Promise<{
+   777→  credentials: Record<string, string>
+   778→  providerKey: string
+   779→  category: 'courier' | 'ecommerce'
+   780→  organizationId: string
+   781→} | null> {
+   782→  const integration = await db.companyIntegration.findUnique({
+   783→    where: { id: companyIntegrationId },
+   784→    include: { provider: true },
+   785→  })
+   786→  if (!integration || !integration.isActive || !integration.credentialsEncrypted) return null
+   787→
+   788→  const credentials = decryptCredentials(integration.credentialsEncrypted)
+   789→  const category = getAdapterCategory(integration.provider.providerKey)
+   790→  if (!category) return null
+   791→
+   792→  return {
+   793→    credentials,
+   794→    providerKey: integration.provider.providerKey,
+   795→    category,
+   796→    organizationId: integration.organizationId,
+   797→  }
+   798→}
+   799→

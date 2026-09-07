@@ -13399,3 +13399,711 @@ Stage Summary:
 - 3 frontend/backend mismatches fixed (Customers, Integrations, Promotions).
 - Org-wide data leak fixed (/api/inventory/dashboard).
 - Production DB roles updated with new permissions.
+
+---
+Task ID: COURIER-INTEGRATION-AUDIT
+Agent: explore
+Task: Comprehensive audit of the Leopard + PostEx courier integration system (RESEARCH ONLY — no file modifications)
+
+Work Log:
+- Read full worklog.md context (13,401 lines) to understand prior history of courier integration builds (Leopard PDF conformance, PostEx API field confirmation via Postman, Booking Workbench v2, city sync job, status polling infrastructure).
+- Audited all 10 required areas: connection-status logic, integration logs, city sync, shipper import, test button, order/auto-booking flow, Leopard adapter fields, PostEx adapter fields, status polling, webhook, DB state.
+- Connected directly to the Supabase DB via Bun + PrismaClient (psql not available in sandbox) to read live production state.
+- Verified against migration 004 SQL + prisma schema + every adapter / action / route file referenced in the task description.
+
+Findings — see "Detailed Findings" section below.
+
+Stage Summary — DETAILED FINDINGS:
+
+═══════════════════════════════════════════════════════════════════════
+1. ROOT CAUSE OF "PENDING" STATUS (why not "connected")
+═══════════════════════════════════════════════════════════════════════
+
+PRIMARY ROOT CAUSE (P0 bug — confirmed):
+  src/app/api/integrations/[id]/test/route.ts line 84 sets
+  `connectionStatus: 'active'` on successful test — NOT 'connected'.
+
+  src/components/settings/integrations-view.tsx lines 131-136 only render
+  badges for these connectionStatus values:
+     connected → "Connected" (green)
+     pending   → "Pending"   (amber)
+     error     → "Error"     (red)
+     expired   → "Expired"   (slate)
+
+  There is NO entry for 'active'. Line 137 falls back to `config.pending`
+  when the status isn't in the map — so any integration with status='active'
+  renders as the amber "Pending" badge.
+
+  Sequence reproducing the user's complaint:
+     1. User connects integration → connectIntegration() sets status='pending' (correct, intentional — DB needs validation).
+     2. User clicks "Test Connection" → frontend posts to /api/integrations/[id]/test.
+     3. Test route decrypts creds, calls adapter.pingConnection() (Leopard: getAllCities; PostEx: get-operational-city) — REAL read-only API call.
+     4. Adapter returns success.
+     5. Route updates DB row with connectionStatus='active'.
+     6. Frontend refetches integrations list.
+     7. StatusBadge receives status='active' → no map entry → falls back to pending → renders "Pending" badge.
+
+  DB confirmation (live query):
+     connectionStatus distribution:
+       active    | isActive=true  | 4 rows  (all show "Pending" in UI)
+       connected | isActive=true  | 2 rows  (correctly show "Connected")
+       pending   | isActive=true  | 2 rows  (genuinely never tested)
+       expired   | isActive=false | 1 row   (disconnected)
+
+DEAD/DUPLICATE CODE PATH:
+  src/lib/actions/integration.actions.ts lines 617-769 has a SECOND test
+  implementation: `testIntegrationConnection()` server action. It correctly
+  sets `connectionStatus: 'connected'` (line 736) — but the UI NEVER calls
+  this action. The frontend testMutation calls the API route directly:
+     api.post(`/api/integrations/${id}/test`)
+  (src/components/settings/integrations-view.tsx line 172)
+
+  So the "correct" implementation is dead code; the "broken" implementation
+  is the one wired to the UI.
+
+DB CHECK CONSTRAINT MISSING:
+  Migration 004 specifies:
+     CHECK ("connectionStatus" IN ('pending','connected','error','expired'))
+  but a live query of pg_constraint on `company_integrations` returns ONLY
+  PK + FK constraints — NO check constraint exists. This is why the bad
+  'active' value was silently accepted by the DB instead of raising an
+  error that would have caught this bug at first run.
+
+  Root cause: migration 004's `CREATE TABLE IF NOT EXISTS company_integrations`
+  was a no-op because the table already existed (created earlier by
+  `prisma db:push`). The CHECK constraint inside the CREATE TABLE never
+  applied. Subsequent prisma db:push operations never sync CHECK constraints
+  (only column/index changes).
+
+═══════════════════════════════════════════════════════════════════════
+2. WHY NO INTEGRATION LOGS (partial — system logs DO work)
+═══════════════════════════════════════════════════════════════════════
+
+  src/lib/integrations/logged-call.ts — executeLoggedIntegrationAction()
+  WORKS correctly. It wraps every adapter call in a try/finally that
+  inserts a row into integration_action_logs (success or failure). Log
+  insertion failures are non-fatal (logged to console only).
+
+  Live DB confirms 337 total log rows exist. Logs ARE being created.
+
+  Per-integration breakdown (live query):
+     cmtlswof6 (Leopard Production, active) — 41 logs
+     cmsn7440q (postex, pending)            — 200+ logs (all track_shipment_bulk from poller)
+     cmseghq99 (Postex, connected)          — 28 logs
+     cmtjig58201 (mz leopard, active)       — 9 logs
+     cmtgd1r520002 (usman@flowops.pk, connected) — 15 logs
+     cmth74xi6 (muzammal leopard, expired)  — 13 logs
+     cmtqexzj0 + cmtqfarn0 (LP×2, active)   — 2 logs each (only ping + fetch_shipper_by_id)
+     cmtqetsml (Leopard Prod, pending)      — 0 LOGS ← user's complaint is correct for THIS integration
+
+  REASONS the user might believe "no logs":
+  (a) The Leopard Prod integration (cmtqetsml) genuinely has 0 logs because
+      the Test button was never clicked for it. The test_connection/
+      ping_connection actions are the ONLY ones that would create logs for
+      an integration that hasn't yet been used for booking/tracking.
+  (b) /api/integrations/logs route (line 16) requires `isElevated(ctx)` —
+      NOT just INTEGRATIONS_VIEW. A Manager role with INTEGRATIONS_VIEW
+      permission CANNOT view integration logs — they'd get a 403 "Only
+      elevated employees can view integration logs" and the
+      integration-logs-view component would show an empty state, looking
+      like "no logs exist".
+  (c) The Integration Logs view likely defaults to filtering by an
+      integration that has no logs (e.g. the new pending Leopard Prod
+      integration), making the user think the whole logging system is
+      broken.
+
+═══════════════════════════════════════════════════════════════════════
+3. CITY SYNC FLOW
+═══════════════════════════════════════════════════════════════════════
+
+  Flow traced end-to-end:
+     Frontend syncCitiesMutation (integrations-view.tsx:193)
+       → POST /api/couriers/sync-cities
+       → route returns IMMEDIATELY with "sync started in background"
+       → async IIFE calls syncCourierOperationalCities(providerKey)
+         (src/lib/actions/city-sync.actions.ts:50)
+       → finds ANY active company_integration for the providerKey
+       → decrypts creds, gets adapter
+       → adapter.fetchOperationalCities() wrapped in executeLoggedIntegrationAction
+       → upserts each city into courier_operational_cities
+       → disables cities no longer in the fresh response
+       → insertAuditLog + insertMetricEvent (fire-and-forget)
+
+  VERDICT: WORKS at the system level. DB shows:
+     leopard: 774 cities (770 pickup, 770 delivery), last sync 2026-09-07 19:56
+     postex:  896 cities (896 pickup, 896 delivery), last sync 2026-08-30 22:40
+
+  ISSUES that may make the user think it's broken:
+  (a) /api/couriers/sync-cities route checks `caller.role.roleTier !== 'elevated'`
+      — only Owner/Admin can sync. A Manager with INTEGRATIONS_MANAGE gets 403.
+      This is INCONSISTENT with the rest of the integration framework which
+      uses `requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)`.
+  (b) The route returns immediately ("sync started in background") and the
+      frontend has to refetch after a delay — there's no WebSocket/SSE/event
+      to notify the UI when the sync actually completes. If the user clicks
+      "Sync" and immediately looks at the cities list, they see stale data.
+  (c) For the new pending "Leopard Prod" integration (cmtqetsml), NO sync
+      has ever been run — 0 logs. User must click Sync Cities first.
+
+═══════════════════════════════════════════════════════════════════════
+4. SHIPPER IMPORT FLOW (pickup addresses)
+═══════════════════════════════════════════════════════════════════════
+
+  Flow traced end-to-end (Import by ID):
+     Frontend importMutation (pickup-addresses-section.tsx:124)
+       → POST /api/integrations/[id]/pickup-addresses/import-by-id
+       → route calls importPickupAddressById(id, shipment_id)
+         (src/lib/actions/courier-address-book.actions.ts:300)
+       → verifies ownership + requires isElevated(ctx)
+       → Leopard-only (rejects PostEx)
+       → calls leopardAdapter.fetchShipperById(shipmentId) via logged wrapper
+       → fetchShipperById → GET getShipperDetails?request_param=shipment_id&request_value={id}
+         (Leopard PDF page 73-78 confirmed)
+       → creates courier_pickup_address row
+       → audit log
+
+  VERDICT: WORKS. DB confirms 1 successful fetch_shipper_by_id log for each
+  of cmtqexzj0, cmtqfarn0, cmtjig58201, cmtlswof6 (Leopard integrations).
+
+  Frontend buttons available (pickup-addresses-section.tsx):
+     Refresh  → /api/integrations/[id]/pickup-addresses/refresh (re-fetch existing)
+     Add      → /api/integrations/[id]/pickup-addresses (create new on courier + locally)
+     Import   → /api/integrations/[id]/pickup-addresses/import-by-id (single, Leopard only)
+
+  MISSING (gap, not bug):
+     There's a backend route POST /api/integrations/[id]/pickup-addresses/sync
+     that calls syncPickupAddresses() — bulk fetch ALL remote shippers + upsert
+     locally. The action is fully implemented (line 551) and the route exists
+     (35 lines), but NO FRONTEND BUTTON calls this endpoint. Users can only
+     import shippers one at a time by shipment_id (Leopard) or create new ones.
+
+  DB state — courier_pickup_addresses:
+     cmseghq99 (Postex)            — 8 addresses
+     cmsn7440q (postex, pending)   — 7 addresses
+     cmth74xi6 (muzammal leopard, expired) — 2 addresses
+     cmtjig58201 (mz leopard)     — 1 address
+     cmtqexzj0 (LP)               — 1 address
+     cmtqfarn0 (LP)               — 1 address
+     Total: 20 addresses across 6 integrations
+
+═══════════════════════════════════════════════════════════════════════
+5. TEST CONNECTION FLOW
+═══════════════════════════════════════════════════════════════════════
+
+  Flow traced end-to-end:
+     Frontend testMutation (integrations-view.tsx:172)
+       → POST /api/integrations/[id]/test
+       → route decrypts creds, gets adapter
+       → calls adapter.pingConnection() via executeLoggedIntegrationAction
+       → on success: updates connectionStatus='active' ← BUG (should be 'connected')
+       → insertAuditLog('integration.test_success')
+       → returns { ok: true, status: 'active' }
+
+  Adapter ping implementations (both REAL API calls, not stubs):
+     Leopard: pingConnection() → fetchOperationalCities() → POST getAllCities
+              Returns success if ≥1 city returned.
+     PostEx:  pingConnection() → fetchOperationalCities() → GET v2/get-operational-city (30s timeout)
+              Returns success if ≥1 city returned.
+
+  VERDICT: Test button WORKS at the API + adapter level — it really does
+  call the courier API and validate credentials. The bug is ONLY in the
+  connectionStatus value ('active' vs 'connected') + the UI fallback.
+
+  DB confirmation of successful tests:
+     - cmtjig58201: 1 ping_connection success on 2026-09-07 19:56 (last)
+     - cmtqexzj0:   1 ping_connection success on 2026-09-06 22:58
+     - cmtqfarn0:   2 ping_connection success (latest 2026-09-06 23:11)
+     - cmtlswof6:   2 ping_connection success (latest 2026-09-04 11:02)
+     - cmth74xi6:   5 test_connection success (latest 2026-08-31)
+     - cmsn7440q:   2 test_connection success (2026-08-11) ← OLD, never re-tested
+     - cmseghq99:   1 test_connection success (2026-08-10), 1 failed (2026-08-06 — PostEx rate API not supported)
+     - cmtqetsml (Leopard Prod, pending): 0 test/ping logs ← NEVER tested
+
+═══════════════════════════════════════════════════════════════════════
+6. ORDER CREATION + AUTO-BOOKING FLOW
+═══════════════════════════════════════════════════════════════════════
+
+  createManualOrder() (src/lib/actions/order.actions.ts:920):
+     Fires maybeAutoBookOrder() in BACKGROUND (fire-and-forget IIFE) IF:
+        - orderStatus === 'confirmed'
+        - !isSelfFulfilled
+        - orderSettings.courierBookingMode === 'automatic'
+        - d.courier_company_integration_id (per-order courier) OR
+          orderSettings.defaultCourierCompanyIntegrationId is set
+
+  maybeAutoBookOrder() (booking.actions.ts:581):
+     - orderSource must be 'manual'
+     - orderStatus must be 'confirmed' or 'processing'
+     - reads CompanyOrderSetting
+     - integrationId = order.courierCompanyIntegrationId || settings.defaultCourierCompanyIntegrationId
+     - bails if integrationId is null (silent skip)
+     - bails if integration isActive=false (reconnect prompt)
+     - calls bookOrderWithCourier()
+
+  bookOrderWithCourier() (booking.actions.ts:81):
+     1. getWorkspace() + requirePermission(ORDERS_FULFILL)
+     2. Fetch integration (isActive=true required)
+     3. Fetch order + items + variant weights + customer
+     4. Apply overrides + stored-value defaults
+     5. Leopard preferences (auto-append product details to transaction notes)
+     6. BUG FIX: Leopard rejects empty special_instructions — fallback to itemDescription
+     7. revalidateCityAtBookingTime() — provider-agnostic, with live courier fallback
+     8. calculateOrderWeightKg() — sums variant.weightKg × quantity
+     9. determinePostExOrderType() — PostEx only (Normal/Overland/Replacement, never Reversed)
+     10. Resolve pickupAddressCode (override > order.pickupAddressId > integration default)
+     11. For Leopard: resolve delivery city NAME to numeric cityId from courier_operational_cities
+     12. Build BookShipmentInput
+     13. Call adapter.bookShipment() DIRECTLY (NOT wrapped in executeLoggedIntegrationAction)
+         — then wrap the captured result in a no-op fn for logging
+     14. If success: update order with trackingNumber + courierBookingStatus='booked'
+         + persist corrected deliveryCity (numeric for Leopard)
+     15. If success: download courier slip_link if provided (Leopard) → store local PDF
+     16. insertAuditLog('order.auto_booked')
+     17. insertMetricEvent('order.auto_booked')
+     18. Background async — order creation returns immediately, booking runs in background
+
+  VERDICT: WORKS. DB confirms:
+     - cmsn7440q (postex, pending): 11 successful book_shipment logs
+     - cmtlswof6 (Leopard Production, active): 18 successful book_shipment logs
+     - cmseghq99 (Postex, connected): 14 successful book_shipment logs
+     - cmtjig58201 (mz leopard): 2 successful book_shipment logs
+     - cmth74xi6 (muzammal leopard, expired): 1 successful book_shipment log
+
+  Order table status:
+     10 confirmed + booked (9 with tracking numbers)
+     1 delivered + booked
+     3 rto + booked
+     12 cancelled + cancelled
+     6 confirmed + failed (city resolution issues — see below)
+     13 cancelled + not_booked (with tracking — pre-existing test data)
+     28 confirmed + not_booked (no auto-booking fired — see critical gap)
+
+  CRITICAL GAP — defaultCourierCompanyIntegrationId is NULL for ALL 14
+  companies in CompanyOrderSetting! Even when courierBookingMode='automatic'
+  for 3 companies, auto-booking will ONLY fire if the user explicitly
+  selects a courier on the order form. If they don't, the order is created
+  with courierBookingStatus='not_booked' and no error surfaces.
+
+  BOOKING FAILURE ANALYSIS (6 orders with courierBookingStatus='failed'):
+     - ORD-2026-00009: NULL failure reason + NULL courierName — auto-booking
+       fired but had no integration to book with (default courier was null
+       and order.courierCompanyIntegrationId was null)
+     - ORD-2026-00028, ORD-2026-00029, ORD-2026-00017: City "Shinkiari
+       Mansehra" / "MANSEHRA" not in PostEx's city list — PostEx doesn't
+       serve this area
+     - ORD-2026-00005, ORD-SFS-2026-00006: City "322" — numeric cityId
+       was stored in Order.deliveryCity (probably user-entered). City
+       validation rejected "322" as not matching any city NAME. The booking
+       action correctly resolves city NAME → numeric cityId, but it can't
+       accept a numeric ID as input. This is a frontend UX issue (city
+       field accepting arbitrary strings instead of enforcing autocomplete).
+
+═══════════════════════════════════════════════════════════════════════
+7. LEOPARD ADAPTER — field-by-field audit vs PDF
+═══════════════════════════════════════════════════════════════════════
+
+  File: src/lib/integrations/couriers/leopard.adapter.ts (784 lines)
+
+  bookShipment() (lines 269-393) sends ALL required PDF fields:
+     ✓ booked_packet_weight (numeric grams — booking action converts KG×1000)
+     ✓ booked_packet_no_piece (input.quantity ?? 1)
+     ✓ booked_packet_collect_amount (Math.round(input.codAmount))
+     ✓ booked_packet_order_id (orderRefNumber / flowopsOrderNumber)
+     ✓ origin_city = 'self' (shipper's own city)
+     ✓ destination_city = parseInt(destinationCity, 10) — numeric cityId
+     ✓ shipment_id = input.pickupAddressCode (numeric shipper ID)
+     ✓ shipment_name_eng = 'self' (Leopard uses shipper's registered name)
+     ✓ shipment_email = 'self'
+     ✓ shipment_phone = 'self'
+     ✓ shipment_address = 'self'
+     ✓ consignment_name_eng = input.recipientName
+     ✓ consignment_email = ''
+     ✓ consignment_phone = input.recipientPhone
+     ✓ consignment_phone_two = '' (optional)
+     ✓ consignment_phone_three = '' (optional)
+     ✓ consignment_address = input.deliveryAddress
+     ✓ special_instructions = input.transactionNotes (with non-empty fallback)
+     ✓ shipment_type = input.shipmentType ?? '' (defaults to "overnight" if empty)
+     ✓ return_address + return_city (optional, only if returnAddressOverride provided)
+
+  Validation: requires destinationCity to be numeric (regex /^\d+$/); returns
+  clear error if city name was passed instead of numeric ID.
+
+  Other Leopard methods (all verified vs PDF):
+     ✓ trackShipment() — POST trackBookedPacket with { track_numbers }
+     ✓ cancelShipment() — POST cancelBookedPackets with { cn_numbers }
+     ✓ fetchOperationalCities() — POST getAllCities (returns OperationalCity[])
+     ✓ fetchOperationalCitiesRaw() — same endpoint, returns raw city_list with shipment_type arrays
+     ✓ fetchShipperById() — GET getShipperDetails?request_param=shipment_id&request_value={id} (PDF page 73-78)
+     ✓ fetchExistingPickupAddresses() — GET getShipperDetails (no filter — returns all)
+     ✓ createPickupAddress() — POST createShipper with { shipment_name, shipment_email, shipment_phone, shipment_address, city_id }
+     ✓ pingConnection() — calls fetchOperationalCities() (lightest read-only endpoint)
+     ✓ parseStatusWebhook() — handles { data: [{ cn_number, status, ... }] } array
+     ✓ verifyWebhookSignature() — returns true (Leopard has no documented HMAC; security relies on webhook_endpoint_id)
+
+  VERDICT: All Leopard adapter fields CORRECT per PDF.
+
+═══════════════════════════════════════════════════════════════════════
+8. POSTEX ADAPTER — field-by-field audit vs PDF
+═══════════════════════════════════════════════════════════════════════
+
+  File: src/lib/integrations/couriers/postex.adapter.ts (762 lines)
+
+  bookShipment() (lines 160-222) sends to POST /v3/create-order:
+     ✓ cityName (input.deliveryCity — city NAME, not ID)
+     ✓ customerName (input.recipientName)
+     ✓ customerPhone (convertToPostExPhone — converts +92XXXXXXXXXX → 03XXXXXXXXX)
+     ✓ deliveryAddress (input.deliveryAddress)
+     ✓ invoiceDivision = 1 (default — split airway bills for larger orders)
+     ✓ invoicePayment (input.codAmount)
+     ✓ items (input.quantity ?? 1)
+     ✓ orderDetail (input.itemDescription || 'Order')
+     ✓ orderRefNumber (input.orderNumber)
+     ✓ orderType (input.orderType ?? 'Normal' — Normal/Overland/Replacement, NEVER Reversed)
+     ✓ transactionNotes (input.transactionNotes ?? '')
+     ✓ pickupAddressCode (input.pickupAddressCode ?? '')
+
+  Intentionally OMITTED (per code comment + Postman confirmation):
+     ✗ storeAddressCode — sending empty string causes "INVALID MERCHANT STORE ADDRESS CODE"
+       PostEx uses its default store address when the field is absent.
+     ✗ weight, handling, itemsQty, paymentMethod, orderTags — confirmed
+       non-existent in v3/create-order API via live Postman testing.
+
+  Other PostEx methods (all verified vs PDF):
+     ✓ trackShipment() — GET v1/track-order/{trackingNumber}
+     ✓ trackBulkShipments() — GET v1/track-bulk-order?TrackingNumbers=... (chunks of 50)
+       With robust fallback to single-track on HTTP error or non-200 statusCode
+       (PostEx bulk endpoint has known intermittent instability)
+     ✓ cancelShipment() — PUT v1/cancel-order with { trackingNumber } body
+     ✓ fetchOperationalCities() — GET v2/get-operational-city (30s timeout, no param filter)
+     ✓ createPickupAddress() — POST v2/create-merchant-address
+       (returns no addressCode — caller falls back to fetchExistingPickupAddresses + match)
+     ✓ fetchExistingPickupAddresses() — GET v1/get-merchant-address
+     ✓ generateLoadSheet() — POST v2/generate-load-sheet (returns PDF as base64)
+     ✓ fetchPaymentStatus() — GET v1/payment-status/{trackingNumber}
+       (does NOT return actualDeliveryCharge — only settle boolean + dates)
+     ✓ pingConnection() — calls fetchOperationalCities() (cheapest read-only endpoint)
+     ✓ calculateRate() — throws (PostEx doesn't provide rate API)
+     ✓ parseStatusWebhook() — throws (PostEx doesn't support webhooks — use polling)
+     ✓ verifyWebhookSignature() — throws (PostEx doesn't support webhooks)
+
+  VERDICT: All PostEx adapter fields CORRECT per PDF + confirmed via live API testing.
+
+═══════════════════════════════════════════════════════════════════════
+9. STATUS POLLING — WORKS
+═══════════════════════════════════════════════════════════════════════
+
+  instrumentation.ts (170 lines) starts BOTH pollers in-process:
+     - PostEx poller: setInterval every 30 min (POSTEX_POLL_INTERVAL_MS)
+       Initial delay: 60s after server start
+     - Leopard safety-net poller: setInterval every 60 min
+       Initial delay: 90s after server start
+     - FX refresh: setInterval every 24h (FX_INTERVAL_MS)
+
+  All three guarded by env vars:
+     ENABLE_IN_PROCESS_POLLER (default 'true')
+     ENABLE_IN_PROCESS_FX_REFRESH (default 'true')
+
+  Vercel cron configured in vercel.json (also wired, runs in addition to in-process):
+     */30 * * * *  /api/cron/poll-postex
+     0 * * * *      /api/cron/poll-leopard-safety-net
+     0 */3 * * *    /api/cron/sync-cities
+     0 1 * * *      /api/cron/generate-scan-reports
+     0 2 * * *      /api/cron/refresh-exchange-rates
+
+  Cron routes require `x-cron-secret` header matching CRON_SECRET env var.
+  CRON_SECRET is set in /home/z/my-project/.env (confirmed).
+
+  pollPostExOrderStatuses() (postex-status-poll.actions.ts:342):
+     - Finds ALL active postex company_integrations
+     - For each: fetches active Orders + ExchangeShipments (not delivered/rto)
+     - Combines tracking numbers, batches via adapter.trackBulkShipments()
+     - For each result: maps status, updates order.courierSubStatus + lastPolledAt
+     - Status transitions:
+        in_transit → performOrderDispatch() (auto-dispatch + inventory deduction)
+        delivered  → markOrderDelivered() (or auto-dispatch first if skipped)
+        returned   → restockOrderForRto() + status='rto'
+        failed + cancelled_by_merchant/expired → unreserve stock + status='cancelled'
+
+  pollLeopardOrderStatuses() (leopard-webhook.actions.ts:388):
+     - Finds ALL active leopard company_integrations
+     - For each: fetches stale orders + shipments (lastPolledAt null OR >1h old)
+     - For each: adapter.trackShipment() via logged wrapper
+     - Same status transitions as PostEx
+
+  DB confirms polling IS WORKING:
+     - cmsn7440q (postex): 175 track_shipment_bulk logs, latest 2026-09-07 00:01
+     - cmtlswof6 (Leopard Production): 19 track_shipment logs, latest 2026-09-06 23:09
+     - cmseghq99 (Postex): 9 track_shipment_bulk logs
+     - cmth74xi6 (muzammal leopard, expired): 2 track_shipment logs
+
+  POLLING WORKS EVEN WHEN connectionStatus='pending' — both pollers only
+  check `isActive: true` and `credentialsEncrypted: { not: null }`. So the
+  pending postex integration (cmsn7440q) is being polled successfully.
+
+═══════════════════════════════════════════════════════════════════════
+10. WEBHOOK — EXISTS AND WORKS (for Leopard; PostEx uses polling)
+═══════════════════════════════════════════════════════════════════════
+
+  Endpoint: src/app/api/webhooks/[provider_key]/[webhook_endpoint_id]/route.ts
+
+  Flow:
+     1. Extract provider_key + webhook_endpoint_id from URL
+     2. Look up company_integration by webhook_endpoint_id (joined with
+        provider to confirm provider_key matches) — 404 if no match
+     3. Decrypt credentials + get adapter
+     4. Wrap in executeLoggedIntegrationAction(direction='inbound')
+     5. For courier: parse status webhook → update order status
+        - Leopard-specific: processLeopardWebhookUpdates() handles FULL
+          array of status updates (Leopard pushes { data: [...] })
+        - Other couriers: adapter.parseStatusWebhook() for single update
+     6. For ecommerce: parse order webhook → match/create customer
+     7. Always return 200 for processing errors (prevent external retries)
+     8. Return 404 only for auth/routing failures (don't leak endpoint IDs)
+
+  processLeopardWebhookUpdates() (leopard-webhook.actions.ts:67):
+     - For each update in the data array:
+       - Find matching order OR exchange_shipment by trackingNumber = cn_number
+       - Skip if already in terminal state (delivered/rto/cancelled)
+       - mapLeopardStatus() → { triggerDispatch, triggerDelivered, triggerRto, courierSubStatus, needsShipperAdvice }
+       - Apply transitions using SHARED functions:
+           triggerDispatch → performOrderDispatch() / performExchangeShipmentDispatch()
+           triggerDelivered → markOrderDelivered() / markExchangeShipmentDelivered()
+           triggerRto → processOrderReturn() / performExchangeShipmentRto()
+       - Update courierSubStatus, needsShipperAdvice, unrecognizedCourierStatus, lastPolledAt
+       - Audit log each transition
+
+  PostEx integration has supportsWebhook=false (confirmed in DB).
+  PostEx adapter.parseStatusWebhook() throws "PostEx does not support
+  webhooks — use polling instead." Correct per PostEx documentation.
+
+  VERDICT: Webhook route exists, is correctly wired, and handles Leopard's
+  array-of-updates format. No webhook-specific bugs found.
+
+═══════════════════════════════════════════════════════════════════════
+11. DATABASE STATE — LIVE PRODUCTION QUERY RESULTS
+═══════════════════════════════════════════════════════════════════════
+
+  integration_providers (5 rows):
+     leopard  | courier   | supports_webhook=true
+     postex   | courier   | supports_webhook=false
+     tcs      | courier   | supports_webhook=true  (stub adapter — not real)
+     daraz    | ecommerce | supports_webhook=true  (stub adapter)
+     shopify  | ecommerce | supports_webhook=true  (stub adapter)
+
+  company_integrations (9 rows):
+     ID                       | Name              | Status    | Active | Default
+     cmtqfarnt002lp4ijy7i0fe7f | LP                | active    | true   | false    (Test Co)
+     cmtqexzj0002lp40pugrxmyvr | LP                | active    | true   | false    (Test Co)
+     cmtqetsml002lp4od9p3v6bph | Leopard Prod      | pending   | true   | false    (Co) ← NEVER TESTED
+     cmtlswof6002up51jh6vsmvl1 | Leopard Production | active    | true   | true     (Test Company)
+     cmtjig582018zlke3g7fs1y2x | mz leopard        | active    | true   | true     (Muzammal Collection)
+     cmth74xi60009rmd17u0xblgg | muzammal leopard   | expired   | false  | false    (sfsfs) — disconnected
+     cmtgd1r520002lq8gtf7yktm5 | usman@flowops.pk   | connected | true   | true     (dhhdh)
+     cmsn7440q0011jlruel5f8nf4 | postex            | pending   | true   | false    (Muzammal Collection) ← stale pending
+     cmseghq990001jky7fdwliiz0 | Postex            | connected | true   | false    (dhhdh)
+
+  connectionStatus distribution:
+     active    | isActive=true  | 4 rows
+     connected | isActive=true  | 2 rows
+     pending   | isActive=true  | 2 rows
+     expired   | isActive=false | 1 row
+
+  integration_action_logs: 337 total rows
+     Action types logged:
+       book_shipment, cancel_shipment, create_pickup_address,
+       fetch_existing_pickup_addresses, fetch_operational_cities,
+       fetch_shipper_by_id, generate_load_sheet, ping_connection,
+       test_connection, track_shipment, track_shipment_bulk
+     Statuses: success (most), failed (8 rows — see below)
+
+  Failed log entries (8 total):
+     cmtlswof6 — fetch_shipper_by_id | Unexpected token '<' (Leopard returned HTML error page)
+     cmtgd1r520002 — fetch_operational_cities | Invalid API Key (3 attempts on 2026-08-30/31)
+     cmtgd1r520002 — fetch_existing_pickup_addresses | JSON Parse error (HTML returned)
+     cmseghq99 — test_connection | "PostEx does not provide a rate calculation API" (old test path before pingConnection was added)
+     cmseghq99 — fetch_operational_cities | "PostEx cities API returned statusCode undefined" (old transient PostEx issue, 2026-08-06)
+
+  courier_operational_cities:
+     leopard: 774 cities (770 pickup, 770 delivery) — last sync 2026-09-07 19:56
+     postex:  896 cities (896 pickup, 896 delivery) — last sync 2026-08-30 22:40
+
+  courier_pickup_addresses (20 total across 6 integrations):
+     cmseghq99 (Postex, connected)        — 8 addresses
+     cmsn7440q (postex, pending)          — 7 addresses
+     cmth74xi6 (muzammal leopard, expired) — 2 addresses
+     cmtjig58201 (mz leopard)             — 1 address
+     cmtqexzj0 (LP)                       — 1 address
+     cmtqfarn0 (LP)                       — 1 address
+
+  Order table (booking status distribution):
+     status              | courierBookingStatus | n  | with_tracking
+     cancelled            | cancelled            | 12 | 12
+     cancelled            | not_booked           | 13 | 11
+     confirmed             | booked               | 10 | 9
+     confirmed             | failed               | 6  | 0
+     confirmed             | not_booked           | 28 | 12
+     delivered             | booked               | 1  | 1
+     delivered             | not_booked           | 13 | 13
+     dispatched            | not_booked           | 15 | 12
+     partially_backordered | not_booked           | 1  | 0
+     pending               | not_booked           | 13 | 12
+     processing            | not_booked           | 12 | 12
+     refunded              | not_booked           | 11 | 11
+     rto                    | booked               | 3  | 3
+     rto                    | not_booked           | 11 | 11
+
+     Total orders with courierBookingStatus='booked' = 14 (10 confirmed + 1 delivered + 3 rto)
+     All have tracking numbers (except 1 confirmed booked)
+
+  CompanyOrderSetting (CRITICAL GAP):
+     defaultCourierCompanyIntegrationId is NULL for ALL 14 companies!
+     courierBookingMode distribution:
+        automatic  | 3 companies (cmsn6x7df, cmrsfbeza, cmth4ru7t)
+        semi_manual | 11 companies
+     Even companies with automatic mode have NO default courier set.
+
+═══════════════════════════════════════════════════════════════════════
+12. PRIORITIZED LIST OF ISSUES TO FIX
+═══════════════════════════════════════════════════════════════════════
+
+P0 — CRITICAL (directly causes user's "pending" complaint):
+  1. src/app/api/integrations/[id]/test/route.ts line 84:
+     Change `connectionStatus: 'active'` → `connectionStatus: 'connected'`.
+     This is the root cause of the "stuck on pending" UI bug.
+  2. Migrate existing DB rows: UPDATE company_integrations SET
+     "connectionStatus" = 'connected' WHERE "connectionStatus" = 'active'.
+     Affects 4 rows (the 4 'active' Leopard integrations).
+  3. src/components/settings/integrations-view.tsx lines 131-136:
+     Add `active: { label: 'Active', className: 'bg-emerald-50...', icon: CheckCircle2 }`
+     to the StatusBadge config OR (preferred) ensure only 'connected' is used
+     after fix #1+#2 (then 'active' is never produced).
+
+P1 — HIGH (causes auto-booking to silently skip):
+  4. CompanyOrderSetting.defaultCourierCompanyIntegrationId is NULL for all
+     14 companies. Even with courierBookingMode='automatic' for 3 companies,
+     auto-booking silently skips with "no courier selected on the order and
+     no default courier set in Order Settings."
+     FIX: Either (a) require setting a default courier before enabling
+     automatic mode in the UI, OR (b) auto-pick the most recently created
+     integration if no default is set.
+  5. ORD-2026-00009 failed with NULL courierName + NULL failureReason —
+     this is the silent-skip case where auto-booking was attempted but
+     the order had no courier selected AND no default courier was set.
+     The action should write the failure reason to courierBookingFailureReason
+     so the user sees a clear error in the UI.
+
+P2 — MEDIUM (dead code / inconsistencies):
+  6. src/lib/actions/integration.actions.ts lines 617-769:
+     testIntegrationConnection() server action is dead code — the UI uses
+     the API route directly. Either delete it OR have the API route delegate
+     to the server action (preferred — single source of truth). The action
+     correctly sets 'connected'; the route incorrectly sets 'active'.
+  7. The DB CHECK constraint from migration 004 was never applied (CREATE
+     TABLE IF NOT EXISTS was a no-op because the table pre-existed from
+     prisma db:push). The CHECK would have caught the 'active' bug at first
+     run. FIX: Add a new migration that runs:
+        ALTER TABLE company_integrations
+        ADD CONSTRAINT company_integrations_connectionStatus_check
+        CHECK ("connectionStatus" IN ('pending','connected','error','expired'));
+     Will fail until existing 'active' rows are updated (fix #2).
+  8. /api/couriers/sync-cities (line 37) checks `caller.role.roleTier !== 'elevated'`
+     — INCONSISTENT with the integration framework which uses
+     requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE). A Manager
+     with INTEGRATIONS_MANAGE permission gets 403. Same issue with
+     /api/integrations/logs (line 16).
+
+P3 — LOW (UX gaps):
+  9. No frontend button calls POST /api/integrations/[id]/pickup-addresses/sync
+     (bulk import all shippers from courier). The backend is implemented but
+     inaccessible from the UI. Users can only import one at a time by
+     shipment_id (Leopard only) or create new ones.
+  10. City sync runs in background with no UI completion notification.
+      User clicks "Sync", sees "syncing...", then must manually refetch
+      after a delay. No WebSocket/SSE/event-driven refresh.
+  11. 4 of 6 booking failures are city-resolution issues:
+      - "Shinkiari Mansehra" / "MANSEHRA" not in PostEx city list (3 orders)
+      - "322" (numeric cityId) was stored in Order.deliveryCity and the
+        validation rejected it as a city NAME (2 orders)
+      FIX: Frontend city autocomplete should be enforced (not optional),
+      and the order form should reject raw numeric strings.
+  12. booking.actions.ts line 470 overwrites Order.deliveryCity with the
+      numeric cityId (resolvedDeliveryCity) on successful Leopard booking.
+      This is intentional for traceability, but means if the booking later
+      fails for some reason and the order needs re-booking, the city field
+      is now a numeric ID that the next booking attempt can't resolve.
+      Consider: store the resolved cityId in a separate column (e.g.
+      `courierCityId`) instead of overwriting the user-facing deliveryCity.
+
+P4 — COSMETIC:
+  13. Leopard adapter bookShipment() uses 'self' for ALL shipper fields
+      (shipment_name_eng, shipment_phone, shipment_address). This relies
+      on Leopard using the shipper's registered info via shipment_id. If
+      the shipper's registered info is wrong on Leopard's side, the booking
+      will use bad data. Acceptable design — but consider sending the
+      explicit pickup address data as a sanity check.
+  14. Leopard verifyWebhookSignature() returns true (no HMAC documented).
+      Security relies solely on the webhook_endpoint_id in the URL. Acceptable
+      per Leopard's design, but worth documenting prominently in the route.
+
+═══════════════════════════════════════════════════════════════════════
+VERDICT — what works vs what's broken
+═══════════════════════════════════════════════════════════════════════
+
+WORKS (verified end-to-end):
+  ✓ Leopard adapter — all PDF fields correct, real API calls succeed
+  ✓ PostEx adapter — all PDF fields correct, confirmed via Postman
+  ✓ Test connection (adapter.pingConnection in both Leopard + PostEx)
+  ✓ City sync (774 leopard + 896 postex cities synced)
+  ✓ Shipper import-by-id (Leopard-specific, single shipper)
+  ✓ Pickup address CRUD (add / list / set-default / delete)
+  ✓ Order booking — 14 orders successfully booked with tracking numbers
+  ✓ Booking flow including Leopard numeric cityId resolution
+  ✓ Booking slip download (Leopard returns slip_link, stored locally as PDF)
+  ✓ PostEx status polling — 175 successful track_shipment_bulk calls
+  ✓ Leopard status polling — 19 successful track_shipment calls
+  ✓ Webhook receiver (Leopard) — array-of-updates handling + transitions
+  ✓ Status transitions: in_transit → dispatch, delivered, returned → rto,
+    failed/cancelled_by_merchant/expired → cancel + restock
+  ✓ Integration action logging — 337 log rows in production DB
+  ✓ Audit logs + metric events for all state changes
+
+BROKEN (root causes of user's complaints):
+  ✗ Test button sets connectionStatus='active' instead of 'connected' → UI
+    shows "Pending" badge for successfully tested integrations
+  ✗ StatusBadge config missing 'active' entry → fallback to 'pending'
+  ✗ DB CHECK constraint missing → 'active' silently accepted (would have
+    caught the bug if applied)
+  ✗ Duplicate test implementations — action sets 'connected' (correct) but
+    UI uses API route that sets 'active' (broken)
+
+PARTIALLY WORKING:
+  ~ City sync works at the system level, but:
+    - Elevated-only check blocks non-elevated users with INTEGRATIONS_MANAGE
+    - No UI completion notification (background async)
+    - 1 pending integration (Leopard Prod) never had sync run for it
+  ~ Shipper import-by-id works, but no bulk-sync button in UI
+  ~ Integration logs ARE created (337 rows), but:
+    - Elevated-only check on /api/integrations/logs blocks Managers
+    - 1 pending integration (Leopard Prod) has 0 logs because never tested
+  ~ Auto-booking fires correctly when conditions met, but:
+    - defaultCourierCompanyIntegrationId is NULL for all 14 companies →
+      auto-booking silently skips unless user explicitly selects courier
+      per-order
+    - 6 orders failed due to city-resolution issues (3 city not in PostEx,
+      2 numeric ID stored as city name, 1 silent skip with NULL reason)
+
+NEXT ACTIONS (recommended order):
+  1. Fix P0 #1+#2+#3 — change 'active' → 'connected' in test route + migrate
+     4 existing rows. This single fix resolves the user's primary complaint.
+  2. Fix P1 #4+#5 — surface the "no default courier" error in the UI so
+     users know to set one. Optionally require it when enabling automatic mode.
+  3. Fix P2 #6 — delete the dead testIntegrationConnection() server action
+     (or route the API through it). Single source of truth.
+  4. Fix P2 #7 — add the missing CHECK constraint via a new migration.
+  5. Fix P2 #8 — relax /api/couriers/sync-cities + /api/integrations/logs
+     from elevated-only to requirePermission(INTEGRATIONS_MANAGE/VIEW).
+  6. Fix P3 #9 — add a "Sync All Shippers" button in pickup-addresses-section.
+  7. Fix P3 #11 — enforce city autocomplete in order form, reject raw
+     numeric strings.
+

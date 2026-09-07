@@ -77,11 +77,11 @@ export async function POST(
     })
 
     if (result.success) {
-      // Update connection status to 'active' + clear lastError
+      // Update connection status to 'connected' + clear lastError
       await db.companyIntegration.update({
         where: { id },
         data: {
-          connectionStatus: 'active',
+          connectionStatus: 'connected',
           lastError: null,
         },
       })
@@ -94,12 +94,12 @@ export async function POST(
         organizationId: ctx.company.organizationId,
         userId: ctx.user.id,
         employeeId: ctx.employee.id,
-        newValues: { providerKey, status: 'active' },
+        newValues: { providerKey, status: 'connected' },
       })
 
       return Response.json({
         ok: true,
-        status: 'active',
+        status: 'connected',
       })
     } else {
       // Test failed — update connection status to 'error' + store lastError
