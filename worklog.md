@@ -14138,3 +14138,186 @@ Stage Summary:
 - FIX: Changed 'active' → 'connected' + added backward compat in UI
 - Permission fixes: sync-cities + logs now use requirePermission (not isElevated)
 - All integration features working: connect, test, city sync, shipper import, logs
+
+---
+Task ID: DOC-UPDATE-BRIEFING
+Agent: sub-agent (general-purpose)
+Task: Professionally update FLOWOPS_BRIEFING.md to reflect all recent changes (permissions system overhaul, courier integration fixes, brute-force testing, stock-loss fragmentation, Turbopack crash)
+
+Work Log:
+- Read /home/z/my-project/worklog.md (14,141 lines) for full context on recent changes: PERMISSIONS-AUDIT, PERM-FIX-P0-P1, PERM-FIX-REMAINING-P0-P2, PERMISSIONS-SYSTEM-COMPLETE, COURIER-INTEGRATION-AUDIT, COURIER-INTEGRATION-FIX, LEOPARD-API-FIXES-V1.0, STOCKLOSS-INVESTIGATE.
+- Read the full FLOWOPS_BRIEFING.md (1,937 lines) before editing to preserve existing structure.
+- Applied 8 targeted edits (no full rewrite):
+
+  1. **Header (line 5)** — bumped Last Updated from August 2026 → September 2026; updated note to: "permissions system overhaul — 51 permissions, 35+ routes protected; courier integration fixes — `connectionStatus` bug, Leopard production toggle, Switch UI; brute-force testing verified — Leopard full lifecycle: book → track → cancel".
+
+  2. **Executive Summary scale line (line 43)** — updated "30 permission keys" → "51 permission keys (expanded from 26 visible in role editor to all 51)"; "2 live courier integrations" → "2 live courier integrations (Leopard + PostEx, both verified with real API calls)"; added "1,670 courier operational cities (774 Leopard + 896 PostEx)".
+
+  3. **§6 Permission System (line 414)** — changed "30 keys" → "51 keys"; restructured the permission count table from a 9-row table to a 12-row table with per-module count column. New totals: Inventory 13, Products 7, Orders 5, Customers 3, Scan 2, Employees 6, Payroll 3, Finance 2, Reports 2, Settings 3, Integrations 2, KPI & Audit 3 = 51. Added note about Role Editor visibility ("All 51 keys now visible in Role Editor (was 26); 'Select All' button grants all 51"). Added note about elevated roles bypassing checks via `isElevated()`. Added performance note: `requirePermission()` is cached via `getWorkspace()` — saves 140–280 ms per request vs inline checks.
+
+  4. **§2 Order Lifecycle (line 99)** — added new "Order Lifecycle (end-to-end with courier — brute-force verified, September 2026)" subsection with full ASCII flow diagram, brute-force verified results (bookPacket → tracking number FS7543203010 in ~0.25–1 s, cancel via cn_numbers field, order cancellation calls courier cancel first), and courier booking modes (`semi_manual` default / `automatic` / `off`). Added warning about NULL `defaultCourierCompanyIntegrationId` causing silent auto-booking skip.
+
+  5. **§4 Architecture Overview (line 227)** — expanded item 3 (multi-tenant isolation) to document the cached `getWorkspace()` context (single Prisma JOIN + request-lifetime cache + 140–280 ms saving). Added new item 7: "Lazy PrismaClient via Proxy" — `src/lib/db.ts` uses a Proxy to defer client instantiation until first property access, preventing module-load crashes in the sandbox when `DATABASE_URL` isn't yet set. Mirrored the Proxy note in §5 Connection section.
+
+  6. **§10 Integration / Courier Adapter Framework** — added 6 new subsections after the Leopard Status Mapping:
+     - "Connection Status Lifecycle" — `pending` → `connected` (was `'active'` which showed as Pending in UI — FIXED Sept 2026)
+     - "Leopard Production / Staging Toggle" — Switch UI (ON=production, OFF=staging); adapter handles all boolean formats
+     - "Leopard API — Verified Endpoints" — table with 6 endpoints + verified behavior (bookPacket ~0.25 s, cancel via cn_numbers, getAllCities 774 cities, getShipperDetails single-object/array shape fix)
+     - "PostEx API — Verified Endpoints" — table with 7 endpoints including full URL `api.postex.pk/services/integration/api/order/v3/create-order`
+     - "Integration Logging" — table of 12 logged action types (verified against 337+ production rows): ping_connection, fetch_operational_cities, fetch_shipper_by_id, book_shipment, cancel_shipment, track_shipment, track_shipment_bulk, generate_load_sheet, create_pickup_address, parse_status_webhook, etc.
+     - "Status Polling Cadence" — PostEx every 30 min, Leopard every 60 min (safety-net), Leopard push webhooks (real-time), PostEx no webhook support
+
+  7. **§15 Gateway & Deployment / Development** — updated dev command from `bun run dev` (runs `next dev -p 3000`) → `bun run dev` (runs `next dev -p 3000 --webpack`); updated "Hot reload: Turbopack" → "Hot reload: Webpack (the dev script uses the --webpack flag to bypass Turbopack, which has a known Rust panic `inner_of_uppers_lost_follower` in Next.js 16.1.3 — see §18 item 3)".
+
+  8. **§16 What's Built vs. In-Process vs. Needed**:
+     - Updated item 2: "30 permissions" → "51 permissions (all visible in Role Editor; was 26)"
+     - Updated item 15: courier integrations marked as "verified with real API calls — full lifecycle: book → track → cancel"
+     - Added 6 new ✅ Fully Built items (35-40): Permissions System (51 keys, 35+ routes protected, 6 orphan permissions enforced), Courier integration verified end-to-end, Leopard production/staging toggle (Switch UI), Connection status lifecycle (fixed), Integration logging (all outbound + inbound), Cached workspace + permission gate.
+     - Added 6 new 🔧 In-Process / Recently Fixed items (30-35): Leopard production/staging toggle fix (parseBoolean), Leopard adapter response shape fix (Array.isArray guard), Permission route protection (35+ routes, including the inventory dashboard cross-company leak fix), Connection status UI bug fix ('active' → 'connected' + 4 DB rows migrated), Permission-gated routes / elevated-only replaced (sync-cities + logs), 🔄 Stock loss unification (IN PROGRESS — exchange verifyOldItemReceived still bypasses recordStockLoss helper).
+
+  9. **§18 Known Issues & Gotchas** — added 2 new items:
+     - Item 3 (Environment): Turbopack crash — Next.js 16.1.3 Rust panic `inner_of_uppers_lost_follower`; workaround is `next dev --webpack` in the dev script; production builds unaffected (no Turbopack). Replaced the older "Turbopack instability — clear .next cache" item.
+     - Item 13 (Schema): Stock loss system fragmentation — 8 modules (RTO, Returned Stitched, Cycle Count, Adjust Stock, Stock Losses, supplier returns, exchanges, damage writeoff) each independently decrement InventoryPool.onHand; verifyOldItemReceived in exchange.actions.ts bypasses the unified recordStockLoss helper; double stock-decrease risk; planned unified fix via src/lib/stock-loss.ts + migration 027_stock_loss_unification.sql.
+     - Renumbered the Performance subsection items 13-18 → 14-19 to accommodate the new Schema item 13.
+
+Verification:
+- File size: 1,937 → 2,068 lines (+131 lines, +6.8%). File growth is consistent with the volume of new content (6 new courier subsections, new Order Lifecycle diagram, new architecture item, new known-issues items, 6 new built items, 6 new in-process items).
+- Cross-checked: 51-key total in §6 table math (13+7+5+3+2+6+3+2+2+3+2+3 = 51 ✓).
+- Verified all stale references removed: grep for "30 permission" / "30 keys" / "Inventory (14)" / "Employees (4)" returns 0 hits except the inline mention in the Executive Summary where the original "30 permission keys" wording has been updated.
+- Verified new courier subsection headers present: Connection Status Lifecycle, Leopard Production/Staging Toggle, Leopard API — Verified, PostEx API — Verified, Integration Logging, Status Polling Cadence.
+- No code blocks were broken; existing tables preserved; numbering maintained in §16.
+
+Stage Summary:
+- FLOWOPS_BRIEFING.md is now current as of September 2026 covering the permissions system overhaul (51 keys + 35+ protected routes), courier integration fixes (connectionStatus bug, Leopard production toggle, Switch UI, response-shape handling), brute-force verified Leopard lifecycle (book → track → cancel), integration logging (337+ production rows across 12 action types), status polling cadence (PostEx 30min / Leopard 60min safety-net + push webhooks), Turbopack crash workaround (--webpack flag), and the in-progress stock-loss unification effort.
+- The document remains a single source of truth suitable for AI-assisted code generation.
+
+---
+Task ID: DOC-UPDATE-DEPLOY-DOCKER
+Agent: sub-agent (general-purpose)
+Task: Professionally update PRODUCTION_DEPLOYMENT_GUIDE.md and DOCKER.md to reflect VPS-ready state, Turbopack crash workaround, Leopard production/staging toggle, 51-key permissions system, full env-var reference, and VPS deployment instructions.
+
+Work Log:
+- Read /home/z/my-project/worklog.md (14,192 lines) for context: identified the pre-Hostinger revert (commit 77c0923), the v1.0.0 release (bun/docker/VPS-ready), the Turbopack Rust panic `inner_of_uppers_lost_follower` workaround (--webpack flag), the Leopard production/staging Switch toggle (with all-boolean-format parsing), and the 51-key permission registry expansion (from 26 → 51 keys visible in Role Editor).
+- Read the full PRODUCTION_DEPLOYMENT_GUIDE.md (330 lines) and DOCKER.md (256 lines) before editing — preserved existing structure throughout.
+- Verified package.json scripts: `dev: next dev -p 3000 --webpack`, `build: next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/`, `start: NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log`, `db:push: prisma db push`, `db:generate: prisma generate`. NO `postinstall` script (deliberately removed at commit 77c0923).
+- Verified Dockerfile uses `oven/bun:1.3.14`, multi-stage build (base → deps → builder → runner), `CMD ["bun", "server.js"]`, non-root `flowops` user (UID 1001), HEALTHCHECK every 30s.
+- Verified docker-compose.yml (dev) uses bind-mount (`.:/app`) + anonymous volumes; docker-compose.prod.yml uses named volume `flowops_uploads`; docker-compose.local-db.yml uses `postgres:17-alpine` on port 5433.
+
+## PRODUCTION_DEPLOYMENT_GUIDE.md edits (12 targeted edits, +188 lines → 518 total):
+
+1. **Header (lines 3-5)** — replaced "Read this BEFORE deploying to Hostinger" → "deploying to a VPS"; added "Applicable to: v1.0.0 — pre-Hostinger production codebase (bun/docker/VPS-ready)".
+
+2. **Rule 2 (.env FILE MANAGEMENT, lines 23-29)** — replaced all Hostinger mentions with VPS; added the `predev` hook note (the hook aborts `bun run dev` if `DATABASE_URL` is not a `postgresql://` URL — guards against the sandbox SQLite-revert issue and production typos).
+
+3. **Rule 5 (lines 43-47)** — replaced Hostinger → VPS in 3 places ("deployed to the VPS via `git pull` + rebuild", "NEVER make code changes directly on the VPS", "NEVER run `bun run dev` on the VPS").
+
+4. **Step 3 (lines 80-130) — FULL REPLACEMENT** — replaced the 5-line Hostinger panel configuration with a 7-step VPS provisioning guide:
+   - Step 1: VPS sizing (2 vCPU / 4 GB RAM, Node.js 20+, bun 1.3.14, git, curl, psql)
+   - Step 2: `git clone` + `bun install` + `bunx prisma generate` (postinstall note)
+   - Step 3: `.env` creation (mode 0600) with the `@` → `%40` URL-encoding note for Supabase passwords
+   - Step 4: `bun run db:push` + `bun run db:generate` + `cat supabase/functions-only.sql | psql "$DATABASE_URL"`
+   - Step 5: `bun run build` (webpack, NOT Turbopack — explicit note)
+   - Step 6: `bun run start` (= `NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log`) with pm2/systemd/Docker alternatives
+   - Step 7: `/api/health` verification
+
+5. **Post-Deployment Workflow diagram (line 171)** — replaced `│                  PRODUCTION (Hostinger)                       │` with `│                  PRODUCTION (VPS)                              │` (calculated 27-space trailing offset to preserve 65-char box alignment; verified via `awk` + Python).
+
+6. **"Development Session Workflow" (line 194)** — "User deploys to Hostinger" → "User deploys to VPS".
+
+7. **Safety Guidelines (lines 209-233) — 4 targeted edits**:
+   - "Never modify production `.env` (user does this on Hostinger)" → "(user does this on the VPS)"
+   - "Provide exact commands for the user to run on Hostinger" → "on the VPS"
+   - "Set production `.env` on Hostinger" → "on the VPS"
+   - "Deploy the app on Hostinger (build + start)" → "on the VPS (build + start)"
+
+8. **DEPLOYMENT COMMANDS section header (line 237)** — "for Hostinger" → "for VPS".
+
+9. **Initial Deployment block (lines 241-273) — FULL REPLACEMENT** — replaced with VPS-flavored commands including:
+   - `bunx prisma generate` (postinstall note inline)
+   - `.env` creation (mode 0600, with `@` → `%40` encoding note)
+   - `bun run db:push` + `bun run db:generate` (replacing the old `bunx prisma db push`)
+   - `cat supabase/functions-only.sql | psql "$DATABASE_URL"`
+   - `bun run build` (webpack, NOT Turbopack)
+   - `bun run start` (with the explicit `NODE_ENV=production bun .next/standalone/server.js 2>&1 | tee server.log` equivalent)
+
+10. **Subsequent Updates block (lines 277-293) — FULL REPLACEMENT** — VPS commands for `git pull` → `bun install` → `bun run db:generate` → `bun run build` → restart (pm2 / systemctl / docker compose -f docker-compose.prod.yml up -d --build).
+
+11. **ENVIRONMENT VARIABLES REFERENCE (lines 429-442) — EXPANDED** — added `%40` URL-encoding to the PRODUCTION example; added a new "Required Variables Summary" 7-row table (DATABASE_URL, DIRECT_URL, INTEGRATION_ENCRYPTION_KEY, SESSION_SECRET, CRON_SECRET, APP_URL, NODE_ENV) with purpose + notes columns; preserved the existing DEV/PRODUCTION code blocks + the "INTEGRATION_ENCRYPTION_KEY must be identical" warning.
+
+12. **NEW SECTIONS inserted between Deployment Commands and Environment Variables (lines 304-427)** — 4 new top-level sections:
+    - **⚙️ TURBOPACK CRASH + --webpack FLAG** — explains the Next.js 16.1.3 Rust panic `inner_of_uppers_lost_follower`; documents the `--webpack` flag on the dev script; 3-row table showing dev/build/start all use Webpack (not Turbopack); 4-step recovery procedure if the panic reappears.
+    - **🐆 LEOPARD PRODUCTION / STAGING TOGGLE** — documents the staging vs production base URLs, the `isProduction` field in `CompanyIntegration.credentials`, the Switch UI, the adapter's defensive parsing of `true`/`false`/`"true"`/`"false"`/`"on"`/`undefined`; deployment guidance (DEV=staging, PROD=production); 5-item pre-flight checklist before flipping ON.
+    - **🔐 PERMISSIONS SYSTEM (51 KEYS, ROLE EDITOR)** — overview of the 51-key registry across 12 modules; per-module breakdown table (Inventory 13, Products 7, Orders 5, Customers 3, Scan 2, Employees 6, Payroll 3, Finance 2, Reports 2, Settings 3, Integrations 2, KPI & Audit 3 = 51); Role Editor notes (all 51 keys visible, was 26; "Select All" button; `isElevated` bypass; 6 orphan permissions enforced); production verification notes (35+ protected routes, cross-company leak fix).
+    - **📦 POSTINSTALL NOTE: PRISMA CLIENT GENERATION** — explicit explanation that `package.json` has NO `postinstall` script (deliberately removed at commit 77c0923); 5-row table of when to run `prisma generate` manually (after `bun install`, after schema.prisma change, before build if missing — vs no-op for TS-only changes and Docker builds); failure-mode explanation; quick-fix command block.
+
+- Fixed a corrupted emoji (🗂️ → replacement char) caused by the large MultiEdit; ran a follow-up Edit to restore the original `🗂️` glyph on the "ENVIRONMENT VARIABLES REFERENCE" header.
+
+## DOCKER.md edits (4 targeted edits, +276 lines → 532 total):
+
+1. **Overview (lines 3-11)** — added 2 blockquote notes at the top: "Runtime: All containers (dev + prod) run on bun 1.3.14 (not Node.js). See the 'Bun Runtime in Docker' section below." and "Production target: VPS (Ubuntu 22.04+). See the 'VPS Docker Deployment' section below for full instructions."
+
+2. **Development section comment (lines 20-22)** — replaced "Start the dev server with Turbopack hot reload" with "Start the dev server with Webpack hot reload (the dev script uses the --webpack flag to bypass the Turbopack Rust panic — see the 'Turbopack Crash + --webpack Flag' section below)".
+
+3. **Dev "How it works" bullets (lines 32-37)** — 3 fixes: "Turbopack watches host files" → "Webpack watches host files for hot reload"; replaced the incorrect "Named volume (`flowops_uploads`) persists uploaded files across rebuilds" claim (the dev compose has NO named volume for uploads — they persist via the source bind-mount) with the accurate "Uploaded files persist on the host filesystem via the bind-mount — no separate named volume is needed in dev (the `flowops_uploads` named volume exists only in `docker-compose.prod.yml`)"; kept the anonymous-volumes bullet unchanged.
+
+4. **NEW SECTIONS appended after File Reference (lines 262-532)** — 6 new top-level sections:
+    - **Bun Runtime in Docker** — base image `oven/bun:1.3.14` (pinned, not `:latest`); multi-stage build breakdown (base → deps → builder → runner); "Why bun (not Node)?" 4-row comparison table (startup ~50 ms vs ~200 ms, I/O throughput, native TypeScript, `bun server.js` vs `node server.js`); notes about the runtime-agnostic standalone `server.js`, the bun version pinning rationale, and consistency with the `bun run` invocations in package.json.
+    - **`.env.docker` File Management** — 5-row file table distinguishing `.env` (local bun), `.env.docker` (Docker), `.env.docker.example` (committed template), `.env.local-db`, `.env.local-db.example`; setup commands (`cp .env.docker.example .env.docker` + `chmod 600` + `docker compose config | grep DATABASE_URL` to verify); production-on-VPS instructions (5-step list: copy template, fill in PROD credentials with `@` → `%40` note, chmod 600, rebuild); "Changes require restart" note (env_file is read at container start time — must `docker compose down && up` to apply).
+    - **Turbopack Crash + --webpack Flag** — same Rust panic explanation; documents how Docker handles it (`Dockerfile.dev` invokes `bun run dev` → bun runs `next dev -p 3000 --webpack` → Webpack hot reload); "In the dev container" bullets (Webpack, bind-mount, ~1s reflect time); "In the prod container" bullets (`next build` uses Webpack by default — no Turbopack); 3-step recovery procedure inside Docker (`docker compose exec app rm -rf .next/cache` + restart + NEVER add `--turbo`).
+    - **Permissions System (51 Keys)** — explains the 51-key system is enforced identically inside Docker (no Docker-specific config); "Seeding default roles inside Docker (DEV only)" command (`docker compose exec app bun scripts/seed-default-roles.ts`) with intentional omission of the prod equivalent; per-module permission count breakdown table (12-row, totals 51); cross-reference to PRODUCTION_DEPLOYMENT_GUIDE.md.
+    - **Leopard Production / Staging Toggle** — staging vs production URLs; explains the per-integration `isProduction` field + Switch UI + defensive boolean parsing; Docker-specific considerations (no Docker-specific env var; per-integration not per-deployment; audit log captures every flip); recommended DEV/OFF → PROD/ON workflow with cross-reference to PRODUCTION_DEPLOYMENT_GUIDE.md pre-flight checklist.
+    - **VPS Docker Deployment** — 8-step deployment guide: Step 1 (VPS sizing — Ubuntu 22.04+, 2 vCPU/4 GB RAM, Docker Engine 24+, Docker Compose v2+, 20 GB disk); Step 2 (Docker install via `curl -fsSL https://get.docker.com | sh` + usermod + verify); Step 3 (git clone + `cp .env.docker.example .env.docker` + chmod 600); Step 4 (first-time DB setup: `docker compose build` + `docker compose run --rm --entrypoint "bunx prisma db push" app` + `cat supabase/functions-only.sql | docker exec -i flowops-prod-app-1 psql "$DATABASE_URL"`); Step 5 (`docker compose up -d` + health verification); Step 6 (reverse proxy — Caddy example); Step 7 (ongoing operations: logs, restart, `git pull` + rebuild, stop, destructive `down -v`); Step 8 (HEALTHCHECK status via `docker ps`); cross-reference to PRODUCTION_DEPLOYMENT_GUIDE.md for non-Docker VPS deployment (pm2/systemd).
+
+Verification:
+- File sizes: PRODUCTION_DEPLOYMENT_GUIDE.md 330 → 518 lines (+188, +57%); DOCKER.md 256 → 532 lines (+276, +108%).
+- Hostinger audit: `grep -n "Hostinger" PRODUCTION_DEPLOYMENT_GUIDE.md` returns only 2 hits (line 5: "pre-Hostinger production codebase" — historical reference to git state; line 403: "reverted to the pre-Hostinger state — see commit 77c0923" — git history reference). Both are legitimate historical references, NOT deployment instructions. All Hostinger-specific instructions have been removed/replaced.
+- DOCKER.md grep for `turbopack\|webpack`: 13 hits — all in the dedicated "Turbopack Crash + --webpack Flag" section or accurate inline mentions. No stale "Turbopack hot reload" claims remain (the only remaining mention is in the docstring explaining that the dev script uses --webpack to bypass Turbopack).
+- Permission count math verified: 13+7+5+3+2+6+3+2+2+3+2+3 = 51 ✓ (matches the FLOWOPS_BRIEFING.md §6 total from DOC-UPDATE-BRIEFING task).
+- Workflow diagram box alignment verified: line 171 is now `│                  PRODUCTION (VPS)                              │` — measured 65 chars total to match the surrounding box width (verified via `awk` + Python).
+- All 6 required env vars documented: DATABASE_URL (with %40 encoding note), DIRECT_URL, INTEGRATION_ENCRYPTION_KEY (with "must match dev" warning), SESSION_SECRET, CRON_SECRET, APP_URL — plus NODE_ENV (already in original).
+- Cross-references: DOCKER.md links back to PRODUCTION_DEPLOYMENT_GUIDE.md in 3 places (Permissions section, Leopard section, VPS Docker Deployment section); PRODUCTION_DEPLOYMENT_GUIDE.md links to DOCKER.md in 1 place (Step 6 — "wrap this in pm2, systemd, or a Docker container (see DOCKER.md)").
+- All commands use the npm scripts (`bun run db:push`, `bun run db:generate`, `bun run build`, `bun run start`) rather than the raw `bunx prisma ...` invocations where applicable — matches the v1.0.0 package.json scripts.
+- `package.json` `postinstall` absence explicitly documented in both files (PRODUCTION_DEPLOYMENT_GUIDE.md "POSTINSTALL NOTE" section + the inline note in Initial Deployment command block; DOCKER.md notes that the Docker build handles `prisma generate` automatically in the `Dockerfile`).
+
+Stage Summary:
+- PRODUCTION_DEPLOYMENT_GUIDE.md is now VPS-ready: all Hostinger instructions removed/replaced, 4 new production feature sections (Turbopack crash, Leopard toggle, Permissions system, Postinstall note) added, env-var reference expanded with a Required Variables Summary table, Step 3 of the pre-deployment checklist rewritten as a 7-step VPS provisioning guide using `bun run db:push` / `bun run db:generate` / `bun run build` / `bun run start` npm scripts.
+- DOCKER.md is now VPS-ready: 6 new sections added (Bun Runtime, .env.docker Management, Turbopack Crash, Permissions System, Leopard Toggle, VPS Docker Deployment), existing dev section corrected (Turbopack→Webpack, named-volume claim fixed), bun 1.3.14 runtime explicitly documented.
+- Both files cross-reference each other appropriately and align with the v1.0.0 release (commit 77c0923 — pre-Hostinger, bun/docker/VPS-ready codebase).
+
+---
+Task ID: DOCUMENTATION-UPDATE-COMPLETE
+Agent: main
+Task: Professionally update all documentation files
+
+Work Log:
+- FLOWOPS_BRIEFING.md updated (1,937 → 2,068 lines):
+  * Header: September 2026, permissions overhaul, courier fixes, brute-force testing
+  * Scale: 51 permissions, 1,670 courier cities, verified integrations
+  * Permission system: full 51-key table with per-module counts
+  * Courier integration: connection status lifecycle, Leopard toggle, verified endpoints
+  * Order lifecycle: brute-force verified (booking + cancel)
+  * Architecture: lazy PrismaClient, cached getWorkspace
+  * Known issues: Turbopack crash, stock loss fragmentation
+  * What's built: 6 new items added
+
+- PRODUCTION_DEPLOYMENT_GUIDE.md updated (330 → 518 lines):
+  * Hostinger → VPS deployment guide
+  * 7-step VPS provisioning guide
+  * Environment variables reference table
+  * 4 new sections: Turbopack, Leopard toggle, Permissions, Postinstall
+
+- DOCKER.md updated (256 → 532 lines):
+  * Bun runtime in Docker
+  * .env.docker file management
+  * Turbopack crash + --webpack flag
+  * Permissions system (51 keys)
+  * Leopard production/staging toggle
+  * VPS Docker deployment (8-step guide)
+
+- All docs aligned with v1.0.0 release (pre-Hostinger, bun/docker/VPS-ready)
+- Committed as e15c034 + merge 809aef9, pushed to GitHub.
+
+Stage Summary:
+- 3 documentation files professionally updated.
+- Total: +669 insertions, -72 deletions across 3 files.
+- All docs reflect current state: 51 permissions, verified courier integrations, VPS-ready deployment.
