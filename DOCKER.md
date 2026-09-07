@@ -7,6 +7,9 @@ FlowOps uses Docker for two purposes:
 1. **Dev/prod parity** (Phase 1) — the app runs in a container whether developing or in production, connecting to the remote Supabase Mumbai database.
 2. **Local schema experimentation** (Phase 2) — a disposable local PostgreSQL container for testing risky `prisma db push` changes without touching production data.
 
+> **Runtime**: All containers (dev + prod) run on **bun 1.3.14** (not Node.js). See the "Bun Runtime in Docker" section below.
+> **Production target**: VPS (Ubuntu 22.04+). See the "VPS Docker Deployment" section below for full instructions.
+
 ---
 
 ## Phase 1: Dev / Prod Containers
@@ -14,7 +17,9 @@ FlowOps uses Docker for two purposes:
 ### Development (with hot reload)
 
 ```bash
-# Start the dev server with Turbopack hot reload
+# Start the dev server with Webpack hot reload
+# (the `dev` script uses the --webpack flag to bypass the Turbopack Rust panic — see
+#  the "Turbopack Crash + --webpack Flag" section below)
 docker compose up --build
 
 # App is at http://localhost:3000
@@ -26,9 +31,9 @@ docker compose down
 
 **How it works:**
 - `Dockerfile.dev` installs all dependencies (including devDeps) + generates Prisma Client
-- `docker-compose.yml` bind-mounts the source directory (`.:/app`) so Turbopack watches host files
-- Anonymous volumes (`/app/node_modules`, `/app/.next`) prevent host versions from overwriting container's
-- Named volume (`flowops_uploads`) persists uploaded files across rebuilds
+- `docker-compose.yml` bind-mounts the source directory (`.:/app`) so Webpack watches host files for hot reload
+- Anonymous volumes (`/app/node_modules`, `/app/.next`) prevent host versions from overwriting the container's installed versions
+- Uploaded files (`public/uploads/`) persist on the host filesystem via the bind-mount — no separate named volume is needed in dev (the `flowops_uploads` named volume exists only in `docker-compose.prod.yml`)
 - Environment variables loaded from `.env.docker` (contains real Supabase Mumbai credentials)
 
 ### Production
@@ -253,3 +258,275 @@ docker compose -f docker-compose.local-db.yml down -v
 | `src/app/api/health/route.ts` | Health check endpoint for Docker HEALTHCHECK |
 | `mini-services/postex-poller/` | Scaffold for future standalone poller worker (Phase 3 groundwork) |
 | `instrumentation.ts` | In-process poller toggle (`ENABLE_IN_PROCESS_POLLER` env var) |
+
+---
+
+## Bun Runtime in Docker
+
+FlowOps uses **bun** (not Node.js) as the production runtime inside Docker. Both the build and the server execution happen on bun.
+
+### Image
+- Base image: `oven/bun:1.3.14` (pinned to an exact tag for reproducibility — not `:latest`)
+- Multi-stage build (in `Dockerfile`):
+  - **base**: `oven/bun:1.3.14` — shared base for all subsequent stages
+  - **deps**: installs all dependencies via `bun install --frozen-lockfile`
+  - **builder**: copies deps + source, runs `bunx prisma generate` and `bun run build`
+  - **runner**: copies ONLY `.next/standalone`, `.next/static`, `public/`, and `prisma/` — no source code, no devDeps
+
+### Why bun (not Node)?
+| Aspect | bun | Node.js |
+|---|---|---|
+| Startup time | ~50 ms | ~200 ms |
+| I/O throughput | higher (built-in I/O scheduler) | lower |
+| TypeScript support | native | requires ts-node or compilation |
+| Production CMD | `bun server.js` | `node server.js` |
+
+### Notes
+- The standalone `server.js` produced by `next build` is runtime-agnostic but is invoked via `bun server.js` (see `Dockerfile` line 79: `CMD ["bun", "server.js"]`).
+- bun 1.3.14 is the version pinned in both `Dockerfile` and `Dockerfile.dev`. Don't upgrade without testing — bun minor versions sometimes break Next.js compatibility.
+- For local dev (no Docker), the `dev`, `build`, and `start` scripts in `package.json` are also invoked via `bun run`.
+
+---
+
+## `.env.docker` File Management
+
+Docker Compose loads environment variables from `.env.docker` (NOT `.env`). This separation lets you run Docker with different credentials than your local dev server.
+
+### Files
+| File | Purpose | Gitignored? |
+|---|---|---|
+| `.env` | Used by `bun run dev` (local, no Docker) | ✅ yes |
+| `.env.docker` | Used by `docker compose` (dev + prod) | ✅ yes |
+| `.env.docker.example` | Template — copy to `.env.docker` and fill in | ❌ no (committed) |
+| `.env.local-db` | Used by `docker-compose.local-db.yml` | ✅ yes |
+| `.env.local-db.example` | Template for the local DB | ❌ no (committed) |
+
+### Setup
+```bash
+# One-time setup:
+cp .env.docker.example .env.docker
+nano .env.docker   # fill in real Supabase Mumbai credentials
+chmod 600 .env.docker
+
+# Verify the file is loaded:
+docker compose config | grep DATABASE_URL
+```
+
+### Production on a VPS
+1. Copy `.env.docker.example` → `.env.docker` on the VPS.
+2. Fill in PRODUCTION credentials (not dev):
+   - `DATABASE_URL` and `DIRECT_URL` → production Supabase project (URL-encode any `@` in the password as `%40`)
+   - `INTEGRATION_ENCRYPTION_KEY` → same 64-char hex as dev (required for credential decryption across environments)
+   - `SESSION_SECRET` → NEW strong secret (32+ chars, different from dev)
+   - `CRON_SECRET` → NEW strong secret (different from dev)
+   - `APP_URL` → `https://yourdomain.com`
+3. Set file permissions: `chmod 600 .env.docker`.
+4. Rebuild: `docker compose -f docker-compose.prod.yml up --build -d`.
+
+### Changes require restart
+`.env.docker` is read at container start time. Changes to the file do NOT propagate to a running container — you must restart:
+```bash
+docker compose -f docker-compose.prod.yml down
+docker compose -f docker-compose.prod.yml up -d
+```
+
+---
+
+## Turbopack Crash + --webpack Flag
+
+### Background
+Next.js 16.1.3 ships with Turbopack as the default dev compiler. Under certain conditions (large module graphs, deeply nested `import()` chains, or the `ROUTE_CHUNK_LOADERS` pattern in `src/app/page.tsx`), Turbopack's Rust core panics with:
+
+```
+thread 'xxx' panicked at crates/.../inner_of_uppers_lost_follower
+```
+
+This is a known upstream issue. **Production builds are NOT affected.**
+
+### How Docker handles it
+The `dev` script in `package.json` includes `--webpack`:
+```json
+"dev": "next dev -p 3000 --webpack"
+```
+
+`Dockerfile.dev` invokes `bun run dev` → bun runs `next dev -p 3000 --webpack` → Webpack is used for hot reload (bypassing the Rust panic).
+
+### In the dev container
+- `docker compose up --build` starts the dev server with Webpack hot reload (not Turbopack).
+- The bind-mount (`.:/app`) lets Webpack watch host files for changes.
+- Edits to source code on the host reflect in the container within ~1 second.
+
+### In the prod container
+- `next build` (run during the Docker build) uses Webpack by default — no Turbopack involved.
+- The standalone server (`bun server.js`) doesn't use any compiler.
+- Production is completely unaffected by the Turbopack crash.
+
+### If the panic appears inside Docker
+1. Confirm `package.json` has `--webpack` on `dev` (it does on the v1.0.0 release).
+2. Clear the container's `.next/cache`:
+   ```bash
+   docker compose exec app rm -rf .next/cache
+   docker compose restart app
+   ```
+3. NEVER add `--turbo` to the dev script — it will crash on every start.
+
+---
+
+## Permissions System (51 Keys)
+
+The 51-key permission registry (`src/lib/permissions.ts`) is enforced identically inside Docker as on bare-metal — there is no Docker-specific configuration.
+
+### What this means for Docker deployments
+- No special env vars needed.
+- The Role Editor UI works the same way (all 51 keys visible).
+- `requirePermission()` is enforced at the API route level regardless of runtime.
+- 35+ API routes are protected, including a cross-company leak fix in the inventory dashboard route.
+
+### Seeding default roles inside Docker (DEV only)
+```bash
+# Inside the dev container:
+docker compose exec app bun scripts/seed-default-roles.ts
+
+# Inside the prod container (NOT recommended — production should not run dev scripts):
+# (intentionally omitted — never run seed scripts against production data)
+```
+
+### Permission count breakdown (reference)
+| Module | Keys |
+|---|---|
+| Inventory | 13 |
+| Products | 7 |
+| Orders | 5 |
+| Customers | 3 |
+| Scan | 2 |
+| Employees | 6 |
+| Payroll | 3 |
+| Finance | 2 |
+| Reports | 2 |
+| Settings | 3 |
+| Integrations | 2 |
+| KPI & Audit | 3 |
+| **Total** | **51** |
+
+See `PRODUCTION_DEPLOYMENT_GUIDE.md` → "Permissions System (51 Keys, Role Editor)" for full details.
+
+---
+
+## Leopard Production / Staging Toggle
+
+The Leopard Courier adapter (`src/lib/integrations/couriers/leopard.adapter.ts`) supports two endpoints:
+- **Staging** (default): `https://merchantapistaging.leopardscourier.com/api/`
+- **Production**: `https://merchantapi.leopardscourier.com/api/`
+
+### How the toggle works
+The integration's `isProduction` field (stored in `CompanyIntegration.credentials`) controls which base URL is used. The UI is a **Switch** component in the integrations panel. The adapter defensively handles all boolean representations: `true`/`false`, `"true"`/`"false"`, `"on"`, `undefined` (defaults to staging).
+
+### Docker-specific considerations
+- **No Docker-specific env var** — the toggle is per-integration, not per-deployment.
+- A single Docker container can host integrations pointing to staging AND production simultaneously (though this is unusual).
+- Every flip is captured in the audit log (`IntegrationLog`) — no silent toggles.
+
+### Recommended workflow on a VPS Docker deployment
+1. **DEV container**: leave the toggle OFF (staging). Verify the full lifecycle: book → track → cancel.
+2. **PROD container**: flip ON once verified. Every API call is recorded in `IntegrationLog` (337+ verified rows across 12 action types in dev).
+
+See `PRODUCTION_DEPLOYMENT_GUIDE.md` → "Leopard Production / Staging Toggle" for the pre-flight checklist before flipping ON.
+
+---
+
+## VPS Docker Deployment
+
+### Step 1: Provision the VPS
+- Ubuntu 22.04+ (or Debian 12+)
+- 2 vCPU / 4 GB RAM minimum (build is RAM-heavy)
+- Docker Engine 24+
+- Docker Compose v2+ (the `docker compose` plugin, not the legacy `docker-compose` binary)
+- 20 GB free disk (for image + uploads volume)
+
+### Step 2: Install Docker (if not pre-installed)
+```bash
+# Official Docker install script:
+curl -fsSL https://get.docker.com | sh
+
+# Add your user to the docker group (then log out and back in):
+sudo usermod -aG docker $USER
+
+# Verify:
+docker --version
+docker compose version
+```
+
+### Step 3: Clone + configure
+```bash
+git clone [repo-url] /app/flowops
+cd /app/flowops
+
+# Create .env.docker from the template:
+cp .env.docker.example .env.docker
+nano .env.docker   # fill in PRODUCTION Supabase credentials
+chmod 600 .env.docker
+```
+
+### Step 4: First-time database setup
+Run `db:push` and `prisma generate` inside a one-shot container:
+
+```bash
+# Build the production image first (so prisma generate has the client available):
+docker compose -f docker-compose.prod.yml build
+
+# Push schema to production DB (FIRST TIME ONLY):
+docker compose -f docker-compose.prod.yml run --rm \
+  --entrypoint "bunx prisma db push" app
+
+# Apply SQL functions / triggers / sequences (idempotent — safe to re-run):
+cat supabase/functions-only.sql | docker exec -i flowops-prod-app-1 \
+  psql "$DATABASE_URL"
+# (or paste each supabase/migrations/0XX_*.sql into the Supabase SQL Editor)
+```
+
+> **Note**: The container name `flowops-prod-app-1` may differ — check with `docker compose -f docker-compose.prod.yml ps`.
+
+### Step 5: Start the production stack
+```bash
+docker compose -f docker-compose.prod.yml up -d
+
+# Verify:
+curl http://localhost:3000/api/health
+# Expected: {"status":"healthy","db":"connected",...}
+```
+
+### Step 6: Configure a reverse proxy (recommended)
+Put Caddy, Traefik, or Nginx in front of the container for TLS termination. Example with Caddy:
+```
+yourdomain.com {
+  reverse_proxy localhost:3000
+}
+```
+
+### Step 7: Ongoing operations
+```bash
+# View logs:
+docker compose -f docker-compose.prod.yml logs -f
+
+# Restart:
+docker compose -f docker-compose.prod.yml restart
+
+# Pull updates + rebuild:
+cd /app/flowops
+git pull origin main
+docker compose -f docker-compose.prod.yml up -d --build
+
+# Stop:
+docker compose -f docker-compose.prod.yml down
+
+# Stop + destroy uploads volume (DESTRUCTIVE — never do this in production):
+docker compose -f docker-compose.prod.yml down -v
+```
+
+### Step 8: Health monitoring
+The production container has a built-in `HEALTHCHECK` (every 30s, 10s timeout, 3 retries). Check status:
+```bash
+docker ps   # STATUS column shows "healthy" or "unhealthy"
+```
+
+For more details on each command and the underlying Docker files, see the "File Reference" table above. For non-Docker VPS deployment (pm2 / systemd), see `PRODUCTION_DEPLOYMENT_GUIDE.md`.

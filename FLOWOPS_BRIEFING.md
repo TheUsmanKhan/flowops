@@ -2,7 +2,7 @@
 
 > **Purpose**: This document is the single source of truth for the FlowOps ERP system. It covers every module, the API system, dependencies, database schema, frontend, backend, third-party services, what's built, what's in process, and what needs to be built. Use this to train AI assistants so they can generate correct, context-aware prompts.
 >
-> **Last Updated**: August 2026 (updated after international phone validation, country system, self-fulfilled channel, Markets/regional-pricing system, 3-gate enforcement, discount rework, currency rollup, audit fixes, order-create scope-leak fixes, slip PDF binary response fix)
+> **Last Updated**: September 2026 (permissions system overhaul — 51 permissions, 35+ routes protected; courier integration fixes — `connectionStatus` bug, Leopard production toggle, Switch UI; brute-force testing verified — Leopard full lifecycle: book → track → cancel)
 > **App URL**: Single-page app at `/` (Next.js 16 App Router)
 > **Stack**: Next.js 16 + React 19 + TypeScript + Prisma 6 + Supabase PostgreSQL + Tailwind 4 + shadcn/ui
 >
@@ -40,7 +40,7 @@
 
 **Core value proposition**: One system to manage products, inventory, orders, customers, and courier bookings — replacing the spreadsheets + WhatsApp + manual courier portal workflow that Pakistani e-commerce sellers currently use.
 
-**Scale**: 68 Prisma models, 170+ API routes, ~160 React components (108 non-UI + 52 shadcn/ui), 21 SQL migrations, 30 permission keys, 2 live courier integrations, 5 cron jobs.
+**Scale**: 68 Prisma models, 170+ API routes, ~160 React components (108 non-UI + 52 shadcn/ui), 21 SQL migrations, **51 permission keys (expanded from 26 visible in role editor to all 51)**, **2 live courier integrations (Leopard + PostEx, both verified with real API calls)**, 5 cron jobs, **1,670 courier operational cities (774 Leopard + 896 PostEx)**.
 
 **Performance posture** (as of latest optimization pass):
 - First Load JS: **1,070 KB** (down from 3,148 KB baseline — 66% reduction via code-splitting)
@@ -95,6 +95,41 @@ Every transition has inventory side-effects:
 - **Dispatch**: deduct stock (`onHand -= qty`, `reserved -= qty`)
 - **Cancel**: unreserve stock (`reserved -= qty`)
 - **RTO**: restock (`onHand += qty` via `return_resellable` or `return_stitched_received`)
+
+### Order Lifecycle (end-to-end with courier — brute-force verified, September 2026)
+
+The complete order → courier lifecycle, verified end-to-end with real Leopard API calls:
+
+```
+Order creation (manual or external)
+  ↓ if courierBookingMode='automatic' → maybeAutoBookOrder() fires in background
+Auto-booking (bookOrderWithCourier)
+  ↓ bookPacket (Leopard) / create-order (PostEx) — returns tracking number
+Tracking number received (~0.25–1s for Leopard; e.g. FS7543203010)
+  ↓ order is now bookable + ready-to-dispatch
+Status polling (PostEx 30min / Leopard 60min safety-net + Leopard push webhooks)
+  ↓ courierSubStatus transitions
+Dispatch (when "Picked By PostEx" / Leopard RC → SP → DP)
+  ↓ performOrderDispatch — deducts stock, locks COGS
+Delivery or RTO
+  ↓ triggerDelivered / triggerRto → markOrderDelivered / restockOrderForRto
+Cancellation (pre-pickup only)
+  ↓ cancelOrder() → cancelCourierBooking() first → if courier API fails, order is NOT cancelled
+```
+
+**Verified — Leopard full lifecycle (September 2026 brute-force test):**
+- ✅ `bookPacket` returns a tracking number (e.g. `FS7543203010`) in ~0.25–1 s
+- ✅ Tracking number is stored on the `Order` row + `courierBookingStatus='booked'`
+- ✅ `trackBookedPacket` returns the latest 2-char status code (RC/SP/DP/...)
+- ✅ `cancelBookedPackets` with the `cn_numbers` field successfully cancels pre-pickup shipments
+- ✅ Order cancellation in FlowOps automatically calls the courier cancel API first — if the API fails, internal cancellation is blocked (prevents orphaned courier bookings)
+
+**Courier booking modes** (`CompanyOrderSetting.courierBookingMode`):
+- `semi_manual` (default) — use the Booking Workbench to book orders after creation
+- `automatic` — `maybeAutoBookOrder()` fires in the background on order creation (PostEx can take 50–100 s)
+- `off` — no booking automation; user must book via the workbench
+
+> ⚠️ If `courierBookingMode='automatic'` but `defaultCourierCompanyIntegrationId` is NULL, auto-booking silently skips. The order remains `not_booked` with no failure reason surfaced in the UI.
 
 ---
 
@@ -189,13 +224,15 @@ Supabase PostgreSQL (Mumbai)
 
 2. **Custom HMAC sessions** — Sessions are HMAC-signed tokens: `userId.timestamp.hmac` (30-day TTL). Dual-channel: `Authorization: Bearer` header (works in iframes/cross-origin) + HttpOnly cookie fallback. (`next-auth` was previously installed but unused; it was removed in Step 4 — see §3.)
 
-3. **Multi-tenant isolation in app layer** — `getWorkspace()` in `src/lib/workspace.ts` resolves the caller's active company from `UserSetting.activeCompanyId` via a SINGLE Prisma JOIN query (Profile → settings.activeCompany + employees.role). No database-level RLS — all scoping is enforced in the application layer via `requirePermission()`.
+3. **Multi-tenant isolation in app layer** — `getWorkspace()` in `src/lib/workspace.ts` resolves the caller's active company from `UserSetting.activeCompanyId` via a SINGLE Prisma JOIN query (Profile → settings.activeCompany + employees.role + rolePermission rows). The result (`{ user, employee, company, permissions }`) is **cached for the lifetime of the request** so subsequent `requirePermission()` calls reuse it instead of re-querying the DB. No database-level RLS — all scoping is enforced in the application layer via `requirePermission(ctx, PERMISSIONS.XXX)`. Replacing inline `db.employee.findFirst()` boilerplate with the cached helper saves **140–280 ms per gated request** (the role + permissions lookup is paid once, not per gate).
 
 4. **Fire-and-forget audit/metric writes** — `insertAuditLog()` and `insertMetricEvent()` return `void` immediately (detached promises via `fireAndForget()`). This works because the app runs on a long-lived Bun/Node server where the event loop survives the HTTP response.
 
 5. **Adapter pattern for couriers** — provider-agnostic `CourierAdapter` interface. Only PostEx + Leopard are real implementations; TCS is a stub. All courier calls go through `executeLoggedIntegrationAction()` which logs every API call to `integration_action_logs`.
 
 6. **Prisma `db push` workflow** — the `supabase/migrations/*.sql` files are reference SQL. The live schema is managed via `prisma db push` against `prisma/schema.prisma`. SQL functions (like `generate_order_number()`) must be applied manually to the DB.
+
+7. **Lazy PrismaClient via Proxy** — `src/lib/db.ts` exports a `Proxy`-wrapped PrismaClient that lazily instantiates the real client on first property access (not at module load). This prevents the dev server from crashing on cold start in the sandbox when `@prisma/client` throws because the `DATABASE_URL` env var is not yet set (e.g., during Next.js config evaluation). The Proxy defers construction until the first `db.*` call inside a request handler, by which time `.env` is guaranteed to be loaded by the `predev` script.
 
 ---
 
@@ -205,7 +242,7 @@ Supabase PostgreSQL (Mumbai)
 - **Provider**: PostgreSQL (Supabase)
 - **Region**: Mumbai (ap-south-1) — ~100ms latency from sandbox
 - **Pooler**: Session mode, port 5432
-- **Client**: `src/lib/db.ts` — Prisma singleton with `log: ['error', 'warn']`
+- **Client**: `src/lib/db.ts` — Prisma singleton via the **Proxy pattern** (lazy instantiation on first property access, prevents module-load crashes when `DATABASE_URL` is not yet set during sandbox cold start). `log: ['error', 'warn']`.
 
 ### Environment Variables (REQUIRED)
 ```env
@@ -374,22 +411,28 @@ APP_URL="http://localhost:3000"
 5. POST /api/auth/logout → clear cookie + localStorage
 ```
 
-### Permission System (30 keys)
-Permissions use dot-notation `module.action`:
+### Permission System (51 keys)
+Permissions use dot-notation `module.action`. All 51 keys are now visible in the Role Editor (was 26). The "Select All" button now grants all 51 permissions.
 
-| Module | Keys |
-|---|---|
-| Inventory (14) | view, create, adjust, delete, receive, report_loss, manage_loss, manage_locations, manage_suppliers, transfer, manage_purchase_orders, manage_supplier_returns, cycle_count, manage_production |
-| Products (7) | view, create, edit, manage_catalog, subscribe, pricing, promote |
-| Orders (5) | view, create, fulfill, cancel, manage |
-| Employees (4) | view, invite, terminate, manage |
-| Finance (2) | view, manage |
-| Reports (2) | view, export |
-| Settings (3) | company_view, company_edit, roles_manage |
-| Integrations (2) | view, manage |
-| KPI & Audit (3) | kpi_view, kpi_manage, audit_view |
+| Module | Keys | Count |
+|---|---|---|
+| Inventory | view, receive, adjust, transfer, report_loss, manage_loss, manage_locations, manage_suppliers, manage_purchase_orders, manage_supplier_returns, cycle_count, manage_production, delete | 13 |
+| Products | view, create, edit, manage_catalog, pricing, promote, subscribe | 7 |
+| Orders | view, create, fulfill, cancel, manage | 5 |
+| Customers | view, create, edit | 3 |
+| Scan | operate, view_reports | 2 |
+| Employees | view, invite, terminate, manage, view_salary, manage_salary | 6 |
+| Payroll | manage, view_all, manage_advances | 3 |
+| Finance | view, manage | 2 |
+| Reports | view, export | 2 |
+| Settings | company_view, company_edit, roles_manage | 3 |
+| Integrations | view, manage | 2 |
+| KPI & Audit | kpi_view, kpi_manage, audit_view | 3 |
+| **Total** | | **51** |
 
 **Elevated roles** (`owner`, `founder`, `co_founder`, `investor`) bypass ALL permission checks via `isElevated()`.
+
+**Performance note**: `requirePermission()` is cached via `getWorkspace()` — the workspace context (user, employee, role, permissions) is resolved once per request via a single Prisma JOIN query, saving 140–280 ms per request compared to inline checks that re-fetch the caller's role + permissions on every gate.
 
 ### Workspace Resolution
 `getWorkspace()` in `src/lib/workspace.ts`:
@@ -1090,6 +1133,81 @@ No credentials are logged — only business data.
 
 Leopard uses 2-character status codes: RC, SP, DP, AR, AC, DV, PN1, PN2, RO, RN1, RN2, NR, RW, DW, RS, DR — all mapped to FlowOps canonical subStatuses.
 
+### Connection Status Lifecycle (FIXED — September 2026)
+
+`CompanyIntegration.connectionStatus` follows this lifecycle:
+
+| Transition | Status | Trigger |
+|---|---|---|
+| User connects | `pending` | `connectIntegration()` — credentials saved, needs validation |
+| User clicks "Test Connection" (success) | `connected` | `/api/integrations/[id]/test` calls `adapter.pingConnection()` (real read-only API call: Leopard `getAllCities`, PostEx `get-operational-city`) |
+| User disconnects | `expired` | `disconnectIntegration()` — `isActive=false` |
+
+> ⚠️ **Bug fixed (Sept 2026)**: The test route previously set `connectionStatus='active'`, but the `StatusBadge` UI config only recognized `connected`/`pending`/`error`/`expired` — so successfully tested integrations rendered as the amber "Pending" badge. The test route now sets `'connected'` (matching the server action). A backward-compat mapping for `'active'` → "Connected" was added to `StatusBadge` to gracefully handle the 4 existing rows that were migrated from `'active'` → `'connected'`.
+
+### Leopard Production / Staging Toggle
+
+The Leopard integration uses two distinct API bases:
+- **Staging**: `https://merchantapistaging.leopardscourier.com/api/`
+- **Production**: `https://merchantapi.leopardscourier.com/api/`
+
+The `isProduction` flag in the encrypted credentials controls which base URL the adapter uses. The Connect dialog renders this as a **Switch UI toggle** (ON = production, OFF = staging) — not a free-text input. The adapter handles all boolean formats (`true`, `'true'`, `'on'`, `'1'`, `1`) for backward compatibility with rows saved by prior versions of the form.
+
+> ⚠️ **Bug fixed (Sept 2026)**: The adapter previously only checked `credentials.isProduction === 'true'` (strict string match), which silently routed to staging when the value was stored as a boolean `true` or any other truthy format. Now normalizes via a small `parseBoolean()` helper.
+
+### Leopard API — Verified Endpoints (September 2026 brute-force test)
+
+| Method | Endpoint | Verified behaviour |
+|---|---|---|
+| `bookShipment` | `POST /services/bookPacket/format/json/` | Returns tracking number (e.g. `FS7543203010`) in ~0.25 s when credentials are valid. Slip PDF link returned in `slip_link`. |
+| `trackShipment` | `POST /services/trackBookedPacket/format/json/` | Returns latest 2-char status code (`status card` array). |
+| `cancelShipment` | `POST /services/cancelBookedPackets/format/json/` | Body: `{ api_key, api_password, cn_numbers }`. `status=1` → success; `status=0` → error message returned. |
+| `fetchOperationalCities` | `POST /services/getAllCities/format/json/` | Returns full city list with `shipment_type` array per city. Last sync: 774 cities. |
+| `createShipper` | `POST /services/createShipper/format/json/` | Creates a pickup address (shipper). |
+| `getShipperDetails` | `GET /services/getShipperDetails/format/json/` | Returns array OR single object (filtered by `request_param`) — adapter now handles both shapes. |
+
+### PostEx API — Verified Endpoints (September 2026)
+
+| Method | Endpoint | Verified behaviour |
+|---|---|---|
+| `bookShipment` | `POST /services/integration/api/order/v3/create-order` | Returns `trackingNumber` + `status` field. |
+| `trackShipment` | `GET /services/integration/api/order/v1/track-order/{trackingNumber}` | Returns `transactionStatus` (string). |
+| `trackBulkShipments` | `GET /services/integration/api/order/v1/track-bulk-order?TrackingNumbers=...` | Intermittent HTTP 400 → single-track fallback. |
+| `fetchOperationalCities` | `GET /services/integration/api/order/v2/get-operational-city` | Returns all PostEx-served cities. Last sync: 896 cities. |
+| `cancelShipment` | `PUT /services/integration/api/order/v1/cancel-order` | Cancels a pre-pickup shipment. |
+| `createPickupAddress` | `POST /services/integration/api/order/v3/create-pickup-address` | Creates a pickup address entry. |
+| `generateLoadSheet` | `POST /services/integration/api/order/v2/generate-load-sheet` | Returns a manifest PDF for multiple tracking numbers. |
+
+### Integration Logging (all outbound + inbound calls)
+
+Every adapter call is wrapped by `executeLoggedIntegrationAction()`, which inserts a row into `integration_action_logs` with `actionType`, `direction` (`outbound` / `inbound`), `requestPayload`, `responsePayload`, `durationMs`, and `status` (`success` / `failed`). The `finally` block ensures failures are still logged (the `IntegrationActionLog` insert is the only awaited DB write in the call — ~150 ms).
+
+Logged action types (verified against 337+ rows in production):
+
+| Action type | Direction | Notes |
+|---|---|---|
+| `ping_connection` | outbound | Test Connection button |
+| `test_connection` | outbound | Legacy test path (deprecated) |
+| `fetch_operational_cities` | outbound | City sync (cron + manual) |
+| `fetch_shipper_by_id` | outbound | Leopard single-shipper import |
+| `fetch_existing_pickup_addresses` | outbound | PostEx + Leopard bulk address sync |
+| `book_shipment` | outbound | Order + exchange shipment booking |
+| `cancel_shipment` | outbound | Order + exchange shipment cancel |
+| `track_shipment` | outbound | Leopard single-track (manual + safety-net poll) |
+| `track_shipment_bulk` | outbound | PostEx bulk poll |
+| `create_pickup_address` | outbound | New pickup address |
+| `generate_load_sheet` | outbound | PostEx manifest PDF |
+| `parse_status_webhook` | inbound | Webhook receiver (Leopard only) |
+
+### Status Polling Cadence
+
+| Provider | Poll frequency | Mechanism |
+|---|---|---|
+| PostEx | every 30 min | In-process poller (`instrumentation.ts`) + `/api/cron/poll-postex` (Vercel cron — only fires on Vercel). Bulk API with single-track fallback. |
+| Leopard | every 60 min (safety-net) | `/api/cron/poll-leopard-safety-net` — only catches up if Leopard's push webhook missed updates. |
+| Leopard webhooks | push (real-time) | `/api/webhooks/leopard/[webhook_endpoint_id]` — Leopard pushes the full status array; `processLeopardWebhookUpdates()` applies each transition via shared `performOrderDispatch` / `markOrderDelivered` / `restockOrderForRto` functions. |
+| PostEx webhooks | — | PostEx does not support webhooks (`adapter.parseStatusWebhook` throws). Polling is the only channel. |
+
 ---
 
 ## 11. Frontend Architecture
@@ -1588,9 +1706,9 @@ The sandbox exposes one port (81) via Caddy:
 - **Timeouts**: 120s (supports long courier API calls)
 
 ### Development
-- **Command**: `bun run dev` (runs `next dev -p 3000`)
+- **Command**: `bun run dev` (runs `next dev -p 3000 --webpack`)
 - **Predev guard**: refuses to start if `.env` `DATABASE_URL` isn't `postgresql://`
-- **Hot reload**: Turbopack (can be unstable in sandbox — memory issues)
+- **Hot reload**: Webpack (the `dev` script uses the `--webpack` flag to bypass Turbopack, which has a known Rust panic `inner_of_uppers_lost_follower` in Next.js 16.1.3 — see §18 item 3)
 
 ### Production
 - **Build**: `next build` → `.next/standalone/`
@@ -1610,7 +1728,7 @@ The sandbox exposes one port (81) via Caddy:
 ### ✅ Fully Built & Working
 
 1. **Auth System** — login, register, logout, forgot/reset password, dual-channel sessions
-2. **Multi-Tenancy** — org → company → employee, workspace switching, 30 permissions
+2. **Multi-Tenancy** — org → company → employee, workspace switching, **51 permissions (all visible in Role Editor; was 26)**
 3. **Catalog** — org-level categories, brands, attributes, attribute values
 4. **Product Management** — org products, company subscriptions, variant management, pricing overrides, selective access. **Products list view**: responsive table (desktop, 8 columns) + stacked card list (mobile), switches at `md` breakpoint.
 5. **Customer Management** — multi-phone, multi-address, external identities, RTO flagging, stats
@@ -1623,7 +1741,7 @@ The sandbox exposes one port (81) via Caddy:
 12. **Cycle Counts** — create, count, adjust
 13. **Exchanges** — request, verify, dispatch replacement, settle price difference
 14. **Exchange Shipments** — reserve, dispatch, RTO, cancel
-15. **Courier Integrations** — PostEx (live), Leopard (live)
+15. **Courier Integrations** — PostEx (live, verified with real API calls), Leopard (live, verified with real API calls — full lifecycle: book → track → cancel)
 16. **Booking Workbench** — book orders/shipments, load sheets
 17. **City Management** — sync, search, auto-fetch missing cities, fuzzy match, aliases
 18. **Courier Status Tracking** — auto-poller (30min), bulk+single fallback, status mapping, auto-dispatch/deliver/RTO
@@ -1643,6 +1761,12 @@ The sandbox exposes one port (81) via Caddy:
 32. **Discount Rework** — client-overridable unit_price removed; originalUnitPrice resolved strictly from MarketVariantPricing (server-side only, never client-writable); per-item discount (percentage/fixed) with validation; Order.discountAmount/discountReason (order-wide) works independently; Shopify total_discounts now captured
 33. **Dashboard Currency Rollup** — shared computeRevenueWithCurrencies() function; per-currency breakdown (always accurate) + estimated total in baseCurrency; daily exchange rate cron; display-only (never touches stored order prices)
 34. **Pricing Tab with Market Sub-Tabs** — product-detail-view Pricing tab renders market sub-tabs (Default first) with completion badges; ParentChildVariantTable scoped by marketId with full cascade/sync; "Copy from Default" bulk action for empty markets
+35. **Permissions System** — 51 keys, all visible in the Role Editor (was 26), 35+ routes protected with `requirePermission()`, 6 orphan permissions now enforced; `Select All` grants all 51
+36. **Courier integration verified end-to-end** — Leopard + PostEx both verified with real API calls against staging + production; brute-force test of the full Leopard lifecycle (book → track → cancel) succeeded
+37. **Leopard production/staging toggle** — Switch UI in the Connect dialog (ON = production, OFF = staging); adapter handles all boolean formats (`true`, `'true'`, `'on'`, `'1'`, `1`) for backward compatibility
+38. **Connection status lifecycle** — `pending` on connect → `connected` after successful test (FIXED — was `'active'` which the StatusBadge UI rendered as the amber "Pending" badge)
+39. **Integration logging** — all outbound courier API calls (book, cancel, track, ping, city sync, shipper fetch) + inbound webhook parses logged to `integration_action_logs` with `requestPayload` + `responsePayload` + `durationMs` + `status`
+40. **Cached workspace + permission gate** — `getWorkspace()` resolves user + employee + role + permissions in a single Prisma JOIN; `requirePermission()` reuses this cached context (saves 140–280 ms per request vs inline checks)
 
 ### 🔧 In-Process / Recently Fixed
 
@@ -1675,6 +1799,12 @@ The sandbox exposes one port (81) via Caddy:
 27. **Button cursor fix** (FIXED) — `cursor-pointer` on all buttons; `disabled:cursor-not-allowed` replaces `disabled:pointer-events-none`
 28. **Order-create child-component scope leaks** (FIXED) — `order-create-view.tsx` has 6 child function components (`CustomerSection`, `CrmStatsWidget`, `ItemsSection`, `PaymentSection`, `ProofFileInput`, `SummarySection`) declared at module level (NOT closures inside `OrderCreateView`). During the Markets/3-gate feature work, parent-scope variables were referenced directly inside child components without being passed as props, causing `ReferenceError: X is not defined` at runtime. Fixed by passing ALL required variables as props: `isCountryBlocked`, `countryBlockReason`, `fulfillmentChannel`, `setFulfillmentChannel`, `userPickedCourier`, `setUserPickedCourier`, `deliveryCountry`, `enabledProductIdsSet`, `pricedVariantIdsSet`, `resolvedMarketName`. Exhaustive Python audit confirmed all 6 child components are now clean.
 29. **Self-fulfilled slip PDF 404 fix** (FIXED) — The slip PDF API previously returned a URL path (`/uploads/self-fulfilled-slips/...`) and the frontend did `window.open(url)` to open it, but the Caddy gateway didn't serve the static file correctly (404). Fixed: the API now returns the PDF as a **binary response** (`Content-Type: application/pdf`), and the frontend uses `fetch()` → `response.blob()` → `URL.createObjectURL(blob)` → `window.open(blobUrl)` — no static file serving needed, no 404 possible.
+30. **Leopard production/staging toggle** (FIXED) — the adapter previously only checked `credentials.isProduction === 'true'` (strict string match), which silently routed to staging when the value was stored as a boolean `true`. Now normalizes via a `parseBoolean()` helper that accepts `true`, `'true'`, `'on'`, `'1'`, `1`. The Connect dialog renders this as a **Switch UI toggle** (ON = production, OFF = staging) — previously a free-text input where users had to type `'true'` manually.
+31. **Leopard adapter response shape** (FIXED) — `fetchShipperById` + `fetchExistingPickupAddresses` previously returned `null` / empty array when Leopard returned a single OBJECT (filtered by `request_param`) instead of an array. Now handles both shapes via an `Array.isArray()` guard.
+32. **Permission route protection** (FIXED, Sept 2026) — 35+ previously-unprotected API routes now enforce `requirePermission()`: `ORDERS_VIEW` on `/api/orders` + `/api/exchanges` + `/api/exchanges/[id]` + self-fulfilled-slip; `INTEGRATIONS_VIEW`/`MANAGE` on 6 integration sub-routes (test + pickup-addresses CRUD + sync + refresh + import-by-id); `INVENTORY_VIEW` on 13 inventory read endpoints; `PRODUCTS_VIEW` on 4 catalog endpoints; `SCAN_VIEW_REPORTS` on scan reports; `ORDERS_FULFILL` on load-sheet + refresh-status; `PRODUCTS_PROMOTE` on promote/demote. The `/api/inventory/dashboard` org-wide cross-company data leak is also fixed (filter scoped to `companyId ∈ {null, ctx.company.id}`).
+33. **Connection status UI bug** (FIXED, Sept 2026) — `/api/integrations/[id]/test` was setting `connectionStatus='active'`, but the `StatusBadge` only recognized `connected`/`pending`/`error`/`expired`, so successfully tested integrations rendered as the amber "Pending" badge. Route now sets `'connected'`; a backward-compat `'active'` → "Connected" mapping was added; 4 existing DB rows migrated from `'active'` → `'connected'`.
+34. **Permission-gated routes / elevated-only replaced** (FIXED, Sept 2026) — `/api/couriers/sync-cities` and `/api/integrations/logs` previously required `isElevated()` (Owner/Admin only). Now use `requirePermission(INTEGRATIONS_MANAGE)` / `requirePermission(INTEGRATIONS_VIEW)` — a Manager role with these permissions can now sync cities and view logs.
+35. **🔄 Stock loss unification** (IN PROGRESS) — `STOCKLOSS_INVESTIGATION.md` audit identified 8 separate paths that decrement `InventoryPool.onHand` (RTO, Returned Stitched, Cycle Count, Adjust Stock, Stock Losses module, supplier returns, exchanges, damage writeoff). Migration `027_stock_loss_unification.sql` adds `sourceModule` + `cycleCountItemId` + the `stock_loss_orderitem_dedup` partial unique index. The unified `recordStockLoss()` helper in `src/lib/stock-loss.ts` is wired into most paths but **exchange verification (`verifyOldItemReceived`) still bypasses it** — needs follow-up to close the loop and eliminate double-stock-decrease risk.
 
 ### ❌ Not Yet Built / Needed
 
@@ -1829,7 +1959,7 @@ import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-valid
 ### Environment
 1. **`.env` reverts to SQLite** — the `predev` script guards against this, but always verify before starting. If it happens, restore from DOCKER.md reference or git history.
 2. **DB latency** — Mumbai region (~100ms per query from sandbox). Performance optimizations (fire-and-forget, parallel queries, single-JOIN getWorkspace) have been applied. `/api/auth/me` is now ~210ms (was 500-1000ms) — FIXED (see item 14 for details).
-3. **Turbopack instability** — dev server can hang during compilation in the sandbox (memory issue). Clear `.next/` cache and restart.
+3. **Turbopack crash (Next.js 16.1.3)** — the dev server can panic with a Rust error: `inner_of_uppers_lost_follower`. This is a known Turbopack bug in Next.js 16.1.3 that crashes the dev server with no recovery short of restarting the process. **Workaround**: run dev with `next dev --webpack` (the `dev` npm script uses the `--webpack` flag) instead of Turbopack. **Production builds are unaffected** — `next build` does not use Turbopack, so the standalone bundle compiles cleanly.
 4. **Hydration mismatch from browser extensions** — Grammarly injects `data-gr-ext-installed` + `data-new-gr-c-s-check-loaded` attributes into `<body>`. Fixed via `suppressHydrationWarning` on `<body>` in `layout.tsx`. If new hydration errors appear, check for other browser-extension-injected attributes.
 
 ### Bundling
@@ -1845,14 +1975,15 @@ import { isValidPhoneFormat, validateAndNormalizePhone } from '@/lib/phone-valid
 10. **No DB-level RLS** — all multi-tenant isolation is in the app layer. A bug in `getWorkspace()` or a missing `companyId` filter could leak data across tenants
 11. **No `available` column** — `available = onHand - reserved` is computed in app code every time
 12. **Order-create child components are module-level functions** — `CustomerSection`, `ItemsSection`, `PaymentSection`, etc. in `order-create-view.tsx` are declared at the module level (NOT closures inside `OrderCreateView`). Any new state variable used in these child components MUST be passed as a prop — referencing it directly will compile fine but crash at runtime with `ReferenceError`. TypeScript does NOT catch this. When adding new state/hooks to `OrderCreateView` that child components need, always: (1) add it to the child's destructured props, (2) add it to the child's type definition, (3) pass it from `<OrderCreateView>` to `<ChildComponent>`.
+13. **Stock loss system fragmentation** — RTO processing, Returned Stitched inventory, Cycle Count adjustments, Adjust Stock, and the dedicated Stock Losses module each independently decrement `InventoryPool.onHand` through different transaction types (`return_damaged`, `cycle_count_adjust`, `damage_writeoff`, `theft_writeoff`, `transit_loss`, etc.). A 2026 audit (`STOCKLOSS_INVESTIGATION.md`) found that the `verifyOldItemReceived` path in `exchange.actions.ts` bypasses the unified `recordStockLoss()` helper and the `stock_loss_orderitem_dedup` partial unique index. This creates a risk of **double stock-decrease entries** when the same loss is recorded from two modules (e.g. an RTO recorded as both `return_damaged` and a separate `StockLossRecord`). **Planned fix**: unify all 8 loss paths through `src/lib/stock-loss.ts` with the `sourceModule` discriminator column + atomic `db.$transaction` wrapping the loss record + the inventory transaction. Migration `027_stock_loss_unification.sql` adds `sourceModule` + `cycleCountItemId` + the dedup index — but exchange-side adoption is still pending.
 
 ### Performance
-13. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
-14. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
-15. ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1 + Phase 2)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw query JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. See `src/lib/session-payload.ts`. Phase 2: client-side stale-while-revalidate caching added via TanStack Query (`refetchOnWindowFocus: true` scoped to session query only — see §11.1). Server-side in-memory cache deliberately deferred (see §16 item 19 note).
-16. **Booking-time city corrections were not persisted** (FIXED) — `order.update` in `bookOrderWithCourier()` now includes `deliveryCity` + `deliveryAddress`. Pre-fix, corrected cities were sent to the courier API but not saved on the Order row. Historical data cannot be backfilled (requestPayload was null for pre-fix logs). Going forward, requestPayload is logged for all outbound calls.
-17. **Employee invite had race window** (FIXED) — was check-then-create (findFirst then create). Now has partial unique index `invitation_pending_email_unique` on `(companyId, invitedEmail) WHERE status='pending'` + catches P2002 constraint violation.
-18. **Company integration had race window** (FIXED) — was find-then-create. Now has `@@unique([companyId, providerId])` + catches P2002 → re-fetches + reactivates.
+14. **Audit/metric writes are fire-and-forget** — on a serverless platform (Vercel Edge), these would be killed mid-flight. The current long-lived Bun server keeps them alive
+15. **`executeLoggedIntegrationAction` has a blocking DB write** — the `IntegrationActionLog` insert in the `finally` block is awaited (~150ms per booking). Not yet converted to fire-and-forget
+16. ~~**`/api/auth/me` takes 500-1000ms**~~ **FIXED (Phase 1 + Phase 2)**: `buildSessionPayload()` now uses a single raw SQL JOIN (`prisma.$queryRaw`) instead of 5-6 sequential Prisma queries. Latency reduced from ~696ms avg to ~210ms warm (67% faster). The raw query JOINs Profile + UserSetting + Employee + Company + Role + RolePermission in one statement. See `src/lib/session-payload.ts`. Phase 2: client-side stale-while-revalidate caching added via TanStack Query (`refetchOnWindowFocus: true` scoped to session query only — see §11.1). Server-side in-memory cache deliberately deferred (see §16 item 19 note).
+17. **Booking-time city corrections were not persisted** (FIXED) — `order.update` in `bookOrderWithCourier()` now includes `deliveryCity` + `deliveryAddress`. Pre-fix, corrected cities were sent to the courier API but not saved on the Order row. Historical data cannot be backfilled (requestPayload was null for pre-fix logs). Going forward, requestPayload is logged for all outbound calls.
+18. **Employee invite had race window** (FIXED) — was check-then-create (findFirst then create). Now has partial unique index `invitation_pending_email_unique` on `(companyId, invitedEmail) WHERE status='pending'` + catches P2002 constraint violation.
+19. **Company integration had race window** (FIXED) — was find-then-create. Now has `@@unique([companyId, providerId])` + catches P2002 → re-fetches + reactivates.
 
 ---
 
