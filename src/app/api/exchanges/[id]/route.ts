@@ -1,4 +1,5 @@
-import { ApiError, handleError } from '@/lib/workspace'
+import { ApiError, handleError, getWorkspace, requirePermission } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 import { getExchangeDetail } from '@/lib/actions/exchange.actions'
 
@@ -11,6 +12,9 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_VIEW)
+
     const { id } = await params
     const result = await getExchangeDetail(id)
     if (!result.success) throw new ApiError(404, result.error ?? 'Exchange not found')

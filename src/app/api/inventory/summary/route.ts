@@ -1,5 +1,5 @@
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { getProductInventorySummary } from '@/lib/inventory'
 import { NextRequest } from 'next/server'
 
@@ -15,8 +15,8 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET(req: NextRequest) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INVENTORY_VIEW)
 
     const url = new URL(req.url)
     const productId = url.searchParams.get('product_id')

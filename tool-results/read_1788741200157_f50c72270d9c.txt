@@ -1,0 +1,740 @@
+     1→'use client'
+     2→
+     3→import { useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import { api, FetchError } from '@/lib/api-client'
+     7→import { useAppStore } from '@/stores/app-store'
+     8→import { PageHeader } from '@/components/layout/dashboard-shell'
+     9→import { Button } from '@/components/ui/button'
+    10→import { Input } from '@/components/ui/input'
+    11→import { Label } from '@/components/ui/label'
+    12→import { Badge } from '@/components/ui/badge'
+    13→import { Card, CardContent } from '@/components/ui/card'
+    14→import { Skeleton } from '@/components/ui/skeleton'
+    15→import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+    16→import {
+    17→  Dialog,
+    18→  DialogContent,
+    19→  DialogDescription,
+    20→  DialogFooter,
+    21→  DialogHeader,
+    22→  DialogTitle,
+    23→} from '@/components/ui/dialog'
+    24→import {
+    25→  Plug,
+    26→  Truck,
+    27→  ShoppingCart,
+    28→  Loader2,
+    29→  Plus,
+    30→  CheckCircle2,
+    31→  AlertCircle,
+    32→  Clock,
+    33→  Copy,
+    34→  Star,
+    35→  Settings2,
+    36→  Power,
+    37→  Zap,
+    38→  Info,
+    39→  RefreshCw,
+    40→} from 'lucide-react'
+    41→import {
+    42→  AlertDialog,
+    43→  AlertDialogAction,
+    44→  AlertDialogCancel,
+    45→  AlertDialogContent,
+    46→  AlertDialogDescription,
+    47→  AlertDialogFooter,
+    48→  AlertDialogHeader,
+    49→  AlertDialogTitle,
+    50→} from '@/components/ui/alert-dialog'
+    51→import { cn } from '@/lib/utils'
+    52→import { Switch } from '@/components/ui/switch'
+    53→import { getErrorMessage } from '@/components/orders/_shared'
+    54→import { PickupAddressesSection } from '@/components/couriers/pickup-addresses-section'
+    55→import { LeopardPreferencesSection } from '@/components/settings/leopard-preferences-section'
+    56→
+    57→// ──────────────────────────────────────────────────────────────
+    58→// Types
+    59→// ──────────────────────────────────────────────────────────────
+    60→
+    61→interface ConfigField {
+    62→  key: string
+    63→  label: string
+    64→  type: 'text' | 'password'
+    65→  required: boolean
+    66→}
+    67→
+    68→interface Provider {
+    69→  id: string
+    70→  providerKey: string
+    71→  providerName: string
+    72→  category: string
+    73→  logoUrl: string | null
+    74→  authType: string
+    75→  supportsWebhook: boolean
+    76→  configSchema: string
+    77→  capabilities: string
+    78→  adapterStatus?: string // 'live' | 'framework_ready' | 'stub' — from registry
+    79→}
+    80→
+    81→interface Integration {
+    82→  id: string
+    83→  connectionName: string
+    84→  isActive: boolean
+    85→  isDefault: boolean
+    86→  connectionStatus: string
+    87→  lastSyncAt: string | null
+    88→  lastError: string | null
+    89→  webhookEndpointId: string | null
+    90→  webhookUrl: string | null
+    91→  createdAt: string
+    92→  provider: {
+    93→    id: string
+    94→    providerKey: string
+    95→    providerName: string
+    96→    category: string
+    97→    logoUrl: string | null
+    98→    authType: string
+    99→    supportsWebhook: boolean
+   100→    configSchema: string
+   101→  }
+   102→}
+   103→
+   104→interface ApiResponse {
+   105→  providers: Provider[]
+   106→  integrations: Integration[]
+   107→}
+   108→
+   109→// ──────────────────────────────────────────────────────────────
+   110→// Status badge helper
+   111→// ──────────────────────────────────────────────────────────────
+   112→
+   113→/**
+   114→ * Status badge — checks `isActive` FIRST. A disconnected integration
+   115→ * (isActive=false) always shows a muted "Disconnected" badge regardless
+   116→ * of its connectionStatus field. This fixes the bug where disconnected
+   117→ * integrations still showed a green "Connected" badge.
+   118→ */
+   119→function StatusBadge({ status, isActive }: { status: string; isActive: boolean }) {
+   120→  // Disconnected integrations always show "Disconnected" — no matter what
+   121→  // the connectionStatus column says.
+   122→  if (!isActive) {
+   123→    return (
+   124→      <Badge variant="outline" className="text-[10px] bg-slate-100 text-slate-500 border-slate-300">
+   125→        <Power className="h-2.5 w-2.5 mr-0.5" /> Disconnected
+   126→      </Badge>
+   127→    )
+   128→  }
+   129→  const config: Record<string, { label: string; className: string; icon: typeof CheckCircle2 }> = {
+   130→    connected: { label: 'Connected', className: 'bg-emerald-50 text-emerald-700 border-emerald-200', icon: CheckCircle2 },
+   131→    pending: { label: 'Pending', className: 'bg-amber-50 text-amber-700 border-amber-200', icon: Clock },
+   132→    error: { label: 'Error', className: 'bg-rose-50 text-rose-700 border-rose-200', icon: AlertCircle },
+   133→    expired: { label: 'Expired', className: 'bg-slate-50 text-slate-700 border-slate-200', icon: Clock },
+   134→  }
+   135→  const c = config[status] ?? config.pending
+   136→  const Icon = c.icon
+   137→  return (
+   138→    <Badge variant="outline" className={cn('text-[10px]', c.className)}>
+   139→      <Icon className="h-2.5 w-2.5 mr-0.5" /> {c.label}
+   140→    </Badge>
+   141→  )
+   142→}
+   143→
+   144→// ──────────────────────────────────────────────────────────────
+   145→// Main view
+   146→// ──────────────────────────────────────────────────────────────
+   147→
+   148→export function IntegrationsView() {
+   149→  const navigate = useAppStore((s) => s.navigate)
+   150→  const queryClient = useQueryClient()
+   151→  const [connectProvider, setConnectProvider] = useState<Provider | null>(null)
+   152→  const [confirmDisconnect, setConfirmDisconnect] = useState<Integration | null>(null)
+   153→
+   154→  const query = useQuery<ApiResponse>({
+   155→    queryKey: ['integrations'],
+   156→    queryFn: () => api.get<ApiResponse>('/api/integrations'),
+   157→    staleTime: 15_000,
+   158→  })
+   159→
+   160→  const invalidate = () => {
+   161→    queryClient.invalidateQueries({ queryKey: ['integrations'] })
+   162→    // Also invalidate order-settings (default courier may have been cleared)
+   163→    queryClient.invalidateQueries({ queryKey: ['order-settings'] })
+   164→  }
+   165→
+   166→  // Mutations
+   167→  const testMutation = useMutation({
+   168→    mutationFn: (id: string) => api.post<{ ok: boolean; error?: string; status?: string }>(`/api/integrations/${id}/test`),
+   169→    onSuccess: (data: { ok: boolean; error?: string; status?: string }) => {
+   170→      if (data.ok) toast.success('Connection test succeeded.')
+   171→      else toast.error(data.error || 'Connection test failed.')
+   172→      invalidate()
+   173→    },
+   174→    onError: (err) => toast.error(getErrorMessage(err)),
+   175→  })
+   176→
+   177→  const disconnectMutation = useMutation({
+   178→    mutationFn: (id: string) => api.post(`/api/integrations/${id}/disconnect`),
+   179→    onSuccess: () => { toast.success('Integration disconnected. Credentials wiped.'); invalidate() },
+   180→    onError: (err) => toast.error(getErrorMessage(err)),
+   181→  })
+   182→
+   183→  const setDefaultMutation = useMutation({
+   184→    mutationFn: (id: string) => api.post(`/api/integrations/${id}/set-default`),
+   185→    onSuccess: () => { toast.success('Set as default.'); invalidate() },
+   186→    onError: (err) => toast.error(getErrorMessage(err)),
+   187→  })
+   188→
+   189→  const syncCitiesMutation = useMutation({
+   190→    mutationFn: (providerKey: string) =>
+   191→      api.post<{ success: boolean; message?: string; providerKey?: string }>(
+   192→        '/api/couriers/sync-cities',
+   193→        { providerKey },
+   194→      ),
+   195→    onSuccess: (data) => {
+   196→      // The sync runs in the background (PostEx API can take 30-60s).
+   197→      // Show a "started" toast now, and refetch the cities after a delay.
+   198→      toast.success('City sync started in the background. This may take 30-60 seconds.')
+   199→      // Refetch the integrations query after 30s to pick up the updated
+   200→      // lastSyncAt timestamp + any new cities.
+   201→      setTimeout(() => {
+   202→        queryClient.invalidateQueries({ queryKey: ['integrations'] })
+   203→        queryClient.invalidateQueries({ queryKey: ['courier-cities'] })
+   204→        toast.success('City sync complete — cities list refreshed.')
+   205→      }, 35_000)
+   206→    },
+   207→    onError: (err) => toast.error(getErrorMessage(err)),
+   208→  })
+   209→
+   210→  if (query.isLoading) {
+   211→    return (
+   212→      <div className="space-y-6">
+   213→        <PageHeader title="Integrations" />
+   214→        <Skeleton className="h-64" />
+   215→      </div>
+   216→    )
+   217→  }
+   218→
+   219→  if (query.isError) {
+   220→    return (
+   221→      <div className="space-y-6">
+   222→        <PageHeader title="Integrations" />
+   223→        <Card><CardContent className="p-10 text-center">
+   224→          <p className="text-sm text-muted-foreground mb-4">{getErrorMessage(query.error)}</p>
+   225→          <Button variant="outline" onClick={() => query.refetch()}>Try again</Button>
+   226→        </CardContent></Card>
+   227→      </div>
+   228→    )
+   229→  }
+   230→
+   231→  const providers = query.data?.providers ?? []
+   232→  const integrations = query.data?.integrations ?? []
+   233→
+   234→  const courierProviders = providers.filter((p) => p.category === 'courier')
+   235→  const ecommerceProviders = providers.filter((p) => p.category === 'ecommerce')
+   236→  const courierIntegrations = integrations.filter((i) => i.provider.category === 'courier')
+   237→  const ecommerceIntegrations = integrations.filter((i) => i.provider.category === 'ecommerce')
+   238→
+   239→  return (
+   240→    <div className="space-y-6">
+   241→      <PageHeader
+   242→        title="Integrations"
+   243→        description="Connect courier and ecommerce platforms. Credentials are encrypted at rest."
+   244→        actions={
+   245→          <Button variant="outline" size="sm" onClick={() => navigate({ name: 'integration-logs' })}>
+   246→            View Logs
+   247→          </Button>
+   248→        }
+   249→      />
+   250→
+   251→      {/* Dynamic adapter status banner — shows per-provider implementation status.
+   252→          Replaces the old hardcoded "framework-only/stub" banner that incorrectly
+   253→          claimed ALL adapters were stubs. Now accurately reflects which adapters
+   254→          are live (PostEx) vs framework-ready (Leopard, TCS). */}
+   255→      {(() => {
+   256→        const liveProviders = providers.filter((p) => p.adapterStatus === 'live')
+   257→        const stubProviders = providers.filter((p) => p.adapterStatus !== 'live')
+   258→        const hasLive = liveProviders.length > 0
+   259→        const hasStubs = stubProviders.length > 0
+   260→
+   261→        if (hasLive && hasStubs) {
+   262→          // Mixed: some live, some stub
+   263→          return (
+   264→            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 flex items-start gap-2">
+   265→              <Info className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+   266→              <div className="text-xs text-emerald-800 space-y-1">
+   267→                <div>
+   268→                  <strong>Integration framework is active.</strong>{' '}
+   269→                  <span className="font-medium">{liveProviders.map((p) => p.providerName).join(', ')}</span>{' '}
+   270→                  {liveProviders.length === 1 ? 'is' : 'are'} fully implemented — API calls (booking, tracking, city sync) work end-to-end.
+   271→                </div>
+   272→                <div className="text-emerald-700">
+   273→                  The following providers are framework-ready (adapter class exists but methods are not yet implemented):
+   274→                  {' '}
+   275→                  <span className="font-medium">{stubProviders.map((p) => p.providerName).join(', ')}</span>.
+   276→                  You can save credentials now, but API calls will show &quot;not yet implemented&quot; until the adapter is completed.
+   277→                </div>
+   278→              </div>
+   279→            </div>
+   280→          )
+   281→        }
+   282→
+   283→        if (hasLive && !hasStubs) {
+   284→          // All live
+   285→          return (
+   286→            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 flex items-start gap-2">
+   287→              <Info className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
+   288→              <div className="text-xs text-emerald-800">
+   289→                <strong>All providers are fully implemented.</strong>{' '}
+   290→                API calls (booking, tracking, city sync, connection testing) work end-to-end for all connected providers.
+   291→              </div>
+   292→            </div>
+   293→          )
+   294→        }
+   295→
+   296→        // All stubs (no live providers)
+   297→        return (
+   298→          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 flex items-start gap-2">
+   299→            <Info className="h-4 w-4 text-amber-600 shrink-0 mt-0.5" />
+   300→            <div className="text-xs text-amber-800">
+   301→              <strong>Integration framework is active.</strong>{' '}
+   302→              Provider adapters are currently in framework-ready mode — you can connect and
+   303→              configure providers now, but actual API calls (booking shipments, receiving orders)
+   304→              will be available once each provider&apos;s adapter is fully implemented. Connection
+   305→              testing will also show &quot;not yet implemented&quot; for these providers.
+   306→            </div>
+   307→          </div>
+   308→        )
+   309→      })()}
+   310→
+   311→      <Tabs defaultValue="courier">
+   312→        <TabsList>
+   313→          <TabsTrigger value="courier" className="gap-1.5">
+   314→            <Truck className="h-3.5 w-3.5" /> Couriers
+   315→          </TabsTrigger>
+   316→          <TabsTrigger value="ecommerce" className="gap-1.5">
+   317→            <ShoppingCart className="h-3.5 w-3.5" /> Ecommerce
+   318→          </TabsTrigger>
+   319→        </TabsList>
+   320→
+   321→        <TabsContent value="courier" className="space-y-6 mt-4">
+   322→          <IntegrationsSection
+   323→            integrations={courierIntegrations}
+   324→            availableProviders={courierProviders.filter(
+   325→              (p) => !courierIntegrations.some((i) => i.provider.id === p.id && i.isActive)
+   326→            )}
+   327→            onConnect={setConnectProvider}
+   328→            onTest={(id) => testMutation.mutate(id)}
+   329→            onDisconnect={(i) => setConfirmDisconnect(i)}
+   330→            onSetDefault={(id) => setDefaultMutation.mutate(id)}
+   331→            onSyncCities={(providerKey) => syncCitiesMutation.mutate(providerKey)}
+   332→            syncingCities={syncCitiesMutation.isPending}
+   333→            testing={testMutation.isPending}
+   334→          />
+   335→        </TabsContent>
+   336→
+   337→        <TabsContent value="ecommerce" className="space-y-6 mt-4">
+   338→          <IntegrationsSection
+   339→            integrations={ecommerceIntegrations}
+   340→            availableProviders={ecommerceProviders.filter(
+   341→              (p) => !ecommerceIntegrations.some((i) => i.provider.id === p.id && i.isActive)
+   342→            )}
+   343→            onConnect={setConnectProvider}
+   344→            onTest={(id) => testMutation.mutate(id)}
+   345→            onDisconnect={(i) => setConfirmDisconnect(i)}
+   346→            onSetDefault={(id) => setDefaultMutation.mutate(id)}
+   347→            testing={testMutation.isPending}
+   348→          />
+   349→        </TabsContent>
+   350→      </Tabs>
+   351→
+   352→      {connectProvider && (
+   353→        <ConnectDialog
+   354→          provider={connectProvider}
+   355→          open={!!connectProvider}
+   356→          onOpenChange={(v) => !v && setConnectProvider(null)}
+   357→          onConnected={() => { setConnectProvider(null); invalidate() }}
+   358→        />
+   359→      )}
+   360→
+   361→      {/* Disconnect confirmation dialog */}
+   362→      <AlertDialog open={!!confirmDisconnect} onOpenChange={(v) => !v && setConfirmDisconnect(null)}>
+   363→        <AlertDialogContent>
+   364→          <AlertDialogHeader>
+   365→            <AlertDialogTitle>Disconnect {confirmDisconnect?.provider.providerName}?</AlertDialogTitle>
+   366→            <AlertDialogDescription>
+   367→              This will deactivate the integration, wipe all stored credentials, and clear it
+   368→              as the default courier if it was set. You can reconnect later with new credentials.
+   369→              Any orders currently in the Booking Workbench will need to be booked manually.
+   370→            </AlertDialogDescription>
+   371→          </AlertDialogHeader>
+   372→          <AlertDialogFooter>
+   373→            <AlertDialogCancel>Cancel</AlertDialogCancel>
+   374→            <AlertDialogAction
+   375→              className="bg-rose-600 hover:bg-rose-700 text-white"
+   376→              onClick={() => {
+   377→                if (confirmDisconnect) {
+   378→                  disconnectMutation.mutate(confirmDisconnect.id)
+   379→                  setConfirmDisconnect(null)
+   380→                }
+   381→              }}
+   382→            >
+   383→              <Power className="h-3.5 w-3.5" /> Disconnect
+   384→            </AlertDialogAction>
+   385→          </AlertDialogFooter>
+   386→        </AlertDialogContent>
+   387→      </AlertDialog>
+   388→    </div>
+   389→  )
+   390→}
+   391→
+   392→// ──────────────────────────────────────────────────────────────
+   393→// Section: connected + available
+   394→// ──────────────────────────────────────────────────────────────
+   395→
+   396→function IntegrationsSection({
+   397→  integrations,
+   398→  availableProviders,
+   399→  onConnect,
+   400→  onTest,
+   401→  onDisconnect,
+   402→  onSetDefault,
+   403→  onSyncCities,
+   404→  syncingCities,
+   405→  testing,
+   406→}: {
+   407→  integrations: Integration[]
+   408→  availableProviders: Provider[]
+   409→  onConnect: (p: Provider) => void
+   410→  onTest: (id: string) => void
+   411→  onDisconnect: (i: Integration) => void
+   412→  onSetDefault: (id: string) => void
+   413→  onSyncCities?: (providerKey: string) => void
+   414→  syncingCities?: boolean
+   415→  testing: boolean
+   416→}) {
+   417→  // Only show ACTIVE integrations in the "Connected" section.
+   418→  // Disconnected integrations are hidden — the provider reappears in
+   419→  // "Available to Connect" so the user can connect fresh.
+   420→  const activeIntegrations = integrations.filter((i) => i.isActive)
+   421→
+   422→  return (
+   423→    <>
+   424→      {/* Connected */}
+   425→      {activeIntegrations.length > 0 && (
+   426→        <div className="space-y-3">
+   427→          <p className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Connected</p>
+   428→          <div className="grid gap-3 sm:grid-cols-2">
+   429→            {activeIntegrations.map((i) => (
+   430→              <Card key={i.id}>
+   431→                <CardContent className="p-4 space-y-3">
+   432→                  <div className="flex items-start justify-between gap-2">
+   433→                    <div className="min-w-0">
+   434→                      <div className="flex items-center gap-2">
+   435→                        <p className="text-sm font-medium truncate">{i.provider.providerName}</p>
+   436→                        {i.isDefault && (
+   437→                          <Badge variant="outline" className="bg-primary/10 text-primary border-primary/20 text-[10px]">
+   438→                            <Star className="h-2.5 w-2.5 mr-0.5 fill-current" /> Default
+   439→                          </Badge>
+   440→                        )}
+   441→                      </div>
+   442→                      <p className="text-xs text-muted-foreground truncate">{i.connectionName}</p>
+   443→                    </div>
+   444→                    <StatusBadge status={i.connectionStatus} isActive={i.isActive} />
+   445→                  </div>
+   446→
+   447→                  {i.lastError && (
+   448→                    <p className="text-xs text-rose-600 bg-rose-50 rounded p-2">{i.lastError}</p>
+   449→                  )}
+   450→
+   451→                  {i.webhookUrl && (
+   452→                    <div className="space-y-1">
+   453→                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Webhook URL</p>
+   454→                      <div className="flex items-center gap-1">
+   455→                        <code className="text-[10px] bg-muted px-1.5 py-0.5 rounded truncate flex-1">{i.webhookUrl}</code>
+   456→                        <Button
+   457→                          size="sm"
+   458→                          variant="ghost"
+   459→                          className="h-6 px-1.5"
+   460→                          onClick={() => {
+   461→                            navigator.clipboard.writeText(i.webhookUrl!)
+   462→                            toast.success('Webhook URL copied.')
+   463→                          }}
+   464→                        >
+   465→                          <Copy className="h-3 w-3" />
+   466→                        </Button>
+   467→                      </div>
+   468→                    </div>
+   469→                  )}
+   470→
+   471→                  <div className="flex items-center gap-1 flex-wrap pt-1">
+   472→                    {!i.isDefault && (
+   473→                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onSetDefault(i.id)}>
+   474→                        <Star className="h-3 w-3" /> Set Default
+   475→                      </Button>
+   476→                    )}
+   477→                    <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onTest(i.id)} disabled={testing}>
+   478→                      <Zap className="h-3 w-3" /> Test
+   479→                    </Button>
+   480→                    {onSyncCities && (
+   481→                      <Button
+   482→                        size="sm"
+   483→                        variant="ghost"
+   484→                        className="h-7 text-xs"
+   485→                        onClick={() => onSyncCities(i.provider.providerKey)}
+   486→                        disabled={syncingCities}
+   487→                        title="Sync operational cities from courier API"
+   488→                      >
+   489→                        {syncingCities ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+   490→                        {' '}Sync Cities
+   491→                      </Button>
+   492→                    )}
+   493→                    <Button
+   494→                      size="sm"
+   495→                      variant="ghost"
+   496→                      className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+   497→                      onClick={() => onDisconnect(i)}
+   498→                    >
+   499→                      <Power className="h-3 w-3" /> Disconnect
+   500→                    </Button>
+   501→                  </div>
+   502→
+   503→                  {/* Pickup & Return Addresses section — only for courier integrations */}
+   504→                  {i.provider.category === 'courier' && (
+   505→                    <PickupAddressesSection
+   506→                      companyIntegrationId={i.id}
+   507→                      providerKey={i.provider.providerKey}
+   508→                    />
+   509→                  )}
+   510→
+   511→                  {/* Leopard-specific preferences (transaction note builder) */}
+   512→                  {i.provider.providerKey === 'leopard' && (
+   513→                    <LeopardPreferencesSection integrationId={i.id} />
+   514→                  )}
+   515→                </CardContent>
+   516→              </Card>
+   517→            ))}
+   518→          </div>
+   519→        </div>
+   520→      )}
+   521→
+   522→      {/* Available to connect */}
+   523→      {availableProviders.length > 0 && (
+   524→        <div className="space-y-3">
+   525→          <p className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Available to Connect</p>
+   526→          <div className="grid gap-3 sm:grid-cols-2">
+   527→            {availableProviders.map((p) => (
+   528→              <Card key={p.id}>
+   529→                <CardContent className="p-4 flex items-center justify-between gap-2">
+   530→                  <div className="min-w-0">
+   531→                    <p className="text-sm font-medium">{p.providerName}</p>
+   532→                    <p className="text-xs text-muted-foreground">
+   533→                      {p.supportsWebhook ? 'Supports webhooks' : 'No webhooks'} · {p.authType}
+   534→                    </p>
+   535→                  </div>
+   536→                  <Button size="sm" onClick={() => onConnect(p)}>
+   537→                    <Plus className="h-3.5 w-3.5" /> Connect
+   538→                  </Button>
+   539→                </CardContent>
+   540→              </Card>
+   541→            ))}
+   542→          </div>
+   543→        </div>
+   544→      )}
+   545→
+   546→      {activeIntegrations.length === 0 && availableProviders.length === 0 && (
+   547→        <Card><CardContent className="p-10 text-center">
+   548→          <Plug className="h-10 w-10 mx-auto text-muted-foreground/40 mb-3" />
+   549→          <p className="text-sm text-muted-foreground">No providers available in this category.</p>
+   550→        </CardContent></Card>
+   551→      )}
+   552→    </>
+   553→  )
+   554→}
+   555→
+   556→// ──────────────────────────────────────────────────────────────
+   557→// Connect dialog (dynamic form from config_schema)
+   558→// ──────────────────────────────────────────────────────────────
+   559→
+   560→function ConnectDialog({
+   561→  provider,
+   562→  open,
+   563→  onOpenChange,
+   564→  onConnected,
+   565→}: {
+   566→  provider: Provider
+   567→  open: boolean
+   568→  onOpenChange: (open: boolean) => void
+   569→  onConnected: () => void
+   570→}) {
+   571→  const [connectionName, setConnectionName] = useState('')
+   572→  const [credentials, setCredentials] = useState<Record<string, string>>({})
+   573→  const [createdWebhookUrl, setCreatedWebhookUrl] = useState<string | null>(null)
+   574→
+   575→  // Parse config_schema dynamically — this works for ANY provider
+   576→  let fields: ConfigField[] = []
+   577→  try {
+   578→    fields = JSON.parse(provider.configSchema)
+   579→  } catch {
+   580→    fields = []
+   581→  }
+   582→
+   583→  const connectMutation = useMutation({
+   584→    mutationFn: () =>
+   585→      api.post<{ companyIntegrationId: string; webhookUrl?: string }>('/api/integrations', {
+   586→        provider_id: provider.id,
+   587→        connection_name: connectionName.trim() || `${provider.providerName} Connection`,
+   588→        credentials,
+   589→      }, {
+   590→        'Idempotency-Key': `${provider.id}-${connectionName.trim()}`,
+   591→      }),
+   592→    onSuccess: (data) => {
+   593→      toast.success('Integration connected.')
+   594→      if (data.webhookUrl) setCreatedWebhookUrl(data.webhookUrl)
+   595→      else onConnected()
+   596→    },
+   597→    onError: (err) => {
+   598→      toast.error(err instanceof FetchError ? err.message : 'Failed to connect')
+   599→    },
+   600→  })
+   601→
+   602→  const canSubmit = fields.every((f) => !f.required || (credentials[f.key] && credentials[f.key].trim()))
+   603→
+   604→  return (
+   605→    <Dialog open={open} onOpenChange={(v) => !v && onOpenChange(v)}>
+   606→      <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto scrollbar-thin">
+   607→        <DialogHeader>
+   608→          <DialogTitle className="flex items-center gap-2">
+   609→            <Plus className="h-4 w-4" /> Connect {provider.providerName}
+   610→          </DialogTitle>
+   611→          <DialogDescription>
+   612→            Enter your {provider.providerName} credentials. They will be encrypted before storage.
+   613→          </DialogDescription>
+   614→        </DialogHeader>
+   615→
+   616→        {createdWebhookUrl ? (
+   617→          <div className="space-y-4 py-2">
+   618→            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 space-y-2">
+   619→              <div className="flex items-center gap-2 text-emerald-700">
+   620→                <CheckCircle2 className="h-4 w-4" />
+   621→                <p className="text-sm font-medium">Connected successfully!</p>
+   622→              </div>
+   623→              {provider.supportsWebhook && (
+   624→                <div className="space-y-1">
+   625→                  <p className="text-xs text-emerald-700">
+   626→                    Add this URL to your {provider.providerName}&apos;s webhook settings to receive
+   627→                    real-time updates:
+   628→                  </p>
+   629→                  <div className="flex items-center gap-1">
+   630→                    <code className="text-[10px] bg-white border px-1.5 py-0.5 rounded truncate flex-1">
+   631→                      {createdWebhookUrl}
+   632→                    </code>
+   633→                    <Button
+   634→                      size="sm"
+   635→                      variant="ghost"
+   636→                      className="h-6 px-1.5"
+   637→                      onClick={() => {
+   638→                        navigator.clipboard.writeText(createdWebhookUrl)
+   639→                        toast.success('Copied.')
+   640→                      }}
+   641→                    >
+   642→                      <Copy className="h-3 w-3" />
+   643→                    </Button>
+   644→                  </div>
+   645→                </div>
+   646→              )}
+   647→            </div>
+   648→            <Button className="w-full" onClick={onConnected}>Done</Button>
+   649→          </div>
+   650→        ) : (
+   651→          <div className="space-y-4 py-2">
+   652→            {/* Connection name */}
+   653→            <div className="space-y-1.5">
+   654→              <Label className="text-xs">Connection Name</Label>
+   655→              <Input
+   656→                placeholder={`e.g. ${provider.providerName} - Main Account`}
+   657→                value={connectionName}
+   658→                onChange={(e) => setConnectionName(e.target.value)}
+   659→                autoFocus
+   660→              />
+   661→              <p className="text-[10px] text-muted-foreground">
+   662→                A label to identify this connection if you have multiple {provider.providerName} accounts.
+   663→              </p>
+   664→            </div>
+   665→
+   666→            {/* Dynamic credential fields from config_schema */}
+   667→            {fields.map((field) => (
+   668→              field.type === 'boolean' ? (
+   669→                <div key={field.key} className="space-y-1.5">
+   670→                  <div className="flex items-center justify-between rounded-md border p-3">
+   671→                    <div className="space-y-0.5">
+   672→                      <Label className="text-xs">
+   673→                        {field.label}
+   674→                      </Label>
+   675→                      {field.description && (
+   676→                        <p className="text-[10px] text-muted-foreground">{field.description}</p>
+   677→                      )}
+   678→                    </div>
+   679→                    <Switch
+   680→                      checked={credentials[field.key] === 'true' || credentials[field.key] === true}
+   681→                      onCheckedChange={(checked) =>
+   682→                        setCredentials((p) => ({ ...p, [field.key]: checked ? 'true' : 'false' }))
+   683→                      }
+   684→                    />
+   685→                  </div>
+   686→                </div>
+   687→              ) : (
+   688→                <div key={field.key} className="space-y-1.5">
+   689→                  <Label className="text-xs">
+   690→                    {field.label}
+   691→                    {field.required && <span className="text-rose-600 ml-0.5">*</span>}
+   692→                  </Label>
+   693→                  <Input
+   694→                    type={field.type === 'password' ? 'password' : 'text'}
+   695→                    placeholder={field.type === 'password' ? '••••••••' : `Enter ${field.label}`}
+   696→                    value={credentials[field.key] ?? ''}
+   697→                    onChange={(e) => setCredentials((p) => ({ ...p, [field.key]: e.target.value }))}
+   698→                  />
+   699→                </div>
+   700→              )
+   701→            ))}
+   702→
+   703→            {/* Per-provider adapter status note — only shown for non-live adapters */}
+   704→            {provider.adapterStatus !== 'live' && (
+   705→              <div className="rounded-md bg-amber-50 border border-amber-200 p-2.5 text-[10px] text-amber-800">
+   706→                Note: This provider&apos;s adapter is{' '}
+   707→                {provider.adapterStatus === 'framework_ready' ? 'framework-ready (methods not yet implemented)' : 'a stub'}.
+   708→                Credentials will be saved securely, but actual API calls and connection testing will
+   709→                show &quot;not yet implemented&quot; until the adapter is fully implemented.
+   710→              </div>
+   711→            )}
+   712→            {provider.adapterStatus === 'live' && (
+   713→              <div className="rounded-md bg-emerald-50 border border-emerald-200 p-2.5 text-[10px] text-emerald-800">
+   714→                This provider&apos;s adapter is fully implemented. API calls (booking, tracking,
+   715→                city sync, connection testing) work end-to-end once credentials are saved.
+   716→              </div>
+   717→            )}
+   718→          </div>
+   719→        )}
+   720→
+   721→        {!createdWebhookUrl && (
+   722→          <DialogFooter>
+   723→            <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+   724→            <Button
+   725→              disabled={!canSubmit || connectMutation.isPending}
+   726→              onClick={() => connectMutation.mutate()}
+   727→            >
+   728→              {connectMutation.isPending ? (
+   729→                <><Loader2 className="h-4 w-4 animate-spin" /> Connecting…</>
+   730→              ) : (
+   731→                <>Connect</>
+   732→              )}
+   733→            </Button>
+   734→          </DialogFooter>
+   735→        )}
+   736→      </DialogContent>
+   737→    </Dialog>
+   738→  )
+   739→}
+   740→

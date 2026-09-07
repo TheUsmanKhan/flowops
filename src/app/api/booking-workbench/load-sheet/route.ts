@@ -1,4 +1,5 @@
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, getWorkspace, requirePermission, handleError, readBody } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 import { generateLoadSheet } from '@/lib/actions/load-sheet.actions'
 
@@ -22,6 +23,9 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(req: NextRequest) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+
     const body = await readBody<Record<string, unknown>>(req)
     const providerKey = typeof body.providerKey === 'string' ? body.providerKey : ''
     const pickupAddressId = typeof body.pickupAddressId === 'string' ? body.pickupAddressId : undefined

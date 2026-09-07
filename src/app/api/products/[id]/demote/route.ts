@@ -1,6 +1,7 @@
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, getWorkspace, requirePermission, handleError, readBody } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { demoteProductSchema } from '@/lib/validations/product'
@@ -20,6 +21,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.PRODUCTS_PROMOTE)
+
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
     const settings = await db.userSetting.findUnique({

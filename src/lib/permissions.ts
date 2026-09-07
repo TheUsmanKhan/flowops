@@ -96,13 +96,35 @@ export const PERMISSION_GROUPS: {
   permissions: { key: PermissionKey; label: string; description: string }[]
 }[] = [
   {
-    group: 'Inventory',
+    group: 'Products',
     icon: 'Package',
     permissions: [
-      { key: PERMISSIONS.INVENTORY_VIEW, label: 'View inventory', description: 'See products, stock levels and warehouses' },
-      { key: PERMISSIONS.INVENTORY_CREATE, label: 'Create products', description: 'Add new products and SKUs' },
-      { key: PERMISSIONS.INVENTORY_ADJUST, label: 'Adjust stock', description: 'Perform stock adjustments and transfers' },
-      { key: PERMISSIONS.INVENTORY_DELETE, label: 'Delete products', description: 'Remove products from catalog' },
+      { key: PERMISSIONS.PRODUCTS_VIEW, label: 'View products', description: 'See the product catalog and SKUs' },
+      { key: PERMISSIONS.PRODUCTS_CREATE, label: 'Create products', description: 'Add new products and variants' },
+      { key: PERMISSIONS.PRODUCTS_EDIT, label: 'Edit products', description: 'Update product details, images, variants' },
+      { key: PERMISSIONS.PRODUCTS_MANAGE_CATALOG, label: 'Manage catalog', description: 'Manage categories, brands, attributes' },
+      { key: PERMISSIONS.PRODUCTS_PRICING, label: 'Manage pricing', description: 'Set sale prices and cost overrides per company' },
+      { key: PERMISSIONS.PRODUCTS_PROMOTE, label: 'Promote products', description: 'Promote/demote products to organization scope' },
+      { key: PERMISSIONS.PRODUCTS_SUBSCRIBE, label: 'Subscribe to products', description: 'Subscribe company to organization-level products' },
+    ],
+  },
+  {
+    group: 'Inventory',
+    icon: 'Boxes',
+    permissions: [
+      { key: PERMISSIONS.INVENTORY_VIEW, label: 'View inventory', description: 'See stock levels, warehouses, and transactions' },
+      { key: PERMISSIONS.INVENTORY_RECEIVE, label: 'Receive stock', description: 'Receive stock into warehouses (PO receiving, opening stock)' },
+      { key: PERMISSIONS.INVENTORY_ADJUST, label: 'Adjust stock', description: 'Perform stock adjustments (increase/decrease)' },
+      { key: PERMISSIONS.INVENTORY_TRANSFER, label: 'Transfer stock', description: 'Move stock between inventory locations' },
+      { key: PERMISSIONS.INVENTORY_REPORT_LOSS, label: 'Report stock loss', description: 'Report damaged/theft/in-transit losses' },
+      { key: PERMISSIONS.INVENTORY_MANAGE_LOSS, label: 'Manage stock losses', description: 'Review and resolve stock loss records' },
+      { key: PERMISSIONS.INVENTORY_MANAGE_LOCATIONS, label: 'Manage locations', description: 'Create and edit inventory locations (warehouses)' },
+      { key: PERMISSIONS.INVENTORY_MANAGE_SUPPLIERS, label: 'Manage suppliers', description: 'Create and edit suppliers' },
+      { key: PERMISSIONS.INVENTORY_MANAGE_PURCHASE_ORDERS, label: 'Manage purchase orders', description: 'Create, confirm, and receive purchase orders' },
+      { key: PERMISSIONS.INVENTORY_MANAGE_SUPPLIER_RETURNS, label: 'Manage supplier returns', description: 'Create and process returns to suppliers' },
+      { key: PERMISSIONS.INVENTORY_CYCLE_COUNT, label: 'Cycle counts', description: 'Create and manage cycle count audits' },
+      { key: PERMISSIONS.INVENTORY_MANAGE_PRODUCTION, label: 'Manage production', description: 'Manage production orders (made-to-order stitching)' },
+      { key: PERMISSIONS.INVENTORY_DELETE, label: 'Delete inventory records', description: 'Delete stock transactions and adjustments' },
     ],
   },
   {

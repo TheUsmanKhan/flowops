@@ -1,4 +1,5 @@
-import { ApiError, handleError, readBody, getWorkspace } from '@/lib/workspace'
+import { ApiError, handleError, readBody, getWorkspace, requirePermission } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import {
   createExchangeRequest,
   listExchanges,
@@ -10,6 +11,9 @@ export const dynamic = 'force-dynamic'
 /** GET /api/exchanges — list exchanges with filters. */
 export async function GET(req: Request) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_VIEW)
+
     const url = new URL(req.url)
     const result = await listExchanges({
       status: url.searchParams.get('status') ?? undefined,

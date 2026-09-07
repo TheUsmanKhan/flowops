@@ -487,7 +487,7 @@ export async function createCustomer(
 ): Promise<ActionResult<{ customerId: string }>> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_CREATE)
     // Delegate to the internal variant that skips the (now-redundant)
     // getWorkspace + requirePermission resolution.
     return createCustomerInternal(ctx, input)
@@ -683,7 +683,7 @@ export async function updateCustomer(
 ): Promise<ActionResult<{ customerId: string }>> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_EDIT)
 
     const parsed = updateCustomerSchema.safeParse(input)
     if (!parsed.success) {
@@ -744,7 +744,7 @@ export async function addCustomerPhone(
 ): Promise<ActionResult<{ phoneId: string }>> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_EDIT)
 
     const parsed = phoneInputSchema.safeParse(input)
     if (!parsed.success) {
@@ -834,7 +834,7 @@ export async function addCustomerPhone(
 export async function removeCustomerPhone(phoneId: string): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_EDIT)
 
     const phone = await db.customerPhone.findUnique({
       where: { id: phoneId },
@@ -963,7 +963,7 @@ export async function addCustomerAddress(
 ): Promise<ActionResult<{ addressId: string }>> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_EDIT)
 
     const parsed = addressInputSchema.safeParse(input)
     if (!parsed.success) {
@@ -1038,7 +1038,7 @@ export async function updateCustomerAddress(
 ): Promise<ActionResult<{ addressId: string }>> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_EDIT)
 
     const parsed = addressInputSchema.safeParse(input)
     if (!parsed.success) {
@@ -1128,7 +1128,7 @@ export async function updateCustomerAddress(
 export async function removeCustomerAddress(addressId: string): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_CREATE)
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_EDIT)
 
     const address = await db.customerAddress.findUnique({
       where: { id: addressId },
@@ -1518,7 +1518,7 @@ export async function updateCustomerStats(customerId: string): Promise<ActionRes
 }
 
 // ──────────────────────────────────────────────────────────────
-// flagCustomer — manual flagging (requires orders.manage)
+// flagCustomer — manual flagging (requires customers.edit)
 // ──────────────────────────────────────────────────────────────
 export async function flagCustomer(
   customerId: string,
@@ -1526,7 +1526,7 @@ export async function flagCustomer(
 ): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_EDIT)
     return flagCustomerInternal(customerId, reason, /* auto */ false, ctx)
   } catch (err) {
     return {
@@ -1608,7 +1608,7 @@ async function flagCustomerInternal(
 export async function unflagCustomer(customerId: string): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_EDIT)
 
     const customer = await db.customer.findFirst({
       where: { id: customerId, organizationId: ctx.company.organizationId },

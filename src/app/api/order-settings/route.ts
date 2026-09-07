@@ -1,7 +1,8 @@
 import { db } from '@/lib/db'
-import { ApiError, handleError, readBody, isElevated, getWorkspace } from '@/lib/workspace'
+import { ApiError, handleError, readBody, isElevated, getWorkspace, requirePermission } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
+import { PERMISSIONS } from '@/lib/permissions'
 import { z } from 'zod'
 
 export const runtime = 'nodejs'
@@ -22,6 +23,7 @@ const updateSchema = z.object({
 export async function GET() {
   try {
     const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_VIEW)
     let settings = await db.companyOrderSetting.findUnique({
       where: { companyId: ctx.company.id },
     })

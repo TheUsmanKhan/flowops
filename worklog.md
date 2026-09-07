@@ -12852,3 +12852,504 @@ Stage Summary:
 
 Recommended next action: implement P0 fixes (1–8) to close the security holes, then
 tackle P1 (9–16) for correctness, then P2 (17–22) for consistency.
+
+---
+Task ID: PERM-FIX-P0-P1
+Agent: general-purpose
+Task: Fix permission mismatches (P1) + add security checks to unprotected API routes (P0)
+
+Work Log:
+
+CONTEXT: Read /home/z/my-project/worklog.md (lines 12600-12854) — the permission
+audit findings from the previous task. The audit identified 7 P0 security holes
+(routes with NO permission check), 6 P1 frontend/backend mismatches, and 7
+orphan permission keys (catalog-defined but never enforced). This task
+implements P1 fixes 1-4 and P0 fixes for 21 unprotected routes.
+
+P1 FIXES (PERMISSION MISMATCHES):
+
+P1 Fix 1 — Customer actions use CUSTOMERS_CREATE/EDIT (DONE)
+  File: src/lib/actions/customer.actions.ts
+  Replaced all 9 ORDERS_CREATE/ORDERS_MANAGE checks:
+    - createCustomer (line 490): ORDERS_CREATE → CUSTOMERS_CREATE
+    - updateCustomer (line 686): ORDERS_CREATE → CUSTOMERS_EDIT
+    - addCustomerPhone (line 747): ORDERS_CREATE → CUSTOMERS_EDIT
+    - removeCustomerPhone (line 837): ORDERS_CREATE → CUSTOMERS_EDIT
+    - addCustomerAddress (line 966): ORDERS_CREATE → CUSTOMERS_EDIT
+    - updateCustomerAddress (line 1041): ORDERS_CREATE → CUSTOMERS_EDIT
+    - removeCustomerAddress (line 1131): ORDERS_CREATE → CUSTOMERS_EDIT
+    - flagCustomer (line 1529): ORDERS_MANAGE → CUSTOMERS_EDIT
+    - unflagCustomer (line 1611): ORDERS_MANAGE → CUSTOMERS_EDIT
+  listCustomers (line 1670) already used CUSTOMERS_VIEW — kept as-is.
+  CUSTOMERS_CREATE + CUSTOMERS_EDIT were previously orphan keys
+  (catalog-defined but never enforced). Now properly enforced.
+  NOTE: createCustomerInternal (the internal helper called by createManualOrder)
+  does NOT have its own permission check by design — it relies on the caller's
+  ORDERS_CREATE check (createManualOrder) for the inline-new-customer order
+  path. Left unchanged so order flow still works for users with ORDERS_CREATE
+  but without CUSTOMERS_CREATE.
+
+P1 Fix 2 — Integrations replace elevatedOnly/isElevated with INTEGRATIONS_VIEW/MANAGE (DONE)
+  File: src/components/layout/sidebar.tsx
+    - Sidebar integrations nav item: elevatedOnly:true → permission:PERMISSIONS.INTEGRATIONS_VIEW
+  File: src/components/settings/integrations-view.tsx
+    - Added useCan hook + canManage = can(PERMISSIONS.INTEGRATIONS_MANAGE)
+    - Connect/Disconnect/Test/Set Default/Sync Cities buttons now disabled={!canManage}
+    - Added canManage prop to IntegrationsSection component
+  File: src/lib/actions/integration.actions.ts
+    - connectIntegration: isElevated() → requirePermission(INTEGRATIONS_MANAGE)
+    - updateIntegrationCredentials: isElevated() → requirePermission(INTEGRATIONS_MANAGE)
+    - disconnectIntegration: isElevated() → requirePermission(INTEGRATIONS_MANAGE)
+    - setDefaultIntegration: isElevated() → requirePermission(INTEGRATIONS_MANAGE)
+    - testIntegrationConnection: isElevated() → requirePermission(INTEGRATIONS_MANAGE)
+    - listCompanyIntegrations already used INTEGRATIONS_VIEW — kept as-is.
+    - Removed unused isElevated import.
+  Now a custom role granted INTEGRATIONS_VIEW sees the integrations page,
+  and a role granted INTEGRATIONS_MANAGE can connect/disconnect/test.
+
+P1 Fix 3 — Payroll listPayrollRuns accepts PAYROLL_VIEW_ALL OR PAYROLL_MANAGE (DONE)
+  File: src/lib/actions/payroll.actions.ts
+    - listPayrollRuns (line 170): replaced requirePermission(PAYROLL_MANAGE)
+      with: if (!hasPermission(PAYROLL_MANAGE) && !hasPermission(PAYROLL_VIEW_ALL))
+            throw new ApiError(403, '...payroll.manage or payroll.view_all')
+    - Imported hasPermission alongside requirePermission.
+    - All other payroll mutations (generate/finalize/mark-paid/adjust) STILL
+      require PAYROLL_MANAGE — view-only is sufficient only for listing.
+  Fixes the broken UX where the sidebar (PAYROLL_VIEW_ALL) showed the nav
+  but the backend rejected the list query with 403.
+
+P1 Fix 4 — Seed default roles (DONE)
+  File: src/lib/seed-default-roles.ts
+    - Warehouse Staff: added ORDERS_FULFILL (scan endpoint requires it;
+      previously Warehouse Staff had SCAN_OPERATE but couldn't actually
+      use the scan station).
+    - Manager: added EMPLOYEES_VIEW (description promises "broad operational
+      access" but Manager couldn't see employees directory). Updated
+      description to mention "employees".
+    - Sales Manager: INVENTORY_VIEW was already present (line 56) — kept as-is.
+    - Manager: PRODUCTS_VIEW + PRODUCTS_EDIT were already present (lines 110-111)
+      — kept as-is.
+  NOTE: These changes affect only NEW companies going forward (the seed runs
+  idempotently — existing companies keep their existing role permissions
+  unless an admin re-runs the seed script or manually edits the role).
+
+P0 FIXES (SECURITY — PERMISSION CHECKS ADDED TO UNPROTECTED ROUTES):
+
+For each route: added `const ctx = await getWorkspace()` (replacing manual
+getCurrentUser + db.userSetting.findUnique boilerplate) and
+`await requirePermission(ctx, PERMISSIONS.XXX)` immediately after.
+
+P0 #1: src/app/api/inventory/dashboard/route.ts — DONE
+  - Added requirePermission(INVENTORY_VIEW)
+  - ALSO fixed the cross-company data leak: was filtering by organizationId
+    only (showed ALL companies' inventory in the org). Now filters by
+    location.companyId ∈ {null, ctx.company.id} (org-level shared + this
+    company's private locations only). Same filter applied to inventory
+    transaction queries (month movement + recent transactions).
+  - This was the most severe P0 — org-wide cross-company data leak.
+
+P0 #2: src/app/api/inventory/summary/route.ts — DONE
+  - Added requirePermission(INVENTORY_VIEW)
+
+P0 #3: src/app/api/inventory-locations/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+  - POST: already had INVENTORY_MANAGE_LOCATIONS check (inline boilerplate) —
+    left as-is per "don't change other logic" rule.
+
+P0 #4: src/app/api/suppliers/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+  - POST: already had INVENTORY_MANAGE_SUPPLIERS check — left as-is.
+
+P0 #5: src/app/api/cycle-counts/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+  - POST: already had INVENTORY_CYCLE_COUNT check — left as-is.
+
+P0 #6: src/app/api/cycle-counts/[id]/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+  - PATCH: already had INVENTORY_CYCLE_COUNT check — left as-is.
+
+P0 #7: src/app/api/stock-loss/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+
+P0 #8: src/app/api/stock-loss/stats/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+
+P0 #9: src/app/api/purchase-orders/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+  - POST: already had INVENTORY_MANAGE_PURCHASE_ORDERS check — left as-is.
+
+P0 #10: src/app/api/supplier-returns/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+  - POST: already had INVENTORY_MANAGE_SUPPLIER_RETURNS check — left as-is.
+
+P0 #11: src/app/api/returned-stitched/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+  - POST: already had INVENTORY_RECEIVE/INVENTORY_REPORT_LOSS check — left as-is.
+
+P0 #12: src/app/api/returned-stitched/stats/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+
+P0 #13: src/app/api/production-orders/route.ts — DONE
+  - GET: added requirePermission(INVENTORY_VIEW)
+  - POST: already had INVENTORY_MANAGE_PRODUCTION check — left as-is.
+
+P0 #14: src/app/api/brands/route.ts — DONE
+  - GET: added requirePermission(PRODUCTS_VIEW)
+  - POST: already had PRODUCTS_MANAGE_CATALOG check — left as-is.
+
+P0 #15: src/app/api/categories/route.ts — DONE
+  - GET: added requirePermission(PRODUCTS_VIEW)
+  - POST: already had PRODUCTS_MANAGE_CATALOG check — left as-is.
+  - Also removed unused getSessionUserId import.
+
+P0 #16: src/app/api/catalog/attributes/route.ts — DONE
+  - GET: added requirePermission(PRODUCTS_VIEW)
+  - POST: already had PRODUCTS_MANAGE_CATALOG check — left as-is.
+
+P0 #17: src/app/api/org/catalog/route.ts — DONE
+  - GET: added requirePermission(PRODUCTS_VIEW)
+  - The existing elevated-only check (roleTier !== 'elevated') was kept
+    intact per "don't change other logic" rule — so this route still
+    effectively requires elevated. The PRODUCTS_VIEW check is now an
+    additional documented permission requirement.
+  - Removed unused getCurrentUser import.
+
+P0 #18: src/app/api/order-settings/route.ts — DONE
+  - GET: added requirePermission(ORDERS_VIEW)
+  - PUT: already had isElevated() check — left as-is.
+
+P0 #19: src/app/api/scan/reports/route.ts — DONE
+  - GET: added requirePermission(SCAN_VIEW_REPORTS)
+  - POST: added requirePermission(SCAN_VIEW_REPORTS)
+  - SCAN_VIEW_REPORTS was previously an orphan permission key (catalog-defined
+    but never enforced). Now properly enforced.
+  - Removed the inline `await import('@/lib/workspace')` dynamic import in POST
+    (replaced with the static import already at top of file).
+
+P0 #20: src/app/api/booking-workbench/load-sheets/route.ts — DONE
+  - GET: added requirePermission(ORDERS_VIEW)
+
+P0 #21: src/app/api/booking-workbench/load-sheet-ready/route.ts — DONE
+  - GET: added requirePermission(ORDERS_VIEW)
+
+VERIFICATION:
+
+- bun run lint: 0 errors, 12 warnings (ALL pre-existing — react-hook-form
+  incompatible-library warnings in catalog-settings-view.tsx, returned-stitched-
+  view.tsx, etc. — none introduced by this task).
+- bunx tsc --noEmit: 69 errors (pre-existing) before AND after my changes
+  (verified via git stash + recount). My changes introduced 0 new TS errors.
+  All 69 errors are in pre-existing code I did not touch (shipper-advice
+  schema mismatch, leopard adapter type comparisons, session-payload
+  ordersDataScope missing from session type, etc.).
+
+FILES MODIFIED (27 total):
+P1 fixes (6 files I modified + 1 pre-existing):
+  - src/lib/actions/customer.actions.ts        (modified by me)
+  - src/lib/actions/integration.actions.ts     (modified by me)
+  - src/components/settings/integrations-view.tsx (modified by me)
+  - src/components/layout/sidebar.tsx          (modified by me)
+  - src/lib/actions/payroll.actions.ts          (modified by me)
+  - src/lib/seed-default-roles.ts               (modified by me)
+  - src/lib/permissions.ts                      (PRE-EXISTING uncommitted change
+    in the working directory when I started — the file had already been
+    modified to expand PERMISSION_GROUPS from 26 to 41 visible keys. I did
+    NOT touch this file. The diff shows the catalog was reorganized (Inventory
+    group split into Products + Inventory groups with many more keys added).
+    This pre-existing change actually overlaps with audit P1 #9 which I was
+    NOT asked to do — looks like another agent already did it.)
+
+P0 fixes (21 API route files):
+  - src/app/api/inventory/dashboard/route.ts
+  - src/app/api/inventory/summary/route.ts
+  - src/app/api/inventory-locations/route.ts
+  - src/app/api/suppliers/route.ts
+  - src/app/api/cycle-counts/route.ts
+  - src/app/api/cycle-counts/[id]/route.ts
+  - src/app/api/stock-loss/route.ts
+  - src/app/api/stock-loss/stats/route.ts
+  - src/app/api/purchase-orders/route.ts
+  - src/app/api/supplier-returns/route.ts
+  - src/app/api/returned-stitched/route.ts
+  - src/app/api/returned-stitched/stats/route.ts
+  - src/app/api/production-orders/route.ts
+  - src/app/api/brands/route.ts
+  - src/app/api/categories/route.ts
+  - src/app/api/catalog/attributes/route.ts
+  - src/app/api/org/catalog/route.ts
+  - src/app/api/order-settings/route.ts
+  - src/app/api/scan/reports/route.ts
+  - src/app/api/booking-workbench/load-sheets/route.ts
+  - src/app/api/booking-workbench/load-sheet-ready/route.ts
+
+PERMISSIONS NOW ENFORCED (previously orphan):
+  - CUSTOMERS_CREATE — enforced by createCustomer()
+  - CUSTOMERS_EDIT — enforced by updateCustomer, addCustomerPhone,
+    removeCustomerPhone, addCustomerAddress, updateCustomerAddress,
+    removeCustomerAddress, flagCustomer, unflagCustomer
+  - INTEGRATIONS_VIEW — enforced by listCompanyIntegrations + sidebar nav
+  - INTEGRATIONS_MANAGE — enforced by connect, disconnect, setDefault, test,
+    updateCredentials actions + frontend button gating
+  - SCAN_VIEW_REPORTS — enforced by /api/scan/reports GET + POST
+
+REMAINING ORPHAN PERMISSIONS (not addressed by this task — out of scope):
+  - INVENTORY_DELETE — still never checked (hard-delete paths use elevated-only)
+  - PRODUCTS_PROMOTE — still never checked (promote/demote routes use
+    elevated-only; P1 fix #5 in the audit recommendations but not in this
+    task's scope)
+  - KPI_MANAGE — no KPI config UI exists yet
+  - FINANCE_MANAGE — no finance transaction module exists yet
+
+NOT ADDRESSED (out of scope for this task — see audit P0 #5-#8 and P1 #12-#13):
+  - /api/integrations/[id]/test/route.ts — bypasses isElevated by re-implementing
+    test logic inline (audit P0 #6)
+  - /api/integrations/[id]/pickup-addresses/* — 5 routes with no check (audit P0 #7)
+  - /api/orders/[id]/self-fulfilled-slip POST — no check (audit P0 #8)
+  - listOrders() in order.actions.ts — no ORDERS_VIEW check (audit P0 #1)
+  - listExchanges/getExchangeDetail in exchange*.ts — no check (audit P0 #2)
+  - load-sheet.actions.ts generateLoadSheet — uses isElevated instead of
+    ORDERS_FULFILL (audit P1 #12)
+  - postex-status-poll.actions.ts trackSingleOrderStatus — uses isElevated
+    instead of ORDERS_FULFILL (audit P1 #12)
+  - /api/products/[id]/promote + /demote — uses elevated-only instead of
+    PRODUCTS_PROMOTE (audit P1 #13)
+  - PERMISSION_GROUPS expansion to include the 15 missing keys (audit P1 #9)
+    — NOTE: a pre-existing uncommitted change in the working tree appears
+    to have ALREADY addressed this (permissions.ts now has 41 visible keys
+    across Products + Inventory + Orders + Customers + Scan + Employees +
+    Payroll + Finance + Reports + Settings + Integrations + KPI/Audit groups).
+    This was not my work but the audit P1 #9 recommendation appears
+    satisfied. Worth re-running the audit to confirm.
+  - Frontend can() gates on various buttons (audit P2 #18)
+
+Stage Summary:
+- P1 fixes 1-4 completed: customer actions now use the proper CUSTOMERS_*
+  permission keys (resolves frontend/backend mismatch where Sales agents
+  could create customers via API but the UI hid the buttons); integrations
+  page is now accessible to non-elevated users granted INTEGRATIONS_VIEW
+  and connect/disconnect ops gated by INTEGRATIONS_MANAGE; payroll list
+  accepts either PAYROLL_VIEW_ALL or PAYROLL_MANAGE; default roles for
+  Warehouse Staff and Manager updated (Warehouse Staff can now actually
+  use the scan station).
+- P0 fixes for 21 API routes completed: all read endpoints in
+  /api/inventory/*, /api/inventory-locations, /api/suppliers,
+  /api/cycle-counts/*, /api/stock-loss/*, /api/purchase-orders,
+  /api/supplier-returns, /api/returned-stitched/*, /api/production-orders,
+  /api/brands, /api/categories, /api/catalog/attributes, /api/org/catalog,
+  /api/order-settings, /api/scan/reports, and /api/booking-workbench/
+  load-sheets + load-sheet-ready now enforce a permission check.
+- Critical cross-company data leak fixed in /api/inventory/dashboard
+  (was returning org-wide inventory data to ANY authenticated employee
+  regardless of company; now filters by location.companyId ∈ {null,
+  ctx.company.id} so only org-level shared + the active company's
+  private locations are returned).
+- 4 previously orphan permission keys (CUSTOMERS_CREATE, CUSTOMERS_EDIT,
+  INTEGRATIONS_VIEW, INTEGRATIONS_MANAGE) are now properly enforced
+  somewhere in the codebase. SCAN_VIEW_REPORTS is also now enforced.
+- 4 orphan keys remain (INVENTORY_DELETE, PRODUCTS_PROMOTE, KPI_MANAGE,
+  FINANCE_MANAGE) — these are out of scope for this task and require
+  either implementation work (KPI/FINANCE modules) or additional
+  refactoring of elevated-only paths (INVENTORY_DELETE, PRODUCTS_PROMOTE).
+- Lint: 0 errors. TypeScript: 0 new errors introduced (69 pre-existing
+  errors unchanged).
+- Recommended next action: implement audit P0 #5-8 (integrations test
+  route, pickup-addresses routes, self-fulfilled-slip, listOrders/
+  listExchanges), then P1 #12-13 (load sheet + status poll should use
+  ORDERS_FULFILL, products promote/demote should use PRODUCTS_PROMOTE).
+
+---
+
+Task ID: PERM-FIX-REMAINING-P0-P2
+Agent: sub-agent (general-purpose)
+Task: Complete remaining P0 security fixes and P2 UX fixes for the permissions system
+
+Work Log:
+- Read worklog context from prior PERM-FIX-P0-P1 task to understand the audit
+  findings (4 orphan permissions remaining + 6 routes bypassing isElevated +
+  P1 #12/#13 ORDERS_FULFILL + PRODUCTS_PROMOTE wiring + P2 frontend gates).
+- Read all target files (12 API routes + 3 frontend components + role editor
+  selector) before editing.
+
+P0 #1: src/app/api/orders/route.ts — DONE
+  - GET: added `const ctx = await getWorkspace()` + `await requirePermission(ctx, PERMISSIONS.ORDERS_VIEW)` at start of try block.
+  - Added imports: `getWorkspace, requirePermission` from `@/lib/workspace`, `PERMISSIONS` from `@/lib/permissions`.
+  - POST handler left unchanged (createManualOrder action enforces ORDERS_CREATE internally).
+
+P0 #2: src/app/api/exchanges/route.ts — DONE
+  - GET: added ORDERS_VIEW check after getWorkspace().
+  - getWorkspace was already imported (used by POST idempotency path); added requirePermission + PERMISSIONS imports.
+
+P0 #3: Integration sub-routes — DONE (6 files)
+  - src/app/api/integrations/[id]/test/route.ts — POST: added INTEGRATIONS_MANAGE check.
+    Also removed unused `isElevated` import (was imported but never called).
+  - src/app/api/integrations/[id]/pickup-addresses/route.ts — GET: INTEGRATIONS_VIEW, POST: INTEGRATIONS_MANAGE.
+  - src/app/api/integrations/[id]/pickup-addresses/import-by-id/route.ts — POST: INTEGRATIONS_MANAGE.
+  - src/app/api/integrations/[id]/pickup-addresses/sync/route.ts — POST: INTEGRATIONS_MANAGE.
+  - src/app/api/integrations/[id]/pickup-addresses/refresh/route.ts — POST: INTEGRATIONS_MANAGE.
+  - src/app/api/integrations/[id]/pickup-addresses/[addressId]/route.ts — PATCH: INTEGRATIONS_MANAGE, DELETE: INTEGRATIONS_MANAGE.
+
+P0 #4: src/app/api/exchanges/[id]/route.ts — DONE
+  - GET: added ORDERS_VIEW check. getWorkspace + requirePermission + PERMISSIONS imports added.
+
+P0 #5: src/app/api/orders/[id]/self-fulfilled-slip/route.ts — DONE
+  - POST: added ORDERS_VIEW check immediately after the existing getWorkspace() call. requirePermission + PERMISSIONS imports added.
+
+P0 #6: ORDERS_FULFILL wired into fulfillment routes — DONE
+  - src/app/api/booking-workbench/load-sheet/route.ts — POST: added ORDERS_FULFILL check.
+  - src/app/api/orders/[id]/refresh-status/route.ts — POST: added ORDERS_FULFILL check.
+  - NOTE: per "only add the permission check" rule, the underlying action
+    functions (generateLoadSheet, trackSingleOrderStatus) still call isElevated
+    internally — those P1 #12 fixes are out of scope for this task. The route
+    layer now enforces ORDERS_FULFILL, which means a non-elevated user without
+    ORDERS_FULFILL will be rejected before the action is invoked.
+
+P0 #7: PRODUCTS_PROMOTE wired into promote/demote — DONE
+  - src/app/api/products/[id]/promote/route.ts — POST: added requirePermission(PRODUCTS_PROMOTE) at start of try block, BEFORE the existing user/caller lookup.
+  - src/app/api/products/[id]/demote/route.ts — POST: same pattern.
+  - NOTE: per "don't change other logic" rule, the existing elevated-only
+    check (`if (caller.role.roleTier !== 'elevated') throw 403`) is left intact.
+    This means PRODUCTS_PROMOTE is now wired in code (no longer an orphan
+    permission key referenced nowhere), but for non-elevated users the
+    elevated-only check still blocks them even if their role grants
+    PRODUCTS_PROMOTE. Functionally this is a behavior-preserving change for
+    non-elevated users; the audit's stricter "replace elevated with
+    PRODUCTS_PROMOTE" interpretation would require removing the elevated
+    check, which is a separate refactoring task. Elevated users pass
+    requirePermission automatically (isElevated bypass).
+
+P2 #8: Role editor count display — VERIFIED ALREADY DONE
+  - src/components/roles/permission-key-selector.tsx ALREADY uses
+    `ALL_PERMISSION_KEYS.length` dynamically (lines 45, 50, 55).
+  - No hardcoded "26" exists anywhere in src/components/roles/ (confirmed
+    via ripgrep).
+  - Current PERMISSION_GROUPS catalog has 51 visible permission keys across
+    12 groups (Products 7, Inventory 13, Orders 5, Customers 3, Scan 2,
+    Employees 6, Payroll 3, Finance 2, Reports 2, Settings 3, Integrations 2,
+    KPI & Audit 3) — so the role editor now displays "x of 51 permissions
+    selected" dynamically. (Pre-existing uncommitted change to permissions.ts
+    expanded the catalog from 26 → 51 visible keys; this was done by a prior
+    agent and is documented in the PERM-FIX-P0-P1 worklog entry.)
+  - No code changes required for Fix 8.
+
+P2 #9: Frontend permission gates — DONE
+  - src/components/orders/order-detail-view.tsx — wrapped the
+    RefreshCourierStatusButton render with `{canFulfill && (...)}`.
+    `canFulfill` was already computed at line 307 from useCan().
+    The sibling CancelCourierBookingButton was left visible (cancel is a
+    separate permission concern, not in this task's scope).
+  - src/components/orders/load-sheets-tab.tsx — added `useCan` import from
+    `@/stores/app-store` + `PERMISSIONS` import from `@/lib/permissions`.
+    Added `const can = useCan(); const canFulfill = can(PERMISSIONS.ORDERS_FULFILL)`
+    at top of LoadSheetsTab component. Wrapped the "Generate Load Sheet"
+    Button with `{canFulfill && (...)}` — the "Select all" checkbox remains
+    visible (selecting without generate permission is harmless).
+  - src/components/products/org-catalog-view.tsx — added `useCan` + `PERMISSIONS`
+    imports. Added `const canPromote = can(PERMISSIONS.PRODUCTS_PROMOTE)` inside
+    PromotableProductCard. Restructured the promote button JSX from
+    `product.readyToPromote ? (Button) : (Tooltip)` to a 3-way branch:
+    `canPromote && readyToPromote ? (Button) : canPromote && !readyToPromote ? (Tooltip) : null`.
+    Users without PRODUCTS_PROMOTE see no promote button at all (cleanest UX).
+
+VERIFICATION:
+
+- bun run lint: 0 errors, 12 warnings (ALL pre-existing — React Hook Form
+  incompatible-library warnings in catalog-settings-view.tsx,
+  returned-stitched-view.tsx, etc. — none introduced by this task).
+  Matches the baseline count from the PERM-FIX-P0-P1 worklog.
+- bunx tsc --noEmit: 69 errors (pre-existing baseline) — verified count
+  unchanged. Confirmed none of the 3 errors in order-detail-view.tsx
+  (lines 415, 953, 963) are in the regions I modified (my edits were at
+  lines 1213-1227). Zero new TS errors introduced.
+
+FILES MODIFIED (12 total):
+API routes (10 files):
+  - src/app/api/orders/route.ts
+  - src/app/api/exchanges/route.ts
+  - src/app/api/exchanges/[id]/route.ts
+  - src/app/api/orders/[id]/self-fulfilled-slip/route.ts
+  - src/app/api/booking-workbench/load-sheet/route.ts
+  - src/app/api/orders/[id]/refresh-status/route.ts
+  - src/app/api/products/[id]/promote/route.ts
+  - src/app/api/products/[id]/demote/route.ts
+  - src/app/api/integrations/[id]/test/route.ts
+  - src/app/api/integrations/[id]/pickup-addresses/route.ts
+  - src/app/api/integrations/[id]/pickup-addresses/import-by-id/route.ts
+  - src/app/api/integrations/[id]/pickup-addresses/sync/route.ts
+  - src/app/api/integrations/[id]/pickup-addresses/refresh/route.ts
+  - src/app/api/integrations/[id]/pickup-addresses/[addressId]/route.ts
+Frontend components (3 files):
+  - src/components/orders/order-detail-view.tsx
+  - src/components/orders/load-sheets-tab.tsx
+  - src/components/products/org-catalog-view.tsx
+
+PERMISSIONS NOW ENFORCED (previously orphan or under-enforced):
+  - ORDERS_VIEW — now enforced on /api/orders GET, /api/exchanges GET,
+    /api/exchanges/[id] GET, /api/orders/[id]/self-fulfilled-slip POST.
+  - ORDERS_FULFILL — now enforced on /api/booking-workbench/load-sheet POST
+    and /api/orders/[id]/refresh-status POST (previously had NO permission
+    check at the route layer — relied solely on the action function's
+    isElevated check).
+  - PRODUCTS_PROMOTE — now enforced (wired) on /api/products/[id]/promote
+    and /api/products/[id]/demote POST routes. Previously these routes used
+    elevated-only; PRODUCTS_PROMOTE was an orphan key never checked anywhere.
+    NOTE: the elevated-only check is preserved per task scope, so the gate
+    is additive (non-elevated users still blocked by elevated check, but
+    PRODUCTS_PROMOTE is now referenced in code and can be assigned to
+    elevated-bypass roles in the future if desired).
+  - INTEGRATIONS_VIEW — now enforced on
+    /api/integrations/[id]/pickup-addresses GET (previously had no check).
+  - INTEGRATIONS_MANAGE — now enforced on 5 previously-unprotected routes:
+    /api/integrations/[id]/test POST, /api/integrations/[id]/pickup-addresses
+    POST, /api/integrations/[id]/pickup-addresses/import-by-id POST,
+    /api/integrations/[id]/pickup-addresses/sync POST,
+    /api/integrations/[id]/pickup-addresses/refresh POST,
+    /api/integrations/[id]/pickup-addresses/[addressId] PATCH + DELETE.
+
+FRONTEND GATES ADDED:
+  - RefreshCourierStatusButton (order-detail-view) gated by ORDERS_FULFILL.
+  - Generate Load Sheet button (load-sheets-tab) gated by ORDERS_FULFILL.
+  - Promote button (org-catalog-view PromotableProductCard) gated by
+    PRODUCTS_PROMOTE.
+
+REMAINING ORPHAN PERMISSIONS (still not enforced anywhere — out of scope):
+  - INVENTORY_DELETE — hard-delete paths still use elevated-only.
+  - KPI_MANAGE — no KPI config UI exists yet.
+  - FINANCE_MANAGE — no finance transaction module exists yet.
+
+KNOWN LIMITATIONS:
+  - The P1 #12 deeper fix (load-sheet.actions.ts generateLoadSheet and
+    postex-status-poll.actions.ts trackSingleOrderStatus should use
+    requirePermission(ORDERS_FULFILL) instead of isElevated internally)
+    was NOT done — those action functions still use isElevated internally.
+    The route layer now enforces ORDERS_FULFILL, so the behavior for HTTP
+    callers is correct, but if these action functions are invoked from a
+    server action or another internal code path that bypasses the route
+    layer, the isElevated check (not ORDERS_FULFILL) would apply. Marked as
+    a follow-up if server-action callers exist.
+  - The P1 #13 deeper fix (promote/demote should REPLACE elevated-only with
+    PRODUCTS_PROMOTE, not ADD it) was NOT done — the elevated-only check
+    remains in both routes. To fully wire PRODUCTS_PROMOTE such that
+    non-elevated users with the permission can promote/demote, the elevated
+    check would need to be removed. This was intentionally not done per the
+    "don't change other logic" rule in the task description.
+
+Stage Summary:
+- 7 P0 security fixes completed: ORDERS_VIEW added to listOrders + listExchanges
+  + getExchangeDetail + self-fulfilled-slip; INTEGRATIONS_MANAGE/VIEW added
+  to 6 integration sub-routes that previously had NO permission check;
+  ORDERS_FULFILL wired into load-sheet + refresh-status routes (previously
+  no route-layer check at all); PRODUCTS_PROMOTE wired into promote/demote.
+- 2 P2 UX fixes completed: frontend buttons for Refresh Courier Status,
+  Generate Load Sheet, and Promote Product are now hidden for users lacking
+  the corresponding permission. Role editor count display was already
+  using dynamic ALL_PERMISSION_KEYS.length (no change required).
+- Lint: 0 errors. TypeScript: 0 new errors introduced (69 pre-existing
+  errors unchanged).
+- Recommended next action: (a) audit INVENTORY_DELETE, KPI_MANAGE,
+  FINANCE_MANAGE orphan permissions when their respective modules are
+  built; (b) consider deeper P1 #12/#13 refactoring to remove the
+  isElevated fallback in load-sheet.actions / postex-status-poll.actions /
+  promote / demote if cleaner role-based access is desired (the current
+  state is secure — elevated-only is a strict subset of PRODUCTS_PROMOTE
+  granted to elevated roles — but less flexible than the permission system
+  intends).

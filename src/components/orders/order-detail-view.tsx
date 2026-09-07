@@ -1212,10 +1212,12 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
               {/* Refresh courier status button — triggers PostEx polling for this order */}
               {order.trackingNumber && order.courierCompanyIntegrationId && (
                 <div className="flex items-center gap-2 mt-2">
-                  <RefreshCourierStatusButton
-                    orderId={order.id}
-                    onSuccess={() => invalidateAll()}
-                  />
+                  {canFulfill && (
+                    <RefreshCourierStatusButton
+                      orderId={order.id}
+                      onSuccess={() => invalidateAll()}
+                    />
+                  )}
                   <CancelCourierBookingButton
                     entityType="order"
                     entityId={order.id}

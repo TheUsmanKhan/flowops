@@ -1,4 +1,5 @@
-import { ApiError, handleError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 import { listLoadSheetHistory } from '@/lib/actions/load-sheet.actions'
 
@@ -13,6 +14,9 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET(req: NextRequest) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_VIEW)
+
     const url = new URL(req.url)
     const limitParam = url.searchParams.get('limit')
     const limit = limitParam ? Math.min(parseInt(limitParam, 10) || 20, 100) : 20

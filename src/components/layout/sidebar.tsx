@@ -111,7 +111,7 @@ const NAV: NavItem[] = [
   },
   { route: { name: 'customers' }, label: 'Customers', icon: Users, permission: PERMISSIONS.CUSTOMERS_VIEW, matchPrefixes: ['customers', 'customer-detail'] },
   { route: { name: 'order-workflow-settings' }, label: 'Order Settings', icon: SlidersHorizontal, elevatedOnly: true, matchPrefixes: ['order-workflow'] },
-  { route: { name: 'integrations' }, label: 'Integrations', icon: Plug, elevatedOnly: true, matchPrefixes: ['integrations'] },
+  { route: { name: 'integrations' }, label: 'Integrations', icon: Plug, permission: PERMISSIONS.INTEGRATIONS_VIEW, matchPrefixes: ['integrations'] },
   { route: { name: 'integration-logs' }, label: 'Integration Logs', icon: Webhook, elevatedOnly: true, matchPrefixes: ['integration-logs'] },
   { route: { name: 'employees' }, label: 'Employees', icon: Users, permission: PERMISSIONS.EMPLOYEES_VIEW, matchPrefixes: ['employees'] },
   { route: { name: 'payroll' }, label: 'Payroll', icon: Receipt, permission: PERMISSIONS.PAYROLL_VIEW_ALL, matchPrefixes: ['payroll'] },

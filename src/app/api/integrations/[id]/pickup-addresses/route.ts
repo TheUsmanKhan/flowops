@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
-import { handleError, readBody } from '@/lib/workspace'
+import { getWorkspace, requirePermission, handleError, readBody } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import {
   listPickupAddresses,
   addPickupAddress,
@@ -15,6 +16,9 @@ export async function GET(
 ) {
   try {
     const { id } = await params
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_VIEW)
+
     const result = await listPickupAddresses(id)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })
@@ -32,6 +36,9 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+
     const body = await readBody<{
       label: string
       address: string

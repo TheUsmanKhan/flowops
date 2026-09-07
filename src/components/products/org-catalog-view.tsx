@@ -59,6 +59,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { useCan } from '@/stores/app-store'
+import { PERMISSIONS } from '@/lib/permissions'
 import {
   Loader2,
   Globe,
@@ -892,6 +894,9 @@ function PromotableProductCard({
   product: PromotableProduct
   onPromote: () => void
 }) {
+  const can = useCan()
+  const canPromote = can(PERMISSIONS.PRODUCTS_PROMOTE)
+
   const missing: string[] = []
   if (product.variantCount === 0) missing.push('at least one active variant')
   if (product.imageCount === 0) missing.push('at least one image')
@@ -934,7 +939,7 @@ function PromotableProductCard({
             </CardDescription>
           </div>
           <div className="shrink-0">
-            {product.readyToPromote ? (
+            {canPromote && product.readyToPromote ? (
               <Button
                 size="sm"
                 onClick={onPromote}
@@ -943,7 +948,7 @@ function PromotableProductCard({
                 <Plus className="h-3.5 w-3.5" />
                 Promote
               </Button>
-            ) : (
+            ) : canPromote && !product.readyToPromote ? (
               <Tooltip>
                 <TooltipTrigger asChild>
                   <span>
@@ -962,7 +967,7 @@ function PromotableProductCard({
                   </div>
                 </TooltipContent>
               </Tooltip>
-            )}
+            ) : null}
           </div>
         </div>
       </CardHeader>

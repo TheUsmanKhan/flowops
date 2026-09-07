@@ -1,4 +1,5 @@
-import { ApiError, handleError } from '@/lib/workspace'
+import { ApiError, getWorkspace, requirePermission, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 import { trackSingleOrderStatus } from '@/lib/actions/postex-status-poll.actions'
 
@@ -26,6 +27,9 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
+
     const { id } = await params
     const result = await trackSingleOrderStatus(id)
     if (!result.success) {

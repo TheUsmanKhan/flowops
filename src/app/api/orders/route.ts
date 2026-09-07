@@ -1,4 +1,5 @@
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, handleError, readBody, getWorkspace, requirePermission } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import {
   listOrders,
   createManualOrder,
@@ -44,6 +45,9 @@ function parseArrayParam(url: URL, key: string): string[] {
  */
 export async function GET(req: Request) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_VIEW)
+
     const url = new URL(req.url)
 
     // Multi-select filters (preferred)

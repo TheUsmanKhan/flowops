@@ -11,7 +11,7 @@
  */
 
 import { db } from '@/lib/db'
-import { getWorkspace, requirePermission, ApiError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, hasPermission, ApiError } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
 import { insertAuditLog } from '@/lib/audit'
 import { computeCommissionEarned } from '@/lib/analytics/commission'
@@ -169,7 +169,13 @@ export async function listPayrollRuns(): Promise<ActionResult<{
 }>> {
   try {
     const ctx = await getWorkspace()
-    await requirePermission(ctx, PERMISSIONS.PAYROLL_MANAGE)
+    // View-only access (PAYROLL_VIEW_ALL) is sufficient to LIST runs.
+    // Mutations (generate/finalize/mark-paid) still require PAYROLL_MANAGE.
+    const canManage = await hasPermission(ctx, PERMISSIONS.PAYROLL_MANAGE)
+    const canViewAll = await hasPermission(ctx, PERMISSIONS.PAYROLL_VIEW_ALL)
+    if (!canManage && !canViewAll) {
+      throw new ApiError(403, 'You lack the required permission: payroll.manage or payroll.view_all')
+    }
 
     const runs = await db.payrollRun.findMany({
       where: { companyId: ctx.company.id },

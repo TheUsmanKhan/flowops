@@ -1,4 +1,5 @@
-import { ApiError, handleError } from '@/lib/workspace'
+import { ApiError, getWorkspace, requirePermission, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 import { syncPickupAddresses } from '@/lib/actions/courier-address-book.actions'
 
@@ -22,6 +23,9 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+
     const result = await syncPickupAddresses(id)
     if (!result.success) throw new ApiError(400, result.error ?? 'Sync failed')
     return Response.json(result.data)

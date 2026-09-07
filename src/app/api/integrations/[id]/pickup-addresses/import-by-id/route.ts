@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
-import { handleError, readBody } from '@/lib/workspace'
+import { getWorkspace, requirePermission, handleError, readBody } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { importPickupAddressById } from '@/lib/actions/courier-address-book.actions'
 
 export const runtime = 'nodejs'
@@ -17,6 +18,9 @@ export async function POST(
 ) {
   try {
     const { id } = await params
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+
     const body = await readBody<{ shipment_id: string }>(req)
 
     if (!body.shipment_id) {

@@ -36,6 +36,8 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { api, FetchError } from '@/lib/api-client'
+import { useCan } from '@/stores/app-store'
+import { PERMISSIONS } from '@/lib/permissions'
 import { getErrorMessage, formatDateTime } from './_shared'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -98,6 +100,8 @@ export function LoadSheetsTab({
   courierIntegrations: CompanyIntegration[]
 }) {
   const queryClient = useQueryClient()
+  const can = useCan()
+  const canFulfill = can(PERMISSIONS.ORDERS_FULFILL)
   const [selectedIntegrationId, setSelectedIntegrationId] = useState<string>('')
   const [selectedPickupAddressId, setSelectedPickupAddressId] = useState<string>('')
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
@@ -307,17 +311,19 @@ export function LoadSheetsTab({
                   <Checkbox checked={allChecked} onCheckedChange={toggleSelectAll} />
                   <span className="text-muted-foreground">Select all</span>
                 </label>
-                <Button
-                  size="sm"
-                  onClick={handleGenerate}
-                  disabled={checkedIds.size === 0 || generateMutation.isPending}
-                >
-                  {generateMutation.isPending ? (
-                    <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating…</>
-                  ) : (
-                    <>Generate Load Sheet ({checkedIds.size})</>
-                  )}
-                </Button>
+                {canFulfill && (
+                  <Button
+                    size="sm"
+                    onClick={handleGenerate}
+                    disabled={checkedIds.size === 0 || generateMutation.isPending}
+                  >
+                    {generateMutation.isPending ? (
+                      <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Generating…</>
+                    ) : (
+                      <>Generate Load Sheet ({checkedIds.size})</>
+                    )}
+                  </Button>
+                )}
               </div>
             )}
           </div>

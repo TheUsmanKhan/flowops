@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
 
@@ -10,12 +10,11 @@ export const dynamic = 'force-dynamic'
 /** List suppliers visible to the active company. */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    const orgId = settings?.activeOrgId
-    if (!companyId || !orgId) throw new ApiError(403, 'No active company')
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INVENTORY_VIEW)
+
+    const orgId = ctx.company.organizationId
+    const companyId = ctx.company.id
 
     const suppliers = await db.supplier.findMany({
       where: {

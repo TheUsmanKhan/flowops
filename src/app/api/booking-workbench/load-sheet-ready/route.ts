@@ -1,4 +1,5 @@
-import { ApiError, handleError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 import { listLoadSheetReady } from '@/lib/actions/load-sheet.actions'
 
@@ -16,6 +17,9 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET(req: NextRequest) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_VIEW)
+
     const url = new URL(req.url)
     const companyIntegrationId = url.searchParams.get('companyIntegrationId')
     if (!companyIntegrationId) {

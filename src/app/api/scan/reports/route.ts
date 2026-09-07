@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
-import { handleError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { getScanReport, generateDailyScanReport } from '@/lib/actions/scan-report.actions'
 import { generateScanReportPdf } from '@/lib/utils/scan-pdf'
 import { db } from '@/lib/db'
@@ -10,6 +11,9 @@ export const dynamic = 'force-dynamic'
 /** GET /api/scan/reports?dateFrom=&dateTo=&employeeId=&customerId= */
 export async function GET(req: NextRequest) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.SCAN_VIEW_REPORTS)
+
     const { searchParams } = new URL(req.url)
     const dateFrom = searchParams.get('dateFrom') ?? new Date().toISOString().slice(0, 10)
     const dateTo = searchParams.get('dateTo') ?? dateFrom
@@ -27,6 +31,9 @@ export async function GET(req: NextRequest) {
 /** POST /api/scan/reports — download PDF for a custom range */
 export async function POST(req: NextRequest) {
   try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.SCAN_VIEW_REPORTS)
+
     const body = await req.json()
     const { dateFrom, dateTo, employeeId, customerId } = body
 
@@ -36,8 +43,6 @@ export async function POST(req: NextRequest) {
     // Get company name — BUG FIX: was findFirst({}) with NO where clause
     // (returned ANY user's settings, not the authenticated user's).
     // Now uses getWorkspace() (cached, 0ms) for the correct company.
-    const { getWorkspace } = await import('@/lib/workspace')
-    const ctx = await getWorkspace()
     const company = await db.company.findUnique({
       where: { id: ctx.company.id },
       select: { name: true, id: true },

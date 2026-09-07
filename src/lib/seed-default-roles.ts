@@ -95,11 +95,14 @@ export const DEFAULT_ROLES: DefaultRoleDef[] = [
       PERMISSIONS.INVENTORY_TRANSFER,
       PERMISSIONS.INVENTORY_CYCLE_COUNT,
       PERMISSIONS.SCAN_OPERATE,
+      // ORDERS_FULFILL is required by the scan endpoint (processScan)
+      // — Warehouse Staff can't use the scan station without it.
+      PERMISSIONS.ORDERS_FULFILL,
     ],
   },
   {
     name: 'Manager',
-    description: 'General manager — broad operational access across orders, products, inventory, reports, and audit.',
+    description: 'General manager — broad operational access across orders, products, inventory, employees, reports, and audit.',
     ordersDataScope: 'all',
     permissions: [
       PERMISSIONS.ORDERS_VIEW,
@@ -111,6 +114,7 @@ export const DEFAULT_ROLES: DefaultRoleDef[] = [
       PERMISSIONS.PRODUCTS_EDIT,
       PERMISSIONS.INVENTORY_VIEW,
       PERMISSIONS.INVENTORY_ADJUST,
+      PERMISSIONS.EMPLOYEES_VIEW,
       PERMISSIONS.FINANCE_VIEW,
       PERMISSIONS.REPORTS_VIEW,
       PERMISSIONS.REPORTS_EXPORT,

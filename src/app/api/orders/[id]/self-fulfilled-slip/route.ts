@@ -1,5 +1,6 @@
 import { db } from '@/lib/db'
-import { getWorkspace, ApiError, handleError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { generateInternalSlipPdf, type InternalSlipPdfData } from '@/lib/utils/internal-slip-pdf'
 import { promises as fs } from 'fs'
 import path from 'path'
@@ -23,6 +24,7 @@ export async function POST(
 ) {
   try {
     const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.ORDERS_VIEW)
     const { id: orderId } = await params
 
     const order = await db.order.findFirst({

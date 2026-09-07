@@ -1,6 +1,11 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import {
+  getWorkspace,
+  requirePermission,
+  ApiError,
+  handleError,
+} from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -9,18 +14,30 @@ export const dynamic = 'force-dynamic'
  * Inventory dashboard stats.
  * Returns: total stock value, low stock count, out of stock count,
  * dead stock value, stock movement summary (this month), recent transactions.
+ *
+ * SECURITY: Filters by companyId (org-level shared locations + this company's
+ * locations only) — never returns cross-company inventory data within the org.
  */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const orgId = settings?.activeOrgId
-    if (!orgId) throw new ApiError(403, 'No active organization')
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INVENTORY_VIEW)
 
-    // Fetch all pools for this org with variant info
+    const orgId = ctx.company.organizationId
+    const companyId = ctx.company.id
+
+    // Company filter: include org-level shared locations (companyId = null)
+    // AND this company's own locations.
+    const companyFilter = {
+      OR: [{ companyId: null }, { companyId }],
+    }
+
+    // Fetch all pools for this org + company scope with variant info
     const pools = await db.inventoryPool.findMany({
-      where: { organizationId: orgId },
+      where: {
+        organizationId: orgId,
+        location: companyFilter,
+      },
       include: {
         orgVariant: {
           select: {
@@ -54,6 +71,7 @@ export async function GET() {
     const monthTxns = await db.inventoryTransaction.findMany({
       where: {
         organizationId: orgId,
+        ...companyFilter,
         recordedAt: { gte: startOfMonth },
       },
       select: { transactionType: true, quantity: true, costPerUnit: true },
@@ -72,7 +90,10 @@ export async function GET() {
 
     // Recent transactions (last 30)
     const recentTxns = await db.inventoryTransaction.findMany({
-      where: { organizationId: orgId },
+      where: {
+        organizationId: orgId,
+        ...companyFilter,
+      },
       include: {
         orgVariant: { select: { sku: true, product: { select: { title: true } } } },
         location: { select: { name: true } },

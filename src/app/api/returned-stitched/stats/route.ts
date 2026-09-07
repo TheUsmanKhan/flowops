@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -8,11 +8,10 @@ export const dynamic = 'force-dynamic'
 /** Stats for the returned stitched inventory page header. */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INVENTORY_VIEW)
+
+    const companyId = ctx.company.id
 
     const now = new Date()
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1)

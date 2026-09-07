@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
 import { returnedStitchedInventorySchema } from '@/lib/validations/product'
@@ -16,11 +16,10 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET(req: NextRequest) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INVENTORY_VIEW)
+
+    const companyId = ctx.company.id
 
     const url = new URL(req.url)
     const status = url.searchParams.get('status') ?? ''

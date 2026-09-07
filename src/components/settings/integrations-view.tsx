@@ -4,7 +4,8 @@ import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
-import { useAppStore } from '@/stores/app-store'
+import { useAppStore, useCan } from '@/stores/app-store'
+import { PERMISSIONS } from '@/lib/permissions'
 import { PageHeader } from '@/components/layout/dashboard-shell'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -147,6 +148,8 @@ function StatusBadge({ status, isActive }: { status: string; isActive: boolean }
 
 export function IntegrationsView() {
   const navigate = useAppStore((s) => s.navigate)
+  const can = useCan()
+  const canManage = can(PERMISSIONS.INTEGRATIONS_MANAGE)
   const queryClient = useQueryClient()
   const [connectProvider, setConnectProvider] = useState<Provider | null>(null)
   const [confirmDisconnect, setConfirmDisconnect] = useState<Integration | null>(null)
@@ -331,6 +334,7 @@ export function IntegrationsView() {
             onSyncCities={(providerKey) => syncCitiesMutation.mutate(providerKey)}
             syncingCities={syncCitiesMutation.isPending}
             testing={testMutation.isPending}
+            canManage={canManage}
           />
         </TabsContent>
 
@@ -345,6 +349,7 @@ export function IntegrationsView() {
             onDisconnect={(i) => setConfirmDisconnect(i)}
             onSetDefault={(id) => setDefaultMutation.mutate(id)}
             testing={testMutation.isPending}
+            canManage={canManage}
           />
         </TabsContent>
       </Tabs>
@@ -403,6 +408,7 @@ function IntegrationsSection({
   onSyncCities,
   syncingCities,
   testing,
+  canManage,
 }: {
   integrations: Integration[]
   availableProviders: Provider[]
@@ -413,6 +419,7 @@ function IntegrationsSection({
   onSyncCities?: (providerKey: string) => void
   syncingCities?: boolean
   testing: boolean
+  canManage: boolean
 }) {
   // Only show ACTIVE integrations in the "Connected" section.
   // Disconnected integrations are hidden — the provider reappears in
@@ -470,11 +477,11 @@ function IntegrationsSection({
 
                   <div className="flex items-center gap-1 flex-wrap pt-1">
                     {!i.isDefault && (
-                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onSetDefault(i.id)}>
+                      <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onSetDefault(i.id)} disabled={!canManage}>
                         <Star className="h-3 w-3" /> Set Default
                       </Button>
                     )}
-                    <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onTest(i.id)} disabled={testing}>
+                    <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => onTest(i.id)} disabled={testing || !canManage}>
                       <Zap className="h-3 w-3" /> Test
                     </Button>
                     {onSyncCities && (
@@ -483,7 +490,7 @@ function IntegrationsSection({
                         variant="ghost"
                         className="h-7 text-xs"
                         onClick={() => onSyncCities(i.provider.providerKey)}
-                        disabled={syncingCities}
+                        disabled={syncingCities || !canManage}
                         title="Sync operational cities from courier API"
                       >
                         {syncingCities ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
@@ -495,6 +502,7 @@ function IntegrationsSection({
                       variant="ghost"
                       className="h-7 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50"
                       onClick={() => onDisconnect(i)}
+                      disabled={!canManage}
                     >
                       <Power className="h-3 w-3" /> Disconnect
                     </Button>
@@ -533,7 +541,7 @@ function IntegrationsSection({
                       {p.supportsWebhook ? 'Supports webhooks' : 'No webhooks'} · {p.authType}
                     </p>
                   </div>
-                  <Button size="sm" onClick={() => onConnect(p)}>
+                  <Button size="sm" onClick={() => onConnect(p)} disabled={!canManage}>
                     <Plus className="h-3.5 w-3.5" /> Connect
                   </Button>
                 </CardContent>

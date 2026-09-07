@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server'
-import { handleError, readBody } from '@/lib/workspace'
+import { getWorkspace, requirePermission, handleError, readBody } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { setDefaultPickupAddress } from '@/lib/actions/courier-address-book.actions'
 import { deletePickupAddress } from '@/lib/actions/courier-address-book.actions'
 
@@ -18,6 +19,9 @@ export async function PATCH(
 ) {
   try {
     const { id, addressId } = await params
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+
     const body = await readBody<{ action?: string }>(req).catch(() => ({ action: undefined }))
 
     if (body.action === 'set-default') {
@@ -41,6 +45,9 @@ export async function DELETE(
 ) {
   try {
     const { addressId } = await params
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
+
     const result = await deletePickupAddress(addressId)
     if (!result.success) {
       return Response.json({ error: result.error }, { status: 400 })

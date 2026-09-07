@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError, handleError } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -14,17 +14,13 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({
-      where: { userId: user.id },
-      include: { activeCompany: true },
-    })
-    const orgId = settings?.activeOrgId
-    if (!orgId) throw new ApiError(403, 'No active organization')
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)
+
+    const orgId = ctx.company.organizationId
 
     const caller = await db.employee.findFirst({
-      where: { companyId: settings!.activeCompanyId!, userId: user.id, status: 'active' },
+      where: { companyId: ctx.company.id, userId: ctx.user.id, status: 'active' },
       include: { role: true },
     })
     if (!caller) throw new ApiError(403, 'Not a member of this company.')

@@ -7,11 +7,12 @@
  * CRITICAL RULES:
  *   1. Never return credentials_encrypted (even encrypted) to the client.
  *   2. All adapter calls go through executeLoggedIntegrationAction().
- *   3. Connecting/configuring integrations is elevated-only (involves credentials).
+ *   3. Connecting/configuring integrations requires INTEGRATIONS_MANAGE permission
+ *      (involves credentials).
  */
 
 import { db } from '@/lib/db'
-import { getWorkspace, requirePermission, isElevated, ApiError } from '@/lib/workspace'
+import { getWorkspace, requirePermission, ApiError } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
 import {
@@ -181,9 +182,7 @@ export async function connectIntegration(input: {
 }>> {
   try {
     const ctx = await getWorkspace()
-    if (!isElevated(ctx)) {
-      return { success: false, error: 'Only elevated roles (Owner/Founder/Co-Founder/Investor) can configure integrations.' }
-    }
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
 
     // Fetch the provider to get config_schema + supports_webhook
     const provider = await db.integrationProvider.findUnique({
@@ -404,9 +403,7 @@ export async function updateIntegrationCredentials(
 ): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
-    if (!isElevated(ctx)) {
-      return { success: false, error: 'Only elevated roles can update integration credentials.' }
-    }
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
 
     const integration = await db.companyIntegration.findFirst({
       where: { id: companyIntegrationId, companyId: ctx.company.id },
@@ -477,9 +474,7 @@ export async function updateIntegrationCredentials(
 export async function disconnectIntegration(companyIntegrationId: string): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
-    if (!isElevated(ctx)) {
-      return { success: false, error: 'Only elevated roles can disconnect integrations.' }
-    }
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
 
     const integration = await db.companyIntegration.findFirst({
       where: { id: companyIntegrationId, companyId: ctx.company.id },
@@ -562,9 +557,7 @@ export async function disconnectIntegration(companyIntegrationId: string): Promi
 export async function setDefaultIntegration(companyIntegrationId: string): Promise<ActionResult> {
   try {
     const ctx = await getWorkspace()
-    if (!isElevated(ctx)) {
-      return { success: false, error: 'Only elevated roles can set default integrations.' }
-    }
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
 
     // Fetch the integration + its provider's category
     const integration = await db.companyIntegration.findFirst({
@@ -627,9 +620,7 @@ export async function testIntegrationConnection(companyIntegrationId: string): P
 }>> {
   try {
     const ctx = await getWorkspace()
-    if (!isElevated(ctx)) {
-      return { success: false, error: 'Only elevated roles can test integrations.' }
-    }
+    await requirePermission(ctx, PERMISSIONS.INTEGRATIONS_MANAGE)
 
     const integration = await db.companyIntegration.findFirst({
       where: { id: companyIntegrationId, companyId: ctx.company.id },
