@@ -1,0 +1,402 @@
+   200→   200→
+   201→   201→### API Routes
+   202→   202→
+   203→   203→| Method | Path | Description |
+   204→   204→| --- | --- | --- |
+   205→   205→| POST | `/api/products` | Create the product (see Module 1). |
+   206→   206→| POST | `/api/products/[id]/variants/generate` | Pure calculation — cartesian product of selected attributes with bidirectional rule filtering. (Same as Module 1 — used by the wizard before the product exists; the `[id]` in the URL is a placeholder.) |
+   207→   207→| POST | `/api/products/generate-stitched` | Pure calculation — generates stitched/unstitched variant combinations for a stitchable product. Returns suggested variants with SKUs + cost_price (base_fabric_cost + stitching_charges) + fulfillment_type. |
+   208→   208→| GET | `/api/catalog/available-attributes` | Fetch all active attributes + values + rules for the org. Powers the `AttributeSelector` component. |
+   209→   209→| POST | `/api/catalog/inline-attribute` | Create a new attribute inline from the variant builder. |
+   210→   210→| POST | `/api/catalog/inline-value` | Create a new attribute value inline from the variant builder. |
+   211→   211→| GET | `/api/categories` | List org categories. |
+   212→   212→| GET | `/api/brands` | List org brands. |
+   213→   213→
+   214→   214→### Server Actions
+   215→   215→None.
+   216→   216→
+   217→   217→### Schema Models
+   218→   218→Same as Module 1 — `OrgProduct`, `OrgProductVariant`, `CompanyVariantPricing`, `CompanyProductSetting`, plus the catalog entities (`OrgAttribute`, `OrgAttributeValue`, `AttributeValueRule`, `OrgCategory`, `OrgBrand`) which are detailed in Module 5.
+   219→   219→
+   220→   220→### Issues Found
+   221→   221→
+   222→   222→- **[HIGH] `POST /api/products/[id]/variants/generate` does NOT verify the user has permission to create variants** — it's a pure calculation endpoint that returns combinations, but it does NOT check that the user is the source company or has PRODUCTS_EDIT permission. Anyone in the org can call it. Not a security hole (no DB writes), but inconsistent with the rest of the variant endpoints which DO check.
+   223→   223→
+   224→   224→- **[HIGH] `POST /api/products/generate-stitched` does NOT check ANY permission** — anyone authenticated can call it. Same as above: pure calculation, no DB write, but inconsistent. Worse, the route doesn't even fetch the product or company from the DB — it operates entirely on the request body, so it can be called with any slug/sku prefix (no validation that the product slug exists).
+   225→   225→
+   226→   226→- **[HIGH] `POST /api/products/generate-stitched` and `POST /api/products/[id]/variants/generate` use `product_slug` as the SKU prefix fallback** (line 35 of generate-stitched, line 160 of generate). A user can pass any arbitrary string as `product_slug` and the generated SKUs will use it as the prefix. No length cap on the slug → can produce SKUs exceeding the 100-char DB limit. The slicing at line 161 (`.slice(0, 100)`) catches this for the `generate` route but the `generate-stitched` route has no length cap (line 35).
+   227→   227→
+   228→   228→- **[MEDIUM] `POST /api/products/generate-stitched` uses hardcoded `'Piece Type'` and `'Size'` strings as attribute keys** (lines 54, 86, 100). The schema migration to generic attributes (Sprint 9, schema line 511-577) was supposed to make these configurable, but this route still hardcodes them. If an org renames "Piece Type" to "Product Type" or "Size" to "Size (UK)", the generate-stitched endpoint produces variants with the wrong attribute keys.
+   229→   229→
+   230→   230→- **[MEDIUM] `POST /api/products/generate-stitched` defaults Size to `'Free Size'`** (line 54, 86). But the seeded Size attribute (in `attribute-seeding.ts` line 46) defines `'One Size'`. If a user generates stitched variants then tries to match them against existing Size attribute values, the lookup will fail because `'Free Size'` ≠ `'One Size'`. The attribute value rules (`unstitched → One Size`) won't apply either, because the trigger value matches `Piece Type='Unstitched'` but the forced value is `'One Size'` not `'Free Size'`. Silent data inconsistency.
+   231→   231→
+   232→   232→- **[MEDIUM] The wizard flow does NOT verify the user has PRODUCTS_CREATE permission before showing the form** — relies entirely on the POST endpoint rejecting unauthorized users. Frontend should pre-check `can('products.create')` and gray out the "Add Product" button for users without the permission. The `ProductCreateView` component at line 215 doesn't import or check `useCan`.
+   233→   233→
+   234→   234→- **[MEDIUM] The wizard allows the user to enter an `is_active: false` flag on individual variants** (variantSchema line 78 in validations/product.ts), but the `POST /api/products` route does NOT validate that at least one variant is active. A user can create a product with all variants inactive — the product appears in the catalog with `variantCount: 0` (the count filter at line 102 of `GET /api/products` filters `where: { isActive: true }`), making it impossible to order or subscribe to.
+   235→   235→
+   236→   236→- **[LOW] `POST /api/products/generate-stitched` accepts `include_unstitched: z.boolean().default(true)` but the Unstitched variant always uses `Size: 'Free Size'`** (not `'One Size'`) — same mismatch as above.
+   237→   237→
+   238→   238→- **[LOW] `POST /api/products` sets `productScope: d.product_scope` directly from user input** (line 241). A user can create a product with `product_scope='organization'` or `'selective'` directly, bypassing the promote flow (which checks for ≥1 variant + ≥1 image). This means a brand-new product with no variants and no images can be org-wide visible. The GET list filter (line 64-68 of GET route) will show it to all companies with `variantCount: 0`. The promote endpoint exists precisely to prevent this, but the create endpoint doesn't enforce the same guard.
+   239→   239→
+   240→   240→- **[LOW] The wizard `STEPS` array (line 156) hardcodes 3 steps** — but if the user picks `product_type='simple'`, the variants step is skipped and the wizard advances from step 0 to step 2. The `STEPS` constant doesn't reflect this — the progress indicator may show "Step 2 of 3" when only 2 steps are shown.
+   241→   241→
+   242→   242→### Frontend
+   243→   243→- **`ProductCreateView`** (`src/components/products/product-create-view.tsx`, 2337 lines) — the full 3-step wizard. Uses `useFormGuard()` for unsaved-changes protection. Has draft autosave via `POST /api/products/drafts`.
+   244→   244→- **`AttributeSelector`** (`src/components/products/attribute-selector.tsx`, 1294 lines) — generic attribute picker, supports inline creation of new attributes/values via the `/api/catalog/inline-*` routes.
+   245→   245→- **`ClientSideParentChildVariantTable`** (`src/components/products/client-side-parent-child-variant-table.tsx`) — the variants table shown in the wizard (client-side, before the product is created). Uses the same `determineParentAttribute` + `groupVariantsByParentAttribute` shared utilities from `src/lib/utils/variant-grouping.ts` so the wizard and the edit page can never disagree on grouping.
+   246→   246→
+   247→   247→No obvious frontend bugs.
+   248→   248→
+   249→   249→---
+   250→   250→
+   251→   251→## Module 3: Product Drafts (draft system)
+   252→   252→
+   253→   253→### Purpose
+   254→   254→Save in-progress product form data as JSON so users can resume later. Auto-saves on a timer + on form changes via `useFormGuard`. Drafts are listed in the shared Drafts sidebar item (`/api/drafts?draftType=product&scope=all`).
+   255→   255→
+   256→   256→### API Routes
+   257→   257→
+   258→   258→| Method | Path | Description |
+   259→   259→| --- | --- |
+   260→   260→| POST | `/api/products/drafts` | Thin wrapper around `saveProductDraft()` server action. |
+   261→   261→| GET | `/api/drafts?draftType=product&scope=all` | List product drafts. Uses the generic `listDrafts()` action. |
+   262→   262→| GET | `/api/drafts?mode=count&draftType=product` | Count product drafts (used for sidebar badge). |
+   263→   263→| GET | `/api/drafts?id=...` | Fetch a single draft by ID (for resume flow). |
+   264→   264→| DELETE | `/api/drafts?id=...` | Delete a draft. |
+   265→   265→
+   266→   266→### Server Actions (in `src/lib/actions/drafts/save-draft.ts`)
+   267→   267→
+   268→   268→| Export | Description |
+   269→   269→| --- | --- |
+   270→   270→| `saveProductDraft({ draftId?, draftData, draftTitle? })` | Create or update a product draft. Uses modern `getWorkspace()` — the ONLY product-adjacent code path that uses the modern pattern. |
+   271→   271→| `saveOrderDraft({ ... })` | Same but for orders — also generates a draft number via raw SQL `generate_draft_number()`. Not product-specific. |
+   272→   272→| `listDrafts({ draftType, scope? })` | List drafts for the active company. Default scope: `'mine'` for orders, `'all'` for products. |
+   273→   273→| `countDrafts({ draftType, scope? })` | Lightweight count for sidebar badges. |
+   274→   274→| `deleteDraft(draftId)` | Delete a draft. Company-scoped via `findFirst({ where: { id, companyId } })`. |
+   275→   275→| `getDraft(draftId)` | Fetch a single draft. Company-scoped. |
+   276→   276→
+   277→   277→### Schema Models
+   278→   278→
+   279→   279→- **`FormDraft`** (schema line 1854) — Generic form draft storage. Key fields:
+   280→   280→  - `organizationId`, `companyId`, `createdBy`
+   281→   281→  - `draftType` ('product' | 'order' — CHECK constraint at SQL level)
+   282→   282→  - `draftData` (JSONB string, default `'{}'`)
+   283→   283→  - `draftTitle` (nullable)
+   284→   284→  - `draftNumber` (nullable, `DRAFT-00001` format — only for order drafts, null for product drafts)
+   285→   285→  - Indexes: `@@index([companyId, draftType, updatedAt])`, `@@index([createdBy])`
+   286→   286→  - **NO `expiresAt` field — drafts persist forever.**
+   287→   287→
+   288→   288→### Issues Found
+   289→   289→
+   290→   290→- **[HIGH] NO expiry/TTL on drafts.** The `FormDraft` model has no `expiresAt` field and no cleanup cron exists. Drafts accumulate indefinitely — over months, the table can grow to thousands of rows per company. The `draftData` JSONB column has no size limit either (Postgres jsonb practical limit ~1GB per row), so a single draft could in theory be tens of MB. The inventory audit (worklog line 496-504) found a similar lack of TTL pattern.
+   291→   291→
+   292→   292→- **[HIGH] `saveProductDraft()` does NOT enforce a per-employee or per-company draft count limit.** A malicious or buggy client can flood the `form_drafts` table by repeatedly calling `POST /api/products/drafts` with no `draftId` — each call creates a new draft. No rate limiting, no max-per-user, no max-per-company.
+   293→   293→
+   294→   294→- **[HIGH] `POST /api/products/drafts` does NOT validate the `draftData` payload.** Line 11 of route.ts — `draftData: (body.draftData as Record<string, unknown>) ?? {}`. No Zod schema, no size check, no shape validation. A client can post a 50MB JSON blob as `draftData` and the server will `JSON.stringify` and store it.
+   295→   295→
+   296→   296→- **[MEDIUM] `POST /api/products/drafts` lacks `Idempotency-Key` support.** A network retry would create duplicate drafts. Compare with `POST /api/products` (Module 1) which DOES support idempotency.
+   297→   297→
+   298→   298→- **[MEDIUM] `saveProductDraft()` does NOT update the `updatedAt` timestamp explicitly** — relies on Prisma's `@updatedAt` decorator (line 1869 of schema). This works but means drafts updated via raw SQL or other paths won't refresh the timestamp. Acceptable for current usage.
+   299→   299→
+   300→   300→- **[MEDIUM] `listDrafts()` returns ALL fields including the full `draftData` JSON** (line 239-248 of save-draft.ts). For a company with 50 drafts each holding 100KB of form data, that's 5MB transferred on every page load of the Drafts view. Should defer `draftData` loading until a draft is opened for resume.
+   301→   301→
+   302→   302→- **[MEDIUM] `deleteDraft()` does NOT emit an audit log.** Lines 302-317 — silently deletes. The `saveProductDraft()` action DOES audit (line 74-82 of save-draft.ts), so the asymmetry is suspicious. A user discarding a draft leaves no audit trail.
+   303→   303→
+   304→   304→- **[LOW] The DORMANCY RULES comment block at lines 357-375 of `save-draft.ts` is excellent documentation** — explicitly states drafts must NOT touch inventory, payments, integrations, etc. Good defensive comment.
+   305→   305→
+   306→   306→- **[LOW] `saveProductDraft()` always returns `draftTitle: 'Untitled Product Draft'` if not provided** (line 70). No smart title derivation from `draftData.title`. The wizard does pass a title derived from the form's `title` field, so this is a non-issue in practice — but the API contract is loose.
+   307→   307→
+   308→   308→- **[LOW] The draft system has no soft-delete / archive state.** Drafts are either present or absent. If a user discards a draft by accident (the DELETE button has no confirmation per the frontend), it's gone permanently.
+   309→   309→
+   310→   310→### Frontend
+   311→   311→- **`ProductCreateView`** auto-saves drafts via `useFormGuard()` hook + `POST /api/products/drafts`.
+   312→   312→- **`DraftsView`** (`src/components/shared/drafts-view.tsx`, shared between Products and Orders) — has tabs for product drafts and order drafts, with badges showing counts. Resumes a draft by calling `navigate({ name: 'product-create', draftId })` which loads the draft and repopulates the wizard.
+   313→   313→
+   314→   314→No obvious frontend bugs.
+   315→   315→
+   316→   316→---
+   317→   317→
+   318→   318→## Module 4: Returned Stock (returned-stitched inventory)
+   319→   319→
+   320→   320→### Purpose
+   321→   321→Special inventory pool for made-to-order items returned in sellable condition. Per the schema comment (line 840-841): "This is the ONLY stock a made_to_order variant ever holds." A returned made-to-order item (e.g. a stitched suit where the customer refused delivery) is received here with its condition + total cost, then either re-sold (with a `soldOrderReference`) or written off.
+   322→   322→
+   323→   323→### API Routes
+   324→   324→
+   325→   325→| Method | Path | Description |
+   326→   326→| --- | --- | --- |
+   327→   327→| GET | `/api/returned-stitched` | List returned items for the active company. Filters: status, org_variant_id. Joined with variant + product. **No permission check beyond auth.** |
+   328→   328→| POST | `/api/returned-stitched` | Receive a returned item. If `condition='damaged'`: immediately written off (`status='written_off'`, `writtenOffAt` set). Else: `status='available'`. Supports `Idempotency-Key`. Permission: `INVENTORY_RECEIVE` OR `INVENTORY_REPORT_LOSS` (weird combo). |
+   329→   329→| POST | `/api/returned-stitched/[id]` | Lifecycle transition: `action='sold'` sets `status='sold'` + `soldOrderReference`; `action='write_off'` sets `status='written_off'` + `writtenOffReason`. Both require `INVENTORY_MANAGE_LOSS` permission. |
+   330→   330→| GET | `/api/returned-stitched/stats` | Header stats: available count + total value + written-off-this-month count. **No permission check beyond auth.** |
+   331→   331→
+   332→   332→### Server Actions
+   333→   333→None.
+   334→   334→
+   335→   335→### Schema Models
+   336→   336→
+   337→   337→- **`ReturnedStitchedInventory`** (schema line 842) — Key fields:
+   338→   338→  - `organizationId`, `companyId`, `orgVariantId`
+   339→   339→  - `quantity` (Int, default 1)
+   340→   340→  - `condition` ('perfect' | 'good' | 'open_box' | 'damaged')
+   341→   341→  - `totalCost` (Decimal 12,2), `suggestedResalePrice` (nullable)
+   342→   342→  - `originalOrderReference` (nullable string — **NOT a FK**, just text)
+   343→   343→  - `returnReason`
+   344→   344→  - `status` ('available' | 'sold' | 'written_off')
+   345→   345→  - `photos` (JSON array of URLs, default `'[]'`)
+   346→   346→  - `notes`
+   347→   347→  - `receivedById`, `receivedAt`
+   348→   348→  - `soldAt`, `soldOrderReference` (string, NOT a FK)
+   349→   349→  - `writtenOffAt`, `writtenOffById`, `writeOffReason`
+   350→   350→  - Indexes: `@@index([organizationId, orgVariantId, status])`, `@@index([companyId, status])`
+   351→   351→
+   352→   352→- **`ProductFulfillmentCost`** (schema line 883) — Per-variant fulfillment cost tracking for made_to_order production. **Defined but never written to by any returned-stitched route.** Some of its lifecycle fields (`status`, `dispatchedAt`, `deliveredAt`, `returnedAt`) suggest it was intended to be the canonical made-to-order lifecycle tracker, but it appears to be dead schema (confirmed also by the inventory audit, worklog line 535).
+   353→   353→
+   354→   354→### Issues Found
+   355→   355→
+   356→   356→- **[CRITICAL] The `ReturnedStitchedInventory` lifecycle is NOT linked to the inventory ledger (`InventoryTransaction`).** The schema comment (line 840-841) says "This is the ONLY stock a made_to_order variant ever holds" — meaning this is a separate inventory pool outside the main `InventoryPool` / `InventoryTransaction` system. But when a returned item is marked `'sold'`, NO `InventoryTransaction` row is created — no `sale_dispatched`-style entry. This means the inventory ledger is INCOMPLETE for made-to-order variants: returns appear (in this table), but sales/dispatches of returned stock do NOT appear in the ledger. The inventory audit (worklog line 511) flagged a similar gap on `inventory/fulfill-mto`.
+   357→   357→
+   358→   358→- **[HIGH] `POST /api/returned-stitched` permission check uses `INVENTORY_RECEIVE OR INVENTORY_REPORT_LOSS`** (lines 100-105). `INVENTORY_REPORT_LOSS` is the permission for reporting theft/missing stock — has nothing to do with receiving customer returns. A user with only the report-loss permission can receive customer returns, which is incorrect. Should be `INVENTORY_RECEIVE` only.
+   359→   359→
+   360→   360→- **[HIGH] `POST /api/returned-stitched/[id]` lifecycle transition (`'sold'` / `'write_off'`) uses `INVENTORY_MANAGE_LOSS` permission** (lines 51, 88). `INVENTORY_MANAGE_LOSS` is the permission for resolving loss reports (writing them off or marking as found). Marking a returned item as sold is a SALES action, not a loss-management action. Should arguably require a new `PRODUCTS_RESELL_RETURNED` permission or `ORDERS_FULFILL`. At minimum, the `'sold'` action should require `ORDERS_FULFILL` since it's effectively fulfilling an order from returned stock.
+   361→   361→
+   362→   362→- **[HIGH] `POST /api/returned-stitched/[id]` does NOT verify the variant is `made_to_order`.** Lines 32-35 — fetches the record by `id + companyId` but does NOT check `record.orgVariant.fulfillmentType === 'made_to_order'`. A user could receive a return against a `stock_based` variant (which has its own `InventoryPool` stock) — double-counting the item. The `POST /api/returned-stitched` (create) route DOES verify this (line 113-117 — "Verify variant exists and is made_to_order"). But the schema comment says "ONLY stock a made_to_order variant ever holds" — the create route's check is right; the lifecycle transition doesn't re-verify.
+   363→   363→
+   364→   364→- **[HIGH] `POST /api/returned-stitched` does NOT check the variant belongs to the active company's product scope.** Lines 114-116 — `findFirst({ where: { id: d.org_variant_id, organizationId: orgId } })`. Org-scoped only. A user can receive a return against a variant from a `private` product owned by ANOTHER company in the org. The variant will be linked to the active company's returned-stitched record, but the variant itself is private to another company — cross-company data leak.
+   365→   365→
+   366→   366→- **[HIGH] `originalOrderReference` and `soldOrderReference` are free-text strings, NOT foreign keys.** Schema lines 856, 868. No validation that they correspond to real orders. A user can type any string. This breaks the audit trail: there's no way to query "which orders resulted in returns" without parsing free-text. Should be `orderId String?` with a FK to `Order`.
+   367→   367→
+   368→   368→- **[HIGH] `POST /api/returned-stitched/[id]` 'sold' transition does NOT decrement any inventory count** — neither the `ReturnedStitchedInventory.quantity` nor an `InventoryTransaction` is created. The item just gets `status='sold'` and the count of available items in `GET /api/returned-stitched/stats` decreases by 1. If the original order is later cancelled or returned again, there's no way to "un-sell" the returned item — it's stuck in `'sold'` status forever. There's also no `unsell` action in the route.
+   369→   369→
+   370→   370→- **[HIGH] `POST /api/returned-stitched` supports `Idempotency-Key`** but `POST /api/returned-stitched/[id]` does NOT. A network retry on the `'sold'` or `'write_off'` action would surface a 400 ("Item is not available") on the retry — which is at least non-destructive, but the user sees a confusing error. Adding idempotency would let the retry return the original success response.
+   371→   371→
+   372→   372→- **[MEDIUM] `GET /api/returned-stitched` returns ALL fields including `photos` (parsed from JSON)** (line 60). For a company with hundreds of returned items each having multiple photo URLs, this can be a large response. No pagination on this endpoint.
+   373→   373→
+   374→   374→- **[MEDIUM] `GET /api/returned-stitched/stats` uses three separate aggregate queries** (lines 20-36) — `_sum: { quantity }`, `_sum: { totalCost }`, `count()`. Could be combined into a single `groupBy` query, but Prisma's `aggregate` doesn't support mixed sum+count in one call. Three round-trips to Supabase per stats-card render.
+   375→   375→
+   376→   376→- **[MEDIUM] `POST /api/returned-stitched` validates `condition` enum but does NOT validate `quantity` against the variant's `trackInventory` flag.** Schema says `trackInventory` is "FALSE for made_to_order until first return; one-way TRUE→never back to FALSE". The receive route should flip `trackInventory` from false to true on first receive — but it doesn't. This means the `trackInventory` field stays false forever unless something else flips it (a check of `inventory.ts` shows `checkAndFulfillMadeToOrderVariant` may do it, but the receive route doesn't).
+   377→   377→
+   378→   378→- **[MEDIUM] `POST /api/returned-stitched` validates `total_cost > 0` via Zod (line 242 of validations/product.ts) but `suggested_resale_price` can be 0** — a user can set a resale price of 0 which then appears as "suggested" on the item. Misleading data.
+   379→   379→
+   380→   380→- **[LOW] The schema comment (line 858) lists status values as `'available' | 'sold' | 'written_off'` but the create route uses `isDamaged ? 'written_off' : 'available'` (line 135) — there's no `'pending'` or `'received'` intermediate state. The lifecycle is binary: receive → available → sold/write_off. No "in inspection" state. This is a deliberate design choice but worth flagging.
+   381→   381→
+   382→   382→- **[LOW] `POST /api/returned-stitched` has a typo-prone comment at line 113**: `// Verify variant exists and is made_to_order` — but the check only fetches the variant, doesn't actually verify `fulfillmentType === 'made_to_order'`. The check is misleading.
+   383→   383→
+   384→   384→### Frontend
+   385→   385→- **`ReturnedStitchedView`** (`src/components/products/returned-stitched-view.tsx`, 1352 lines) — full CRUD UI. Stats cards + filterable table + "Record a Return" dialog + "Mark as Sold" dialog + "Write Off" dialog. Uses `useIdempotentMutation` for the receive endpoint (good — idempotency key sent automatically).
+   386→   386→- **`ReturnedStockBanner`** (`src/components/products/returned-stock-banner.tsx`) — small banner shown on the product detail page when a variant has available returned stock, prompting the merchant to consider reselling it before producing new stock.
+   387→   387→
+   388→   388→The frontend uses a Zod schema (`recordReturnSchema`, line 172-220) that REJECTS the backend's `total_cost` field — instead it has `fabricStitchingCost`, `outgoingCourier`, `returnCourier` and computes the total client-side. This is a **schema mismatch** — the backend expects `total_cost` (number, required), but the frontend posts `fabricStitchingCost`, `outgoingCourier`, `returnCourier`. Either the frontend transforms before POST (need to check), or this is a bug. The backend's `returnedStitchedInventorySchema` (validations/product.ts line 238-249) requires `total_cost`, so a raw POST of the frontend's payload would fail validation.
+   389→   389→
+   390→   390→---
+   391→   391→
+   392→   392→## Module 5: Catalog Settings (org catalog config)
+   393→   393→
+   394→   394→### Purpose
+   395→   395→Org-level catalog configuration: manage categories, brands, attributes, attribute values, and attribute-value rules. The "Org Catalog" view (separate from Catalog Settings) is the elevated-employee view for promoting/demoting products across companies. Catalog Settings is where the org admin configures the building blocks (categories, brands, attributes) used by the Add Product wizard.
+   396→   396→
+   397→   397→### API Routes
+   398→   398→
+   399→   399→| Method | Path | Description |
+   400→   400→| --- | --- | --- |
+   401→   401→| GET | `/api/org/catalog` | Org-level overview for elevated employees. Returns shared (organization + selective scope) products + promotable (private scope) products + all companies in org. Elevated-only. |
+   402→   402→| GET | `/api/catalog/attributes` | List attributes for the org with their values. |
+   403→   403→| POST | `/api/catalog/attributes` | Create an attribute. Requires `PRODUCTS_MANAGE_CATALOG` or elevated. |
+   404→   404→| PATCH | `/api/catalog/attributes/[id]` | Update an attribute (displayName, type, displayOrder, isActive). |
+   405→   405→| DELETE | `/api/catalog/attributes/[id]` | Delete an attribute. Elevated-only. Cascade-deletes values. |
+   406→   406→| GET | `/api/catalog/attributes/[id]/values` | List values for an attribute. |
+   407→   407→| POST | `/api/catalog/attributes/[id]/values` | Create a value for an attribute. |
+   408→   408→| PATCH | `/api/catalog/attribute-values/[id]` | Update an attribute value (value, displayValue, colorHex, skuCode, displayOrder, isActive). |
+   409→   409→| DELETE | `/api/catalog/attribute-values/[id]` | Delete an attribute value. Elevated-only. **Does NOT check if variants reference this value** — see Issues. |
+   410→   410→| POST | `/api/catalog/inline-attribute` | Create a new attribute inline from the variant builder. Accepts initial values. |
+   411→   411→| POST | `/api/catalog/inline-value` | Create a new attribute value inline from the variant builder. |
+   412→   412→| GET | `/api/catalog/available-attributes` | Fetch all active attributes + values + rules. Used by `AttributeSelector`. |
+   413→   413→| POST | `/api/catalog/seed-defaults` | One-time endpoint to seed default attributes (Piece Type, Size, Color, Fabric + Unstitched→One Size rule) for an existing org. Elevated-only. Idempotent — refuses if any attributes already exist. |
+   414→   414→| PATCH | `/api/catalog/categories/[id]` | Update a category (name, parentId, imageUrl, displayOrder, isActive). |
+   415→   415→| DELETE | `/api/catalog/categories/[id]` | Delete a category. Elevated-only. Reference check: blocks if products use it. |
+   416→   416→| PATCH | `/api/catalog/brands/[id]` | Update a brand (name, logoUrl, isActive). |
+   417→   417→| DELETE | `/api/catalog/brands/[id]` | Delete a brand. Elevated-only. Reference check: blocks if products use it. |
+   418→   418→| GET | `/api/categories` | List org categories (legacy top-level shim). |
+   419→   419→| POST | `/api/categories` | Create a category. **NO `PRODUCTS_MANAGE_CATALOG` permission check — any active employee can create.** |
+   420→   420→| GET | `/api/brands` | List org brands (legacy top-level shim). |
+   421→   421→| POST | `/api/brands` | Create a brand. **NO `PRODUCTS_MANAGE_CATALOG` permission check — any active employee can create.** |
+   422→   422→
+   423→   423→### Server Actions
+   424→   424→None.
+   425→   425→
+   426→   426→### Schema Models
+   427→   427→Same as Module 1's catalog entities. Note: there is NO `OrgCatalogSettings` model in the schema — the task description mentioned it as a model to look for, but it does not exist. The "Catalog Settings" sidebar module is backed entirely by:
+   428→   428→- `OrgCategory` (schema line 468) — hierarchical categories, `@@unique([organizationId, slug])`
+   429→   429→- `OrgBrand` (schema line 492) — brands, `@@unique([organizationId, slug])`
+   430→   430→- `OrgAttribute` (schema line 512) — attribute definitions, `@@unique([organizationId, name])`
+   431→   431→- `OrgAttributeValue` (schema line 535) — values per attribute, `@@unique([attributeId, value])`
+   432→   432→- `AttributeValueRule` (schema line 559) — generic conditional rules ("when trigger value is selected, force another attribute to a specific value"), `@@unique([triggerAttributeValueId, forcesAttributeId])`
+   433→   433→
+   434→   434→### Issues Found
+   435→   435→
+   436→   436→- **[CRITICAL] `POST /api/categories` and `POST /api/brands` allow ANY active employee to create org-level catalog entities.** Lines 53-58 of categories route, lines 53-56 of brands route — neither checks `PRODUCTS_MANAGE_CATALOG` permission. Compare with `POST /api/catalog/attributes` (line 72-77) which DOES check. This is a clear permission bypass — a regular employee with no catalog-management permission can create arbitrary categories and brands in the org's shared catalog. The Catalog Settings UI (`catalog-settings-view.tsx` line 159) checks `can('products.manage_catalog')` and shows an "Insufficient Permissions" screen, but a direct API call bypasses this client-side check.
+   437→   437→
+   438→   438→- **[HIGH] `DELETE /api/catalog/attribute-values/[id]` does NOT check whether any variant references this value** (lines 113-138). Compare with `DELETE /api/catalog/categories/[id]` (line 117-124) which DOES check `orgProduct.count({ where: { categoryId: id } })` and blocks deletion if products reference it. If an attribute value is in use by a variant (stored as a JSONB key/value in `attributeValues`), deleting the value leaves orphaned references — the variant still has `{"Size":"XXL"}` but `XXL` no longer exists in `org_attribute_values`. The variant generation endpoint and the parent-child grouping logic still work (they read the JSONB directly), but the `AttributeSelector` UI will no longer show `XXL` as an option, making it impossible to add new variants with that value.
+   439→   439→
+   440→   440→- **[HIGH] `DELETE /api/catalog/attributes/[id]` cascade-deletes attribute values without warning.** Line 112 comment says "Cascade deletes attribute values automatically" — but does NOT warn the user that variants referencing those values become orphans (same issue as above, escalated because deleting an attribute orphans ALL its values across ALL variants in the org).
+   441→   441→
+   442→   442→- **[HIGH] `POST /api/catalog/inline-attribute` does NOT validate that the user is creating the attribute from within a product creation context.** Anyone with `PRODUCTS_MANAGE_CATALOG` permission can create an attribute with arbitrary `initial_values` from anywhere — the route doesn't check that the call originates from the variant builder. Not a security hole (the permission is checked), but the audit log records `attribute.created_inline` which is misleading if the call didn't come from the inline flow.
+   443→   443→
+   444→   444→- **[HIGH] `POST /api/catalog/inline-attribute` has a RACE CONDITION on `displayOrder`.** Lines 58-62 — fetches `max(displayOrder)` then increments by 1. Two concurrent calls both see `max=4`, both assign `displayOrder=5`. No unique constraint on `(organizationId, displayOrder)`, so both succeed — but the order is non-deterministic. Compare with the slug race in `POST /api/products` (Module 1).
+   445→   445→
+   446→   446→- **[MEDIUM] `GET /api/org/catalog` returns ALL companies in the org** (line 78-82) to power the selective-access picker. This is fine for elevated employees, but the route only checks `roleTier === 'elevated'` — does NOT check `PRODUCTS_PROMOTE` permission. An elevated employee with no explicit promote permission can view the full org catalog overview. Probably intentional (elevated bypasses all checks per the permissions.ts comment line 6-7), but worth flagging.
+   447→   447→
+   448→   448→- **[MEDIUM] `POST /api/catalog/seed-defaults` is NOT idempotent at the rule level.** Lines 30-34 — refuses if ANY attributes exist (good), but if the seeding partially succeeds (e.g. 4 attributes created, then the rule creation fails), the next call will refuse to re-run because attributes exist. The org is left in a half-seeded state with no automated recovery.
+   449→   449→
+   450→   450→- **[MEDIUM] `POST /api/catalog/seed-defaults` does NOT use a `$transaction`.** Lines 17-119 of `attribute-seeding.ts` — 4 separate `db.orgAttribute.create` calls + 1 `db.attributeValueRule.create` call. If the rule creation fails (e.g. one of the values was deleted between the create and the rule create), the org has 4 attributes with no rule. Manual cleanup required.
+   451→   451→
+   452→   452→- **[MEDIUM] `PATCH /api/catalog/attributes/[id]` allows changing `attributeType` from `'select'` to `'color'`** (line 51) — but does NOT validate that existing values have `colorHex` set. A `select` attribute converted to `color` would have values with `colorHex: null`, breaking the `AttributeSelector` UI which expects `colorHex` for color attributes.
+   453→   453→
+   454→   454→- **[MEDIUM] `POST /api/catalog/inline-attribute` and `POST /api/catalog/inline-value` do NOT support `Idempotency-Key`.** A network retry would create duplicate attributes/values. The uniqueness check (lines 52-55 of inline-attribute, lines 55-58 of inline-value) catches exact-duplicate names case-insensitively, but a retried request with a slightly different name would succeed and create a duplicate.
+   455→   455→
+   456→   456→- **[MEDIUM] `GET /api/org/catalog` returns `_count.variants: { where: { isActive: true } }` for shared products** (line 53) but does NOT filter variants by `isActive` for the `subscribers` list. The `subscriberCount` (line 100) counts ALL `companySettings` rows, including revoked ones. A product with 5 subscribers where 3 are revoked shows `subscriberCount: 5` — misleading.
+   457→   457→
+   458→   458→- **[LOW] `POST /api/categories` and `POST /api/brands` support `Idempotency-Key` but the inline attribute/value routes do NOT.** Inconsistent idempotency support across catalog endpoints.
+   459→   459→
+   460→   460→- **[LOW] The `OrgCategory` model supports hierarchical categories via `parentId` self-relation** (schema line 472-474), but the Catalog Settings UI (`catalog-settings-view.tsx`) does NOT render categories as a tree — they're shown as a flat list. The `parentId` field is accepted by the create/edit endpoints but not surfaced in the UI.
+   461→   461→
+   462→   462→- **[LOW] `seedDefaultAttributes()` in `attribute-seeding.ts` creates the "Unstitched → One Size" rule** (lines 107-119) but does NOT create the inverse rule ("Stitched → NOT One Size"). The bidirectional evaluation in `POST /api/products/[id]/variants/generate` (lines 116-146) handles this without needing an explicit inverse rule, so this is correct — but worth documenting that the rule table is intentionally one-directional and the bidirectional logic lives in the variant-generation code.
+   463→   463→
+   464→   464→- **[LOW] The Catalog Settings UI uses inline Zod schemas** (catalog-settings-view.tsx lines 101-150) that DUPLICATE the backend schemas in `validations/product.ts` (lines 12-45). If the backend schema changes, the frontend won't auto-sync. Should import from the shared `validations/product.ts` file.
+   465→   465→
+   466→   466→### Frontend
+   467→   467→- **`CatalogSettingsView`** (`src/components/products/catalog-settings-view.tsx`, 2301 lines) — tabs for Categories, Brands, Attributes, Attribute Values. Uses `react-hook-form` + `zodResolver`. Permission-gated at line 159 (`can('products.manage_catalog')`). Inline create/edit/delete via the `/api/catalog/*` routes.
+   468→   468→- **`OrgCatalogView`** (`src/components/products/org-catalog-view.tsx`, 1221 lines) — elevated-employee view for promoting/demoting products across companies. Calls `GET /api/org/catalog`. Has promote/demote/selective-access dialogs.
+   469→   469→- **`AttributeSelector`** (`src/components/products/attribute-selector.tsx`, 1294 lines) — the generic attribute picker used in the Add Product wizard. Calls `GET /api/catalog/available-attributes`. Renders values with color swatches for color-type attributes. Supports inline creation via the `/api/catalog/inline-*` routes.
+   470→   470→
+   471→   471→No obvious frontend bugs.
+   472→   472→
+   473→   473→---
+   474→   474→
+   475→   475→## Cross-Cutting Concerns
+   476→   476→
+   477→   477→### 1. Unified product → variant → pricing hierarchy
+   478→   478→**YES — unified and clean.** The 3-tier hierarchy is consistent across all 5 modules:
+   479→   479→- `OrgProduct` (org-level master record, created by one company, sharable)
+   480→   480→- `OrgProductVariant` (every unique sellable combination, JSONB `attributeValues` ≤3 keys per Shopify limit)
+   481→   481→- `CompanyVariantPricing` (per-company selling price; the ONLY company-scoped price)
+   482→   482→
+   483→   483→The Markets system removal was completed cleanly — the `MarketVariantPricing` model is gone, and only 3 comment references to "no market scoping" remain in the product pricing routes (override-price, resync-price, sale-price cascade). These are explicit, intentional comments documenting the migration. **No orphaned `db.market` references found in any product code.**
+   484→   484→
+   485→   485→### 2. Product images storage
+   486→   486→**Local filesystem** — despite the schema comment (line 720) saying "Images stored in Supabase Storage, shared across all subscribing companies." The actual code in `POST /api/products/[id]/images` (line 14 + 77) writes to `process.cwd() + '/public/uploads/products/{orgId}/{productId}/'`. This is a **deployment-time bomb**:
+   487→   487→- **Vercel**: filesystem is read-only except `/tmp`. Uploads will silently fail (or succeed-then-vanish on next cold start).
+   488→   488→- **Docker**: requires a persistent volume mount at `/app/public/uploads`.
+   489→   489→- **Cleanup**: `DELETE /api/products/[id]` (archive) does NOT delete image files from disk — they accumulate forever.
+   490→   490→
+   491→   491→### 3. Product import/export
+   492→   492→**Not implemented.** No `/api/products/import` or `/api/products/export` route exists. The Shopify sync fields (`shopifyVariantId`, `shopifyInventoryItemId`) exist in the schema but no route reads or writes them.
+   493→   493→
+   494→   494→### 4. Draft system (auto-save, manual save, expiry)
+   495→   495→- **Manual save**: `POST /api/products/drafts` called explicitly by the wizard's "Save Draft" button.
+   496→   496→- **Auto-save**: `useFormGuard()` hook in `ProductCreateView` auto-saves on a timer (interval not verified in this audit).
+   497→   497→- **Expiry**: **NONE.** Drafts persist forever (no `expiresAt` field, no cleanup cron, no TTL).
+   498→   498→- **Resume**: `GET /api/drafts?id=...` returns the draft, frontend repopulates the wizard.
+   499→   499→- **Finalize**: After the user completes the wizard and creates the real product, the frontend calls `DELETE /api/drafts?id=...` to clean up. If the user closes the tab before this, the draft lingers.
+   500→   500→
+   501→   501→### 5. Returned-stitched: separate pool or shared with main stock?
+   502→   502→**Separate pool.** Per schema comment (line 840-841): "This is the ONLY stock a made_to_order variant ever holds." A made_to_order variant has:
+   503→   503→- NO row in `InventoryPool` (the main stock ledger).
+   504→   504→- ONE row per returned item in `ReturnedStitchedInventory`.
+   505→   505→
+   506→   506→This is a deliberate design choice: made_to_order variants don't track stock the same way (they're produced on demand). Returns are an exception — the only time a made_to_order variant holds physical stock. The `trackInventory` boolean on `OrgProductVariant` (schema line 670) is the flag that controls whether this variant participates in the main `InventoryPool` system: `false` until first return (then one-way `true`).
+   507→   507→
+   508→   508→**However, the receive route (`POST /api/returned-stitched`) does NOT flip `trackInventory` from false to true on first receive** — see Module 4 Issues. This is a known gap.
+   509→   509→
+   510→   510→### 6. Markets system removal — orphaned references?
+   511→   511→**CLEAN.** Only 3 references to "market" in the products code, all in code comments explicitly documenting the migration:
+   512→   512→- `src/app/api/products/[id]/variants/[variantId]/override-price/route.ts` line 13: "Uses CompanyVariantPricing (per-company pricing) — no market scoping."
+   513→   513→- `src/app/api/products/[id]/variants/[variantId]/resync-price/route.ts` line 14: same comment.
+   514→   514→- `src/app/api/products/[id]/variant-groups/[parentValueId]/sale-price/route.ts` line 13: same comment.
+   515→   515→
+   516→   516→No `db.market.findMany` or `db.marketVariantPricing` calls. No `Market` model in schema. The migration was completed correctly.
+   517→   517→
+   518→   518→### 7. Variant hierarchy: parent/child variants
+   519→   519→**Implemented via the parent-attribute concept**, not via a `parentId` self-relation on `OrgProductVariant`. The "parent attribute" is the attribute with the LOWEST `display_order` among those used by the product's variants (e.g. if a product has Piece Type + Size, and Piece Type has display_order=1 < Size's display_order=2, then Piece Type is the parent). All variants sharing the same parent-attribute value (e.g. "Piece Type=Stitched") form a "parent group" — they share cost price, weight, and (optionally) sale price.
+   520→   520→
+   521→   521→The cascade/override/resync pattern is consistent:
+   522→   522→- `costPriceSyncedWithParent` (on `OrgProductVariant`)
+   523→   523→- `weightSyncedWithParent` (on `OrgProductVariant`)
+   524→   524→- `salePriceSyncedWithParent` (on `CompanyVariantPricing`)
+   525→   525→- `comparePriceSyncedWithParent` (on `CompanyVariantPricing`)
+   526→   526→
+   527→   527→When `true`, the field follows the parent group's value (set via `POST /api/products/[id]/variant-groups/[parentValueId]/{cost,weight,sale-price}`). When `false`, the child has been individually overridden via `POST /api/products/[id]/variants/[variantId]/override-{price,weight,cost}`.
+   528→   528→
+   529→   529→**Concern**: The `determineParentAttribute()` function (in `src/lib/utils/variant-grouping.ts` line 77-89) returns the attribute with the lowest `display_order`. If an admin reorders attributes (changes `display_order` on `OrgAttribute`), the parent attribute can shift, silently changing the grouping. There's no migration / re-validation logic to handle this — the sync flags become meaningless if the parent attribute changes. The risk is low because there's no "reorder attributes" UI (the `display_order` field is editable via `PATCH /api/catalog/attributes/[id]` but the UI doesn't expose it as a drag-and-drop operation).
+   530→   530→
+   531→   531→### 8. SKU uniqueness
+   532→   532→**Org-wide**, not company-wide or per-variant. Schema line 642: `sku String @unique`. This means:
+   533→   533→- A SKU like `FSES-10A-M-ST` must be unique across the ENTIRE org, including across all variants of all products.
+   534→   534→- The uniqueness check in `PATCH /api/products/[id]/variants/[variantId]` (line 76-84 of route.ts) correctly checks `findFirst({ where: { sku: d.sku, id: { not: variantId } } })` — but does NOT scope by `organizationId`. A SKU conflict with a variant in a different org would incorrectly block the update. (In practice, cuid-based org isolation makes cross-org SKU collisions unlikely, but the check is technically wrong.)
+   535→   535→- The `POST /api/products` create route does NOT pre-check SKU uniqueness — it relies on the DB unique constraint to reject duplicates with a generic 500 error. Compare with the slug check (lines 213-218) which DOES pre-check.
+   536→   536→
+   537→   537→### 9. SQL injection risk
+   538→   538→**None found.** All queries use Prisma's parameterized API. The only raw SQL in the products sphere is in `saveOrderDraft()` (line 143-145 of `save-draft.ts`):
+   539→   539→```ts
+   540→   540→const draftNumberRows = await db.$queryRaw<{ draft_number: string }[]>`
+   541→   541→  SELECT generate_draft_number() AS draft_number
+   542→   542→`
+   543→   543→```
+   544→   544→This is parameterized via Prisma's tagged template literal and the function name is hardcoded — safe.
+   545→   545→
+   546→   546→### 10. Missing input validation (cross-cutting)
+   547→   547→The shared Zod schemas in `src/lib/validations/product.ts` (296 lines) are **mostly used**:
+   548→   548→- `productSchema` — used by `POST /api/products` ✓
+   549→   549→- `updateProductSchema` — used by `PATCH /api/products/[id]` ✓
+   550→   550→- `variantSchema` — used by `POST /api/products/[id]/variants` ✓
+   551→   551→- `promoteProductSchema` — used by `POST /api/products/[id]/promote` ✓
+   552→   552→- `demoteProductSchema` — used by `POST /api/products/[id]/demote` ✓
+   553→   553→- `selectiveAccessSchema` — used by `POST /api/products/[id]/selective-access` ✓
+   554→   554→- `setCompanyPricingSchema` — used by `POST /api/products/[id]/pricing` ✓
+   555→   555→- `returnedStitchedInventorySchema` — used by `POST /api/returned-stitched` ✓
+   556→   556→- `markSoldSchema`, `writeOffSchema` — used by `POST /api/returned-stitched/[id]` ✓
+   557→   557→- `generateStitchedSchema` — used by `POST /api/products/generate-stitched` ✓
+   558→   558→- `categorySchema`, `brandSchema`, `attributeSchema`, `attributeValueSchema` — used by the `/api/catalog/*` routes ✓
+   559→   559→
+   560→   560→**Dead code in `validations/product.ts`:**
+   561→   561→- `createProductShellSchema` (line 131-144) — defined but never used by any route. Probably a leftover from an earlier multi-step creation flow.
+   562→   562→- `generateCombinationsSchema` (line 165-186) — defined but never used. The `POST /api/products/[id]/variants/generate` route uses inline `readBody<{...}>` instead.
+   563→   563→- `companyPricingSchema` (line 192-206) — used internally by `setCompanyPricingSchema` (line 209), so technically alive but could be inlined.
+   564→   564→- `logFulfillmentCostSchema` (line 265-276) — defined but no route exists to consume it. Suggests a planned `/api/products/[id]/fulfillment-costs` endpoint that was never built.
+   565→   565→
+   566→   566→### 11. Dead code / unused exports
+   567→   567→- **`OrgProductBundle` model** — defined in schema, never written to or read from by any route. The `product_type='bundle'` enum is accepted but produces a product with no bundle components.
+   568→   568→- **`ProductFulfillmentCost` model** — defined in schema, never written to by any returned-stitched route. Per the inventory audit (worklog line 535), this model is dead schema across both modules.
+   569→   569→- **`createProductShellSchema`** — see above.
+   570→   570→- **`generateCombinationsSchema`** — see above.
+   571→   571→- **`logFulfillmentCostSchema`** — see above.
+   572→   572→- **`STITCHING_TYPES` constant in `fulfillment-types.ts`** — exported but the `stitched_basic/heavy/custom` enum values are also hardcoded in `validations/product.ts` line 71-73. Duplication.
+   573→   573→
+   574→   574→### 12. Permission check pattern (systemic)
+   575→   575→**Same as the inventory audit (worklog line 484-493).** Of the 41 product/catalot routes:
+   576→   576→- **1 route uses the modern `getWorkspace() + requirePermission()` pattern**: `GET /api/products` (the list endpoint).
+   577→   577→- **1 route uses `getWorkspace()` but NOT `requirePermission()`**: `saveProductDraft()` (via the `POST /api/products/drafts` shim).
+   578→   578→- **39 routes use the legacy 4-query `getCurrentUser → userSetting → employee → rolePermission.count` pattern.**
+   579→   579→
+   580→   580→This means 39 routes pay 3-4 extra DB round-trips per request (≈560ms to Supabase per the inventory audit's runtime test, worklog line 700-708) and miss the 60s workspace cache that `getWorkspace()` provides.
+   581→   581→
+   582→   582→### 13. Audit logging
+   583→   583→**Present on all mutating endpoints**, but with the same caveats as the inventory audit:
+   584→   584→- `insertAuditLog()` calls are NOT awaited (fire-and-forget) in most routes — if the audit DB write fails, the action still succeeds but the audit trail is lost. Spot-checked: `POST /api/products` line 313-327, `POST /api/returned-stitched` line 149-163, `POST /api/catalog/attributes` line 101-110 — all fire-and-forget.
+   585→   585→- All GET (read) endpoints have no audit log — acceptable for products (no sensitive data like police reports), but `GET /api/org/catalog` reveals the full org structure (all companies, all subscriber counts) and could warrant audit logging.
+   586→   586→
+   587→   587→### 14. Idempotency support
+   588→   588→**Inconsistent across the module.** Of the 23 mutating product/returned-stitched routes:
+   589→   589→- **5 support `Idempotency-Key`**: `POST /api/products`, `POST /api/returned-stitched`, `POST /api/categories`, `POST /api/brands`, `POST /api/products/drafts` (via `saveProductDraft()` which calls `getWorkspace()` — but no explicit idempotency key support in the action).
+   590→   590→- **18 do NOT support `Idempotency-Key`**: all variant routes, all image routes, all pricing/cost/weight override/resync routes, all promote/demote/subscribe/selective-access routes, all catalog attribute/attribute-value/category/brand mutation routes.
+   591→   591→
+   592→   592→### 15. Catalog settings: who can edit? org-level vs company-level?
+   593→   593→- **Org-level**: All catalog entities (`OrgCategory`, `OrgBrand`, `OrgAttribute`, `OrgAttributeValue`, `AttributeValueRule`) are org-scoped. Changes affect ALL companies in the org.
+   594→   594→- **Who can edit**: `PRODUCTS_MANAGE_CATALOG` permission OR `elevated` role tier. This is checked correctly on most catalog routes (see Module 5).
+   595→   595→- **EXCEPTIONS (CRITICAL)**: `POST /api/categories` and `POST /api/brands` do NOT check `PRODUCTS_MANAGE_CATALOG` — any active employee can create. See Module 5 Issues.
+   596→   596→- **DELETE on catalog entities**: requires `elevated` role tier (not just `PRODUCTS_MANAGE_CATALOG`). This is stricter than PATCH (which accepts either). Inconsistent but arguably correct (deletion is more destructive).
+   597→   597→
+   598→   598→---
+   599→   599→
+
+[showing lines 200-599 of 806; use offset=600 with limit to continue reading]
