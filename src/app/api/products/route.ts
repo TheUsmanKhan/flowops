@@ -59,13 +59,31 @@ export async function GET(req: Request) {
       ...(brandId ? { brandId } : {}),
       ...(productType ? { productType } : {}),
       ...(productScope ? { productScope } : {}),
-      ...(isActiveParam !== null ? { isActive: isActiveParam === 'true' } : { isActive: true }),
+      // PROD-021: treat an empty `is_active=` query param the same as
+      // omitting it (no filter, default to active). Previously an empty
+      // string was treated as "filter present" and the === 'true' check
+      // produced `isActive: false`, hiding ALL active products.
+      ...(isActiveParam !== null && isActiveParam !== ''
+        ? { isActive: isActiveParam === 'true' }
+        : { isActive: true }),
       ...(search ? { title: { contains: search, mode: 'insensitive' as const } } : {}),
       OR: [
         { sourceCompanyId: companyId },
         { productScope: 'organization' },
         { productScope: 'selective', selectiveAccess: { some: { companyId } } },
       ],
+      // PROD-013: hide org-scope products whose subscription for the active
+      // company was revoked (e.g. via a demote that set
+      // CompanyProductSetting.subscriptionStatus='revoked'). Without this NOT,
+      // a re-promote after a demote would silently re-grant visibility to
+      // the revoked company. Selective-scope products don't need this —
+      // SelectiveProductAccess rows are already cleaned up on demote (PROD-005).
+      // Source-company products don't have a 'revoked' subscription row, so
+      // they remain visible to their owner.
+      NOT: {
+        productScope: 'organization',
+        companySettings: { some: { companyId, subscriptionStatus: 'revoked' } },
+      },
     }
 
     const [total, products] = await Promise.all([

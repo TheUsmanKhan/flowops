@@ -61,10 +61,23 @@ export async function POST(
     })
     const affectedCompanyIds = affectedSettings.map((s) => s.companyId)
 
+    // PROD-017: hoisted the inner await into its own statement. Previously
+    // the variant-IDs query was nested inside the `in:` clause of the outer
+    // count(), which (a) made the code harder to read, (b) made any error
+    // from the inner query surface as a confusing count() failure, and
+    // (c) blocked future refactor to a single join. Splitting it also
+    // lets us reuse the array for the warnings computation below.
+    const productVariantIds = (
+      await db.orgProductVariant.findMany({
+        where: { productId },
+        select: { id: true },
+      })
+    ).map((v) => v.id)
+
     // Non-blocking warning: check for available returned stitched inventory
     const returnedCount = await db.returnedStitchedInventory.count({
       where: {
-        orgVariantId: { in: (await db.orgProductVariant.findMany({ where: { productId }, select: { id: true } })).map((v) => v.id) },
+        orgVariantId: { in: productVariantIds },
         companyId: { in: affectedCompanyIds },
         status: 'available',
       },
@@ -100,6 +113,30 @@ export async function POST(
           revokeReason: d.reason,
         },
       })
+    }
+
+    // PROD-005: Clean up SelectiveProductAccess rows so they cannot silently
+    // re-grant access if the product is later re-promoted.
+    if (d.new_scope === 'private') {
+      // Private scope: no selective access needed — purge all rows.
+      await db.selectiveProductAccess.deleteMany({
+        where: { orgProductId: productId },
+      })
+    } else {
+      // Selective scope: keep only rows for companies in the provided list
+      // (default [] → revoke all). Rows for companies NOT in the list are deleted.
+      if (d.selected_company_ids.length > 0) {
+        await db.selectiveProductAccess.deleteMany({
+          where: {
+            orgProductId: productId,
+            companyId: { notIn: d.selected_company_ids },
+          },
+        })
+      } else {
+        await db.selectiveProductAccess.deleteMany({
+          where: { orgProductId: productId },
+        })
+      }
     }
 
     insertAuditLog({

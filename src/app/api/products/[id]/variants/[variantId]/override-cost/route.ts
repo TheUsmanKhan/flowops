@@ -38,6 +38,17 @@ export async function POST(
       })) > 0
     if (!allowed) throw new ApiError(403, 'You lack permission to edit products.')
 
+    // PROD-008: verify the variant belongs to the product in the URL path.
+    // Without this check, a caller could pass a variantId belonging to a
+    // different product and successfully override its cost price.
+    const variant = await db.orgProductVariant.findFirst({
+      where: { id: variantId, productId },
+      select: { id: true },
+    })
+    if (!variant) {
+      throw new ApiError(404, 'Variant not found or does not belong to this product.')
+    }
+
     const body = await readBody<{ cost_price?: number }>(req)
     if (body.cost_price === undefined || body.cost_price < 0) {
       throw new ApiError(400, 'cost_price must be 0 or positive')

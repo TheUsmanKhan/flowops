@@ -39,6 +39,18 @@ export async function POST(
       })) > 0
     if (!allowed) throw new ApiError(403, 'You lack permission to set pricing.')
 
+    // PROD-008: verify the variant belongs to the product in the URL path.
+    // Without this check, a caller could pass a variantId belonging to a
+    // different product and successfully create/override a CompanyVariantPricing
+    // row keyed on that foreign variant.
+    const variant = await db.orgProductVariant.findFirst({
+      where: { id: variantId, productId },
+      select: { id: true },
+    })
+    if (!variant) {
+      throw new ApiError(404, 'Variant not found or does not belong to this product.')
+    }
+
     const body = await readBody<{ sale_price?: number; compare_price?: number | null }>(req)
 
     // UPSERT: if a CompanyVariantPricing row exists for (company, variant), update it

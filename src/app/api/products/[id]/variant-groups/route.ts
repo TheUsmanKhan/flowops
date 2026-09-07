@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { ApiError, getWorkspace, handleError, requirePermission } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import {
   determineParentAttribute,
   groupVariantsByParentAttribute,
@@ -27,12 +27,15 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const orgId = settings?.activeOrgId
-    const companyId = settings?.activeCompanyId
-    if (!orgId) throw new ApiError(403, 'No active organization')
+    // PROD-012: replaced the legacy getCurrentUser + userSetting pattern with
+    // getWorkspace() + requirePermission(PRODUCTS_VIEW). The previous code
+    // only verified the user was authenticated + had an activeOrgId, so any
+    // active employee — even one with zero permissions — could fetch the full
+    // variant-grouping structure for any product in their org.
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)
+    const orgId = ctx.company.organizationId
+    const companyId = ctx.company.id
 
     const { id: productId } = await params
 

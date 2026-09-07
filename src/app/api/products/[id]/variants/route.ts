@@ -74,72 +74,79 @@ export async function POST(
     }
 
     const createdIds: string[] = []
-    for (const v of variants) {
-      const parsed = variantSchema.parse(v)
+    // PROD-007: wrap all writes in a single transaction so a partial failure
+    // (e.g. variant #3 of 5) rolls back variants 1-2 along with their pricing
+    // and company_product_setting rows. Previously, the first N variants were
+    // committed before the failing one threw, leaving the DB in an inconsistent
+    // state and the caller with no variant_ids to act on.
+    await db.$transaction(async (tx) => {
+      for (const v of variants) {
+        const parsed = variantSchema.parse(v)
 
-      // Sync fulfillment_type ↔ inventory_policy
-      let fulfillmentType = parsed.fulfillment_type
-      if (parsed.stitching_type === 'unstitched') {
-        fulfillmentType = 'stock_based'
-      } else if (['stitched_basic', 'stitched_heavy', 'custom_order'].includes(parsed.stitching_type ?? '')) {
-        fulfillmentType = 'made_to_order'
+        // Sync fulfillment_type ↔ inventory_policy
+        let fulfillmentType = parsed.fulfillment_type
+        if (parsed.stitching_type === 'unstitched') {
+          fulfillmentType = 'stock_based'
+        } else if (['stitched_basic', 'stitched_heavy', 'custom_order'].includes(parsed.stitching_type ?? '')) {
+          fulfillmentType = 'made_to_order'
+        }
+
+        // For made_to_order: cost_price = fabric_cost + stitching_charges
+        let costPrice = parsed.cost_price
+        if (fulfillmentType === 'made_to_order' && parsed.fabric_cost !== undefined) {
+          costPrice = parsed.fabric_cost + parsed.stitching_charges
+        }
+
+        const variant = await tx.orgProductVariant.create({
+          data: {
+            productId,
+            organizationId: orgId,
+            sku: parsed.sku,
+            barcode: parsed.barcode || null,
+            attributeValues: JSON.stringify(parsed.attribute_values),
+            costPrice,
+            weightGrams: parsed.weight_grams,
+            weightKg: parsed.weight_kg ?? null,
+            fulfillmentType,
+            stitchingType: parsed.stitching_type ?? null,
+            stitchingCharges: parsed.stitching_charges,
+            productionDays: parsed.production_days,
+            isTaxable: parsed.is_taxable,
+            requiresShipping: parsed.requires_shipping,
+            inventoryPolicy: syncInventoryPolicy(fulfillmentType, parsed.allow_backorder),
+            isDefault: parsed.is_default,
+            isActive: parsed.is_active,
+            createdById: caller.id,
+          },
+        })
+        createdIds.push(variant.id)
+
+        // Create company_variant_pricing for the source company
+        await tx.companyVariantPricing.upsert({
+          where: { companyId_orgVariantId: { companyId, orgVariantId: variant.id } },
+          update: { salePrice: parsed.sale_price, comparePrice: parsed.compare_price ?? null },
+          create: {
+            companyId,
+            orgVariantId: variant.id,
+            organizationId: orgId,
+            salePrice: parsed.sale_price,
+            comparePrice: parsed.compare_price ?? null,
+          },
+        })
       }
 
-      // For made_to_order: cost_price = fabric_cost + stitching_charges
-      let costPrice = parsed.cost_price
-      if (fulfillmentType === 'made_to_order' && parsed.fabric_cost !== undefined) {
-        costPrice = parsed.fabric_cost + parsed.stitching_charges
-      }
-
-      const variant = await db.orgProductVariant.create({
-        data: {
-          productId,
-          organizationId: orgId,
-          sku: parsed.sku,
-          barcode: parsed.barcode || null,
-          attributeValues: JSON.stringify(parsed.attribute_values),
-          costPrice,
-          weightGrams: parsed.weight_grams,
-          weightKg: parsed.weight_kg ?? null,
-          fulfillmentType,
-          stitchingType: parsed.stitching_type ?? null,
-          stitchingCharges: parsed.stitching_charges,
-          productionDays: parsed.production_days,
-          isTaxable: parsed.is_taxable,
-          requiresShipping: parsed.requires_shipping,
-          inventoryPolicy: syncInventoryPolicy(fulfillmentType, parsed.allow_backorder),
-          isDefault: parsed.is_default,
-          isActive: parsed.is_active,
-          createdById: caller.id,
-        },
-      })
-      createdIds.push(variant.id)
-
-      // Create company_variant_pricing for the source company
-      await db.companyVariantPricing.upsert({
-        where: { companyId_orgVariantId: { companyId, orgVariantId: variant.id } },
-        update: { salePrice: parsed.sale_price, comparePrice: parsed.compare_price ?? null },
+      // Ensure company_product_settings exists for source company
+      await tx.companyProductSetting.upsert({
+        where: { companyId_orgProductId: { companyId, orgProductId: productId } },
+        update: {},
         create: {
           companyId,
-          orgVariantId: variant.id,
           organizationId: orgId,
-          salePrice: parsed.sale_price,
-          comparePrice: parsed.compare_price ?? null,
+          orgProductId: productId,
+          isActive: true,
+          subscribedById: caller.id,
         },
       })
-    }
-
-    // Ensure company_product_settings exists for source company
-    await db.companyProductSetting.upsert({
-      where: { companyId_orgProductId: { companyId, orgProductId: productId } },
-      update: {},
-      create: {
-        companyId,
-        organizationId: orgId,
-        orgProductId: productId,
-        isActive: true,
-        subscribedById: caller.id,
-      },
     })
 
     insertAuditLog({

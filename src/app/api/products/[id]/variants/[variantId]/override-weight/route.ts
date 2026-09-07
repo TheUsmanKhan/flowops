@@ -39,6 +39,17 @@ export async function POST(
       })) > 0
     if (!allowed) throw new ApiError(403, 'You lack permission to edit products.')
 
+    // PROD-008: verify the variant belongs to the product in the URL path.
+    // Without this check, a caller could pass a variantId belonging to a
+    // different product and successfully override its weight.
+    const variant = await db.orgProductVariant.findFirst({
+      where: { id: variantId, productId },
+      select: { id: true },
+    })
+    if (!variant) {
+      throw new ApiError(404, 'Variant not found or does not belong to this product.')
+    }
+
     const body = await readBody<{ weightKg?: number }>(req)
     if (body.weightKg === undefined || body.weightKg < 0) {
       throw new ApiError(400, 'weightKg must be 0 or positive')

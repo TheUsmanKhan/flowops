@@ -1,6 +1,6 @@
-import { getCurrentUser } from '@/lib/session'
 import { db } from '@/lib/db'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, getWorkspace, handleError, readBody, requirePermission } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -52,8 +52,18 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
+    // PROD-018: added a permission gate. Previously this route only verified
+    // the user was authenticated + had an activeOrgId, so any active
+    // employee — even one with zero permissions — could enumerate the full
+    // cartesian-product of variant combinations + suggested SKUs for any
+    // product in their org. The route performs no DB writes (pure
+    // calculation), so PRODUCTS_VIEW is the appropriate gate.
+    // The previous implementation also did a second `db.userSetting.findUnique`
+    // later in the function just to read orgId — that lookup is now
+    // unnecessary because ctx.company.organizationId provides the same value.
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)
+    const orgId = ctx.company.organizationId
     await params
 
     const body = await readBody<{
@@ -80,10 +90,6 @@ export async function POST(
     }
 
     // Fetch attribute_value_rules for this org
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const orgId = settings?.activeOrgId
-    if (!orgId) throw new ApiError(403, 'No active organization')
-
     const rules = await db.attributeValueRule.findMany({
       where: { organizationId: orgId },
       include: {

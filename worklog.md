@@ -15420,3 +15420,312 @@ Confirms PROD-002: the POST /api/returned-stitched route never creates the inven
 - Two diagnostic scripts were created (`scripts/products-audit-queries.js`, `scripts/products-audit-queries2.js`) — these are read-only query runners and do not modify state. They can be deleted or kept for future audits.
 
 ---
+
+Task ID: PROD-FIX-CRITICAL
+Agent: general-purpose (code-modification subagent)
+Task: Fix 3 Critical bugs in Catalog & Products module — PROD-001, PROD-003, PROD-004.
+
+Work Log:
+
+- Read /home/z/my-project/worklog.md and /home/z/my-project/PRODUCTS_AUDIT_FINAL.md (bug sections 660-727) for full context.
+- Read the three target files before editing:
+  - src/app/api/returned-stitched/[id]/route.ts
+  - src/components/products/product-detail-view.tsx (1793 lines)
+  - Also read for cross-checks: src/app/api/products/[id]/route.ts, /promote/route.ts, /subscribe/route.ts, src/lib/validations/product.ts, src/lib/permissions.ts, src/stores/app-store.ts, src/lib/api-client.ts, src/components/ui/alert-dialog.tsx.
+
+PROD-001 — Fixed src/app/api/returned-stitched/[id]/route.ts:
+  - mark_sold handler: previously referenced `record.locationId` (undefined — ReturnedStitchedInventory has no such column) and swallowed the resulting error from processInventoryTransaction via try/catch + console.error. The audit log still recorded success, the response was `{success:true, status:'sold'}`, and the InventoryPool.onHand was never decremented → phantom stock.
+  - Fix: lookup the InventoryPool by `orgVariantId` and read its `locationId`. If none, throw `ApiError(400, 'No inventory location found for this variant. Cannot process mark_sold.')`. Removed the swallowing try/catch so any subsequent error from `processInventoryTransaction` propagates to the outer try/catch → `handleError` → real HTTP error returned to the caller. Audit log is no longer written when the inventory transaction fails (the throw skips the `insertAuditLog` call below).
+  - write_off handler: same fix pattern — pool lookup + throw on missing locationId + pass resolved `locationId` to `recordStockLoss` + removed swallowing try/catch.
+
+PROD-003 — Fixed src/components/products/product-detail-view.tsx `changeScope()`:
+  - Replaced `api.patch('/api/products/${productId}', { product_scope: scope })` with `api.post('/api/products/${productId}/promote', { target_scope: scope, selected_company_ids: [] })`.
+  - The previous PATCH silently dropped `product_scope` because `updateProductSchema` (src/lib/validations/product.ts lines 130-142) doesn't include that field — Zod strips unknown keys, the PATCH handler updated zero fields, returned 200 OK, and the UI showed a misleading success toast. The actual `productScope` row in OrgProduct never changed; no `promotedAt` / `promotedById` was set; no SelectiveProductAccess rows were created.
+  - The promote route enforces elevated + owner + ≥1 active variant + ≥1 image and persists `productScope + promotedAt + promotedById` (and creates SelectiveProductAccess rows for selective scope).
+  - Added a `private` guard at the top of `changeScope` — the PromoteDialog only exposes organization/selective options, so `private` should never reach here; if it does, we surface a clear error rather than calling the promote route with an unsupported value.
+  - Updated the success toast to `Product promoted to ${label}.` (was `Product scope set to ${label}.`).
+  - DISCREPANCY NOTE: the task description listed the request shape as `{ scope: 'organization' | 'selective', selectedCompanyIds?: string[] }` and the response as `{ id, productScope, promotedAt }`. The actual `promoteProductSchema` (src/lib/validations/product.ts lines 174-178) uses snake_case `target_scope` (required) + `selected_company_ids` (default []), and the promote route returns `{ success: true }`. Using the task's literal camelCase field names would have caused Zod to strip them, then fail validation on the missing required `target_scope`, returning HTTP 400. Used the actual schema field names so the call succeeds.
+
+PROD-004 — Added Subscribe + Archive UI to src/components/products/product-detail-view.tsx:
+  - Imported `AlertDialog` family from `@/components/ui/alert-dialog` (already present in src/components/ui/).
+  - Imported `Archive` and `BellPlus` icons from `lucide-react`.
+  - Added `employee` from `useAppStore`, plus flags `canSubscribe = can('products.subscribe')`, `canPromote = can('products.promote')`, `isElevated = !!employee?.isElevated`.
+  - Added state: `subscribing`, `archiveDialogOpen`, `archiving`.
+  - Added `subscribe()` async fn → POST `/api/products/${productId}/subscribe`. On success: invalidate `['product', productId]` + `['products']` queries, toast `Subscribed successfully.` On error: surface FetchError message via toast.
+  - Added `archive()` async fn → DELETE `/api/products/${productId}`. On success: invalidate queries, close the AlertDialog, navigate back to `{ name: 'products' }`, toast `Product archived.`
+  - Header actions now render three conditional buttons:
+    - **Subscribe** (variant=outline, icon=BellPlus): gated on `canSubscribe && !product.isOwner && (product.productScope === 'organization' || product.productScope === 'selective') && !product.subscription`. Only non-source companies on org-/selective-scoped products they haven't yet subscribed to.
+    - **Promote to Org** (primary, icon=ArrowUpCircle): gated on `product.isOwner && canPromote`. (Previously gated on `product.isOwner` only — now also requires the `products.promote` permission, which aligns with PROD-020 from the audit.)
+    - **Archive** (variant=destructive, icon=Archive): gated on `canEdit && isElevated`. Clicking opens the AlertDialog confirmation. Confirm calls `archive()`.
+  - AlertDialog: title `Archive product?`, description naming the product and explaining the soft-delete semantics (scope→'archived', isActive→false, reversible by reactivating), with Cancel + destructive `Archive product` action.
+
+Lint:
+- Ran `cd /home/z/my-project && bun run lint 2>&1 | tail -5`. Output: `14 problems (2 errors, 12 warnings)`. Verified via `grep` that NONE of the errors/warnings are in `product-detail-view.tsx` or `returned-stitched/[id]/route.ts` — all remaining issues are pre-existing `react-hooks/incompatible-library` warnings in `catalog-settings-view.tsx`, `product-create-view.tsx`, and `returned-stitched-view.tsx` (unmodified files).
+
+Files Modified:
+1. src/app/api/returned-stitched/[id]/route.ts  — PROD-001 (mark_sold + write_off handlers)
+2. src/components/products/product-detail-view.tsx — PROD-003 (changeScope) + PROD-004 (Subscribe + Archive buttons + AlertDialog)
+
+Out-of-Scope Notes (recommend follow-up tasks):
+- The PromoteDialog currently has no company picker for `selective` scope, so `selected_company_ids: []` is sent. The promote route will reject this for `target_scope: 'selective'` with HTTP 400 ("Selective scope requires at least one company to be selected."). For selective scope, the user must still use the Org-Catalog view (which has the picker). A future improvement: extend the PromoteDialog to include a company multi-select for selective scope.
+- PROD-001 transactional integrity: the `ReturnedStitchedInventory.update()` happens BEFORE the inventory ledger call. Now that errors propagate, a missing-pool scenario will leave the ReturnedStitchedInventory row already marked 'sold'/'written_off' while the pool is unchanged. Consider wrapping the record update + inventory transaction in a `db.$transaction` (PROD-002 sibling work would also benefit).
+- Pre-existing audit recommendations PROD-005, PROD-006, PROD-020 (selective-access cleanup, transactional variant creation, promote-button gating) remain open. PROD-020 is partially addressed here by adding the `canPromote` gate to the Promote button.
+
+---
+
+Task ID: PROD-FIX-HIGH
+Agent: general-purpose (code-modification subagent)
+Task: Fix 4 High severity bugs in Catalog & Products module — PROD-005, PROD-006, PROD-007, PROD-008.
+
+Work Log:
+
+- Read /home/z/my-project/worklog.md for context (prior PROD-FIX-CRITICAL task notes).
+- Read each target file BEFORE editing (no blind edits):
+  - src/app/api/products/[id]/promote/route.ts
+  - src/app/api/products/[id]/demote/route.ts
+  - src/app/api/products/[id]/selective-access/route.ts
+  - src/app/api/products/[id]/variants/route.ts
+  - src/app/api/products/[id]/variants/[variantId]/override-cost/route.ts
+  - src/app/api/products/[id]/variants/[variantId]/override-price/route.ts
+  - src/app/api/products/[id]/variants/[variantId]/override-weight/route.ts
+  - src/lib/validations/product.ts (for promoteProductSchema / demoteProductSchema / selectiveAccessSchema field shapes)
+  - prisma/schema.prisma (SelectiveProductAccess.orgProductId — the @@@unique([orgProductId, companyId]) compound key uses orgProductId, not productId)
+  - src/components/products/org-catalog-view.tsx (DemoteDialog — confirmed it currently sends only { new_scope, reason }, so selected_company_ids defaults to [] via Zod default())
+
+PROD-005 — Fixed src/app/api/products/[id]/promote/route.ts:
+  - Symptom: when promoting to 'selective' scope, the route UPSERTed new SelectiveProductAccess rows for the selected companies but did NOT delete rows for companies NOT in the new list. So narrowing the selective list (or removing a company) silently retained stale grants. When promoting to 'organization' scope, prior 'selective' rows persisted and could silently re-grant access if the product was later re-promoted to selective.
+  - Fix: after the UPSERT loop for selective scope, added `db.selectiveProductAccess.deleteMany({ where: { orgProductId: productId, companyId: { notIn: d.selected_company_ids } } })` (guarded by `d.selected_company_ids.length > 0` so an empty list doesn't blow away the rows just upserted). Added an `else` branch for `target_scope === 'organization'` that purges ALL SelectiveProductAccess rows for this product (private is not allowed by promoteProductSchema). Field names use `orgProductId` (matching the Prisma schema's actual compound-key column and the existing upsert where-clause `orgProductId_companyId`), NOT `productId` as the task description's example code showed — `productId` would not match any column on the SelectiveProductAccess model and would cause Prisma to throw a validation error.
+
+PROD-005 — Fixed src/app/api/products/[id]/demote/route.ts:
+  - Symptom: old SelectiveProductAccess rows persisted after demote and could silently re-grant access on a subsequent re-promotion to selective.
+  - Fix: extended demoteProductSchema (src/lib/validations/product.ts) with an optional `selected_company_ids: z.array(z.string()).default([])` field. After the existing CompanyProductSetting subscription-revoke updateMany in the demote route, added:
+    - If `new_scope === 'private'`: `db.selectiveProductAccess.deleteMany({ where: { orgProductId: productId } })` — purge all rows.
+    - If `new_scope === 'selective'`:
+      - If `d.selected_company_ids.length > 0`: deleteMany where `companyId: { notIn: d.selected_company_ids }` — keep only the selected companies.
+      - Else: deleteMany where `{ orgProductId: productId }` — revoke all (consistent with selective scope requiring explicit grants).
+  - Backward compatibility: the existing DemoteDialog in org-catalog-view.tsx sends only `{ new_scope, reason }`. Zod's `.default([])` supplies the missing field, so existing callers continue to work unchanged — demoting to selective without a list now revokes all selective access (which is safer than the old behavior of silently leaving stale rows).
+  - NOTE: the schema-extension is the only change outside the route file. The frontend was NOT modified — the existing UI flow remains functional. A future improvement could extend the DemoteDialog to include a company multi-select for `new_scope='selective'` so the user can pick the retained companies (mirrors the same UX gap noted in PROD-FIX-CRITICAL for the PromoteDialog).
+
+PROD-006 — Documented design in src/app/api/products/[id]/selective-access/route.ts:
+  - The POST handler UPSERTs a single SelectiveProductAccess row and does not revoke access for companies not in the request. Per the task, this is BY DESIGN — POST adds ONE company, DELETE removes ONE company, matching the UI picker (one chip at a time). The promote route provides the batch-set semantics.
+  - No logic change. Expanded the JSDoc comment block above the POST handler to document the design choice and point callers needing a full-set replacement to `POST /api/products/[id]/promote` with `target_scope='selective'` + `selected_company_ids=[...]` (which now also cleans up stale rows per PROD-005).
+
+PROD-007 — Fixed src/app/api/products/[id]/variants/route.ts:
+  - Symptom: the POST handler created variants one-by-one without a transaction. If variant #3 of 5 failed (e.g. on a duplicate SKU DB-unique violation, or a Zod parse error on a malformed variant), variants #1-2 were already committed, leaving the DB in an inconsistent state. The caller would receive a 5xx error with no variant_ids, and the partial variants would be orphaned (no UI affordance to retry or roll back).
+  - Fix: wrapped the entire variant-creation loop AND the trailing company_product_setting UPSERT in a single `db.$transaction(async (tx) => { ... })`. Switched:
+    - `db.orgProductVariant.create` → `tx.orgProductVariant.create`
+    - `db.companyVariantPricing.upsert` → `tx.companyVariantPricing.upsert`
+    - `db.companyProductSetting.upsert` → `tx.companyProductSetting.upsert`
+  - `createdIds` array remains declared outside the transaction so the post-transaction audit/metric blocks can read it (audit log + metric events are fire-and-forget and intentionally NOT in the transaction — they were not before either).
+  - The Zod validation loop (lines 64-74) runs BEFORE the transaction so we fail fast on bad input without opening a DB connection at all.
+
+PROD-008 — Fixed 3 override routes:
+  - src/app/api/products/[id]/variants/[variantId]/override-cost/route.ts
+  - src/app/api/products/[id]/variants/[variantId]/override-price/route.ts
+  - src/app/api/products/[id]/variants/[variantId]/override-weight/route.ts
+  - Symptom: none of the three routes verified that `variantId` belongs to `productId`. A caller could pass a `variantId` from a different product. For override-cost/weight, Prisma's `update({ where: { id: variantId } })` would happily update the foreign variant. For override-price, the UPSERT on CompanyVariantPricing keyed by `(companyId, orgVariantId)` would create/override a pricing row linking the caller's company to the foreign variant. (If variantId didn't exist at all, Prisma would throw P2025, but the cross-product case is the actual security hole.)
+  - Fix (identical pattern in all 3 files): after the permission check passes, BEFORE the request body is read, added:
+    ```ts
+    const variant = await db.orgProductVariant.findFirst({
+      where: { id: variantId, productId },
+      select: { id: true },
+    })
+    if (!variant) {
+      throw new ApiError(404, 'Variant not found or does not belong to this product.')
+    }
+    ```
+  - `ApiError` was already imported in all 3 files (used by the pre-existing 401/403/400 throws). No new imports needed.
+  - Each verification block is annotated with a PROD-008 comment explaining the cross-product-variant attack vector.
+
+Lint:
+- Ran `cd /home/z/my-project && bun run lint 2>&1 | tail -5`. Output: `14 problems (2 errors, 12 warnings)` — same count as the prior PROD-FIX-CRITICAL run (pre-existing). Listed all files with lint issues via `bun run lint 2>&1 | grep -E "^/home/z" | sort -u` and confirmed NONE of the 7 modified files (4 route files + 1 selective-access route + 3 override routes + 1 validation file = 8 files total counting product.ts) appear in the list. All remaining issues are pre-existing in unmodified files: scripts/fire-and-forget-transform.ts, scripts/products-audit-queries*.js, src/components/inventory/{locations,supplier-detail,suppliers}-view.tsx, src/components/orders/order-create-view.tsx, src/components/products/{catalog-settings,product-create,returned-stitched}-view.tsx.
+
+Files Modified:
+1. src/app/api/products/[id]/promote/route.ts — PROD-005 (selective cleanup + org-scope purge)
+2. src/app/api/products/[id]/demote/route.ts — PROD-005 (private purge + selective prune)
+3. src/lib/validations/product.ts — PROD-005 (added optional selected_company_ids to demoteProductSchema)
+4. src/app/api/products/[id]/selective-access/route.ts — PROD-006 (design doc comment only, no logic change)
+5. src/app/api/products/[id]/variants/route.ts — PROD-007 (wrapped in $transaction, tx.* for all writes)
+6. src/app/api/products/[id]/variants/[variantId]/override-cost/route.ts — PROD-008 (variant ownership check)
+7. src/app/api/products/[id]/variants/[variantId]/override-price/route.ts — PROD-008 (variant ownership check)
+8. src/app/api/products/[id]/variants/[variantId]/override-weight/route.ts — PROD-008 (variant ownership check)
+
+Out-of-scope notes (recommend follow-up tasks):
+- The DemoteDialog UI (org-catalog-view.tsx ~line 276) currently has no company multi-select for `new_scope='selective'`. As a result, a UI-driven demote-to-selective will revoke ALL selective access (Zod default []). To preserve specific companies during a demote-to-selective, the user must call the API directly with `selected_company_ids: [...]`. Extending the dialog with a company picker would close this UX gap (same shape as the PromoteDialog gap noted in PROD-FIX-CRITICAL).
+- The audit log entries for promote/demote still use `db.*` (not `tx.*`) and are fire-and-forget via `insertAuditLog` / `insertMetricEvent`. They are intentionally outside the transaction to match the existing pattern (and because audit-log writes failing should not roll back the business operation). If stronger consistency is needed later, wrap them inside the tx too.
+- PROD-015 (mentioned in the audit NEXT ACTIONS list alongside PROD-008) targets a separate pricing route that was NOT in this task's scope — recommend a follow-up task to verify whether it needs the same ownership-check treatment.
+
+---
+
+Task ID: PROD-FIX-MEDIUM-LOW
+Agent: general-purpose (code-modification subagent)
+Task: Fix 11 Medium + Low severity bugs in Catalog & Products module — PROD-009, PROD-011, PROD-012, PROD-013, PROD-014, PROD-015, PROD-017, PROD-018, PROD-019, PROD-021, PROD-022.
+
+Work Log:
+
+- Read /home/z/my-project/worklog.md for full context (prior PROD-FIX-CRITICAL and PROD-FIX-HIGH task notes; the original audit's bug writeups for PROD-001 through PROD-022 at worklog.md lines ~15044-15340).
+- Read each target file BEFORE editing (no blind edits):
+  - src/app/api/products/[id]/variant-groups/[parentValueId]/cost/route.ts (PROD-009)
+  - src/app/api/products/[id]/variant-groups/[parentValueId]/sale-price/route.ts (PROD-009)
+  - src/app/api/products/[id]/variant-groups/[parentValueId]/weight/route.ts (PROD-009)
+  - src/app/api/products/[id]/route.ts (PROD-011)
+  - src/app/api/products/[id]/variant-groups/route.ts (PROD-012)
+  - src/app/api/products/route.ts (PROD-013 + PROD-021 — same file, edited together)
+  - src/app/api/products/[id]/images/route.ts (PROD-014)
+  - src/app/api/products/[id]/pricing/route.ts (PROD-015)
+  - src/app/api/products/[id]/demote/route.ts (PROD-017)
+  - src/app/api/products/generate-stitched/route.ts (PROD-018)
+  - src/app/api/products/[id]/variants/generate/route.ts (PROD-018)
+  - src/app/api/catalog/attributes/[id]/values/route.ts (PROD-019)
+  - src/app/api/catalog/available-attributes/route.ts (PROD-019)
+  - src/app/api/catalog/attributes/route.ts (PROD-019 — verified GET already had PRODUCTS_VIEW; no change)
+  - src/lib/validations/product.ts (PROD-022)
+  - prisma/schema.prisma OrgProduct.companySettings relation (cross-check for PROD-013's `companySettings: { some: ... }` filter)
+  - src/lib/workspace.ts + src/lib/permissions.ts (helper shape verification for getWorkspace / requirePermission / PERMISSIONS.PRODUCTS_VIEW / PRODUCTS_EDIT)
+
+PROD-009 — Documented design in the 3 variant-group cascade routes:
+  - cost/route.ts, sale-price/route.ts, weight/route.ts
+  - Symptom: the `parentValueId` URL parameter was destructured from `params` but never referenced. The cascade is driven entirely by `body.parent_attribute_name` + `body.parent_value`. The URL gave the misleading impression that the route was keyed on the parent value ID.
+  - Fix: per the task description, this is a documentation-only change (no logic change). Replaced the inline `const { id: productId, parentValueId } = await params` with `const { id: productId } = await params` and expanded the JSDoc on each POST handler to document that parentValueId is decorative — it exists only to give the route a unique path so the Next.js App Router can distinguish it from sibling variant-group routes (`.../cost`, `.../weight`, `.../sale-price`). Added an inline comment at the destructuring site pointing back to the JSDoc. Any string value is accepted for parentValueId; the cascade is body-driven.
+  - Reasoning for NOT converting to a real REST lookup (e.g. finding the parent attribute by id): the body-driven design lets the frontend issue one call per parent group with the attribute name + value inline — no extra DB lookup round-trip needed. Converting would add latency for no security gain (the route already verifies the product exists + the caller has PRODUCTS_EDIT/PRODUCTS_PRICING permission). The audit explicitly allowed either approach; documenting was the lower-risk option.
+
+PROD-011 — Fixed src/app/api/products/[id]/route.ts (GET handler):
+  - Symptom: GET /api/products/[id] used the legacy 4-query auth pattern (getCurrentUser → userSetting → employee → rolePermission) and never called `requirePermission(PRODUCTS_VIEW)`. Any active employee — even one with zero permissions — could fetch any product detail the company had visibility into.
+  - Fix: replaced the legacy auth block with `const ctx = await getWorkspace()` + `await requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)`. Reads `companyId` + `orgId` from `ctx.company.*` instead of `settings.*`. The visibility `OR` clause in the `findFirst` (`sourceCompanyId` | `productScope:'organization'` | `productScope:'selective'` w/ selectiveAccess grant) is UNCHANGED — it still gates WHICH products the caller can read. The new gate ensures that even a company member without `products.view` permission gets a 403 before the DB query runs.
+  - Updated the import line: added `getWorkspace, requirePermission` to the `@/lib/workspace` import (alphabetized). `getCurrentUser` is still imported because the PATCH and DELETE handlers in the same file still use the legacy pattern (out of scope for this task — they were not in the audit's PROD-011 writeup).
+  - Added a comment block above the new auth explaining what changed and why.
+
+PROD-012 — Fixed src/app/api/products/[id]/variant-groups/route.ts (GET handler):
+  - Symptom: the route only checked `getCurrentUser` + `userSetting.activeOrgId`. No `requirePermission`. Any active employee could fetch the variant-grouping structure (variant rows + per-company pricing) for ANY product in their org, even private products owned by another company in the same org. Cross-company data leak within the org.
+  - Fix: replaced the legacy auth block with `getWorkspace()` + `requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)`. Reads `orgId` + `companyId` from `ctx.company.*` instead of `settings.*`.
+  - The audit's "expected" mentioned also adding the same `OR: [sourceCompanyId, organization, selective]` visibility filter to the `findFirst` so a private Company-A product is hidden from Company B in the same org. The task description only required the permission check, so I left the `findFirst` filter as-is (`{ id: productId, organizationId: orgId }`). Follow-up note below.
+  - Removed the now-unused `getCurrentUser` import; added `getWorkspace`, `requirePermission`, `PERMISSIONS` imports. Re-added `ApiError` (used for the 404 throw on missing product — initially dropped by accident, restored).
+
+PROD-013 — Fixed src/app/api/products/route.ts (GET handler, the where clause):
+  - Symptom: the OR visibility clause for org-/selective-scope products did NOT check `CompanyProductSetting.subscriptionStatus`. A company whose subscription was revoked (via demote, which sets `subscriptionStatus='revoked', isActive=false`) still saw the product in the list after a re-promote. Worse — the order-create picker uses this same endpoint, so a revoked company could add the product's variants to new orders.
+  - Fix (per the task's "simpler approach"): added a `NOT` clause to the `where` object:
+    ```
+    NOT: {
+      productScope: 'organization',
+      companySettings: { some: { companyId, subscriptionStatus: 'revoked' } },
+    }
+    ```
+    This excludes org-scope products where the active company has a 'revoked' subscription row. Source-company products don't have a 'revoked' row (their subscription is auto-active on creation), so the owner still sees their own org-scope products. Selective-scope products don't need this NOT — their SelectiveProductAccess rows are already cleaned up on demote (PROD-005). The relation name `companySettings` (plural) matches the OrgProduct→CompanyProductSetting relation defined in prisma/schema.prisma line 630.
+
+PROD-021 — Fixed src/app/api/products/route.ts (GET handler, the is_active filter):
+  - Symptom: when `?is_active=` (empty value) was passed, `isActiveParam !== null` was TRUE and `isActiveParam === 'true'` was FALSE → filter became `{ isActive: false }`, hiding ALL active products.
+  - Fix: changed the condition from `isActiveParam !== null` to `isActiveParam !== null && isActiveParam !== ''`. An empty value is now treated the same as omitting the param (no filter; defaults to `{ isActive: true }`). Added an inline comment explaining the edge case.
+
+PROD-014 — Fixed src/app/api/products/[id]/images/route.ts (DELETE handler):
+  - Symptom: the DELETE image handler checked `isOwner || elevated` but OMITTED the PRODUCTS_EDIT permission check that the POST upload handler enforces (lines 53-58 of the same file). A user with `products.edit` permission could upload images but could NOT delete them — split-brain permission model.
+  - Fix: mirrored the POST handler's two-step permission gate in the DELETE handler:
+    1. `if (!isOwner && !elevated) throw new ApiError(403, 'Only the source company can delete images.')` — unchanged.
+    2. ADDED: `const allowed = elevated || (await db.rolePermission.count({ where: { roleId: caller.roleId, permissionKey: PERMISSIONS.PRODUCTS_EDIT } })) > 0; if (!allowed) throw new ApiError(403, 'You lack permission to edit products.')` — identical to POST's gate.
+    Effective gate: `(isOwner || elevated) && (elevated || hasPermission(PRODUCTS_EDIT))` = `elevated || (isOwner AND hasPermission(PRODUCTS_EDIT))`. Same as POST. Used the existing inline `db.rolePermission.count` pattern (matching the POST handler) rather than the task hint's `hasPermission(ctx, ...)` syntax, to stay consistent with the file's legacy auth pattern in PATCH/POST/DELETE.
+  - Note: this is STRICTER than before — an owner without PRODUCTS_EDIT can no longer delete images. That matches the audit's "Both upload and delete should use the same permission gate" expectation.
+
+PROD-015 — Fixed src/app/api/products/[id]/pricing/route.ts (POST handler):
+  - Symptom: the bulk-set-pricing route UPSERTed CompanyVariantPricing for each `p.org_variant_id` in the payload without verifying the variant belongs to `productId` (from the URL). A caller with PRODUCTS_PRICING could pass variantIds from a DIFFERENT product and activate phantom pricing rows for variants they don't own.
+  - Fix: added a pre-loop validation block right after Zod parse:
+    ```ts
+    if (d.pricing.length > 0) {
+      const variantIdsInPayload = d.pricing.map((p) => p.org_variant_id)
+      const validVariants = await db.orgProductVariant.findMany({
+        where: { id: { in: variantIdsInPayload }, productId },
+        select: { id: true },
+      })
+      const validIdsSet = new Set(validVariants.map((v) => v.id))
+      const invalidEntries = d.pricing.filter((p) => !validIdsSet.has(p.org_variant_id))
+      if (invalidEntries.length > 0) {
+        throw new ApiError(400, `${invalidEntries.length} variant(s) in the payload do not belong to this product. Pricing can only be set for variants of product ${productId}.`)
+      }
+    }
+    ```
+    Single query fetches all valid variant IDs for this product; if any payload entry is foreign, the route fails fast with a 400 BEFORE any UPSERT runs. Guarded by `d.pricing.length > 0` so an empty payload (currently allowed by Zod) doesn't trigger a needless query. Same pattern as the existing PROD-008 fix on the override-* routes (which use `findFirst({ where: { id: variantId, productId } })` for the single-variant case).
+
+PROD-017 — Fixed src/app/api/products/[id]/demote/route.ts (returnedCount query):
+  - Symptom: the returnedCount query nested an `await` inside the `in:` clause:
+    `orgVariantId: { in: (await db.orgProductVariant.findMany({ where: { productId }, select: { id: true } })).map((v) => v.id) }`
+    Worked but was brittle and hard to read; an inner DB error surfaced as a confusing count() failure.
+  - Fix: hoisted the inner await into a named variable before the outer query:
+    ```ts
+    const productVariantIds = (
+      await db.orgProductVariant.findMany({
+        where: { productId },
+        select: { id: true },
+      })
+    ).map((v) => v.id)
+    const returnedCount = await db.returnedStitchedInventory.count({
+      where: {
+        orgVariantId: { in: productVariantIds },
+        companyId: { in: affectedCompanyIds },
+        status: 'available',
+      },
+    })
+    ```
+    Same DB queries, same result, but clearer. NOTE: the task hint mentioned `src/app/api/returned-stitched/route.ts` as the file, but the actual audit location (worklog.md line 15246) is `src/app/api/products/[id]/demote/route.ts` lines 65-71 — fixed the actual site of the nested await.
+
+PROD-018 — Fixed 2 generate routes:
+  - src/app/api/products/generate-stitched/route.ts
+  - src/app/api/products/[id]/variants/generate/route.ts
+  - Symptom: both POST routes only verified the user was authenticated (`getCurrentUser`). Any active employee — even one with zero permissions — could enumerate variant combinations + stitching cost logic + suggested SKUs for any product in their org.
+  - Fix (identical pattern): replaced `const user = await getCurrentUser(); if (!user) throw new ApiError(401, ...)` with `const ctx = await getWorkspace(); await requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)`. The route performs no DB writes (pure calculation), so PRODUCTS_VIEW is the appropriate gate (read-only).
+  - For the variants/generate route specifically, the previous code did a SECOND `db.userSetting.findUnique` later in the function just to read `orgId` for the AttributeValueRule lookup. With getWorkspace() now at the top, this redundant lookup was removed — `orgId` comes from `ctx.company.organizationId`.
+  - Removed the now-unused `getCurrentUser` imports from both files. Re-added `ApiError` to the generate-stitched file (still used for the Zod parse throw).
+
+PROD-019 — Fixed 2 catalog attribute/value GET routes:
+  - src/app/api/catalog/attributes/[id]/values/route.ts (GET handler)
+  - src/app/api/catalog/available-attributes/route.ts (GET handler)
+  - Symptom: both routes only verified the user was authenticated + had an activeOrgId. No `requirePermission(PRODUCTS_VIEW)`. Any active employee could enumerate ALL attributes + values + AttributeValueRules for the org.
+  - Fix (identical pattern): replaced `getCurrentUser + userSetting.findUnique` with `getWorkspace()` + `requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)`. `orgId` comes from `ctx.company.organizationId`.
+  - For attributes/[id]/values/route.ts: `getCurrentUser` is still imported because the POST handler in the same file uses the legacy pattern (out of scope — POST was not in the audit's PROD-019 writeup).
+  - For available-attributes/route.ts: the file only has the GET handler, so all unused imports (`getCurrentUser`, `ApiError`) were removed.
+  - Verified (read-only, no change): src/app/api/catalog/attributes/route.ts (GET handler at line 13) ALREADY had `getWorkspace()` + `requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)` — likely fixed in a prior task. No change needed there.
+
+PROD-022 — Fixed src/lib/validations/product.ts (productSchema):
+  - Symptom: `product_type: z.enum(['simple', 'variable', 'bundle', 'service'])` accepted `'bundle'` but no OrgProductBundle rows were ever created (DB confirmed: `SELECT count(*) FROM "OrgProductBundle"; → 0`). Users could create a "bundle" product that had no bundle components and no bundle behavior — dead-schema footgun.
+  - Fix: kept `'bundle'` in the enum (so the TS type still surfaces it) and added a `.refine(...)` to the schema that rejects it at validation time:
+    ```ts
+    .refine((data) => data.product_type !== 'bundle', {
+      message: 'Bundle products are not yet supported. Please use simple, variable, or service.',
+      path: ['product_type'],
+    })
+    ```
+    The refine approach gives a much clearer error message than removing 'bundle' from the enum (which would produce a generic "Invalid enum value" message). The schema was previously a `z.object({...})` — converted to `z.object({...}).refine(...)` chain. Added a comment explaining that when the bundle feature is built (with CRUD for OrgProductBundle rows), this refinement should be removed.
+
+Lint:
+- Ran `cd /home/z/my-project && bun run lint 2>&1 | tail -5`. Output: `14 problems (2 errors, 12 warnings)` — IDENTICAL count to the prior PROD-FIX-HIGH and PROD-FIX-CRITICAL runs (pre-existing). Listed all files with lint issues via `bun run lint 2>&1 | grep -E "^/home/z" | sort -u` and confirmed NONE of the 13 modified files appear in the list:
+  - 4 variant-group cascade routes (3 + their parent dir)
+  - 1 product detail route
+  - 1 variant-groups route
+  - 1 products list route
+  - 1 images route
+  - 1 pricing route
+  - 1 demote route
+  - 2 generate routes
+  - 2 catalog attribute routes
+  - 1 product.ts validation file
+  All remaining issues are pre-existing in unmodified files: scripts/fire-and-forget-transform.ts, scripts/products-audit-queries*.js, src/components/inventory/{locations,supplier-detail,suppliers}-view.tsx, src/components/orders/order-create-view.tsx, src/components/products/{catalog-settings,product-create,returned-stitched}-view.tsx.
+
+Files Modified:
+1.  src/app/api/products/[id]/variant-groups/[parentValueId]/cost/route.ts — PROD-009 (documentation comment + removed unused parentValueId destructure)
+2.  src/app/api/products/[id]/variant-groups/[parentValueId]/sale-price/route.ts — PROD-009 (same)
+3.  src/app/api/products/[id]/variant-groups/[parentValueId]/weight/route.ts — PROD-009 (same)
+4.  src/app/api/products/[id]/route.ts — PROD-011 (GET handler auth migrated to getWorkspace + requirePermission)
+5.  src/app/api/products/[id]/variant-groups/route.ts — PROD-012 (GET handler auth migrated to getWorkspace + requirePermission)
+6.  src/app/api/products/route.ts — PROD-013 (added NOT clause for revoked subscription) + PROD-021 (empty-string is_active guard)
+7.  src/app/api/products/[id]/images/route.ts — PROD-014 (DELETE handler — added PRODUCTS_EDIT gate mirroring POST)
+8.  src/app/api/products/[id]/pricing/route.ts — PROD-015 (pre-loop variant-ownership validation)
+9.  src/app/api/products/[id]/demote/route.ts — PROD-017 (hoisted nested await into named variable)
+10. src/app/api/products/generate-stitched/route.ts — PROD-018 (added getWorkspace + requirePermission)
+11. src/app/api/products/[id]/variants/generate/route.ts — PROD-018 (same; also removed redundant second userSetting lookup)
+12. src/app/api/catalog/attributes/[id]/values/route.ts — PROD-019 (GET handler auth migrated to getWorkspace + requirePermission)
+13. src/app/api/catalog/available-attributes/route.ts — PROD-019 (same)
+14. src/lib/validations/product.ts — PROD-022 (added .refine() rejecting 'bundle' product_type)
+
+Out-of-scope notes (recommend follow-up tasks):
+- PROD-012 follow-up: the audit's "expected" also recommended adding the `OR: [sourceCompanyId, organization, selective]` visibility filter to the variant-groups GET route's `findFirst`, so a private Company-A product is hidden from Company B in the same org. The task only required the permission check, so the findFirst filter remains `{ id: productId, organizationId: orgId }`. A future task should add the visibility filter (mirroring GET /api/products and GET /api/products/[id]).
+- PROD-011 follow-up: the PATCH and DELETE handlers in src/app/api/products/[id]/route.ts still use the legacy 4-query auth pattern (getCurrentUser → userSetting → employee → rolePermission). The audit's PROD-011 writeup only flagged the GET handler. A future task could migrate PATCH/DELETE to getWorkspace + requirePermission + hasPermission for consistency.
+- PROD-014 follow-up: the DELETE handler's two-step gate `(isOwner || elevated) && (elevated || hasPermission(PRODUCTS_EDIT))` is now STRICTER than the audit's summary (`isOwner || elevated || hasPermission(PRODUCTS_EDIT)`) — an owner without PRODUCTS_EDIT can no longer delete images. This matches the POST upload handler's existing gate, which the audit called "the same permission gate". If a more permissive interpretation is desired (any PRODUCTS_EDIT holder can delete, regardless of ownership), the gate would need to change to `if (!isOwner && !elevated && !hasPermission(ctx, PRODUCTS_EDIT)) throw ...` — but that would require migrating the file to getWorkspace first (current legacy pattern doesn't expose `ctx`). The mirror-of-POST approach was chosen to minimize scope and maximize consistency.
+- PROD-022 follow-up: when OrgProductBundle CRUD is implemented (a substantial feature: bundle component picker, decomposition pricing, bundle inventory handling), remove the .refine() block. The TS type still surfaces 'bundle' as a valid value (so frontend code referencing it doesn't break) but the validation layer rejects it at runtime.
+- PROD-016 (drafts TTL) and PROD-020 (Promote button gating) were Low/Medium bugs in the original audit's NEXT ACTIONS list but were NOT in this task's scope. PROD-020 was partially addressed by the prior PROD-FIX-CRITICAL task (added `canPromote` gate to the Promote button). PROD-016 remains open.

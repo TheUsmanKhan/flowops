@@ -52,6 +52,30 @@ export async function POST(
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     const d = parsed.data
 
+    // PROD-015: validate that every org_variant_id in the payload belongs to
+    // `productId` (from the URL). Without this check, a caller with
+    // PRODUCTS_PRICING permission could UPSERT CompanyVariantPricing rows
+    // for variants of a DIFFERENT product — cross-product pricing injection.
+    // The upsert's `where` clause is keyed on (companyId, orgVariantId), so
+    // Prisma happily creates/updates a row linking the caller's company to
+    // the foreign variant. We pre-fetch all valid variant IDs for this
+    // product in one query, then fail fast if any payload entry is foreign.
+    if (d.pricing.length > 0) {
+      const variantIdsInPayload = d.pricing.map((p) => p.org_variant_id)
+      const validVariants = await db.orgProductVariant.findMany({
+        where: { id: { in: variantIdsInPayload }, productId },
+        select: { id: true },
+      })
+      const validIdsSet = new Set(validVariants.map((v) => v.id))
+      const invalidEntries = d.pricing.filter((p) => !validIdsSet.has(p.org_variant_id))
+      if (invalidEntries.length > 0) {
+        throw new ApiError(
+          400,
+          `${invalidEntries.length} variant(s) in the payload do not belong to this product. Pricing can only be set for variants of product ${productId}.`,
+        )
+      }
+    }
+
     // UPSERT each pricing entry
     for (const p of d.pricing) {
       await db.companyVariantPricing.upsert({

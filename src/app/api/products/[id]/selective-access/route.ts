@@ -12,6 +12,15 @@ export const dynamic = 'force-dynamic'
 /**
  * Grant selective access to a company.
  * GUARD: elevated only.
+ *
+ * DESIGN NOTE (PROD-006):
+ *   POST adds ONE company. DELETE removes ONE company. There is intentionally
+ *   no "set all" / batch-set semantics on this endpoint — the per-company
+ *   granularity matches the UI picker (one chip at a time). For a batch
+ *   full-set operation (replace the entire selective-access list in one call),
+ *   use POST /api/products/[id]/promote with target_scope='selective' and
+ *   selected_company_ids=[...]; the promote route UPSERTs the new list AND
+ *   deletes rows for companies not in the new list (see PROD-005).
  */
 export async function POST(
   req: NextRequest,

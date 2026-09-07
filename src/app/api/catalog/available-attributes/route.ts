@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { getWorkspace, handleError, requirePermission } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -11,11 +11,15 @@ export const dynamic = 'force-dynamic'
  */
 export async function GET() {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const orgId = settings?.activeOrgId
-    if (!orgId) throw new ApiError(403, 'No active organization')
+    // PROD-019: added PRODUCTS_VIEW permission gate. Previously the route only
+    // verified the user was authenticated + had an activeOrgId, so any active
+    // employee — even one with zero permissions — could enumerate ALL
+    // attributes + values + rules for the org. Low severity since attributes
+    // are typically non-sensitive catalog metadata, but aligns the gate with
+    // sibling catalog GET routes.
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)
+    const orgId = ctx.company.organizationId
 
     const [attributes, rules] = await Promise.all([
       db.orgAttribute.findMany({

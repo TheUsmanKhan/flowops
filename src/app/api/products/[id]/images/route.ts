@@ -155,6 +155,18 @@ export async function DELETE(
     if (!isOwner && !elevated) {
       throw new ApiError(403, 'Only the source company can delete images.')
     }
+    // PROD-014: previously this handler checked only `isOwner || elevated` —
+    // omitting the PRODUCTS_EDIT permission check that the POST upload
+    // handler enforces (lines 53-58 above). This created a split-brain
+    // permission model: a user with PRODUCTS_EDIT could upload images but
+    // could NOT delete them. Now both upload and delete use the SAME gate:
+    // (isOwner || elevated) && (elevated || hasPermission(PRODUCTS_EDIT)).
+    const allowed =
+      elevated ||
+      (await db.rolePermission.count({
+        where: { roleId: caller.roleId, permissionKey: PERMISSIONS.PRODUCTS_EDIT },
+      })) > 0
+    if (!allowed) throw new ApiError(403, 'You lack permission to edit products.')
 
     const url = new URL(req.url)
     const imageId = url.searchParams.get('image_id')

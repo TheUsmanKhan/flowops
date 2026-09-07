@@ -48,11 +48,23 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { toast } from 'sonner'
 import {
   AlertCircle,
+  Archive,
   ArrowLeft,
   ArrowUpCircle,
+  BellPlus,
   Check,
   ImageIcon,
   Loader2,
@@ -160,11 +172,18 @@ const PROMOTE_SCOPE_OPTIONS: Array<{
 // ----------------------------------------------------------------------------
 export function ProductDetailView({ productId }: { productId: string }) {
   const navigate = useAppStore((s) => s.navigate)
+  const employee = useAppStore((s) => s.employee)
   const queryClient = useQueryClient()
   const can = useCan()
   const canEdit = can('products.edit')
+  const canSubscribe = can('products.subscribe')
+  const canPromote = can('products.promote')
+  const isElevated = !!employee?.isElevated
   const [scopeDialogOpen, setScopeDialogOpen] = useState(false)
   const [changingScope, setChangingScope] = useState(false)
+  const [subscribing, setSubscribing] = useState(false)
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false)
+  const [archiving, setArchiving] = useState(false)
 
   const { data, isLoading, isError, refetch } = useQuery<{ product: ProductDetail }>({
     queryKey: ['product', productId],
@@ -176,18 +195,70 @@ export function ProductDetailView({ productId }: { productId: string }) {
 
   async function changeScope(scope: 'private' | 'organization' | 'selective') {
     if (!product) return
+    // PROD-003 FIX: route through the dedicated promote endpoint. The
+    // previous PATCH /api/products/[id] call silently dropped product_scope
+    // because updateProductSchema doesn't include that field. The promote
+    // route enforces elevated + owner + ≥1 variant + ≥1 image and persists
+    // productScope + promotedAt + promotedById.
+    //
+    // Note: the route's Zod schema uses snake_case keys (`target_scope`,
+    // `selected_company_ids`) — not the camelCase names the task description
+    // mentioned. The schema is the source of truth.
+    if (scope === 'private') {
+      toast.error('Use the demote endpoint to revert to private scope.')
+      return
+    }
     setChangingScope(true)
     try {
-      // PATCH endpoint: scope update is part of the owner-only product patch route.
-      await api.patch(`/api/products/${productId}`, { product_scope: scope })
+      await api.post(`/api/products/${productId}/promote`, {
+        target_scope: scope,
+        selected_company_ids: [],
+      })
       queryClient.invalidateQueries({ queryKey: ['product', productId] })
       queryClient.invalidateQueries({ queryKey: ['products'] })
-      toast.success(`Product scope set to ${PRODUCT_SCOPE_LABELS[scope]}.`)
+      toast.success(`Product promoted to ${PRODUCT_SCOPE_LABELS[scope]}.`)
       setScopeDialogOpen(false)
     } catch (err) {
-      toast.error(err instanceof FetchError ? err.message : 'Failed to update scope.')
+      toast.error(err instanceof FetchError ? err.message : 'Failed to promote product.')
     } finally {
       setChangingScope(false)
+    }
+  }
+
+  // PROD-004: Subscribe to an org-scoped / selective product from a
+  // non-source company. Creates a CompanyProductSetting (inactive until
+  // pricing is set by the subscribing company).
+  async function subscribe() {
+    if (!product) return
+    setSubscribing(true)
+    try {
+      await api.post(`/api/products/${productId}/subscribe`)
+      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+      queryClient.invalidateQueries({ queryKey: ['products'] })
+      toast.success('Subscribed successfully.')
+    } catch (err) {
+      toast.error(err instanceof FetchError ? err.message : 'Failed to subscribe.')
+    } finally {
+      setSubscribing(false)
+    }
+  }
+
+  // PROD-004: Archive (soft-delete) the product. Sets productScope to
+  // 'archived' and isActive to false. Elevated + products.edit only.
+  async function archive() {
+    if (!product) return
+    setArchiving(true)
+    try {
+      await api.delete(`/api/products/${productId}`)
+      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+      queryClient.invalidateQueries({ queryKey: ['products'] })
+      toast.success('Product archived.')
+      setArchiveDialogOpen(false)
+      navigate({ name: 'products' })
+    } catch (err) {
+      toast.error(err instanceof FetchError ? err.message : 'Failed to archive product.')
+    } finally {
+      setArchiving(false)
     }
   }
 
@@ -238,9 +309,38 @@ export function ProductDetailView({ productId }: { productId: string }) {
         description={product.shortDescription ?? product.slug}
         actions={
           <div className="flex flex-wrap items-center gap-2">
-            {product.isOwner && (
+            {/* Subscribe — non-source company on an org-/selective-scoped product they haven't yet subscribed to */}
+            {canSubscribe &&
+              !product.isOwner &&
+              (product.productScope === 'organization' ||
+                product.productScope === 'selective') &&
+              !product.subscription && (
+                <Button
+                  variant="outline"
+                  onClick={subscribe}
+                  disabled={subscribing}
+                >
+                  {subscribing ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <BellPlus className="h-4 w-4" />
+                  )}
+                  Subscribe
+                </Button>
+              )}
+            {/* Promote to Org — owners with products.promote permission */}
+            {product.isOwner && canPromote && (
               <Button onClick={() => setScopeDialogOpen(true)}>
                 <ArrowUpCircle className="h-4 w-4" /> Promote to Org
+              </Button>
+            )}
+            {/* Archive — elevated + products.edit */}
+            {canEdit && isElevated && (
+              <Button
+                variant="destructive"
+                onClick={() => setArchiveDialogOpen(true)}
+              >
+                <Archive className="h-4 w-4" /> Archive
               </Button>
             )}
           </div>
@@ -389,6 +489,34 @@ export function ProductDetailView({ productId }: { productId: string }) {
           onConfirm={(scope) => changeScope(scope)}
         />
       )}
+
+      {/* PROD-004: Archive confirmation dialog */}
+      <AlertDialog open={archiveDialogOpen} onOpenChange={setArchiveDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Archive product?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will mark <strong>{product.title}</strong> as archived. The
+              product will no longer be active or visible in the catalog. This
+              action can be reversed by reactivating the product.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={archiving}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault()
+                archive()
+              }}
+              disabled={archiving}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {archiving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              Archive product
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

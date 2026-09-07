@@ -1,5 +1,5 @@
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, getWorkspace, handleError, readBody, requirePermission } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { generateStitchedSchema } from '@/lib/validations/product'
 import {
   STITCHING_TYPES,
@@ -22,8 +22,14 @@ export const dynamic = 'force-dynamic'
  */
 export async function POST(req: Request) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
+    // PROD-018: added a permission gate. Previously this route only verified
+    // the user was authenticated, so any active employee — even one with
+    // zero permissions — could enumerate stitched variant combinations +
+    // stitching cost logic. The route performs no DB writes (pure
+    // calculation), so PRODUCTS_VIEW is the appropriate gate.
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.PRODUCTS_VIEW)
+
     const body = await readBody(req)
     const parsed = generateStitchedSchema.safeParse(body)
     if (!parsed.success) {

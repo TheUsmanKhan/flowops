@@ -1,0 +1,1793 @@
+     1→'use client'
+     2→
+     3→import { useRef, useState } from 'react'
+     4→import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
+     5→import { useAppStore, useCan } from '@/stores/app-store'
+     6→import { api, FetchError, getSessionToken } from '@/lib/api-client'
+     7→import { PageHeader } from '@/components/layout/dashboard-shell'
+     8→import { Button } from '@/components/ui/button'
+     9→import { Input } from '@/components/ui/input'
+    10→import { Label } from '@/components/ui/label'
+    11→import { Textarea } from '@/components/ui/textarea'
+    12→import { Badge } from '@/components/ui/badge'
+    13→import {
+    14→  Card,
+    15→  CardAction,
+    16→  CardContent,
+    17→  CardDescription,
+    18→  CardHeader,
+    19→  CardTitle,
+    20→} from '@/components/ui/card'
+    21→import {
+    22→  Tabs,
+    23→  TabsContent,
+    24→  TabsList,
+    25→  TabsTrigger,
+    26→} from '@/components/ui/tabs'
+    27→import { Switch } from '@/components/ui/switch'
+    28→import {
+    29→  Table,
+    30→  TableBody,
+    31→  TableCell,
+    32→  TableHead,
+    33→  TableHeader,
+    34→  TableRow,
+    35→} from '@/components/ui/table'
+    36→import {
+    37→  Select,
+    38→  SelectContent,
+    39→  SelectItem,
+    40→  SelectTrigger,
+    41→  SelectValue,
+    42→} from '@/components/ui/select'
+    43→import {
+    44→  Dialog,
+    45→  DialogContent,
+    46→  DialogDescription,
+    47→  DialogFooter,
+    48→  DialogHeader,
+    49→  DialogTitle,
+    50→} from '@/components/ui/dialog'
+    51→import { toast } from 'sonner'
+    52→import {
+    53→  AlertCircle,
+    54→  ArrowLeft,
+    55→  ArrowUpCircle,
+    56→  Check,
+    57→  ImageIcon,
+    58→  Loader2,
+    59→  Package,
+    60→  Pencil,
+    61→  Save,
+    62→  Shirt,
+    63→  Star,
+    64→  Store,
+    65→  Tag,
+    66→  Trash2,
+    67→  Upload,
+    68→  X,
+    69→  Warehouse,
+    70→  ArrowLeftRight,
+    71→  PackagePlus,
+    72→  SlidersHorizontal,
+    73→  TrendingUp,
+    74→} from 'lucide-react'
+    75→import {
+    76→  PRODUCT_SCOPE_LABELS,
+    77→  PRODUCT_TYPE_LABELS,
+    78→  STITCHING_LABELS,
+    79→} from '@/lib/constants/fulfillment-types'
+    80→import { FulfillmentTypeBadge } from '@/components/products/fulfillment-type-badge'
+    81→import { PERMISSIONS } from '@/lib/permissions'
+    82→import { ParentChildVariantTable } from '@/components/products/parent-child-variant-table'
+    83→import { cn } from '@/lib/utils'
+    84→
+    85→// ----------------------------------------------------------------------------
+    86→// Types
+    87→// ----------------------------------------------------------------------------
+    88→interface ProductImage {
+    89→  id: string
+    90→  publicUrl: string
+    91→  isPrimary: boolean
+    92→  displayOrder: number
+    93→  variantId: string | null
+    94→}
+    95→
+    96→interface ProductVariant {
+    97→  id: string
+    98→  sku: string
+    99→  barcode: string | null
+   100→  attributeValues: Record<string, string>
+   101→  costPrice: number
+   102→  weightGrams: number
+   103→  weightKg?: number | null
+   104→  weightSyncedWithParent?: boolean
+   105→  fulfillmentType: string
+   106→  stitchingType: string | null
+   107→  stitchingCharges: number
+   108→  productionDays: number
+   109→  isTaxable: boolean
+   110→  requiresShipping: boolean
+   111→  inventoryPolicy: string
+   112→  isDefault: boolean
+   113→  isActive: boolean
+   114→  salePrice: number | null
+   115→  comparePrice: number | null
+   116→  pricingId: string | null
+   117→}
+   118→
+   119→interface ProductDetail {
+   120→  id: string
+   121→  title: string
+   122→  slug: string
+   123→  description: string | null
+   124→  shortDescription: string | null
+   125→  productType: string
+   126→  productScope: string
+   127→  isStitchable: boolean
+   128→  hasSizeVariants: boolean
+   129→  stitchingBasePrice: number
+   130→  isActive: boolean
+   131→  isFeatured: boolean
+   132→  isOwner: boolean
+   133→  category: { id: string; name: string } | null
+   134→  brand: { id: string; name: string } | null
+   135→  images: ProductImage[]
+   136→  variants: ProductVariant[]
+   137→  subscription: { id: string; status: string; isActive: boolean } | null
+   138→}
+   139→
+   140→/** Scope options available when promoting from private. */
+   141→const PROMOTE_SCOPE_OPTIONS: Array<{
+   142→  key: 'organization' | 'selective'
+   143→  label: string
+   144→  description: string
+   145→}> = [
+   146→  {
+   147→    key: 'organization',
+   148→    label: 'Organization',
+   149→    description: 'All companies in your organization can subscribe.',
+   150→  },
+   151→  {
+   152→    key: 'selective',
+   153→    label: 'Selective',
+   154→    description: 'Only specific companies you approve can access it.',
+   155→  },
+   156→]
+   157→
+   158→// ----------------------------------------------------------------------------
+   159→// Main component
+   160→// ----------------------------------------------------------------------------
+   161→export function ProductDetailView({ productId }: { productId: string }) {
+   162→  const navigate = useAppStore((s) => s.navigate)
+   163→  const queryClient = useQueryClient()
+   164→  const can = useCan()
+   165→  const canEdit = can('products.edit')
+   166→  const [scopeDialogOpen, setScopeDialogOpen] = useState(false)
+   167→  const [changingScope, setChangingScope] = useState(false)
+   168→
+   169→  const { data, isLoading, isError, refetch } = useQuery<{ product: ProductDetail }>({
+   170→    queryKey: ['product', productId],
+   171→    queryFn: () => api.get<{ product: ProductDetail }>(`/api/products/${productId}`),
+   172→    staleTime: 30_000,
+   173→  })
+   174→
+   175→  const product = data?.product
+   176→
+   177→  async function changeScope(scope: 'private' | 'organization' | 'selective') {
+   178→    if (!product) return
+   179→    setChangingScope(true)
+   180→    try {
+   181→      // PATCH endpoint: scope update is part of the owner-only product patch route.
+   182→      await api.patch(`/api/products/${productId}`, { product_scope: scope })
+   183→      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+   184→      queryClient.invalidateQueries({ queryKey: ['products'] })
+   185→      toast.success(`Product scope set to ${PRODUCT_SCOPE_LABELS[scope]}.`)
+   186→      setScopeDialogOpen(false)
+   187→    } catch (err) {
+   188→      toast.error(err instanceof FetchError ? err.message : 'Failed to update scope.')
+   189→    } finally {
+   190→      setChangingScope(false)
+   191→    }
+   192→  }
+   193→
+   194→  // ---- Render
+   195→  if (isLoading) {
+   196→    return (
+   197→      <div className="flex items-center justify-center py-20">
+   198→        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+   199→      </div>
+   200→    )
+   201→  }
+   202→
+   203→  if (isError || !product) {
+   204→    return (
+   205→      <div className="space-y-6">
+   206→        <button
+   207→          onClick={() => navigate({ name: 'products' })}
+   208→          className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+   209→        >
+   210→          <ArrowLeft className="h-4 w-4" /> Back to products
+   211→        </button>
+   212→        <Card>
+   213→          <CardContent className="p-10 text-center">
+   214→            <AlertCircle className="h-8 w-8 mx-auto text-muted-foreground mb-3" />
+   215→            <p className="text-sm text-muted-foreground mb-4">
+   216→              This product couldn&apos;t be loaded. It may have been removed or you may not have access.
+   217→            </p>
+   218→            <Button variant="outline" onClick={() => refetch()}>
+   219→              Try again
+   220→            </Button>
+   221→          </CardContent>
+   222→        </Card>
+   223→      </div>
+   224→    )
+   225→  }
+   226→
+   227→  return (
+   228→    <div className="space-y-6">
+   229→      <button
+   230→        onClick={() => navigate({ name: 'products' })}
+   231→        className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
+   232→      >
+   233→        <ArrowLeft className="h-4 w-4" /> Back to products
+   234→      </button>
+   235→
+   236→      <PageHeader
+   237→        title={product.title}
+   238→        description={product.shortDescription ?? product.slug}
+   239→        actions={
+   240→          <div className="flex flex-wrap items-center gap-2">
+   241→            {product.isOwner && (
+   242→              <Button onClick={() => setScopeDialogOpen(true)}>
+   243→                <ArrowUpCircle className="h-4 w-4" /> Promote to Org
+   244→              </Button>
+   245→            )}
+   246→          </div>
+   247→        }
+   248→      />
+   249→
+   250→      {/* Header badges */}
+   251→      <div className="flex flex-wrap items-center gap-2">
+   252→        <Badge variant="secondary">
+   253→          {PRODUCT_TYPE_LABELS[product.productType] ?? product.productType}
+   254→        </Badge>
+   255→        <Badge variant="outline">
+   256→          {PRODUCT_SCOPE_LABELS[product.productScope] ?? product.productScope}
+   257→        </Badge>
+   258→        {product.isStitchable && (
+   259→          <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 border-transparent gap-1">
+   260→            <Shirt className="h-3 w-3" /> Stitchable
+   261→          </Badge>
+   262→        )}
+   263→        {product.isActive ? (
+   264→          <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100 border-transparent">
+   265→            Active
+   266→          </Badge>
+   267→        ) : (
+   268→          <Badge variant="outline">Inactive</Badge>
+   269→        )}
+   270→        {product.isFeatured && (
+   271→          <Badge className="bg-amber-500/90 hover:bg-amber-500 text-white border-transparent">
+   272→            Featured
+   273→          </Badge>
+   274→        )}
+   275→        {product.isOwner && (
+   276→          <Badge variant="outline" className="text-xs">You own this</Badge>
+   277→        )}
+   278→      </div>
+   279→
+   280→      <Tabs defaultValue="overview">
+   281→        <TabsList className="w-full sm:w-auto overflow-x-auto justify-start">
+   282→          <TabsTrigger value="overview">Overview</TabsTrigger>
+   283→          <TabsTrigger value="variants">
+   284→            Variants ({product.variants.length})
+   285→          </TabsTrigger>
+   286→          <TabsTrigger value="images">
+   287→            Images ({product.images.length})
+   288→          </TabsTrigger>
+   289→          <TabsTrigger value="shopify">Shopify Sync</TabsTrigger>
+   290→          <TabsTrigger value="inventory">Inventory</TabsTrigger>
+   291→          {product.subscription && (
+   292→            <TabsTrigger value="pricing">Pricing</TabsTrigger>
+   293→          )}
+   294→        </TabsList>
+   295→
+   296→        {/* Overview / Details (inline-edit) */}
+   297→        <TabsContent value="overview">
+   298→          <DetailsTab product={product} productId={productId} canEdit={canEdit} />
+   299→        </TabsContent>
+   300→
+   301→        {/* Variants (parent-child grouped table) */}
+   302→        <TabsContent value="variants">
+   303→          <ParentChildVariantTable productId={productId} mode="cost" />
+   304→        </TabsContent>
+   305→
+   306→        {/* Images (upload + delete) */}
+   307→        <TabsContent value="images">
+   308→          <ImagesTab product={product} productId={productId} canEdit={canEdit} />
+   309→        </TabsContent>
+   310→
+   311→        {/* Shopify Sync */}
+   312→        <TabsContent value="shopify">
+   313→          <Card>
+   314→            <CardHeader>
+   315→              <CardTitle className="text-base flex items-center gap-2">
+   316→                <Store className="h-4 w-4 text-primary" /> Shopify Sync
+   317→              </CardTitle>
+   318→              <CardDescription>
+   319→                A summary of the payload that will be sent to Shopify when this product syncs.
+   320→              </CardDescription>
+   321→            </CardHeader>
+   322→            <CardContent className="space-y-4">
+   323→              <div className="rounded-lg border p-4 space-y-3">
+   324→                <p className="text-xs font-medium uppercase text-muted-foreground">
+   325→                  Product payload
+   326→                </p>
+   327→                <pre className="text-xs bg-muted/50 rounded-md p-3 overflow-x-auto">
+   328→{JSON.stringify(
+   329→  {
+   330→    title: product.title,
+   331→    product_type: product.productType,
+   332→    vendor: product.brand?.name ?? null,
+   333→    status: product.isActive ? 'active' : 'draft',
+   334→    variants: product.variants.map((v) => ({
+   335→      sku: v.sku,
+   336→      barcode: v.barcode ?? null,
+   337→      price: v.salePrice,
+   338→      compare_at_price: v.comparePrice,
+   339→      grams: v.weightGrams,
+   340→      weight_kg: v.weightKg ?? null,
+   341→      requires_shipping: v.requiresShipping,
+   342→      taxable: v.isTaxable,
+   343→      inventory_management: v.fulfillmentType === 'stock_based' ? 'shopify' : null,
+   344→      inventory_policy: v.inventoryPolicy,
+   345→    })),
+   346→  },
+   347→  null,
+   348→  2,
+   349→)}
+   350→                </pre>
+   351→              </div>
+   352→              <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">
+   353→                <p className="font-medium">Sync notes</p>
+   354→                <ul className="mt-1 space-y-0.5 list-disc list-inside opacity-90">
+   355→                  <li>
+   356→                    <strong>stock_based</strong> variants track inventory in Shopify
+   357→                    (<code>inventory_management: shopify</code>).
+   358→                  </li>
+   359→                  <li>
+   360→                    <strong>made_to_order</strong> variants skip inventory tracking and
+   361→                    always allow oversells (<code>inventory_policy: continue</code>).
+   362→                  </li>
+   363→                  <li>Stitching charges are bundled into <code>cost_price</code> for accounting, not shown to customers.</li>
+   364→                </ul>
+   365→              </div>
+   366→            </CardContent>
+   367→          </Card>
+   368→        </TabsContent>
+   369→
+   370→        {/* Inventory */}
+   371→        <TabsContent value="inventory">
+   372→          <InventoryTab productId={productId} variants={product.variants} isStitchable={product.isStitchable} />
+   373→        </TabsContent>
+   374→
+   375→        {/* Pricing (per-company sale price via CompanyVariantPricing) */}
+   376→        {product.subscription && (
+   377→          <TabsContent value="pricing">
+   378→            <ParentChildVariantTable productId={productId} mode="pricing" />
+   379→          </TabsContent>
+   380→        )}
+   381→      </Tabs>
+   382→
+   383→      {/* Promote-to-org dialog */}
+   384→      {scopeDialogOpen && (
+   385→        <PromoteDialog
+   386→          currentScope={product.productScope}
+   387→          loading={changingScope}
+   388→          onClose={() => setScopeDialogOpen(false)}
+   389→          onConfirm={(scope) => changeScope(scope)}
+   390→        />
+   391→      )}
+   392→    </div>
+   393→  )
+   394→}
+   395→
+   396→// ----------------------------------------------------------------------------
+   397→// Sub-components
+   398→// ----------------------------------------------------------------------------
+   399→function DetailRow({
+   400→  label,
+   401→  value,
+   402→}: {
+   403→  label: string
+   404→  value: React.ReactNode
+   405→}) {
+   406→  return (
+   407→    <div className="flex items-center justify-between gap-3">
+   408→      <span className="text-muted-foreground text-xs">{label}</span>
+   409→      <span className="font-medium text-right truncate max-w-[60%]">{value}</span>
+   410→    </div>
+   411→  )
+   412→}
+   413→
+   414→function PromoteDialog({
+   415→  currentScope,
+   416→  loading,
+   417→  onClose,
+   418→  onConfirm,
+   419→}: {
+   420→  currentScope: string
+   421→  loading: boolean
+   422→  onClose: () => void
+   423→  onConfirm: (scope: 'private' | 'organization' | 'selective') => void
+   424→}) {
+   425→  const [scope, setScope] = useState<'organization' | 'selective'>('organization')
+   426→  const currentLabel = PRODUCT_SCOPE_LABELS[currentScope] ?? currentScope
+   427→
+   428→  return (
+   429→    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+   430→      <Card className="w-full max-w-md">
+   431→        <CardHeader>
+   432→          <CardTitle className="text-base flex items-center gap-2">
+   433→            <ArrowUpCircle className="h-5 w-5 text-primary" /> Promote to organization
+   434→          </CardTitle>
+   435→          <CardDescription>
+   436→            Currently: <span className="font-medium">{currentLabel}</span>. Choose the new scope.
+   437→          </CardDescription>
+   438→        </CardHeader>
+   439→        <CardContent className="space-y-4">
+   440→          <div className="space-y-2">
+   441→            {PROMOTE_SCOPE_OPTIONS.map((opt) => (
+   442→              <button
+   443→                key={opt.key}
+   444→                type="button"
+   445→                onClick={() => setScope(opt.key)}
+   446→                className={cn(
+   447→                  'w-full rounded-lg border p-3 text-left transition-all',
+   448→                  scope === opt.key
+   449→                    ? 'border-primary bg-primary/5 ring-2 ring-primary/20'
+   450→                    : 'border-border hover:border-primary/40 hover:bg-muted/40',
+   451→                )}
+   452→              >
+   453→                <p className="text-sm font-medium">{opt.label}</p>
+   454→                <p className="text-xs text-muted-foreground mt-0.5">
+   455→                  {opt.description}
+   456→                </p>
+   457→              </button>
+   458→            ))}
+   459→          </div>
+   460→          <div className="flex justify-end gap-2 pt-2">
+   461→            <Button variant="ghost" onClick={onClose} disabled={loading}>
+   462→              Cancel
+   463→            </Button>
+   464→            <Button onClick={() => onConfirm(scope)} disabled={loading}>
+   465→              {loading ? (
+   466→                <Loader2 className="h-4 w-4 animate-spin" />
+   467→              ) : (
+   468→                <ArrowUpCircle className="h-4 w-4" />
+   469→              )}
+   470→              Promote
+   471→            </Button>
+   472→          </div>
+   473→        </CardContent>
+   474→      </Card>
+   475→    </div>
+   476→  )
+   477→}
+   478→
+   479→// ----------------------------------------------------------------------------
+   480→// DetailsTab — inline edit mode for the Overview tab
+   481→// ----------------------------------------------------------------------------
+   482→function DetailsTab({
+   483→  product,
+   484→  productId,
+   485→  canEdit,
+   486→}: {
+   487→  product: ProductDetail
+   488→  productId: string
+   489→  canEdit: boolean
+   490→}) {
+   491→  const queryClient = useQueryClient()
+   492→  const [editing, setEditing] = useState(false)
+   493→  const [form, setForm] = useState(() => ({
+   494→    title: product.title,
+   495→    description: product.description ?? '',
+   496→    shortDescription: product.shortDescription ?? '',
+   497→    categoryId: product.category?.id ?? '',
+   498→    brandId: product.brand?.id ?? '',
+   499→    isFeatured: product.isFeatured,
+   500→    isActive: product.isActive,
+   501→    isStitchable: product.isStitchable,
+   502→    stitchingBasePrice: product.stitchingBasePrice,
+   503→    hasSizeVariants: product.hasSizeVariants,
+   504→  }))
+   505→
+   506→  function resetForm() {
+   507→    setForm({
+   508→      title: product.title,
+   509→      description: product.description ?? '',
+   510→      shortDescription: product.shortDescription ?? '',
+   511→      categoryId: product.category?.id ?? '',
+   512→      brandId: product.brand?.id ?? '',
+   513→      isFeatured: product.isFeatured,
+   514→      isActive: product.isActive,
+   515→      isStitchable: product.isStitchable,
+   516→      stitchingBasePrice: product.stitchingBasePrice,
+   517→      hasSizeVariants: product.hasSizeVariants,
+   518→    })
+   519→  }
+   520→
+   521→  // Lazy-load category/brand options only when entering edit mode.
+   522→  const { data: catData } = useQuery<{ categories: Array<{ id: string; name: string }> }>({
+   523→    queryKey: ['categories'],
+   524→    queryFn: () => api.get<{ categories: Array<{ id: string; name: string }> }>('/api/categories'),
+   525→    enabled: editing,
+   526→    staleTime: 60_000,
+   527→  })
+   528→  const { data: brandData } = useQuery<{ brands: Array<{ id: string; name: string }> }>({
+   529→    queryKey: ['brands'],
+   530→    queryFn: () => api.get<{ brands: Array<{ id: string; name: string }> }>('/api/brands'),
+   531→    enabled: editing,
+   532→    staleTime: 60_000,
+   533→  })
+   534→
+   535→  const mutation = useMutation({
+   536→    mutationFn: (patch: Record<string, unknown>) =>
+   537→      api.patch(`/api/products/${productId}`, patch),
+   538→    onSuccess: () => {
+   539→      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+   540→      queryClient.invalidateQueries({ queryKey: ['products'] })
+   541→      toast.success('Product updated.')
+   542→      setEditing(false)
+   543→    },
+   544→    onError: (err) => {
+   545→      // Stay in edit mode so the user can fix and retry.
+   546→      toast.error(err instanceof FetchError ? err.message : 'Failed to update product.')
+   547→    },
+   548→  })
+   549→
+   550→  function startEdit() {
+   551→    resetForm()
+   552→    setEditing(true)
+   553→  }
+   554→
+   555→  function cancelEdit() {
+   556→    setEditing(false)
+   557→  }
+   558→
+   559→  function save() {
+   560→    const patch: Record<string, unknown> = {}
+   561→    if (form.title !== product.title) patch.title = form.title
+   562→    if (form.description !== (product.description ?? '')) patch.description = form.description
+   563→    if (form.shortDescription !== (product.shortDescription ?? '')) patch.short_description = form.shortDescription
+   564→    if (form.categoryId !== (product.category?.id ?? '')) patch.category_id = form.categoryId || null
+   565→    if (form.brandId !== (product.brand?.id ?? '')) patch.brand_id = form.brandId || null
+   566→    if (form.isFeatured !== product.isFeatured) patch.is_featured = form.isFeatured
+   567→    if (form.isActive !== product.isActive) patch.is_active = form.isActive
+   568→    if (form.isStitchable !== product.isStitchable) patch.is_stitchable = form.isStitchable
+   569→    if (form.stitchingBasePrice !== product.stitchingBasePrice) patch.stitching_base_price = form.stitchingBasePrice
+   570→    if (form.hasSizeVariants !== product.hasSizeVariants) patch.has_size_variants = form.hasSizeVariants
+   571→
+   572→    if (Object.keys(patch).length === 0) {
+   573→      toast.info('No changes to save.')
+   574→      setEditing(false)
+   575→      return
+   576→    }
+   577→    mutation.mutate(patch)
+   578→  }
+   579→
+   580→  // ---- Edit mode
+   581→  if (editing) {
+   582→    return (
+   583→      <div className="grid gap-6 lg:grid-cols-3">
+   584→        <Card className="lg:col-span-2">
+   585→          <CardHeader>
+   586→            <CardTitle className="text-base">Edit product</CardTitle>
+   587→            <CardDescription>
+   588→              Update the storefront-visible details. Changes are live after save.
+   589→            </CardDescription>
+   590→            <CardAction>
+   591→              <div className="flex items-center gap-2">
+   592→                <Button
+   593→                  variant="ghost"
+   594→                  size="sm"
+   595→                  onClick={cancelEdit}
+   596→                  disabled={mutation.isPending}
+   597→                >
+   598→                  <X className="h-4 w-4" /> Cancel
+   599→                </Button>
+   600→                <Button size="sm" onClick={save} disabled={mutation.isPending}>
+   601→                  {mutation.isPending ? (
+   602→                    <Loader2 className="h-4 w-4 animate-spin" />
+   603→                  ) : (
+   604→                    <Check className="h-4 w-4" />
+   605→                  )}
+   606→                  Save Changes
+   607→                </Button>
+   608→              </div>
+   609→            </CardAction>
+   610→          </CardHeader>
+   611→          <CardContent className="space-y-4">
+   612→            <div className="space-y-1.5">
+   613→              <Label htmlFor="p-title">Title</Label>
+   614→              <Input
+   615→                id="p-title"
+   616→                value={form.title}
+   617→                onChange={(e) => setForm({ ...form, title: e.target.value })}
+   618→                placeholder="Product title"
+   619→              />
+   620→            </div>
+   621→            <div className="space-y-1.5">
+   622→              <Label htmlFor="p-short">Short description</Label>
+   623→              <Input
+   624→                id="p-short"
+   625→                value={form.shortDescription}
+   626→                onChange={(e) => setForm({ ...form, shortDescription: e.target.value })}
+   627→                placeholder="One-line summary (optional)"
+   628→              />
+   629→            </div>
+   630→            <div className="space-y-1.5">
+   631→              <Label htmlFor="p-desc">Description</Label>
+   632→              <Textarea
+   633→                id="p-desc"
+   634→                value={form.description}
+   635→                onChange={(e) => setForm({ ...form, description: e.target.value })}
+   636→                placeholder="Full description"
+   637→                rows={6}
+   638→              />
+   639→            </div>
+   640→          </CardContent>
+   641→        </Card>
+   642→
+   643→        <Card>
+   644→          <CardHeader>
+   645→            <CardTitle className="text-base">Attributes</CardTitle>
+   646→          </CardHeader>
+   647→          <CardContent className="space-y-4">
+   648→            <div className="space-y-1.5">
+   649→              <Label>Category</Label>
+   650→              <Select
+   651→                value={form.categoryId || '__none__'}
+   652→                onValueChange={(v) => setForm({ ...form, categoryId: v === '__none__' ? '' : v })}
+   653→              >
+   654→                <SelectTrigger className="w-full">
+   655→                  <SelectValue placeholder="Select category…" />
+   656→                </SelectTrigger>
+   657→                <SelectContent>
+   658→                  <SelectItem value="__none__">No category</SelectItem>
+   659→                  {(catData?.categories ?? []).map((c) => (
+   660→                    <SelectItem key={c.id} value={c.id}>
+   661→                      {c.name}
+   662→                    </SelectItem>
+   663→                  ))}
+   664→                </SelectContent>
+   665→              </Select>
+   666→            </div>
+   667→            <div className="space-y-1.5">
+   668→              <Label>Brand</Label>
+   669→              <Select
+   670→                value={form.brandId || '__none__'}
+   671→                onValueChange={(v) => setForm({ ...form, brandId: v === '__none__' ? '' : v })}
+   672→              >
+   673→                <SelectTrigger className="w-full">
+   674→                  <SelectValue placeholder="Select brand…" />
+   675→                </SelectTrigger>
+   676→                <SelectContent>
+   677→                  <SelectItem value="__none__">No brand</SelectItem>
+   678→                  {(brandData?.brands ?? []).map((b) => (
+   679→                    <SelectItem key={b.id} value={b.id}>
+   680→                      {b.name}
+   681→                    </SelectItem>
+   682→                  ))}
+   683→                </SelectContent>
+   684→              </Select>
+   685→            </div>
+   686→            <div className="flex items-center justify-between rounded-lg border p-3">
+   687→              <div>
+   688→                <p className="text-sm font-medium">Active</p>
+   689→                <p className="text-xs text-muted-foreground">Inactive products are hidden from storefronts.</p>
+   690→              </div>
+   691→              <Switch
+   692→                checked={form.isActive}
+   693→                onCheckedChange={(v) => setForm({ ...form, isActive: v })}
+   694→              />
+   695→            </div>
+   696→            <div className="flex items-center justify-between rounded-lg border p-3">
+   697→              <div>
+   698→                <p className="text-sm font-medium">Featured</p>
+   699→                <p className="text-xs text-muted-foreground">Shown in the featured section.</p>
+   700→              </div>
+   701→              <Switch
+   702→                checked={form.isFeatured}
+   703→                onCheckedChange={(v) => setForm({ ...form, isFeatured: v })}
+   704→              />
+   705→            </div>
+   706→            <div className="flex items-center justify-between rounded-lg border p-3">
+   707→              <div>
+   708→                <p className="text-sm font-medium">Stitchable</p>
+   709→                <p className="text-xs text-muted-foreground">Can be sent for stitching.</p>
+   710→              </div>
+   711→              <Switch
+   712→                checked={form.isStitchable}
+   713→                onCheckedChange={(v) => setForm({ ...form, isStitchable: v })}
+   714→              />
+   715→            </div>
+   716→            {form.isStitchable && (
+   717→              <div className="space-y-3 rounded-lg border p-3 bg-muted/30">
+   718→                <div className="space-y-1.5">
+   719→                  <Label htmlFor="p-stitch-base">Stitching base price</Label>
+   720→                  <Input
+   721→                    id="p-stitch-base"
+   722→                    type="number"
+   723→                    min="0"
+   724→                    step="0.01"
+   725→                    value={form.stitchingBasePrice}
+   726→                    onChange={(e) => setForm({ ...form, stitchingBasePrice: Number(e.target.value) })}
+   727→                  />
+   728→                </div>
+   729→                <div className="flex items-center justify-between">
+   730→                  <div>
+   731→                    <p className="text-sm font-medium">Has size variants</p>
+   732→                    <p className="text-xs text-muted-foreground">Standard XS–XXXL size variants.</p>
+   733→                  </div>
+   734→                  <Switch
+   735→                    checked={form.hasSizeVariants}
+   736→                    onCheckedChange={(v) => setForm({ ...form, hasSizeVariants: v })}
+   737→                  />
+   738→                </div>
+   739→              </div>
+   740→            )}
+   741→          </CardContent>
+   742→        </Card>
+   743→      </div>
+   744→    )
+   745→  }
+   746→
+   747→  // ---- View mode (plain text, not disabled inputs)
+   748→  return (
+   749→    <div className="grid gap-6 lg:grid-cols-3">
+   750→      <Card className="lg:col-span-2">
+   751→        <CardHeader>
+   752→          <CardTitle className="text-base">Description</CardTitle>
+   753→          {canEdit && (
+   754→            <CardAction>
+   755→              <Button variant="outline" size="sm" onClick={startEdit}>
+   756→                <Pencil className="h-4 w-4" /> Edit
+   757→              </Button>
+   758→            </CardAction>
+   759→          )}
+   760→        </CardHeader>
+   761→        <CardContent className="space-y-3">
+   762→          {product.shortDescription && (
+   763→            <p className="text-sm font-medium">{product.shortDescription}</p>
+   764→          )}
+   765→          {product.description ? (
+   766→            <p className="text-sm text-muted-foreground whitespace-pre-wrap">
+   767→              {product.description}
+   768→            </p>
+   769→          ) : (
+   770→            <p className="text-sm text-muted-foreground italic">
+   771→              No description provided.
+   772→            </p>
+   773→          )}
+   774→        </CardContent>
+   775→      </Card>
+   776→
+   777→      <Card>
+   778→        <CardHeader>
+   779→          <CardTitle className="text-base">Details</CardTitle>
+   780→        </CardHeader>
+   781→        <CardContent className="space-y-3 text-sm">
+   782→          <DetailRow label="Category" value={product.category?.name ?? '—'} />
+   783→          <DetailRow label="Brand" value={product.brand?.name ?? '—'} />
+   784→          <DetailRow
+   785→            label="Variant count"
+   786→            value={String(product.variants.length)}
+   787→          />
+   788→          <DetailRow
+   789→            label="Slug"
+   790→            value={<code className="font-mono text-xs">{product.slug}</code>}
+   791→          />
+   792→          {product.isStitchable && (
+   793→            <div className="border-t pt-3 mt-3 space-y-3">
+   794→              <div className="flex items-center gap-2">
+   795→                <Shirt className="h-4 w-4 text-primary" />
+   796→                <p className="text-xs font-medium uppercase text-muted-foreground">
+   797→                  Stitching info
+   798→                </p>
+   799→              </div>
+   800→              <DetailRow
+   801→                label="Base price"
+   802→                value={formatMoney(product.stitchingBasePrice)}
+   803→              />
+   804→              <DetailRow
+   805→                label="Has size variants"
+   806→                value={product.hasSizeVariants ? 'Yes' : 'No'}
+   807→              />
+   808→            </div>
+   809→          )}
+   810→        </CardContent>
+   811→      </Card>
+   812→    </div>
+   813→  )
+   814→}
+   815→
+   816→// ----------------------------------------------------------------------------
+   817→// VariantsTab — interactive table + per-row edit dialog
+   818→// ----------------------------------------------------------------------------
+   819→function VariantsTab({
+   820→  product,
+   821→  productId,
+   822→  canEdit,
+   823→}: {
+   824→  product: ProductDetail
+   825→  productId: string
+   826→  canEdit: boolean
+   827→}) {
+   828→  const [editingVariant, setEditingVariant] = useState<ProductVariant | null>(null)
+   829→
+   830→  // Fetch inventory summary for live avg cost + stock display
+   831→  const { data: invData } = useQuery<{ variants: InventorySummaryVariant[] }>({
+   832→    queryKey: ['product-inventory', productId],
+   833→    queryFn: () => api.get(`/api/inventory/summary?product_id=${productId}`),
+   834→    staleTime: 15_000,
+   835→  })
+   836→
+   837→  function getInvInfo(variantId: string) {
+   838→    const v = invData?.variants?.find((x) => x.variantId === variantId)
+   839→    if (!v) return null
+   840→    return {
+   841→      avgCost: v.locations.length > 0 ? v.locations[0].avgCost : null,
+   842→      totalAvailable: v.totalAvailable,
+   843→      isMTO: v.fulfillmentType === 'made_to_order',
+   844→      hasStock: v.totalOnHand > 0,
+   845→    }
+   846→  }
+   847→
+   848→  return (
+   849→    <>
+   850→      {/* Weight not set warning — non-blocking indicator for variants with NULL weightKg */}
+   851→      {product.variants.some((v) => v.weightKg == null) && (
+   852→        <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 flex items-start gap-2">
+   853→          <AlertCircle className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" />
+   854→          <div className="text-xs text-amber-800">
+   855→            <p className="font-medium">Weight not set for {product.variants.filter((v) => v.weightKg == null).length} variant(s)</p>
+   856→            <p className="mt-0.5">
+   857→              Courier booking (Overland vs Normal) requires weight. Set it per variant or via the parent-group bulk action in the Variants table below.
+   858→            </p>
+   859→          </div>
+   860→        </div>
+   861→      )}
+   862→      <Card>
+   863→        <CardHeader>
+   864→          <CardTitle className="text-base flex items-center gap-2">
+   865→            <Tag className="h-4 w-4 text-primary" /> Variants
+   866→          </CardTitle>
+   867→          <CardDescription>
+   868→            Each row is a Shopify variant with its own SKU, price, and inventory policy.
+   869→          </CardDescription>
+   870→        </CardHeader>
+   871→        <CardContent className="p-0">
+   872→          <div className="overflow-x-auto">
+   873→            <Table>
+   874→              <TableHeader>
+   875→                <TableRow>
+   876→                  <TableHead>SKU</TableHead>
+   877→                  <TableHead>Attributes</TableHead>
+   878→                  <TableHead className="text-right">Cost</TableHead>
+   879→                  <TableHead className="text-right">Live Avg</TableHead>
+   880→                  <TableHead className="text-right">Stock</TableHead>
+   881→                  <TableHead className="text-right">Sale</TableHead>
+   882→                  <TableHead className="text-right">Compare</TableHead>
+   883→                  <TableHead className="text-right">Weight (kg)</TableHead>
+   884→                  <TableHead>Fulfillment</TableHead>
+   885→                  <TableHead>Stitching</TableHead>
+   886→                  <TableHead className="text-right">Days</TableHead>
+   887→                  <TableHead>Policy</TableHead>
+   888→                  <TableHead className="text-center">Active</TableHead>
+   889→                  {canEdit && <TableHead className="text-right">Actions</TableHead>}
+   890→                </TableRow>
+   891→              </TableHeader>
+   892→              <TableBody>
+   893→                {product.variants.length === 0 ? (
+   894→                  <TableRow>
+   895→                    <TableCell colSpan={canEdit ? 14 : 13} className="h-24 text-center text-muted-foreground text-sm">
+   896→                      No variants on this product.
+   897→                    </TableCell>
+   898→                  </TableRow>
+   899→                ) : (
+   900→                  product.variants.map((v) => (
+   901→                    <TableRow key={v.id}>
+   902→                      <TableCell className="font-mono text-xs">
+   903→                        <div className="flex items-center gap-1.5">
+   904→                          {v.sku}
+   905→                          {v.isDefault && (
+   906→                            <Badge variant="secondary" className="text-[9px] py-0 px-1">DEFAULT</Badge>
+   907→                          )}
+   908→                        </div>
+   909→                        {v.barcode && (
+   910→                          <div className="text-[10px] text-muted-foreground">{v.barcode}</div>
+   911→                        )}
+   912→                      </TableCell>
+   913→                      <TableCell className="text-xs">
+   914→                        {Object.keys(v.attributeValues).length === 0 ? (
+   915→                          <span className="text-muted-foreground">—</span>
+   916→                        ) : (
+   917→                          <div className="space-y-0.5">
+   918→                            {Object.entries(v.attributeValues).map(([k, val]) => (
+   919→                              <div key={k}>
+   920→                                <span className="text-muted-foreground">{k}:</span>{' '}
+   921→                                <span className="font-medium">{val}</span>
+   922→                              </div>
+   923→                            ))}
+   924→                          </div>
+   925→                        )}
+   926→                      </TableCell>
+   927→                      <TableCell className="text-right text-xs">
+   928→                        {formatMoney(v.costPrice)}
+   929→                        {v.stitchingCharges > 0 && (
+   930→                          <div className="text-[10px] text-muted-foreground">
+   931→                            +{formatMoney(v.stitchingCharges)} st.
+   932→                          </div>
+   933→                        )}
+   934→                      </TableCell>
+   935→                      <TableCell className="text-right text-xs text-muted-foreground" title="Live average cost from actual purchases — updates automatically when stock is received">
+   936→                        {(() => {
+   937→                          const inv = getInvInfo(v.id)
+   938→                          return inv?.avgCost != null ? `Rs. ${formatMoney(inv.avgCost)}` : '—'
+   939→                        })()}
+   940→                      </TableCell>
+   941→                      <TableCell className="text-right text-xs">
+   942→                        {(() => {
+   943→                          const inv = getInvInfo(v.id)
+   944→                          if (!inv) return <span className="text-muted-foreground">—</span>
+   945→                          if (inv.isMTO && !inv.hasStock) {
+   946→                            return <Badge variant="outline" className="text-[9px] bg-purple-50 text-purple-700 border-purple-200">MTO</Badge>
+   947→                          }
+   948→                          if (inv.totalAvailable === 0) {
+   949→                            return <span className="text-destructive font-medium" title="Out of stock">0</span>
+   950→                          }
+   951→                          return <span className="font-medium">{inv.totalAvailable}</span>
+   952→                        })()}
+   953→                      </TableCell>
+   954→                      <TableCell className="text-right text-xs font-medium">
+   955→                        {v.salePrice != null ? formatMoney(v.salePrice) : '—'}
+   956→                      </TableCell>
+   957→                      <TableCell className="text-right text-xs">
+   958→                        {v.weightKg != null ? (
+   959→                          <span>{v.weightKg}</span>
+   960→                        ) : (
+   961→                          <span className="text-amber-600 inline-flex items-center gap-0.5" title="Weight not set — courier booking will fall back to Overland">
+   962→                            <AlertCircle className="h-3 w-3" /> —
+   963→                          </span>
+   964→                        )}
+   965→                      </TableCell>
+   966→                      <TableCell>
+   967→                        <FulfillmentTypeBadge type={v.fulfillmentType} />
+   968→                      </TableCell>
+   969→                      <TableCell className="text-xs">
+   970→                        {v.fulfillmentType === 'made_to_order' ? (
+   971→                          v.stitchingType
+   972→                            ? STITCHING_LABELS[v.stitchingType] ?? v.stitchingType
+   973→                            : <span className="text-muted-foreground">—</span>
+   974→                        ) : (
+   975→                          <span className="text-muted-foreground text-[10px]">Stock tracked</span>
+   976→                        )}
+   977→                      </TableCell>
+   978→                      <TableCell className="text-right text-xs">
+   979→                        {v.fulfillmentType === 'made_to_order' && v.productionDays > 0
+   980→                          ? v.productionDays
+   981→                          : '—'}
+   982→                      </TableCell>
+   983→                      <TableCell>
+   984→                        <Badge variant="outline" className="text-[10px] font-mono">
+   985→                          {v.inventoryPolicy}
+   986→                        </Badge>
+   987→                      </TableCell>
+   988→                      <TableCell className="text-center">
+   989→                        <VariantActiveSwitch
+   990→                          productId={productId}
+   991→                          variantId={v.id}
+   992→                          isActive={v.isActive}
+   993→                          canEdit={canEdit}
+   994→                        />
+   995→                      </TableCell>
+   996→                      {canEdit && (
+   997→                        <TableCell className="text-right">
+   998→                          <Button
+   999→                            size="icon"
+  1000→                            variant="ghost"
+  1001→                            className="h-8 w-8"
+  1002→                            onClick={() => setEditingVariant(v)}
+  1003→                            aria-label={`Edit variant ${v.sku}`}
+  1004→                          >
+  1005→                            <Pencil className="h-3.5 w-3.5" />
+  1006→                          </Button>
+  1007→                        </TableCell>
+  1008→                      )}
+  1009→                    </TableRow>
+  1010→                  ))
+  1011→                )}
+  1012→              </TableBody>
+  1013→            </Table>
+  1014→          </div>
+  1015→        </CardContent>
+  1016→      </Card>
+  1017→
+  1018→      {/* Shopify Sync Preview (also on Variants tab as requested) */}
+  1019→      <Card className="mt-6">
+  1020→        <CardHeader>
+  1021→          <CardTitle className="text-base flex items-center gap-2">
+  1022→            <Store className="h-4 w-4 text-primary" /> Shopify Sync Preview
+  1023→          </CardTitle>
+  1024→          <CardDescription>
+  1025→            What will be sent to Shopify per variant.
+  1026→          </CardDescription>
+  1027→        </CardHeader>
+  1028→        <CardContent className="p-0">
+  1029→          <div className="overflow-x-auto">
+  1030→            <Table>
+  1031→              <TableHeader>
+  1032→                <TableRow>
+  1033→                  <TableHead>SKU</TableHead>
+  1034→                  <TableHead>inventory_management</TableHead>
+  1035→                  <TableHead>inventory_policy</TableHead>
+  1036→                  <TableHead className="text-right">price</TableHead>
+  1037→                  <TableHead className="text-right">compare_at_price</TableHead>
+  1038→                  <TableHead className="text-right">grams</TableHead>
+  1039→                  <TableHead>requires_shipping</TableHead>
+  1040→                  <TableHead>taxable</TableHead>
+  1041→                </TableRow>
+  1042→              </TableHeader>
+  1043→              <TableBody>
+  1044→                {product.variants.map((v) => (
+  1045→                  <TableRow key={v.id}>
+  1046→                    <TableCell className="font-mono text-xs">{v.sku}</TableCell>
+  1047→                    <TableCell>
+  1048→                      <code className="text-xs">
+  1049→                        {v.fulfillmentType === 'stock_based' ? 'shopify' : 'null'}
+  1050→                      </code>
+  1051→                    </TableCell>
+  1052→                    <TableCell>
+  1053→                      <Badge
+  1054→                        variant="outline"
+  1055→                        className={cn(
+  1056→                          'text-[10px] font-mono',
+  1057→                          v.inventoryPolicy === 'deny'
+  1058→                            ? 'border-amber-300 text-amber-700'
+  1059→                            : 'border-emerald-300 text-emerald-700',
+  1060→                        )}
+  1061→                      >
+  1062→                        {v.inventoryPolicy}
+  1063→                      </Badge>
+  1064→                    </TableCell>
+  1065→                    <TableCell className="text-right text-xs">
+  1066→                      {v.salePrice != null ? formatMoney(v.salePrice) : '—'}
+  1067→                    </TableCell>
+  1068→                    <TableCell className="text-right text-xs text-muted-foreground">
+  1069→                      {v.comparePrice != null ? formatMoney(v.comparePrice) : 'null'}
+  1070→                    </TableCell>
+  1071→                    <TableCell className="text-right text-xs">{v.weightGrams}</TableCell>
+  1072→                    <TableCell>
+  1073→                      <code className="text-xs">{v.requiresShipping ? 'true' : 'false'}</code>
+  1074→                    </TableCell>
+  1075→                    <TableCell>
+  1076→                      <code className="text-xs">{v.isTaxable ? 'true' : 'false'}</code>
+  1077→                    </TableCell>
+  1078→                  </TableRow>
+  1079→                ))}
+  1080→              </TableBody>
+  1081→            </Table>
+  1082→          </div>
+  1083→        </CardContent>
+  1084→      </Card>
+  1085→
+  1086→      {/* Variant edit dialog */}
+  1087→      {editingVariant && (
+  1088→        <VariantEditDialog
+  1089→          product={product}
+  1090→          variant={editingVariant}
+  1091→          onClose={() => setEditingVariant(null)}
+  1092→        />
+  1093→      )}
+  1094→    </>
+  1095→  )
+  1096→}
+  1097→
+  1098→/** Interactive is_active switch with optimistic update + revert on error. */
+  1099→function VariantActiveSwitch({
+  1100→  productId,
+  1101→  variantId,
+  1102→  isActive,
+  1103→  canEdit,
+  1104→}: {
+  1105→  productId: string
+  1106→  variantId: string
+  1107→  isActive: boolean
+  1108→  canEdit: boolean
+  1109→}) {
+  1110→  const queryClient = useQueryClient()
+  1111→
+  1112→  const mutation = useMutation({
+  1113→    mutationFn: (newVal: boolean) =>
+  1114→      api.post(`/api/products/${productId}/variants/${variantId}/toggle`, {
+  1115→        is_active: newVal,
+  1116→      }),
+  1117→    onMutate: async (newVal) => {
+  1118→      // Optimistic update — flip the cached variant's isActive immediately.
+  1119→      await queryClient.cancelQueries({ queryKey: ['product', productId] })
+  1120→      const prev = queryClient.getQueryData<{ product: ProductDetail }>(['product', productId])
+  1121→      if (prev) {
+  1122→        queryClient.setQueryData<{ product: ProductDetail }>(['product', productId], {
+  1123→          product: {
+  1124→            ...prev.product,
+  1125→            variants: prev.product.variants.map((v) =>
+  1126→              v.id === variantId ? { ...v, isActive: newVal } : v
+  1127→            ),
+  1128→          },
+  1129→        })
+  1130→      }
+  1131→      return { prev }
+  1132→    },
+  1133→    onError: (err, _newVal, context) => {
+  1134→      // Revert the optimistic update.
+  1135→      if (context?.prev) {
+  1136→        queryClient.setQueryData(['product', productId], context.prev)
+  1137→      }
+  1138→      toast.error(err instanceof FetchError ? err.message : 'Failed to toggle variant.')
+  1139→    },
+  1140→    onSuccess: () => {
+  1141→      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+  1142→      toast.success('Variant status updated.')
+  1143→    },
+  1144→  })
+  1145→
+  1146→  return (
+  1147→    <Switch
+  1148→      checked={isActive}
+  1149→      disabled={!canEdit || mutation.isPending}
+  1150→      onCheckedChange={(v) => mutation.mutate(v)}
+  1151→      aria-label="Toggle variant active"
+  1152→    />
+  1153→  )
+  1154→}
+  1155→
+  1156→/** Variant edit dialog with SKU-change confirmation step. */
+  1157→function VariantEditDialog({
+  1158→  product,
+  1159→  variant,
+  1160→  onClose,
+  1161→}: {
+  1162→  product: ProductDetail
+  1163→  variant: ProductVariant
+  1164→  onClose: () => void
+  1165→}) {
+  1166→  const queryClient = useQueryClient()
+  1167→  const [step, setStep] = useState<'edit' | 'confirm'>('edit')
+  1168→  const [form, setForm] = useState({
+  1169→    sku: variant.sku,
+  1170→    barcode: variant.barcode ?? '',
+  1171→    costPrice: variant.costPrice,
+  1172→    weightGrams: variant.weightGrams,
+  1173→    stitchingCharges: variant.stitchingCharges,
+  1174→    productionDays: variant.productionDays,
+  1175→    isTaxable: variant.isTaxable,
+  1176→    requiresShipping: variant.requiresShipping,
+  1177→  })
+  1178→
+  1179→  const mutation = useMutation({
+  1180→    mutationFn: (patch: Record<string, unknown>) =>
+  1181→      api.patch(`/api/products/${product.id}/variants/${variant.id}`, patch),
+  1182→    onSuccess: () => {
+  1183→      queryClient.invalidateQueries({ queryKey: ['product', product.id] })
+  1184→      toast.success('Variant updated.')
+  1185→      onClose()
+  1186→    },
+  1187→    onError: (err) => {
+  1188→      // Send the user back to the edit step so they can fix and retry.
+  1189→      setStep('edit')
+  1190→      toast.error(err instanceof FetchError ? err.message : 'Failed to update variant.')
+  1191→    },
+  1192→  })
+  1193→
+  1194→  function buildPatch(): Record<string, unknown> {
+  1195→    const patch: Record<string, unknown> = {}
+  1196→    if (form.sku !== variant.sku) patch.sku = form.sku
+  1197→    if (form.barcode !== (variant.barcode ?? '')) patch.barcode = form.barcode
+  1198→    if (form.costPrice !== variant.costPrice) patch.cost_price = form.costPrice
+  1199→    if (form.weightGrams !== variant.weightGrams) patch.weight_grams = form.weightGrams
+  1200→    if (form.stitchingCharges !== variant.stitchingCharges) patch.stitching_charges = form.stitchingCharges
+  1201→    if (form.productionDays !== variant.productionDays) patch.production_days = form.productionDays
+  1202→    if (form.isTaxable !== variant.isTaxable) patch.is_taxable = form.isTaxable
+  1203→    if (form.requiresShipping !== variant.requiresShipping) patch.requires_shipping = form.requiresShipping
+  1204→    return patch
+  1205→  }
+  1206→
+  1207→  function trySave() {
+  1208→    const patch = buildPatch()
+  1209→    if (Object.keys(patch).length === 0) {
+  1210→      toast.info('No changes to save.')
+  1211→      onClose()
+  1212→      return
+  1213→    }
+  1214→    if (patch.sku !== undefined) {
+  1215→      // SKU is changing — show the confirmation step before saving.
+  1216→      setStep('confirm')
+  1217→    } else {
+  1218→      mutation.mutate(patch)
+  1219→    }
+  1220→  }
+  1221→
+  1222→  function confirmSave() {
+  1223→    mutation.mutate(buildPatch())
+  1224→  }
+  1225→
+  1226→  return (
+  1227→    <Dialog
+  1228→      open
+  1229→      onOpenChange={(o) => {
+  1230→        if (!o && !mutation.isPending) onClose()
+  1231→      }}
+  1232→    >
+  1233→      <DialogContent className="sm:max-w-lg">
+  1234→        {step === 'edit' ? (
+  1235→          <>
+  1236→            <DialogHeader>
+  1237→              <DialogTitle className="flex items-center gap-2">
+  1238→                <Pencil className="h-4 w-4" /> Edit variant
+  1239→              </DialogTitle>
+  1240→              <DialogDescription>
+  1241→                Update SKU, pricing, and physical attributes for this variant.
+  1242→              </DialogDescription>
+  1243→            </DialogHeader>
+  1244→            <div className="space-y-4 py-2 max-h-[60vh] overflow-y-auto pr-1">
+  1245→              <div className="space-y-1.5">
+  1246→                <Label htmlFor="v-sku">SKU</Label>
+  1247→                <Input
+  1248→                  id="v-sku"
+  1249→                  value={form.sku}
+  1250→                  onChange={(e) => setForm({ ...form, sku: e.target.value })}
+  1251→                  className="font-mono"
+  1252→                />
+  1253→                {form.sku !== variant.sku && (
+  1254→                  <p className="text-xs text-amber-600 flex items-center gap-1">
+  1255→                    <AlertCircle className="h-3 w-3" />
+  1256→                    Changing SKU will require confirmation.
+  1257→                  </p>
+  1258→                )}
+  1259→              </div>
+  1260→              <div className="space-y-1.5">
+  1261→                <Label htmlFor="v-barcode">Barcode</Label>
+  1262→                <Input
+  1263→                  id="v-barcode"
+  1264→                  value={form.barcode}
+  1265→                  onChange={(e) => setForm({ ...form, barcode: e.target.value })}
+  1266→                />
+  1267→              </div>
+  1268→              <div className="grid grid-cols-2 gap-3">
+  1269→                <div className="space-y-1.5">
+  1270→                  <Label htmlFor="v-cost">Cost price</Label>
+  1271→                  <Input
+  1272→                    id="v-cost"
+  1273→                    type="number"
+  1274→                    min="0"
+  1275→                    step="0.01"
+  1276→                    value={form.costPrice}
+  1277→                    onChange={(e) => setForm({ ...form, costPrice: Number(e.target.value) })}
+  1278→                  />
+  1279→                </div>
+  1280→                <div className="space-y-1.5">
+  1281→                  <Label htmlFor="v-weight">Weight (g)</Label>
+  1282→                  <Input
+  1283→                    id="v-weight"
+  1284→                    type="number"
+  1285→                    min="0"
+  1286→                    step="1"
+  1287→                    value={form.weightGrams}
+  1288→                    onChange={(e) => setForm({ ...form, weightGrams: Number(e.target.value) })}
+  1289→                  />
+  1290→                </div>
+  1291→              </div>
+  1292→              <div className="grid grid-cols-2 gap-3">
+  1293→                <div className="space-y-1.5">
+  1294→                  <Label htmlFor="v-stitch">Stitching charges</Label>
+  1295→                  <Input
+  1296→                    id="v-stitch"
+  1297→                    type="number"
+  1298→                    min="0"
+  1299→                    step="0.01"
+  1300→                    value={form.stitchingCharges}
+  1301→                    onChange={(e) => setForm({ ...form, stitchingCharges: Number(e.target.value) })}
+  1302→                  />
+  1303→                </div>
+  1304→                <div className="space-y-1.5">
+  1305→                  <Label htmlFor="v-days">Production days</Label>
+  1306→                  <Input
+  1307→                    id="v-days"
+  1308→                    type="number"
+  1309→                    min="0"
+  1310→                    step="1"
+  1311→                    value={form.productionDays}
+  1312→                    onChange={(e) => setForm({ ...form, productionDays: Number(e.target.value) })}
+  1313→                  />
+  1314→                </div>
+  1315→              </div>
+  1316→              <div className="flex items-center justify-between rounded-lg border p-3">
+  1317→                <div>
+  1318→                  <p className="text-sm font-medium">Taxable</p>
+  1319→                  <p className="text-xs text-muted-foreground">Charge tax on this variant.</p>
+  1320→                </div>
+  1321→                <Switch
+  1322→                  checked={form.isTaxable}
+  1323→                  onCheckedChange={(v) => setForm({ ...form, isTaxable: v })}
+  1324→                />
+  1325→              </div>
+  1326→              <div className="flex items-center justify-between rounded-lg border p-3">
+  1327→                <div>
+  1328→                  <p className="text-sm font-medium">Requires shipping</p>
+  1329→                  <p className="text-xs text-muted-foreground">Variant is a physical product.</p>
+  1330→                </div>
+  1331→                <Switch
+  1332→                  checked={form.requiresShipping}
+  1333→                  onCheckedChange={(v) => setForm({ ...form, requiresShipping: v })}
+  1334→                />
+  1335→              </div>
+  1336→            </div>
+  1337→            <DialogFooter>
+  1338→              <Button variant="ghost" onClick={onClose} disabled={mutation.isPending}>
+  1339→                Cancel
+  1340→              </Button>
+  1341→              <Button onClick={trySave} disabled={mutation.isPending}>
+  1342→                {mutation.isPending ? (
+  1343→                  <Loader2 className="h-4 w-4 animate-spin" />
+  1344→                ) : (
+  1345→                  <Save className="h-4 w-4" />
+  1346→                )}
+  1347→                Save changes
+  1348→              </Button>
+  1349→            </DialogFooter>
+  1350→          </>
+  1351→        ) : (
+  1352→          // ---- SKU change confirmation step
+  1353→          <>
+  1354→            <DialogHeader>
+  1355→              <DialogTitle className="flex items-center gap-2">
+  1356→                <AlertCircle className="h-5 w-5 text-amber-500" /> Confirm SKU change
+  1357→              </DialogTitle>
+  1358→              <DialogDescription>
+  1359→                Changing SKU won&apos;t affect history but may cause confusion with existing labels. Continue?
+  1360→              </DialogDescription>
+  1361→            </DialogHeader>
+  1362→            <div className="rounded-lg border bg-muted/30 p-3 text-sm space-y-1">
+  1363→              <div className="flex justify-between gap-3">
+  1364→                <span className="text-muted-foreground">Old SKU</span>
+  1365→                <code className="font-mono">{variant.sku}</code>
+  1366→              </div>
+  1367→              <div className="flex justify-between gap-3">
+  1368→                <span className="text-muted-foreground">New SKU</span>
+  1369→                <code className="font-mono font-medium">{form.sku}</code>
+  1370→              </div>
+  1371→            </div>
+  1372→            <DialogFooter>
+  1373→              <Button variant="ghost" onClick={() => setStep('edit')} disabled={mutation.isPending}>
+  1374→                Back
+  1375→              </Button>
+  1376→              <Button onClick={confirmSave} disabled={mutation.isPending}>
+  1377→                {mutation.isPending ? (
+  1378→                  <Loader2 className="h-4 w-4 animate-spin" />
+  1379→                ) : (
+  1380→                  <Check className="h-4 w-4" />
+  1381→                )}
+  1382→                Continue
+  1383→              </Button>
+  1384→            </DialogFooter>
+  1385→          </>
+  1386→        )}
+  1387→      </DialogContent>
+  1388→    </Dialog>
+  1389→  )
+  1390→}
+  1391→
+  1392→// ----------------------------------------------------------------------------
+  1393→// ImagesTab — upload + delete + primary badge
+  1394→// ----------------------------------------------------------------------------
+  1395→function ImagesTab({
+  1396→  product,
+  1397→  productId,
+  1398→  canEdit,
+  1399→}: {
+  1400→  product: ProductDetail
+  1401→  productId: string
+  1402→  canEdit: boolean
+  1403→}) {
+  1404→  const queryClient = useQueryClient()
+  1405→  const fileInputRef = useRef<HTMLInputElement>(null)
+  1406→  const [uploading, setUploading] = useState(false)
+  1407→  const [deletingId, setDeletingId] = useState<string | null>(null)
+  1408→
+  1409→  // NOTE: The backend route `PATCH /api/products/[id]/images/[imageId]` for
+  1410→  // setting is_primary does not exist yet. Upload already auto-sets the first
+  1411→  // image as primary, so the manual primary toggle is intentionally skipped
+  1412→  // for now. When that route lands, wire a "Set Primary" star button per
+  1413→  // non-primary image here.
+  1414→
+  1415→  const uploadMutation = useMutation({
+  1416→    mutationFn: async (file: File) => {
+  1417→      // Use raw fetch — multipart FormData must NOT have a JSON Content-Type.
+  1418→      const fd = new FormData()
+  1419→      fd.append('file', file)
+  1420→      const res = await fetch(`/api/products/${productId}/images`, {
+  1421→        method: 'POST',
+  1422→        body: fd,
+  1423→        credentials: 'include',
+  1424→        headers: getSessionToken() ? { Authorization: `Bearer ${getSessionToken()}` } : {},
+  1425→        cache: 'no-store',
+  1426→      })
+  1427→      const text = await res.text()
+  1428→      let body: unknown = null
+  1429→      if (text) {
+  1430→        try {
+  1431→          body = JSON.parse(text)
+  1432→        } catch {
+  1433→          body = text
+  1434→        }
+  1435→      }
+  1436→      if (!res.ok) {
+  1437→        const msg =
+  1438→          body && typeof body === 'object' && 'error' in body
+  1439→            ? String((body as { error: unknown }).error)
+  1440→            : typeof body === 'string'
+  1441→              ? body
+  1442→              : 'Upload failed'
+  1443→        throw new FetchError(res.status, msg)
+  1444→      }
+  1445→      return body as { image_id: string; public_url: string; is_primary: boolean }
+  1446→    },
+  1447→    onSuccess: () => {
+  1448→      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+  1449→      toast.success('Image uploaded.')
+  1450→    },
+  1451→    onError: (err) => {
+  1452→      toast.error(err instanceof FetchError ? err.message : 'Failed to upload image.')
+  1453→    },
+  1454→    onSettled: () => {
+  1455→      setUploading(false)
+  1456→    },
+  1457→  })
+  1458→
+  1459→  const deleteMutation = useMutation({
+  1460→    mutationFn: (imageId: string) =>
+  1461→      api.delete(`/api/products/${productId}/images?image_id=${imageId}`),
+  1462→    onSuccess: () => {
+  1463→      queryClient.invalidateQueries({ queryKey: ['product', productId] })
+  1464→      toast.success('Image deleted.')
+  1465→    },
+  1466→    onError: (err) => {
+  1467→      toast.error(err instanceof FetchError ? err.message : 'Failed to delete image.')
+  1468→    },
+  1469→    onSettled: () => {
+  1470→      setDeletingId(null)
+  1471→    },
+  1472→  })
+  1473→
+  1474→  function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+  1475→    const file = e.target.files?.[0]
+  1476→    // Reset input so the same file can be picked again later.
+  1477→    e.target.value = ''
+  1478→    if (!file) return
+  1479→    // Client-side size guard — backend also enforces 5 MB, but this avoids the
+  1480→    // round-trip for obviously-too-large files.
+  1481→    if (file.size > 5 * 1024 * 1024) {
+  1482→      toast.error('File too large. Maximum 5 MB.')
+  1483→      return
+  1484→    }
+  1485→    setUploading(true)
+  1486→    uploadMutation.mutate(file)
+  1487→  }
+  1488→
+  1489→  return (
+  1490→    <Card>
+  1491→      <CardHeader>
+  1492→        <CardTitle className="text-base flex items-center gap-2">
+  1493→          <ImageIcon className="h-4 w-4 text-primary" /> Images
+  1494→        </CardTitle>
+  1495→        <CardDescription>
+  1496→          Product images used on the storefront and Shopify sync. First image becomes primary automatically.
+  1497→        </CardDescription>
+  1498→        {canEdit && (
+  1499→          <CardAction>
+  1500→            <input
+  1501→              ref={fileInputRef}
+  1502→              type="file"
+  1503→              accept="image/jpeg,image/png,image/webp"
+  1504→              className="hidden"
+  1505→              onChange={onPickFile}
+  1506→              disabled={uploading}
+  1507→            />
+  1508→            <Button
+  1509→              size="sm"
+  1510→              onClick={() => fileInputRef.current?.click()}
+  1511→              disabled={uploading}
+  1512→            >
+  1513→              {uploading ? (
+  1514→                <Loader2 className="h-4 w-4 animate-spin" />
+  1515→              ) : (
+  1516→                <Upload className="h-4 w-4" />
+  1517→              )}
+  1518→              Upload
+  1519→            </Button>
+  1520→          </CardAction>
+  1521→        )}
+  1522→      </CardHeader>
+  1523→      <CardContent>
+  1524→        {product.images.length === 0 ? (
+  1525→          <div className="text-center py-12 border border-dashed rounded-lg">
+  1526→            <div className="mx-auto h-12 w-12 rounded-full bg-muted flex items-center justify-center mb-3">
+  1527→              <ImageIcon className="h-6 w-6 text-muted-foreground" />
+  1528→            </div>
+  1529→            <p className="text-sm font-medium">No images yet</p>
+  1530→            <p className="text-xs text-muted-foreground mt-1">
+  1531→              {canEdit
+  1532→                ? 'Upload images to showcase this product.'
+  1533→                : 'No images have been uploaded yet.'}
+  1534→            </p>
+  1535→          </div>
+  1536→        ) : (
+  1537→          <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 lg:grid-cols-4">
+  1538→            {product.images.map((img) => (
+  1539→              <div
+  1540→                key={img.id}
+  1541→                className="relative aspect-square rounded-lg border overflow-hidden bg-muted group"
+  1542→              >
+  1543→                <img
+  1544→                  src={img.publicUrl}
+  1545→                  alt={`${product.title} image ${img.displayOrder + 1}`}
+  1546→                  className="h-full w-full object-cover"
+  1547→                />
+  1548→                {img.isPrimary && (
+  1549→                  <div className="absolute top-2 left-2">
+  1550→                    <Badge className="bg-background/90 backdrop-blur text-foreground border-transparent text-[10px] gap-1">
+  1551→                      <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
+  1552→                      Primary
+  1553→                    </Badge>
+  1554→                  </div>
+  1555→                )}
+  1556→                {img.variantId && (
+  1557→                  <div className="absolute bottom-2 left-2">
+  1558→                    <Badge className="bg-background/90 backdrop-blur text-foreground border-transparent text-[10px]">
+  1559→                      Variant
+  1560→                    </Badge>
+  1561→                  </div>
+  1562→                )}
+  1563→                {canEdit && (
+  1564→                  <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+  1565→                    <Button
+  1566→                      size="icon"
+  1567→                      variant="secondary"
+  1568→                      className="h-7 w-7"
+  1569→                      onClick={() => {
+  1570→                        setDeletingId(img.id)
+  1571→                        deleteMutation.mutate(img.id)
+  1572→                      }}
+  1573→                      disabled={deletingId === img.id || uploading}
+  1574→                      aria-label="Delete image"
+  1575→                      title="Delete image"
+  1576→                    >
+  1577→                      {deletingId === img.id ? (
+  1578→                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+  1579→                      ) : (
+  1580→                        <Trash2 className="h-3.5 w-3.5" />
+  1581→                      )}
+  1582→                    </Button>
+  1583→                  </div>
+  1584→                )}
+  1585→              </div>
+  1586→            ))}
+  1587→          </div>
+  1588→        )}
+  1589→      </CardContent>
+  1590→    </Card>
+  1591→  )
+  1592→}
+  1593→
+  1594→// ----------------------------------------------------------------------------
+  1595→// Inventory Tab — per-variant stock summary, per-location breakdown, MTO banner
+  1596→// ----------------------------------------------------------------------------
+  1597→interface InventorySummaryVariant {
+  1598→  variantId: string
+  1599→  sku: string
+  1600→  fulfillmentType: string
+  1601→  trackInventory: boolean
+  1602→  totalOnHand: number
+  1603→  totalReserved: number
+  1604→  totalAvailable: number
+  1605→  totalValue: number
+  1606→  locations: Array<{
+  1607→    locationId: string
+  1608→    locationName: string
+  1609→    onHand: number
+  1610→    reserved: number
+  1611→    available: number
+  1612→    avgCost: number
+  1613→    incoming: number
+  1614→  }>
+  1615→}
+  1616→
+  1617→function InventoryTab({
+  1618→  productId,
+  1619→  variants,
+  1620→  isStitchable,
+  1621→}: {
+  1622→  productId: string
+  1623→  variants: ProductVariant[]
+  1624→  isStitchable: boolean
+  1625→}) {
+  1626→  const navigate = useAppStore((s) => s.navigate)
+  1627→  const can = useCan()
+  1628→  const { data, isLoading, isError, refetch } = useQuery<{ variants: InventorySummaryVariant[] }>({
+  1629→    queryKey: ['product-inventory', productId],
+  1630→    queryFn: () => api.get(`/api/inventory/summary?product_id=${productId}`),
+  1631→    staleTime: 15_000,
+  1632→  })
+  1633→
+  1634→  if (isLoading) {
+  1635→    return (
+  1636→      <Card>
+  1637→        <CardContent className="p-6 space-y-3">
+  1638→          {[0, 1, 2].map((i) => (
+  1639→            <div key={i} className="h-16 rounded bg-muted/50 animate-pulse" />
+  1640→          ))}
+  1641→        </CardContent>
+  1642→      </Card>
+  1643→    )
+  1644→  }
+  1645→
+  1646→  if (isError) {
+  1647→    return (
+  1648→      <Card>
+  1649→        <CardContent className="p-6 text-center">
+  1650→          <AlertCircle className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+  1651→          <p className="text-sm text-muted-foreground mb-3">Failed to load inventory data.</p>
+  1652→          <Button variant="outline" size="sm" onClick={() => refetch()}>Retry</Button>
+  1653→        </CardContent>
+  1654→      </Card>
+  1655→    )
+  1656→  }
+  1657→
+  1658→  if (!data || data.variants.length === 0) {
+  1659→    return (
+  1660→      <Card>
+  1661→        <CardContent className="p-6 text-center text-sm text-muted-foreground">
+  1662→          No inventory data for this product yet.
+  1663→        </CardContent>
+  1664→      </Card>
+  1665→    )
+  1666→  }
+  1667→
+  1668→  return (
+  1669→    <div className="space-y-4">
+  1670→      {data.variants.map((v) => {
+  1671→        const variantInfo = variants.find((vv) => vv.id === v.variantId)
+  1672→        const isMTO = v.fulfillmentType === 'made_to_order'
+  1673→        const hasReturnedStock = isMTO && v.totalOnHand > 0
+  1674→
+  1675→        return (
+  1676→          <Card key={v.variantId}>
+  1677→            <CardHeader className="pb-3">
+  1678→              <div className="flex items-center justify-between">
+  1679→                <div>
+  1680→                  <CardTitle className="text-base flex items-center gap-2">
+  1681→                    <Tag className="h-4 w-4 text-muted-foreground" />
+  1682→                    <span className="font-mono text-sm">{v.sku}</span>
+  1683→                  </CardTitle>
+  1684→                  {variantInfo && (
+  1685→                    <div className="mt-1 flex items-center gap-2">
+  1686→                      <FulfillmentTypeBadge type={v.fulfillmentType} />
+  1687→                      {variantInfo.attributeValues && Object.keys(variantInfo.attributeValues).length > 0 && (
+  1688→                        <span className="text-xs text-muted-foreground">
+  1689→                          {Object.entries(variantInfo.attributeValues).map(([k, val]) => `${k}: ${val}`).join(' · ')}
+  1690→                        </span>
+  1691→                      )}
+  1692→                    </div>
+  1693→                  )}
+  1694→                </div>
+  1695→                <div className="text-right">
+  1696→                  <div className="flex gap-4 text-sm">
+  1697→                    <div>
+  1698→                      <span className="text-muted-foreground">On Hand: </span>
+  1699→                      <span className="font-medium">{v.totalOnHand}</span>
+  1700→                    </div>
+  1701→                    <div>
+  1702→                      <span className="text-muted-foreground">Available: </span>
+  1703→                      <span className="font-medium">{v.totalAvailable}</span>
+  1704→                    </div>
+  1705→                    <div>
+  1706→                      <span className="text-muted-foreground">Value: </span>
+  1707→                      <span className="font-medium">Rs. {formatMoney(v.totalValue)}</span>
+  1708→                    </div>
+  1709→                  </div>
+  1710→                </div>
+  1711→              </div>
+  1712→            </CardHeader>
+  1713→            <CardContent className="space-y-3">
+  1714→              {/* MTO returned stock banner */}
+  1715→              {isMTO && !hasReturnedStock && (
+  1716→                <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+  1717→                  <Package className="h-4 w-4 inline mr-2" />
+  1718→                  No returned stock — next order triggers fresh production.
+  1719→                </div>
+  1720→              )}
+  1721→              {isMTO && hasReturnedStock && (
+  1722→                <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-700">
+  1723→                  <Package className="h-4 w-4 inline mr-2" />
+  1724→                  {v.totalOnHand} returned piece(s) available (Rs. {formatMoney(v.totalValue)}) — next order uses this stock automatically.
+  1725→                </div>
+  1726→              )}
+  1727→
+  1728→              {/* Per-location breakdown */}
+  1729→              {v.locations.length > 0 ? (
+  1730→                <Table>
+  1731→                  <TableHeader>
+  1732→                    <TableRow>
+  1733→                      <TableHead>Location</TableHead>
+  1734→                      <TableHead className="text-right">On Hand</TableHead>
+  1735→                      <TableHead className="text-right">Reserved</TableHead>
+  1736→                      <TableHead className="text-right">Available</TableHead>
+  1737→                      <TableHead className="text-right">Avg Cost</TableHead>
+  1738→                      <TableHead className="text-right">Incoming</TableHead>
+  1739→                    </TableRow>
+  1740→                  </TableHeader>
+  1741→                  <TableBody>
+  1742→                    {v.locations.map((loc) => (
+  1743→                      <TableRow key={loc.locationId}>
+  1744→                        <TableCell className="text-sm">{loc.locationName}</TableCell>
+  1745→                        <TableCell className="text-right text-sm font-medium">{loc.onHand}</TableCell>
+  1746→                        <TableCell className="text-right text-sm text-muted-foreground">{loc.reserved}</TableCell>
+  1747→                        <TableCell className="text-right text-sm font-medium">{loc.available}</TableCell>
+  1748→                        <TableCell className="text-right text-sm">Rs. {formatMoney(loc.avgCost)}</TableCell>
+  1749→                        <TableCell className="text-right text-sm text-muted-foreground">{loc.incoming > 0 ? loc.incoming : '—'}</TableCell>
+  1750→                      </TableRow>
+  1751→                    ))}
+  1752→                  </TableBody>
+  1753→                </Table>
+  1754→              ) : (
+  1755→                <p className="text-xs text-muted-foreground py-2">No stock at any location.</p>
+  1756→              )}
+  1757→
+  1758→              {/* Quick action buttons */}
+  1759→              <div className="flex flex-wrap gap-2 pt-1">
+  1760→                {can(PERMISSIONS.INVENTORY_RECEIVE) && (
+  1761→                  <Button variant="outline" size="sm" onClick={() => navigate({ name: 'inventory-receive' })}>
+  1762→                    <PackagePlus className="h-3.5 w-3.5" /> Receive Stock
+  1763→                  </Button>
+  1764→                )}
+  1765→                {can(PERMISSIONS.INVENTORY_ADJUST) && (
+  1766→                  <Button variant="outline" size="sm" onClick={() => navigate({ name: 'inventory-adjust' })}>
+  1767→                    <SlidersHorizontal className="h-3.5 w-3.5" /> Adjust
+  1768→                  </Button>
+  1769→                )}
+  1770→                {can(PERMISSIONS.INVENTORY_TRANSFER) && (
+  1771→                  <Button variant="outline" size="sm" onClick={() => navigate({ name: 'inventory-transfer' })}>
+  1772→                    <ArrowLeftRight className="h-3.5 w-3.5" /> Transfer
+  1773→                  </Button>
+  1774→                )}
+  1775→                <Button variant="outline" size="sm" onClick={() => navigate({ name: 'inventory' })}>
+  1776→                  <TrendingUp className="h-3.5 w-3.5" /> View Full History
+  1777→                </Button>
+  1778→              </div>
+  1779→            </CardContent>
+  1780→          </Card>
+  1781→        )
+  1782→      })}
+  1783→    </div>
+  1784→  )
+  1785→}
+  1786→
+  1787→// ----------------------------------------------------------------------------
+  1788→// Utilities
+  1789→// ----------------------------------------------------------------------------
+  1790→function formatMoney(n: number): string {
+  1791→  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(n)
+  1792→}
+  1793→

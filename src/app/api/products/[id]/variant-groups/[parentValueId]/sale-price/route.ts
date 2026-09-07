@@ -10,7 +10,16 @@ export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
 /** Set sale/compare price for an entire parent group (cascades to synced children only).
- *  Uses CompanyVariantPricing (per-company pricing) — no market scoping. */
+ *  Uses CompanyVariantPricing (per-company pricing) — no market scoping.
+ *
+ *  NOTE (PROD-009): `parentValueId` from the URL is INTENTIONALLY UNUSED by this
+ *  handler. It exists purely to give the route a unique path so the Next.js App
+ *  Router can distinguish it from sibling variant-group routes (e.g.
+ *  `.../cost`, `.../weight`). The actual parent attribute + value that drive
+ *  the cascade are read from the request body (`parent_attribute_name` and
+ *  `parent_value`). The URL parameter is decorative for route uniqueness
+ *  only and any string value will be accepted.
+ */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string; parentValueId: string }> },
@@ -26,7 +35,10 @@ export async function POST(
     const company = settings?.activeCompany
     if (!orgId || !company) throw new ApiError(403, 'No active company')
 
-    const { id: productId, parentValueId } = await params
+    // parentValueId is intentionally unused — see the JSDoc comment above
+    // (PROD-009). The cascade is body-driven via parent_attribute_name +
+    // parent_value below.
+    const { id: productId } = await params
     const caller = await db.employee.findFirst({
       where: { companyId: company.id, userId: user.id, status: 'active' },
       include: { role: true },

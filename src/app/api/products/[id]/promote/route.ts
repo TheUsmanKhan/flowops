@@ -98,6 +98,24 @@ export async function POST(
           },
         })
       }
+      // PROD-005: Revoke access for companies NOT in the new selection list.
+      // Without this, stale rows silently re-grant access on the next promote.
+      if (d.selected_company_ids.length > 0) {
+        await db.selectiveProductAccess.deleteMany({
+          where: {
+            orgProductId: productId,
+            companyId: { notIn: d.selected_company_ids },
+          },
+        })
+      }
+    } else {
+      // target_scope === 'organization' (private is not allowed by promoteProductSchema).
+      // Org-wide scope does not use SelectiveProductAccess — purge any stale rows
+      // left over from a prior 'selective' promotion so they cannot silently
+      // re-grant access if the product is later re-promoted to selective.
+      await db.selectiveProductAccess.deleteMany({
+        where: { orgProductId: productId },
+      })
     }
 
     insertAuditLog({

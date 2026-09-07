@@ -109,22 +109,35 @@ export type VariantInput = z.infer<typeof variantSchema>
 // PRODUCT SCHEMA
 // ──────────────────────────────────────────────────────────────
 
-export const productSchema = z.object({
-  title: z.string().min(1, 'Title is required').max(255),
-  base_sku: z.string().max(50).optional().or(z.literal('')),
-  description: z.string().optional().or(z.literal('')),
-  short_description: z.string().max(500).optional().or(z.literal('')),
-  product_type: z.enum(['simple', 'variable', 'bundle', 'service']).default('variable'),
-  category_id: z.string().optional().or(z.literal('')),
-  brand_id: z.string().optional().or(z.literal('')),
-  product_scope: z.enum(['private', 'organization', 'selective', 'archived']).default('private'),
-  is_stitchable: z.boolean().default(false),
-  stitching_base_price: z.number().min(0).default(0),
-  has_size_variants: z.boolean().default(false),
-  is_active: z.boolean().default(true),
-  is_featured: z.boolean().default(false),
-  variants: z.array(variantSchema).min(1, 'At least one variant is required'),
-})
+export const productSchema = z
+  .object({
+    title: z.string().min(1, 'Title is required').max(255),
+    base_sku: z.string().max(50).optional().or(z.literal('')),
+    description: z.string().optional().or(z.literal('')),
+    short_description: z.string().max(500).optional().or(z.literal('')),
+    product_type: z.enum(['simple', 'variable', 'bundle', 'service']).default('variable'),
+    category_id: z.string().optional().or(z.literal('')),
+    brand_id: z.string().optional().or(z.literal('')),
+    product_scope: z.enum(['private', 'organization', 'selective', 'archived']).default('private'),
+    is_stitchable: z.boolean().default(false),
+    stitching_base_price: z.number().min(0).default(0),
+    has_size_variants: z.boolean().default(false),
+    is_active: z.boolean().default(true),
+    is_featured: z.boolean().default(false),
+    variants: z.array(variantSchema).min(1, 'At least one variant is required'),
+  })
+  // PROD-022: 'bundle' is declared in the product_type enum (above) so the
+  // TS type still surfaces it, but the OrgProductBundle feature has not been
+  // implemented yet (the model exists in prisma/schema.prisma but no route
+  // ever creates/reads OrgProductBundle rows). Rejecting 'bundle' at the
+  // validation layer prevents users from creating products that look like
+  // bundles but have no bundle components — a dead-schema footgun. When the
+  // bundle feature is built (with CRUD for OrgProductBundle rows), remove
+  // this refinement.
+  .refine((data) => data.product_type !== 'bundle', {
+    message: 'Bundle products are not yet supported. Please use simple, variable, or service.',
+    path: ['product_type'],
+  })
 export type ProductInput = z.infer<typeof productSchema>
 
 export const updateProductSchema = z.object({
@@ -180,6 +193,11 @@ export type PromoteProductInput = z.infer<typeof promoteProductSchema>
 export const demoteProductSchema = z.object({
   new_scope: z.enum(['private', 'selective']),
   reason: z.string().min(3, 'Reason must be at least 3 characters').max(500),
+  // PROD-005: when demoting to 'selective', the caller may pass the new list of
+  // company ids to retain. SelectiveProductAccess rows for companies NOT in this
+  // list are revoked. If omitted (default []), all selective rows are revoked —
+  // matching the semantics of the promote route's cleanup branch.
+  selected_company_ids: z.array(z.string()).default([]),
 })
 export type DemoteProductInput = z.infer<typeof demoteProductSchema>
 

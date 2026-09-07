@@ -1,0 +1,258 @@
+ 15300→
+ 15301→```
+ 15302→BUG-ID: PROD-021
+ 15303→Layer: API
+ 15304→Severity: Low
+ 15305→Location: src/app/api/products/route.ts (GET, line 62) — `isActiveParam !== null ? { isActive: isActiveParam === 'true' } : { isActive: true }`
+ 15306→Description: The hybrid isActive filter has an edge case: if `is_active=` (empty string) is passed, `isActiveParam !== null` is TRUE, and `isActiveParam === 'true'` is FALSE, so the filter becomes `{ isActive: false }` — hiding all active products. Should use `isActiveParam !== null && isActiveParam !== ''` or default to `undefined` when empty.
+ 15307→Expected: `is_active=` (empty) should be treated as "no filter" (same as omitting the param).
+ 15308→Actual: `is_active=` hides all active products.
+ 15309→Repro Steps:
+ 15310→  1. Call GET /api/products?is_active= (empty value).
+ 15311→  2. Response: `{ products: [], total: 0 }` — no products returned.
+ 15312→  3. Call GET /api/products?is_active=true → active products returned.
+ 15313→Suspected Root Cause: Loose null-check; didn't account for empty string from URL parsing.
+ 15314→```
+ 15315→
+ 15316→```
+ 15317→BUG-ID: PROD-022
+ 15318→Layer: API
+ 15319→Severity: Low
+ 15320→Location: prisma/schema.prisma OrgProductBundle model (lines 747-759)
+ 15321→Description: The OrgProductBundle model is defined (for bundle-type products) but NEVER written to or read from by any route. DB confirms: `SELECT count(*) FROM "OrgProductBundle"; → 0`. The `product_type='bundle'` enum value is accepted by productSchema (validations/product.ts line 117) but no OrgProductBundle rows are created. If a user picks 'bundle' as the product type, they get a product with no bundle components and no error.
+ 15322→Expected: Either: (a) implement bundle component management (CRUD for OrgProductBundle rows), OR (b) remove the 'bundle' enum value from productSchema until the feature is built.
+ 15323→Actual: Dead schema. Users can create a "bundle" product that has no bundle behavior.
+ 15324→Repro Steps:
+ 15325→  1. POST /api/products with `{ product_type: 'bundle', ... }`.
+ 15326→  2. Product is created with productType='bundle'.
+ 15327→  3. No bundle components can be added (no endpoint exists).
+ 15328→  4. The product behaves like a simple product with a misleading type label.
+ 15329→Suspected Root Cause: Schema was designed ahead of implementation; the bundle feature was never built.
+ 15330→```
+ 15331→
+ 15332→---
+ 15333→
+ 15334→## ADDITIONAL FINDINGS (no specific BUG-ID — informational)
+ 15335→
+ 15336→### F.1 — Mixed auth pattern (modern vs legacy)
+ 15337→
+ 15338→Only 8 of ~40 routes use the modern `getWorkspace() + requirePermission()` helper introduced by the `REBUILD-API-PROTECTION` task. The other ~32 use the legacy 4-query pattern (`getCurrentUser → userSetting.findUnique → employee.findFirst → rolePermission.count`). The modern helper caches the workspace context (0ms vs 4 round-trips). On hot paths (GET /api/products, GET /api/products/[id], GET /api/products/[id]/variant-groups), this adds ~10-15ms per request. Not a bug, but a tech-debt item.
+ 15339→
+ 15340→### F.2 — Idempotency-Key coverage
+ 15341→
+ 15342→Supported on: POST /api/products, POST /api/categories, POST /api/brands, POST /api/returned-stitched, POST /api/inventory/opening-stock, POST /api/inventory/receive-returned-stitched. NOT supported on: POST /api/products/[id]/variants, POST /api/products/[id]/promote, POST /api/products/[id]/demote, POST /api/products/[id]/selective-access, POST /api/products/[id]/subscribe, POST /api/products/[id]/pricing, POST /api/products/[id]/images, all 6 override/resync routes, all 3 variant-groups cascade routes, all catalog/attributes/brands/categories CRUD routes. A network retry on any of these could create duplicate data (caught by unique constraints in some cases, but not all).
+ 15343→
+ 15344→### F.3 — DB-level orphan product (B.1)
+ 15345→
+ 15346→One orphan OrgProduct (`cmry40xze0003pz2k7brq467s` — "OST Verify Product") exists with zero variants. The POST /api/products route is now wrapped in `db.$transaction`, so this orphan likely predates the fix or was created by a manual DB insert during smoke testing. Recommend investigating the createdAt timestamp against the git-blame date of the $transaction wrapper.
+ 15347→
+ 15348→### F.4 — DB-level: OrgProductBundle table is empty
+ 15349→
+ 15350→`SELECT count(*) FROM "OrgProductBundle"; → 0`. The bundle feature is dead schema. See PROD-022.
+ 15351→
+ 15352→### F.5 — DB-level: SelectiveProductAccess has 1 row total
+ 15353→
+ 15354→Only 1 selective access row exists in production. The selective-scope feature is minimally exercised. The bugs PROD-005 and PROD-006 are theoretical for now but will become real as selective-scope usage grows.
+ 15355→
+ 15356→### F.6 — DB-level: 0 variants have costPriceSyncedWithParent=false
+ 15357→
+ 15358→No overrides have ever been performed in production. The entire parent-child cascade / override / resync pattern is untested in real usage. The bugs PROD-008 (override-* missing ownership check) are dormant.
+ 15359→
+ 15360→### F.7 — DB-level: ReturnedStitchedInventory has 2 rows, both with inventoryTxnId=NULL
+ 15361→
+ 15362→Confirms PROD-002: the POST /api/returned-stitched route never creates the inventory_transaction. Both existing rows were created via the broken old route.
+ 15363→
+ 15364→---
+ 15365→
+ 15366→## SUMMARY OF VERIFIED-OK ITEMS
+ 15367→
+ 15368→- **A.1** — No stale/duplicated shape readers of `orgVariantId`.
+ 15369→- **A.2** — Variant isActive=false correctly grays-out (not hides) variants in the order-create picker (gate 1).
+ 15370→- **A.3** — Promote (via POST /api/products/[id]/promote from org-catalog-view) correctly switches visibility for other companies.
+ 15371→- **A.4** — Product creation does NOT touch InventoryPool (zero grep matches in src/app/api/products/).
+ 15372→- **A.5** — Org Catalog view and company-level Products view use intentionally different query paths; no drift.
+ 15373→- **B.1** — POST /api/products is wrapped in `db.$transaction` (verified at route.ts line 249).
+ 15374→- **B.2** — OrgProductVariant.sku and .barcode have DB-level UNIQUE indexes (OrgProductVariant_sku_key, OrgProductVariant_barcode_key).
+ 15375→- **B.3** — Zero variants exceed 3 attributeValues keys (DB-confirmed).
+ 15376→- **B.4** — trackInventory is one-way (only ever set to TRUE; no FALSE write exists in src/).
+ 15377→- **B.5** — Sync flags (costPriceSyncedWithParent, weightSyncedWithParent, salePriceSyncedWithParent) are consistent in DB sample.
+ 15378→- **B.6** — CompanyVariantPricing has exactly one row per (companyId, orgVariantId) — DB UNIQUE constraint + zero duplicates in live query.
+ 15379→- **C.1** — POST /api/products handles duplicate SKUs with friendly 400 (pre-check at lines 232-240) + supports Idempotency-Key + made_to_order cost computation exists in variant-add and generate-stitched routes.
+ 15380→- **C.2** — POST /api/products/[id]/variants/generate correctly implements AttributeValueRule bidirectional logic (INCLUSION + EXCLUSION).
+ 15381→- **C.3** — POST /api/products/[id]/promote enforces ≥1 active variant + ≥1 image gate.
+ 15382→- **C.4** — POST /api/products/[id]/demote revokes subscriptions + surfaces ReturnedStitchedInventory warnings (non-blocking).
+ 15383→- **C.7** — DELETE /api/products/[id] NEVER hard-deletes — always sets productScope='archived', isActive=false.
+ 15384→- **D.1** — products-view.tsx responsive desktop-table / mobile-card behavior is correct.
+ 15385→- **D.2** — product-create-view.tsx multi-step wizard + form guard + scroll-to-top on step change + draft delete on success.
+ 15386→- **D.3** — catalog-settings-view.tsx has 3 top-level tabs (Categories, Brands, Attributes) with a nested AttributeValuesPanel acting as the 4th CRUD surface; permission gate on `products.manage_catalog`.
+ 15387→- **D.4** — returned-stitched-view.tsx mark_sold / write_off UI actions correctly call POST /api/returned-stitched/[id] with action='sold'/'write_off'.
+ 15388→- **D.5** — org-catalog-view.tsx elevated-only guard correctly catches 403 from the backend and renders PermissionMessage.
+ 15389→- **D.7** — No hydration issues / React warnings detected in any frontend component.
+ 15390→- **E.1** — Product creation → ZERO InventoryPool rows (confirmed via grep).
+ 15391→- **E.2** — Opening stock → exactly ONE InventoryPool row + ONE InventoryTransaction + conditionally ONE AvgCostHistory (confirmed via processInventoryTransaction trace + DB query B4).
+ 15392→- **E.3** — Toggle variant inactive → correctly grays-out + disables in order-create picker (gate 1).
+ 15393→- **E.4** — Promote (via canonical POST route) → product becomes visible to other companies in same org via the OR clause.
+ 15394→
+ 15395→---
+ 15396→
+ 15397→## NEXT ACTIONS (recommended, in priority order — DO NOT implement, this is read-only audit)
+ 15398→
+ 15399→1. **PROD-001 (Critical)** — Fix `record.locationId` reference in `/api/returned-stitched/[id]/route.ts`. Either: (a) require `location_id` in the mark_sold / write_off request body, OR (b) add `locationId` column to ReturnedStitchedInventory schema (set at receive time), OR (c) look up the pool via the `inventoryTxnId` link.
+ 15400→2. **PROD-002 (Critical)** — Either: (a) migrate the frontend `returned-stitched-view.tsx` (line 313) to call `/api/inventory/receive-returned-stitched` instead of `/api/returned-stitched`, OR (b) add the `processInventoryTransaction` call + `inventoryTxnId` linkage to the POST `/api/returned-stitched` route. Option (a) is cleaner (single source of truth).
+ 15401→3. **PROD-003 (Critical)** — Fix `ProductDetailView.changeScope` to call `POST /api/products/[id]/promote` with `{ target_scope, selected_company_ids }` instead of `PATCH /api/products/[id]` with `{ product_scope }`.
+ 15402→4. **PROD-004 (Critical)** — Add Subscribe + Archive buttons to `product-detail-view.tsx` header, gated by `can('products.subscribe')` and `elevated` respectively.
+ 15403→5. **PROD-005, PROD-006 (High)** — Add SelectiveProductAccess cleanup to demote (delete all rows when demoting to private) and promote (delete rows not in selected_company_ids).
+ 15404→6. **PROD-007 (High)** — Wrap POST /api/products/[id]/variants in `db.$transaction` (same pattern as POST /api/products).
+ 15405→7. **PROD-008, PROD-015 (High)** — Add `findFirst({ where: { id: variantId, productId } })` ownership check to the 3 override-* routes and the pricing route.
+ 15406→8. **PROD-010 (Medium)** — Migrate image storage to Supabase Storage (or document the local-filesystem requirement + persistent-volume mount).
+ 15407→9. **PROD-011, PROD-012, PROD-018, PROD-019 (Medium/Low)** — Add `requirePermission(PRODUCTS_VIEW)` to the routes missing it.
+ 15408→10. **PROD-013 (Medium)** — Add subscription-status filter to GET /api/products OR add gate-2 check in order-create picker.
+ 15409→11. **PROD-014 (Medium)** — Add PRODUCTS_EDIT permission check to DELETE /api/products/[id]/images.
+ 15410→12. **PROD-020 (Medium)** — Gate the detail-view Promote button on `can('products.promote') && product.isOwner` AND fix the endpoint (PROD-003).
+ 15411→13. **PROD-016, PROD-017, PROD-021, PROD-022 (Low)** — Tech-debt cleanups.
+ 15412→
+ 15413→---
+ 15414→
+ 15415→## READ-ONLY CONFIRMATION
+ 15416→
+ 15417→- No source code was modified during this audit.
+ 15418→- No schema was modified.
+ 15419→- No DB writes were performed — all SQL queries were SELECT / information_schema reads.
+ 15420→- Two diagnostic scripts were created (`scripts/products-audit-queries.js`, `scripts/products-audit-queries2.js`) — these are read-only query runners and do not modify state. They can be deleted or kept for future audits.
+ 15421→
+ 15422→---
+ 15423→
+ 15424→Task ID: PROD-FIX-CRITICAL
+ 15425→Agent: general-purpose (code-modification subagent)
+ 15426→Task: Fix 3 Critical bugs in Catalog & Products module — PROD-001, PROD-003, PROD-004.
+ 15427→
+ 15428→Work Log:
+ 15429→
+ 15430→- Read /home/z/my-project/worklog.md and /home/z/my-project/PRODUCTS_AUDIT_FINAL.md (bug sections 660-727) for full context.
+ 15431→- Read the three target files before editing:
+ 15432→  - src/app/api/returned-stitched/[id]/route.ts
+ 15433→  - src/components/products/product-detail-view.tsx (1793 lines)
+ 15434→  - Also read for cross-checks: src/app/api/products/[id]/route.ts, /promote/route.ts, /subscribe/route.ts, src/lib/validations/product.ts, src/lib/permissions.ts, src/stores/app-store.ts, src/lib/api-client.ts, src/components/ui/alert-dialog.tsx.
+ 15435→
+ 15436→PROD-001 — Fixed src/app/api/returned-stitched/[id]/route.ts:
+ 15437→  - mark_sold handler: previously referenced `record.locationId` (undefined — ReturnedStitchedInventory has no such column) and swallowed the resulting error from processInventoryTransaction via try/catch + console.error. The audit log still recorded success, the response was `{success:true, status:'sold'}`, and the InventoryPool.onHand was never decremented → phantom stock.
+ 15438→  - Fix: lookup the InventoryPool by `orgVariantId` and read its `locationId`. If none, throw `ApiError(400, 'No inventory location found for this variant. Cannot process mark_sold.')`. Removed the swallowing try/catch so any subsequent error from `processInventoryTransaction` propagates to the outer try/catch → `handleError` → real HTTP error returned to the caller. Audit log is no longer written when the inventory transaction fails (the throw skips the `insertAuditLog` call below).
+ 15439→  - write_off handler: same fix pattern — pool lookup + throw on missing locationId + pass resolved `locationId` to `recordStockLoss` + removed swallowing try/catch.
+ 15440→
+ 15441→PROD-003 — Fixed src/components/products/product-detail-view.tsx `changeScope()`:
+ 15442→  - Replaced `api.patch('/api/products/${productId}', { product_scope: scope })` with `api.post('/api/products/${productId}/promote', { target_scope: scope, selected_company_ids: [] })`.
+ 15443→  - The previous PATCH silently dropped `product_scope` because `updateProductSchema` (src/lib/validations/product.ts lines 130-142) doesn't include that field — Zod strips unknown keys, the PATCH handler updated zero fields, returned 200 OK, and the UI showed a misleading success toast. The actual `productScope` row in OrgProduct never changed; no `promotedAt` / `promotedById` was set; no SelectiveProductAccess rows were created.
+ 15444→  - The promote route enforces elevated + owner + ≥1 active variant + ≥1 image and persists `productScope + promotedAt + promotedById` (and creates SelectiveProductAccess rows for selective scope).
+ 15445→  - Added a `private` guard at the top of `changeScope` — the PromoteDialog only exposes organization/selective options, so `private` should never reach here; if it does, we surface a clear error rather than calling the promote route with an unsupported value.
+ 15446→  - Updated the success toast to `Product promoted to ${label}.` (was `Product scope set to ${label}.`).
+ 15447→  - DISCREPANCY NOTE: the task description listed the request shape as `{ scope: 'organization' | 'selective', selectedCompanyIds?: string[] }` and the response as `{ id, productScope, promotedAt }`. The actual `promoteProductSchema` (src/lib/validations/product.ts lines 174-178) uses snake_case `target_scope` (required) + `selected_company_ids` (default []), and the promote route returns `{ success: true }`. Using the task's literal camelCase field names would have caused Zod to strip them, then fail validation on the missing required `target_scope`, returning HTTP 400. Used the actual schema field names so the call succeeds.
+ 15448→
+ 15449→PROD-004 — Added Subscribe + Archive UI to src/components/products/product-detail-view.tsx:
+ 15450→  - Imported `AlertDialog` family from `@/components/ui/alert-dialog` (already present in src/components/ui/).
+ 15451→  - Imported `Archive` and `BellPlus` icons from `lucide-react`.
+ 15452→  - Added `employee` from `useAppStore`, plus flags `canSubscribe = can('products.subscribe')`, `canPromote = can('products.promote')`, `isElevated = !!employee?.isElevated`.
+ 15453→  - Added state: `subscribing`, `archiveDialogOpen`, `archiving`.
+ 15454→  - Added `subscribe()` async fn → POST `/api/products/${productId}/subscribe`. On success: invalidate `['product', productId]` + `['products']` queries, toast `Subscribed successfully.` On error: surface FetchError message via toast.
+ 15455→  - Added `archive()` async fn → DELETE `/api/products/${productId}`. On success: invalidate queries, close the AlertDialog, navigate back to `{ name: 'products' }`, toast `Product archived.`
+ 15456→  - Header actions now render three conditional buttons:
+ 15457→    - **Subscribe** (variant=outline, icon=BellPlus): gated on `canSubscribe && !product.isOwner && (product.productScope === 'organization' || product.productScope === 'selective') && !product.subscription`. Only non-source companies on org-/selective-scoped products they haven't yet subscribed to.
+ 15458→    - **Promote to Org** (primary, icon=ArrowUpCircle): gated on `product.isOwner && canPromote`. (Previously gated on `product.isOwner` only — now also requires the `products.promote` permission, which aligns with PROD-020 from the audit.)
+ 15459→    - **Archive** (variant=destructive, icon=Archive): gated on `canEdit && isElevated`. Clicking opens the AlertDialog confirmation. Confirm calls `archive()`.
+ 15460→  - AlertDialog: title `Archive product?`, description naming the product and explaining the soft-delete semantics (scope→'archived', isActive→false, reversible by reactivating), with Cancel + destructive `Archive product` action.
+ 15461→
+ 15462→Lint:
+ 15463→- Ran `cd /home/z/my-project && bun run lint 2>&1 | tail -5`. Output: `14 problems (2 errors, 12 warnings)`. Verified via `grep` that NONE of the errors/warnings are in `product-detail-view.tsx` or `returned-stitched/[id]/route.ts` — all remaining issues are pre-existing `react-hooks/incompatible-library` warnings in `catalog-settings-view.tsx`, `product-create-view.tsx`, and `returned-stitched-view.tsx` (unmodified files).
+ 15464→
+ 15465→Files Modified:
+ 15466→1. src/app/api/returned-stitched/[id]/route.ts  — PROD-001 (mark_sold + write_off handlers)
+ 15467→2. src/components/products/product-detail-view.tsx — PROD-003 (changeScope) + PROD-004 (Subscribe + Archive buttons + AlertDialog)
+ 15468→
+ 15469→Out-of-Scope Notes (recommend follow-up tasks):
+ 15470→- The PromoteDialog currently has no company picker for `selective` scope, so `selected_company_ids: []` is sent. The promote route will reject this for `target_scope: 'selective'` with HTTP 400 ("Selective scope requires at least one company to be selected."). For selective scope, the user must still use the Org-Catalog view (which has the picker). A future improvement: extend the PromoteDialog to include a company multi-select for selective scope.
+ 15471→- PROD-001 transactional integrity: the `ReturnedStitchedInventory.update()` happens BEFORE the inventory ledger call. Now that errors propagate, a missing-pool scenario will leave the ReturnedStitchedInventory row already marked 'sold'/'written_off' while the pool is unchanged. Consider wrapping the record update + inventory transaction in a `db.$transaction` (PROD-002 sibling work would also benefit).
+ 15472→- Pre-existing audit recommendations PROD-005, PROD-006, PROD-020 (selective-access cleanup, transactional variant creation, promote-button gating) remain open. PROD-020 is partially addressed here by adding the `canPromote` gate to the Promote button.
+ 15473→
+ 15474→---
+ 15475→
+ 15476→Task ID: PROD-FIX-HIGH
+ 15477→Agent: general-purpose (code-modification subagent)
+ 15478→Task: Fix 4 High severity bugs in Catalog & Products module — PROD-005, PROD-006, PROD-007, PROD-008.
+ 15479→
+ 15480→Work Log:
+ 15481→
+ 15482→- Read /home/z/my-project/worklog.md for context (prior PROD-FIX-CRITICAL task notes).
+ 15483→- Read each target file BEFORE editing (no blind edits):
+ 15484→  - src/app/api/products/[id]/promote/route.ts
+ 15485→  - src/app/api/products/[id]/demote/route.ts
+ 15486→  - src/app/api/products/[id]/selective-access/route.ts
+ 15487→  - src/app/api/products/[id]/variants/route.ts
+ 15488→  - src/app/api/products/[id]/variants/[variantId]/override-cost/route.ts
+ 15489→  - src/app/api/products/[id]/variants/[variantId]/override-price/route.ts
+ 15490→  - src/app/api/products/[id]/variants/[variantId]/override-weight/route.ts
+ 15491→  - src/lib/validations/product.ts (for promoteProductSchema / demoteProductSchema / selectiveAccessSchema field shapes)
+ 15492→  - prisma/schema.prisma (SelectiveProductAccess.orgProductId — the @@@unique([orgProductId, companyId]) compound key uses orgProductId, not productId)
+ 15493→  - src/components/products/org-catalog-view.tsx (DemoteDialog — confirmed it currently sends only { new_scope, reason }, so selected_company_ids defaults to [] via Zod default())
+ 15494→
+ 15495→PROD-005 — Fixed src/app/api/products/[id]/promote/route.ts:
+ 15496→  - Symptom: when promoting to 'selective' scope, the route UPSERTed new SelectiveProductAccess rows for the selected companies but did NOT delete rows for companies NOT in the new list. So narrowing the selective list (or removing a company) silently retained stale grants. When promoting to 'organization' scope, prior 'selective' rows persisted and could silently re-grant access if the product was later re-promoted to selective.
+ 15497→  - Fix: after the UPSERT loop for selective scope, added `db.selectiveProductAccess.deleteMany({ where: { orgProductId: productId, companyId: { notIn: d.selected_company_ids } } })` (guarded by `d.selected_company_ids.length > 0` so an empty list doesn't blow away the rows just upserted). Added an `else` branch for `target_scope === 'organization'` that purges ALL SelectiveProductAccess rows for this product (private is not allowed by promoteProductSchema). Field names use `orgProductId` (matching the Prisma schema's actual compound-key column and the existing upsert where-clause `orgProductId_companyId`), NOT `productId` as the task description's example code showed — `productId` would not match any column on the SelectiveProductAccess model and would cause Prisma to throw a validation error.
+ 15498→
+ 15499→PROD-005 — Fixed src/app/api/products/[id]/demote/route.ts:
+ 15500→  - Symptom: old SelectiveProductAccess rows persisted after demote and could silently re-grant access on a subsequent re-promotion to selective.
+ 15501→  - Fix: extended demoteProductSchema (src/lib/validations/product.ts) with an optional `selected_company_ids: z.array(z.string()).default([])` field. After the existing CompanyProductSetting subscription-revoke updateMany in the demote route, added:
+ 15502→    - If `new_scope === 'private'`: `db.selectiveProductAccess.deleteMany({ where: { orgProductId: productId } })` — purge all rows.
+ 15503→    - If `new_scope === 'selective'`:
+ 15504→      - If `d.selected_company_ids.length > 0`: deleteMany where `companyId: { notIn: d.selected_company_ids }` — keep only the selected companies.
+ 15505→      - Else: deleteMany where `{ orgProductId: productId }` — revoke all (consistent with selective scope requiring explicit grants).
+ 15506→  - Backward compatibility: the existing DemoteDialog in org-catalog-view.tsx sends only `{ new_scope, reason }`. Zod's `.default([])` supplies the missing field, so existing callers continue to work unchanged — demoting to selective without a list now revokes all selective access (which is safer than the old behavior of silently leaving stale rows).
+ 15507→  - NOTE: the schema-extension is the only change outside the route file. The frontend was NOT modified — the existing UI flow remains functional. A future improvement could extend the DemoteDialog to include a company multi-select for `new_scope='selective'` so the user can pick the retained companies (mirrors the same UX gap noted in PROD-FIX-CRITICAL for the PromoteDialog).
+ 15508→
+ 15509→PROD-006 — Documented design in src/app/api/products/[id]/selective-access/route.ts:
+ 15510→  - The POST handler UPSERTs a single SelectiveProductAccess row and does not revoke access for companies not in the request. Per the task, this is BY DESIGN — POST adds ONE company, DELETE removes ONE company, matching the UI picker (one chip at a time). The promote route provides the batch-set semantics.
+ 15511→  - No logic change. Expanded the JSDoc comment block above the POST handler to document the design choice and point callers needing a full-set replacement to `POST /api/products/[id]/promote` with `target_scope='selective'` + `selected_company_ids=[...]` (which now also cleans up stale rows per PROD-005).
+ 15512→
+ 15513→PROD-007 — Fixed src/app/api/products/[id]/variants/route.ts:
+ 15514→  - Symptom: the POST handler created variants one-by-one without a transaction. If variant #3 of 5 failed (e.g. on a duplicate SKU DB-unique violation, or a Zod parse error on a malformed variant), variants #1-2 were already committed, leaving the DB in an inconsistent state. The caller would receive a 5xx error with no variant_ids, and the partial variants would be orphaned (no UI affordance to retry or roll back).
+ 15515→  - Fix: wrapped the entire variant-creation loop AND the trailing company_product_setting UPSERT in a single `db.$transaction(async (tx) => { ... })`. Switched:
+ 15516→    - `db.orgProductVariant.create` → `tx.orgProductVariant.create`
+ 15517→    - `db.companyVariantPricing.upsert` → `tx.companyVariantPricing.upsert`
+ 15518→    - `db.companyProductSetting.upsert` → `tx.companyProductSetting.upsert`
+ 15519→  - `createdIds` array remains declared outside the transaction so the post-transaction audit/metric blocks can read it (audit log + metric events are fire-and-forget and intentionally NOT in the transaction — they were not before either).
+ 15520→  - The Zod validation loop (lines 64-74) runs BEFORE the transaction so we fail fast on bad input without opening a DB connection at all.
+ 15521→
+ 15522→PROD-008 — Fixed 3 override routes:
+ 15523→  - src/app/api/products/[id]/variants/[variantId]/override-cost/route.ts
+ 15524→  - src/app/api/products/[id]/variants/[variantId]/override-price/route.ts
+ 15525→  - src/app/api/products/[id]/variants/[variantId]/override-weight/route.ts
+ 15526→  - Symptom: none of the three routes verified that `variantId` belongs to `productId`. A caller could pass a `variantId` from a different product. For override-cost/weight, Prisma's `update({ where: { id: variantId } })` would happily update the foreign variant. For override-price, the UPSERT on CompanyVariantPricing keyed by `(companyId, orgVariantId)` would create/override a pricing row linking the caller's company to the foreign variant. (If variantId didn't exist at all, Prisma would throw P2025, but the cross-product case is the actual security hole.)
+ 15527→  - Fix (identical pattern in all 3 files): after the permission check passes, BEFORE the request body is read, added:
+ 15528→    ```ts
+ 15529→    const variant = await db.orgProductVariant.findFirst({
+ 15530→      where: { id: variantId, productId },
+ 15531→      select: { id: true },
+ 15532→    })
+ 15533→    if (!variant) {
+ 15534→      throw new ApiError(404, 'Variant not found or does not belong to this product.')
+ 15535→    }
+ 15536→    ```
+ 15537→  - `ApiError` was already imported in all 3 files (used by the pre-existing 401/403/400 throws). No new imports needed.
+ 15538→  - Each verification block is annotated with a PROD-008 comment explaining the cross-product-variant attack vector.
+ 15539→
+ 15540→Lint:
+ 15541→- Ran `cd /home/z/my-project && bun run lint 2>&1 | tail -5`. Output: `14 problems (2 errors, 12 warnings)` — same count as the prior PROD-FIX-CRITICAL run (pre-existing). Listed all files with lint issues via `bun run lint 2>&1 | grep -E "^/home/z" | sort -u` and confirmed NONE of the 7 modified files (4 route files + 1 selective-access route + 3 override routes + 1 validation file = 8 files total counting product.ts) appear in the list. All remaining issues are pre-existing in unmodified files: scripts/fire-and-forget-transform.ts, scripts/products-audit-queries*.js, src/components/inventory/{locations,supplier-detail,suppliers}-view.tsx, src/components/orders/order-create-view.tsx, src/components/products/{catalog-settings,product-create,returned-stitched}-view.tsx.
+ 15542→
+ 15543→Files Modified:
+ 15544→1. src/app/api/products/[id]/promote/route.ts — PROD-005 (selective cleanup + org-scope purge)
+ 15545→2. src/app/api/products/[id]/demote/route.ts — PROD-005 (private purge + selective prune)
+ 15546→3. src/lib/validations/product.ts — PROD-005 (added optional selected_company_ids to demoteProductSchema)
+ 15547→4. src/app/api/products/[id]/selective-access/route.ts — PROD-006 (design doc comment only, no logic change)
+ 15548→5. src/app/api/products/[id]/variants/route.ts — PROD-007 (wrapped in $transaction, tx.* for all writes)
+ 15549→6. src/app/api/products/[id]/variants/[variantId]/override-cost/route.ts — PROD-008 (variant ownership check)
+ 15550→7. src/app/api/products/[id]/variants/[variantId]/override-price/route.ts — PROD-008 (variant ownership check)
+ 15551→8. src/app/api/products/[id]/variants/[variantId]/override-weight/route.ts — PROD-008 (variant ownership check)
+ 15552→
+ 15553→Out-of-scope notes (recommend follow-up tasks):
+ 15554→- The DemoteDialog UI (org-catalog-view.tsx ~line 276) currently has no company multi-select for `new_scope='selective'`. As a result, a UI-driven demote-to-selective will revoke ALL selective access (Zod default []). To preserve specific companies during a demote-to-selective, the user must call the API directly with `selected_company_ids: [...]`. Extending the dialog with a company picker would close this UX gap (same shape as the PromoteDialog gap noted in PROD-FIX-CRITICAL).
+ 15555→- The audit log entries for promote/demote still use `db.*` (not `tx.*`) and are fire-and-forget via `insertAuditLog` / `insertMetricEvent`. They are intentionally outside the transaction to match the existing pattern (and because audit-log writes failing should not roll back the business operation). If stronger consistency is needed later, wrap them inside the tx too.
+
+[showing lines 15300-15555 of 15557; use offset=15556 with limit to continue reading]
