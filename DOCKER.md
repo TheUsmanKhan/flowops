@@ -408,8 +408,6 @@ docker compose exec app bun scripts/seed-default-roles.ts
 | KPI & Audit | 3 |
 | **Total** | **51** |
 
-See `PRODUCTION_DEPLOYMENT_GUIDE.md` → "Permissions System (51 Keys, Role Editor)" for full details.
-
 ---
 
 ## Leopard Production / Staging Toggle
@@ -429,8 +427,6 @@ The integration's `isProduction` field (stored in `CompanyIntegration.credential
 ### Recommended workflow on a VPS Docker deployment
 1. **DEV container**: leave the toggle OFF (staging). Verify the full lifecycle: book → track → cancel.
 2. **PROD container**: flip ON once verified. Every API call is recorded in `IntegrationLog` (337+ verified rows across 12 action types in dev).
-
-See `PRODUCTION_DEPLOYMENT_GUIDE.md` → "Leopard Production / Staging Toggle" for the pre-flight checklist before flipping ON.
 
 ---
 
@@ -529,4 +525,4 @@ The production container has a built-in `HEALTHCHECK` (every 30s, 10s timeout, 3
 docker ps   # STATUS column shows "healthy" or "unhealthy"
 ```
 
-For more details on each command and the underlying Docker files, see the "File Reference" table above. For non-Docker VPS deployment (pm2 / systemd), see `PRODUCTION_DEPLOYMENT_GUIDE.md`.
+For more details on each command and the underlying Docker files, see the "File Reference" table above.
