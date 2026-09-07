@@ -1,0 +1,880 @@
+     1→# Stock-Loss System Investigation + Unification Proposal
+     2→
+     3→**Task ID:** STOCKLOSS-INVESTIGATE
+     4→**Agent:** general-purpose (read-only investigation subagent)
+     5→**Scope:** Every code path in FlowOps that DECREMENTS stock due to loss/damage/theft/transit-loss/missing — across the Orders, Inventory, Cycle Count, Adjust Stock, Returned Stock, Return-Order-Scan, Exchange, and Supplier Return modules.
+     6→**Mode:** READ-ONLY — no source code was modified.
+     7→
+     8→---
+     9→
+    10→## Executive Summary
+    11→
+    12→- **Current state:** Stock loss is recorded by **6 disconnected code paths** in the codebase, only **1 of which is the dedicated Stock Losses module**. The other 5 are silent side-effects embedded in RTO, Cycle Count, Adjust Stock, Receive-Returned-Stitched, Exchange verification, and Supplier Return rejection. There is no shared helper that creates `StockLossRecord`, no `sourceModule` discriminator on the loss row, and no DB-level uniqueness constraint that prevents the same physical loss from being recorded twice.
+    13→- **Core problems (confirmed by code reading):**
+    14→  1. **RTO auto-restocks with an optimistic "perfect/resellable" assumption** — if the same item is *then* also fed through `/api/inventory/receive-returned-stitched` (the inventory-module endpoint), stock gets incremented AGAIN (double-increment). If the user instead fires `/api/returned-stitched` (the Returned Stock module endpoint), no pool change occurs but a parallel `ReturnedStitchedInventory` row exists with NO link to the originating order — and if the user marks *that* row as `damaged` or `written_off`, no `StockLossRecord` is created at all.
+    15→  2. **Cycle Count + Adjust Stock don't create `StockLossRecord`** for the most common shortage reasons. Only `theft_suspected` / `unknown` cycle-count shortages auto-create a `lossType='missing'` record. A shortage marked `damage_not_recorded`, `recording_error`, or `transfer_not_recorded` → onHand goes down, **NO loss record exists**. Negative Adjust Stock uses `damage_writeoff` (decrements onHand) and **never** creates a `StockLossRecord`. So the Stock Losses dashboard silently under-reports actual stock decreases.
+    16→  3. **The dedicated Stock Losses "Report Damaged" form has no order-linking field.** The user can select `responsible_party='courier'` but cannot attach the loss to the specific `Order` / `OrderItem`. The `reportDamagedLossSchema` (`src/lib/validations/stock-loss.ts:17-37`) omits `orderItemId` and `orderReferenceId` entirely. The transit-loss form has a free-text `order_reference_id` field that is **not validated as a real Order ID** — any string is accepted.
+    17→  4. **Transit loss has no real Order FK.** `StockLossRecord.orderReferenceId` is a `String?` (line 1320 in schema.prisma) with the comment "for transit_loss: references the dispatched order (future)". The proper `orderItemId` FK exists but is only set by `correctReturnItemCondition` (RTO review) — never by the transit-loss endpoint.
+    18→  5. **Return Order Scan does NOT inline RTO confirmation or damage recording.** The scan action for `receive_return` mode (`src/lib/actions/scan.actions.ts:218-222`) just returns the order items to the UI — it explicitly does NOT call `processOrderReturn`. The user must then navigate to Orders → Order Detail → RTO Dialog → enter return_reason → submit, and later go to Returns → Review Queue to mark an item damaged. Three modules, three round-trips.
+    19→- **Proposed solution (high-level):** Make `StockLossRecord` the SINGLE source of truth for every loss-type stock decrease. Add a `sourceModule` enum, a real `linkedOrderId` FK, a `linkedTransactionId` FK, and a unique constraint on `(orderItemId, lossType, sourceModule)` to prevent double-counting. Every module that currently decrements onHand due to loss must funnel through a single shared helper `recordStockLoss()` that creates the loss record AND the inventory transaction atomically in `db.$transaction`. Return-Order-Scan's `receive_return` mode should be extended to optionally inline: (a) confirm RTO, (b) record damage, (c) record transit loss — all from the scan station UI.
+    20→
+    21→---
+    22→
+    23→## Part 1: Current State (Per Module)
+    24→
+    25→### A. Stock Losses Module (dedicated)
+    26→
+    27→This is the only module whose *primary purpose* is to record stock loss. Located in `src/app/api/stock-loss/`.
+    28→
+    29→#### A.1 API routes
+    30→
+    31→| Method | Path | File | Loss types handled | Inventory txn type created |
+    32→|---|---|---|---|---|
+    33→| GET | `/api/stock-loss` | `route.ts` (72 lines) | List + filter by `lossType`, `investigationStatus` | — (read-only) |
+    34→| GET | `/api/stock-loss/[id]` | `[id]/route.ts` (100 lines) | Get single loss record | — (read-only) |
+    35→| GET | `/api/stock-loss/stats` | `stats/route.ts` (59 lines) | Aggregated counts per lossType for dashboard header | — (read-only) |
+    36→| POST | `/api/stock-loss/report-damaged` | `report-damaged/route.ts` (158 lines) | `damaged` (instant write-off) | `damage_writeoff` (decrements onHand) |
+    37→| POST | `/api/stock-loss/report-theft` | `report-theft/route.ts` (134 lines) | `theft` (quarantine, two-stage) | NONE — only `quarantineStock` (increments `reserved`, no ledger entry) |
+    38→| POST | `/api/stock-loss/report-transit` | `report-transit/route.ts` (126 lines) | `transit_loss` (claim tracking only) | NONE — stock was already decremented at `sale_dispatched` |
+    39→| POST | `/api/stock-loss/resolve` | `resolve/route.ts` (183 lines) | Theft/Missing → `written_off` / `recovered` / `error_corrected`; Transit → `claim_accepted` / `claim_rejected` | Theft/Missing write-off → `theft_writeoff` or `missing_writeoff` (decrements onHand); Transit → none |
+    40→
+    41→**No `report-missing` endpoint exists** despite `reportMissingLossSchema` being defined in `src/lib/validations/stock-loss.ts:59-67` — confirmed dead code. Missing losses can ONLY be created by the Cycle Count approve flow (see §C below).
+    42→
+    43→#### A.2 `StockLossRecord` schema (full)
+    44→
+    45→From `prisma/schema.prisma:1279-1341`:
+    46→
+    47→```prisma
+    48→model StockLossRecord {
+    49→  id              String   @id @default(cuid())
+    50→  organizationId  String
+    51→  companyId       String
+    52→  orgVariantId    String
+    53→  locationId      String
+    54→  lossType        String   // damaged | theft | missing | transit_loss | supplier_dispute
+    55→  subType         String?  // confirmed | suspected | admin_error | manufacturing
+    56→  damageType      String?  // water_moisture | physical_impact | manufacturing_defect | transit_damage | storage_damage | other
+    57→  quantity        Int
+    58→  costPerUnit     Decimal  @db.Decimal(12, 4)
+    59→  investigationStatus String @default("none")  // none | open | closed
+    60→  resolution      String?  // written_off | recovered | error_corrected | claim_accepted | claim_rejected
+    61→  responsibleParty String? // warehouse | courier | customer | employee | unknown | supplier
+    62→  policeReportRef String?
+    63→  insuranceClaimRef String?
+    64→  insuranceRecovered Decimal @default(0) @db.Decimal(12, 2)
+    65→  courierClaimRef String?
+    66→  courierClaimStatus String?  // not_filed | filed | accepted | rejected
+    67→  courierRecovered Decimal @default(0) @db.Decimal(12, 2)
+    68→  evidenceUrls    String   @default("[]")  // JSON array string
+    69→  notes           String?
+    70→  reportedById    String
+    71→  approvedById    String?
+    72→  resolvedById    String?
+    73→  inventoryTxnId  String?   // FK to InventoryTransaction (nullable; updatable post-create)
+    74→  orderReferenceId String?  // FREE-TEXT, not an FK. Comment: "for transit_loss: references the dispatched order (future)"
+    75→  orderItemId     String?   // proper FK to OrderItem (added later, used only by RTO correction)
+    76→  supplierReturnId String? @unique  // ONLY set for supplier_dispute
+    77→  createdAt       DateTime @default(now())
+    78→  updatedAt       DateTime @updatedAt
+    79→  resolvedAt      DateTime?
+    80→
+    81→  @@index([companyId, lossType, investigationStatus])
+    82→  @@index([companyId, createdAt])
+    83→  @@index([orgVariantId])
+    84→}
+    85→```
+    86→
+    87→**Critical observations on the schema:**
+    88→
+    89→1. **No `sourceModule` field.** Once a `StockLossRecord` row exists, you cannot tell which module created it (RTO review? Cycle count? Adjust stock? Receive-returned-stitched? Exchange? Manual report? Supplier-return rejection?) — you can only guess from `lossType` + `notes` text.
+    90→2. **No `cycleCountId` FK.** Cycle-count-created missing losses mention the cycle count name in `notes` text only — no programmatic back-link.
+    91→3. **`orderReferenceId` is a free-text String, not a FK.** Only the transit-loss endpoint sets it; no validation that it points to a real Order.
+    92→4. **`orderItemId` is a proper FK but only set by ONE caller** (`correctReturnItemCondition` in `order-return.actions.ts:319`). No other create path sets it.
+    93→5. **`supplierReturnId` is `@unique`** — supplier-dispute losses ARE idempotent at the DB level.
+    94→6. **NO unique constraint on `orderItemId`** — the same `OrderItem` could have multiple `StockLossRecord` rows (one from RTO correction, one from a manual damaged report). No dedup protection.
+    95→7. **`inventoryTxnId` is nullable AND updatable.** Multiple create paths insert the loss record first with `inventoryTxnId=null`, then call `processInventoryTransaction`, then UPDATE the row to set `inventoryTxnId`. This violates the "append-only ledger" principle documented in `schema.prisma:1032`. If the second step (the txn) fails, the loss record exists with `inventoryTxnId=null` and `resolution='written_off'` but no actual write-off occurred — the UI shows the loss as resolved while stock is untouched.
+    96→8. **`evidenceUrls` stored as a JSON-stringified `String`** — not a proper JSONB column. Same for `photos` on `ReturnedStitchedInventory`.
+    97→
+    98→#### A.3 Transaction types created by Stock Losses module
+    99→
+   100→From `src/lib/inventory.ts:22-41` (the `TransactionType` union) + the OUT_TYPES array (lines 42-51):
+   101→
+   102→- **Damaged (single-stage):** `damage_writeoff` (in OUT_TYPES → decrements onHand).
+   103→- **Theft (two-stage):** NONE at report time (only `quarantineStock` increments `reserved`). At resolve: `theft_writeoff` if `written_off`; none if `recovered` or `error_corrected`.
+   104→- **Missing:** only created via cycle count → `missing_writeoff` at resolve time.
+   105→- **Transit loss:** NONE (no inventory txn — stock was already decremented at `sale_dispatched`).
+   106→- **Supplier dispute:** NONE from the loss-record endpoint itself (the `supplier_return` txn was done at supplier-return CREATE time per the inventory audit).
+   107→
+   108→#### A.4 Order linking
+   109→
+   110→- `orderReferenceId` (free-text String) is set ONLY by the **transit-loss** endpoint (`report-transit/route.ts:72`).
+   111→- `orderItemId` (proper FK) is set ONLY by the **RTO review correction** flow (`correctReturnItemCondition` at `order-return.actions.ts:319`).
+   112→- The dedicated `report-damaged` endpoint does NOT accept any order link in its Zod schema (`reportDamagedLossSchema` in `src/lib/validations/stock-loss.ts:17-37`). The `DamagedForm` UI component (`src/components/inventory/losses-view.tsx:1170-1225`) does not have an order-picker or order-reference input.
+   113→
+   114→#### A.5 Responsible-party options
+   115→
+   116→From `reportDamagedLossSchema` (`validations/stock-loss.ts:29-34`):
+   117→
+   118→```ts
+   119→responsible_party: z.enum(['warehouse', 'courier', 'customer', 'employee'])
+   120→```
+   121→
+   122→Note: `'supplier'` and `'unknown'` are MISSING from this enum despite being valid values per the schema column comment (line 1300: `warehouse | courier | customer | employee | unknown | supplier`). The transit-loss endpoint hard-codes `responsibleParty: 'courier'` (line 69 of report-transit/route.ts). Theft defaults `responsibleParty: 'unknown'` (line 78 of report-theft/route.ts). Supplier-dispute hard-codes `responsibleParty: 'supplier'`.
+   123→
+   124→---
+   125→
+   126→### B. RTO Flow (Orders module)
+   127→
+   128→RTO (Return To Origin) is triggered via 3 entry points that all converge on the same logic:
+   129→
+   130→#### B.1 Entry points
+   131→
+   132→1. **Manual via Order Detail UI** — `POST /api/orders/[id]/rto` (file `src/app/api/orders/[id]/rto/route.ts`, 27 lines) → calls `processOrderReturn(orderId, returnReason)` from `src/lib/actions/order-return.actions.ts`.
+   133→2. **Courier webhook (Leopard)** — `src/lib/actions/leopard-webhook.actions.ts:202-237` calls `restockOrderForRto()` (defined in `src/lib/inventory.ts:846-958`), then sets `order.status = 'rto'`.
+   134→3. **Courier polling (PostEx)** — `src/lib/actions/postex-status-poll.actions.ts:265-286` calls `restockOrderForRto()`, then sets `order.status = 'rto'`.
+   135→4. **Generic webhook** — `src/app/api/webhooks/[provider_key]/[webhook_endpoint_id]/route.ts:127` calls `processOrderReturn(order.id, 'Courier returned (RTO)')`.
+   136→
+   137→#### B.2 What RTO does to stock
+   138→
+   139→Two code paths with DIFFERENT behavior:
+   140→
+   141→**Path A — `processOrderReturn()` (manual + generic webhook)** (`order-return.actions.ts:52-219`):
+   142→
+   143→For each `dispatched` order item:
+   144→- Looks up the original `sale_dispatched` txn to recover `costPerUnit`.
+   145→- If `fulfillmentTypeSnapshot === 'made_to_order'`: calls `processInventoryTransaction` with type `'return_stitched_received'` → **increments onHand** AND recalculates WAC AND one-way flips `trackInventory` to TRUE on the variant.
+   146→- Else (`stock_based`): calls `processInventoryTransaction` with type `'return_resellable'` → **increments onHand** AND recalculates WAC.
+   147→- Sets `OrderItem.autoProcessedAsPerfect = true` AND `OrderItem.needsReview = true` → the item surfaces in the exception review queue for physical spot-checking.
+   148→- Sets `Order.status = 'rto'`, `Order.returnedAt = now`.
+   149→- Updates customer stats (increments `totalRtoCount`); auto-flags customer if RTO count ≥ 3.
+   150→- Fires-and-forgets employee stats recompute (RTO changes `rtoCount`, `rtoRate`, `inTransitCount`).
+   151→
+   152→For `confirmed`/`processing` (not-yet-dispatched) items: NOT covered in `processOrderReturn` (its `where: { fulfillmentStatus: 'dispatched' }` filter at line 69 excludes them).
+   153→
+   154→**Path B — `restockOrderForRto()` (Leopard + PostEx auto-RTO)** (`inventory.ts:846-958`):
+   155→
+   156→For each order item:
+   157→- If `fulfillmentStatus === 'returned'`: **SKIP** (idempotency — already processed by a prior call).
+   158→- If `fulfillmentStatus === 'dispatched'`: same as Path A — looks up `sale_dispatched` txn, calls `processInventoryTransaction` with type `'return_stitched_received'` (MTO) or `'return_resellable'` (stock-based). Sets `OrderItem.fulfillmentStatus = 'returned'`, `autoProcessedAsPerfect = true`, `needsReview = true`.
+   159→- If `fulfillmentStatus === 'reserved'`: calls `unreserveStockForOrder` → `processInventoryTransaction` with type `'order_unreserved'` (decrements `reserved`, no onHand change). Sets `OrderItem.fulfillmentStatus = 'returned'`.
+   160→
+   161→**KEY POINT:** RTO does NOT decrement stock. It INCREMENTS stock back (assumes resellable/perfect). The original stock decrement happened earlier at `dispatchOrder` time via `sale_dispatched`.
+   162→
+   163→#### B.3 Does RTO create a `StockLossRecord`?
+   164→
+   165→**NO — not at RTO trigger time.** Verified in:
+   166→- `processOrderReturn` (`order-return.actions.ts:52-219`): the only DB writes are `order.update`, `processInventoryTransaction`, `orderItem.update`, `insertAuditLog`, `insertMetricEvent`, `updateCustomerStats`, `flagCustomer`, `updateEmployeeStats`. NO `db.stockLossRecord.create` call.
+   167→- `restockOrderForRto` (`inventory.ts:846-958`): only calls `processInventoryTransaction` + `orderItem.update`. NO loss record creation.
+   168→
+   169→**However**, the RTO review-correction path DOES create one — only when a human later inspects the returned item and decides it was actually damaged. That flow is `correctReturnItemCondition` (next subsection B.4).
+   170→
+   171→#### B.4 RTO exception-review correction flow
+   172→
+   173→`POST /api/orders/[id]/returns/review/correct?item_id=X` → `correctReturnItemCondition(orderItemId, 'damaged')` (`order-return.actions.ts:225-359`).
+   174→
+   175→What it does:
+   176→1. Verifies the item was `autoProcessedAsPerfect=true` and `needsReview=true`.
+   177→2. Finds the auto-processed return txn (`return_resellable` or `return_stitched_received`) to recover cost basis.
+   178→3. **Reverses the auto-processed increment** by calling `processInventoryTransaction` with type `'damage_writeoff'` and the same quantity — this decrements onHand back to where it was before RTO. (Code line 280-292.)
+   179→4. **Creates a `StockLossRecord`** with:
+   180→   - `lossType: 'damaged'`, `subType: 'confirmed'`, `damageType: 'other'`, `quantity`, `costPerUnit`
+   181→   - `investigationStatus: 'none'`, `resolution: 'written_off'` (instant write-off — no investigation opened despite the damage being physical)
+   182→   - `responsibleParty: 'courier'` (hard-coded — even though the user has no way to override; e.g. warehouse damage during unpack would still be attributed to courier)
+   183→   - `damageType: 'other'` (hard-coded — no way to specify `water_moisture`, `physical_impact`, etc.)
+   184→   - `orderItemId: item.id` (the ONLY code path that sets this FK)
+   185→   - `inventoryTxnId: reverseResult.transactionId` (linked to the reversal txn)
+   186→   - `reportedById / approvedById / resolvedById` = the correcting employee
+   187→5. Sets `OrderItem.needsReview = false`.
+   188→
+   189→There is also a `POST /api/orders/[id]/returns/review/dismiss?item_id=X` → `dismissReturnReview(orderItemId)` (`order-return.actions.ts:365-403`) which simply sets `needsReview = false` with no inventory change — confirms the auto-assumed condition was correct.
+   190→
+   191→#### B.5 Double-decrement risk (Problem 1 detailed)
+   192→
+   193→The user's wording "RTO decrements stock" is technically imprecise — RTO actually INCREMENTS stock back (auto-assumes resellable). But the underlying bug the user describes is real, and there are THREE distinct double-counting scenarios:
+   194→
+   195→**Scenario 1 — Double INCREMENT (most likely what the user observed):**
+   196→1. Order dispatched → `sale_dispatched` decrements onHand (say 10 → 9).
+   197→2. Order marked RTO → `processOrderReturn` calls `return_resellable` (or `return_stitched_received` for MTO) → onHand goes 9 → 10. Item flagged `needsReview=true`.
+   198→3. User does NOT spot the auto-increment, and ALSO goes to the inventory module and calls `POST /api/inventory/receive-returned-stitched` with the same variant+location+quantity → that endpoint (`src/app/api/inventory/receive-returned-stitched/route.ts:101-118`) calls `processInventoryTransaction` with `return_stitched_received` → onHand goes 10 → 11. **Double-increment.** The system now shows 11 units when only 10 physically exist. The next sale will succeed against phantom stock → customer gets short-shipped, OR a later cycle count reveals a shortage with no explanation.
+   199→
+   200→**Scenario 2 — Two loss records for one damaged item:**
+   201→1. Order dispatched → onHand 10 → 9.
+   202→2. Order marked RTO → onHand 9 → 10 (auto-assumes perfect). Item flagged `needsReview=true`.
+   203→3. User opens Returns & RTO → Review Queue → clicks "Correct to Damaged" → `correctReturnItemCondition` reverses the increment (10 → 9) AND creates `StockLossRecord #1` with `orderItemId=X`, `lossType='damaged'`, `responsibleParty='courier'`.
+   204→4. User separately opens the dedicated Stock Losses module → clicks "Report Damaged" → fills the form with the same variant+location+quantity → `report-damaged/route.ts` creates `StockLossRecord #2` AND decrements onHand AGAIN (9 → 8). **Two loss records exist for the same physical damage; onHand is now 8 when it should be 9.**
+   205→
+   206→Because `orderItemId` is NOT unique on `StockLossRecord` (verified — no `@unique` constraint on `orderItemId` in the schema), the DB does NOT prevent Scenario 2. The report-damaged endpoint doesn't even check for an existing loss on the same `orderItemId`.
+   207→
+   208→**Scenario 3 — Returned Stock module parallel record-keeping:**
+   209→1. Order marked RTO → `processOrderReturn` increments onHand back AND auto-assumes perfect.
+   210→2. User opens Returned Stock module → `POST /api/returned-stitched` (file `src/app/api/returned-stitched/route.ts:79-186`) creates a `ReturnedStitchedInventory` row with `status='available'` (or `'written_off'` if `condition='damaged'`).
+   211→3. **This endpoint does NOT call `processInventoryTransaction`** — so no double-increment. BUT:
+   212→   - It does NOT create a `StockLossRecord` either, even when `condition='damaged'` (it just sets `status='written_off'` on the ReturnedStitchedInventory row itself).
+   213→   - It does NOT validate that the variant hasn't ALREADY been restocked via RTO (`originalOrderReference` is a free-text string, not an FK).
+   214→   - The user now has TWO records of the same physical item: the `OrderItem` with `fulfillmentStatus='returned'` (from RTO) AND a `ReturnedStitchedInventory` row with `originalOrderReference` pointing to the order number — neither references the other.
+   215→   - If the user later marks the `ReturnedStitchedInventory` row as `'written_off'` via `POST /api/returned-stitched/[id]` with `action='write_off'` → that endpoint (`returned-stitched/[id]/route.ts:99-107`) just updates the row's status fields. No `StockLossRecord`. No `processInventoryTransaction`. The pool still shows the auto-incremented stock from RTO — which may now be wrong if the item was actually damaged.
+   216→
+   217→The net effect: the Stock Losses dashboard can show **0 losses for a variant whose onHand has decreased**, OR show **2 losses for the same physical damage**, depending on which combination of paths the user takes. This is the dis-unification the user is asking to fix.
+   218→
+   219→---
+   220→
+   221→### C. Cycle Count
+   222→
+   223→File: `src/app/api/cycle-counts/[id]/route.ts` (424 lines, PATCH action = `start | submit_counts | approve | cancel`).
+   224→
+   225→#### C.1 What happens when a shortage is found
+   226→
+   227→The approve action (lines 271-398) iterates every cycle-count item with a non-zero discrepancy. Branch logic at line 286:
+   228→
+   229→```ts
+   230→if (discrepancy < 0 && (item.discrepancyReason === 'theft_suspected' || item.discrepancyReason === 'unknown')) {
+   231→  // Path X — quarantine + create StockLossRecord(missing) + cycle_count_adjust
+   232→} else {
+   233→  // Path Y — just cycle_count_adjust, NO StockLossRecord
+   234→}
+   235→```
+   236→
+   237→**Path X — shortage with `theft_suspected` or `unknown` reason** (lines 286-337):
+   238→1. Calls `quarantineStock(variant, location, absDiscrepancy)` → increments `reserved` (no ledger txn).
+   239→2. Fetches `pool.avgCost` for cost basis.
+   240→3. **Creates a `StockLossRecord`** with:
+   241→   - `lossType: 'missing'`, `subType: 'suspected'`, `quantity: absDiscrepancy`, `costPerUnit: avgCost`
+   242→   - `investigationStatus: 'open'`, `resolution: null` (will be resolved later via `/api/stock-loss/resolve`)
+   243→   - `responsibleParty: 'unknown'`
+   244→   - `notes: "Auto-created from cycle count ${count.countName}. Discrepancy reason: ${item.discrepancyReason}"`
+   245→   - `inventoryTxnId: null` ← **NOT linked** even though a txn IS created in step 4 below
+   246→   - **NO `orderItemId`** (missing losses are not order-linked)
+   247→   - **NO `cycleCountId`** field exists on `StockLossRecord` — only a text mention in `notes`
+   248→4. Calls `processInventoryTransaction` with type `'cycle_count_adjust'` and `quantity: item.countedQuantity` → **SETS onHand directly to the counted value** (per `inventory.ts:231-235`: `case 'cycle_count_adjust': newOnHand = absQty`). So onHand goes from system_quantity to counted_quantity, e.g. 10 → 8.
+   249→5. Updates `CycleCountItem.adjustmentApproved = true` and `CycleCountItem.inventoryTxnId = txnResult.transactionId`.
+   250→
+   251→**Path Y — shortage with `recording_error`, `transfer_not_recorded`, or `damage_not_recorded` reason, OR any surplus** (lines 338-363):
+   252→- Just calls `processInventoryTransaction` with `'cycle_count_adjust'` and `quantity: item.countedQuantity` → SETS onHand to counted value.
+   253→- **NO `StockLossRecord` is created**, regardless of the reason. So a shortage of 2 suits marked `damage_not_recorded` adjusts onHand from 10 → 8 but the Stock Losses module shows 0 losses for that variant.
+   254→
+   255→#### C.2 Does it create `StockLossRecord`?
+   256→
+   257→**YES — but ONLY for `theft_suspected` / `unknown` shortages.** Confirmed by code at lines 297-315 of `cycle-counts/[id]/route.ts`.
+   258→
+   259→**NO for `damage_not_recorded`, `recording_error`, `transfer_not_recorded`, or `surplus` discrepancies.** Confirmed by lines 338-363 (no `db.stockLossRecord.create` call in the `else` branch).
+   260→
+   261→#### C.3 Does it create a `missing_writeoff` transaction?
+   262→
+   263→**NO.** At approve time it creates a `cycle_count_adjust` txn (which SETS onHand). It does NOT call `missing_writeoff` — that only happens later, when the resulting `StockLossRecord` (lossType='missing') is resolved via `/api/stock-loss/resolve` with `resolution='written_off'`.
+   264→
+   265→The 5 discrepancy reasons are documented in the UI at `src/components/inventory/cycle-counts-view.tsx:220-224`:
+   266→
+   267→```ts
+   268→{ value: 'recording_error', label: 'Recording error', ... },
+   269→{ value: 'transfer_not_recorded', label: 'Transfer not recorded', ... },
+   270→{ value: 'damage_not_recorded', label: 'Damage not recorded', hint: 'Units were damaged but no stock-loss report was filed.' },
+   271→{ value: 'theft_suspected', label: 'Theft suspected', hint: '... will quarantine + open a missing-stock investigation on approval.' },
+   272→{ value: 'unknown', label: 'Unknown', hint: '... will quarantine + open a missing-stock investigation on approval.' },
+   273→```
+   274→
+   275→So the UI explicitly promises that `damage_not_recorded` is for units that were damaged without a prior loss report — yet the approve flow does NOT create a loss record. The hint is misleading.
+   276→
+   277→#### C.4 Double-decrement risk (Problem 2 — detailed)
+   278→
+   279→**Cycle Count vs Stock Losses module:**
+   280→1. Cycle count finds 2 suits short → user selects reason `damage_not_recorded` → approve → onHand goes 10 → 8, NO `StockLossRecord` created.
+   281→2. The user (or an auditor noticing the gap) opens the Stock Losses module and reports 2 damaged units → `report-damaged/route.ts` creates `StockLossRecord` AND calls `processInventoryTransaction('damage_writeoff')` → onHand goes 8 → 6. **Double-decrement: 2 units decremented twice.**
+   282→
+   283→Because cycle-count-created adjustments have `referenceType='cycle_count'` and Stock-Loss-created write-offs have `referenceType='stock_loss'`, you can detect this in the ledger after the fact — but nothing prevents it at write time.
+   284→
+   285→**Cycle Count vs Adjust Stock:**
+   286→Same scenario — a shortage can be corrected via Adjust Stock with `damage_writeoff` instead of via Cycle Count. Both decrement onHand; neither knows about the other.
+   287→
+   288→**Cycle Count's own internal missing-loss path is sound** (creates the loss record + quarantine + adjusts onHand to counted value), but the loss record is missing `inventoryTxnId` (mentioned in `INVENTORY_AUDIT.md` line 443 as `[MEDIUM] The missing-loss record created on approve does NOT have an inventoryTxnId set`). The loss investigator later clicks "Resolve" → `releaseQuarantine` → `missing_writeoff` decrements onHand AGAIN — but since the cycle_count_adjust already set onHand to the counted value, the additional `missing_writeoff` decrement causes onHand to go BELOW the physically-counted value. This is a separate bug (the cycle count should NOT adjust onHand to the counted value when quarantining for theft — it should leave onHand alone and only adjust after the investigation resolves).
+   289→
+   290→---
+   291→
+   292→### D. Adjust Stock
+   293→
+   294→File: `src/app/api/inventory/adjust/route.ts` (179 lines).
+   295→
+   296→#### D.1 What happens on a negative adjustment
+   297→
+   298→The route branches at line 53: `const isPositive = d.quantity > 0`.
+   299→
+   300→**Positive adjustment** (lines 72-114): calls `processInventoryTransaction` with type `'manual_adjustment_in'` → onHand increments by `absQty`. No `StockLossRecord`. (Audit-fixed in INVENTORY-3-BUGS-FIXED — previously used `damage_writeoff` for both directions.)
+   301→
+   302→**Negative adjustment** (lines 115-158): calls `processInventoryTransaction` with type `'damage_writeoff'` → onHand decrements by `absQty`. **NO `StockLossRecord` is created.**
+   303→
+   304→The Zod schema (`adjustStockSchema` in `src/lib/validations/inventory.ts:78-84`):
+   305→
+   306→```ts
+   307→export const adjustStockSchema = z.object({
+   308→  org_variant_id: z.string().min(1),
+   309→  location_id: z.string().min(1),
+   310→  quantity: z.number().int().refine((v) => v !== 0, 'Quantity must be non-zero (positive to add, negative to remove)'),
+   311→  reason: z.string().min(3, 'Reason is required').max(500),
+   312→  notes: z.string().max(1000).optional().or(z.literal('')),
+   313→})
+   314→```
+   315→
+   316→`reason` is a free-text string with no enum constraint. The audit report (line 191) flagged: "Reports cannot group by reason reliably."
+   317→
+   318→The frontend (`src/components/inventory/adjust-stock-view.tsx`) offers reason presets (line 97+ per the audit), but they're sent to the API as plain strings and not enforced by the schema.
+   319→
+   320→#### D.2 Does it create `StockLossRecord`?
+   321→
+   322→**NO.** Verified by reading the entire route (179 lines) — there is no `db.stockLossRecord.create` call anywhere. Confirmed also by `INVENTORY_AUDIT.md` Module 5 audit which makes no mention of a loss record being created on the negative-adjustment path.
+   323→
+   324→#### D.3 Double-decrement risk
+   325→
+   326→1. User wants to record 5 damaged units. Two valid paths:
+   327→   - **Path A:** Stock Losses → Report Damaged → 5 units. Creates loss record + `damage_writeoff` txn. onHand: 10 → 5.
+   328→   - **Path B:** Adjust Stock → -5 → reason "5 units damaged in warehouse flood". Calls `damage_writeoff` txn. onHand: 10 → 5. **NO loss record created.**
+   329→2. **Combination:** User clicks Path A first (creates loss record + decrements to 5), then realises they need to add a note about the flood → opens Adjust Stock → enters -5 again with reason "5 units damaged in warehouse flood" → onHand: 5 → 0. **Stock destroyed; no second loss record but a SECOND `damage_writeoff` txn exists for the same physical damage.**
+   330→
+   331→Even worse: a user might use Adjust Stock with a positive quantity to "fix" a prior loss by adding the units back. Since neither endpoint references the other, there's no audit trail linking the two events.
+   332→
+   333→---
+   334→
+   335→### E. Returned Stock Module
+   336→
+   337→Located in `src/app/api/returned-stitched/` (3 routes) + `src/components/products/returned-stitched-view.tsx` (1351 lines).
+   338→
+   339→The "Returned Stock" sidebar entry (`src/components/layout/sidebar.tsx:67`) routes to `?view=returned-stitched` which renders `ReturnedStitchedView`. It is a PRODUCTS-section module, not an inventory-section module — despite its primary purpose being reverse-logistics inventory handling.
+   340→
+   341→#### E.1 Lifecycle of a `ReturnedStitchedInventory` row
+   342→
+   343→The `ReturnedStitchedInventory` model (`prisma/schema.prisma:842-880`):
+   344→
+   345→```prisma
+   346→model ReturnedStitchedInventory {
+   347→  id              String   @id @default(cuid())
+   348→  organizationId  String
+   349→  companyId       String
+   350→  orgVariantId    String
+   351→  quantity        Int      @default(1)
+   352→  condition       String   // perfect | good | open_box | damaged
+   353→  totalCost       Decimal  @db.Decimal(12, 2)
+   354→  suggestedResalePrice Decimal?
+   355→  originalOrderReference String?   // FREE-TEXT, not an FK
+   356→  returnReason    String?
+   357→  status          String   @default("available")  // available | sold | written_off
+   358→  photos          String   @default("[]")  // JSON array
+   359→  notes           String?
+   360→  receivedById    String?
+   361→  receivedAt      DateTime @default(now())
+   362→  soldAt          DateTime?
+   363→  soldOrderReference String?  // FREE-TEXT, not an FK
+   364→  writtenOffAt    DateTime?
+   365→  writtenOffById  String?
+   366→  writeOffReason  String?
+   367→  createdAt       DateTime @default(now())
+   368→  updatedAt       DateTime @updatedAt
+   369→  @@index([organizationId, orgVariantId, status])
+   370→  @@index([companyId, status])
+   371→}
+   372→```
+   373→
+   374→**Critical observations:**
+   375→- `originalOrderReference` is `String?` — not an FK. No referential integrity.
+   376→- `soldOrderReference` is `String?` — same.
+   377→- No relation to `OrderItem`, `OrderExchange`, or `StockLossRecord`.
+   378→- No `inventoryTxnId` field — the row never references the ledger.
+   379→- The model has NO relation to `InventoryPool` — it's a parallel inventory record that doesn't share the source of truth.
+   380→
+   381→#### E.2 Receive endpoint — `POST /api/returned-stitched`
+   382→
+   383→File: `src/app/api/returned-stitched/route.ts` (186 lines).
+   384→
+   385→**What it does to stock:** NOTHING. It only creates the `ReturnedStitchedInventory` row. **It does NOT call `processInventoryTransaction`.** It does NOT create a `StockLossRecord` even when `condition='damaged'`.
+   386→
+   387→When `condition === 'damaged'`:
+   388→- Sets `status = 'written_off'`
+   389→- Sets `writtenOffAt = now`
+   390→- Sets `writtenOffById = caller.id`
+   391→- Sets `writeOffReason = 'Damaged on return'` (hard-coded)
+   392→- Audit log action: `returned_stitched.received`
+   393→- No pool change. No loss record.
+   394→
+   395→#### E.3 Mark-as-sold / mark-as-written-off — `POST /api/returned-stitched/[id]`
+   396→
+   397→File: `src/app/api/returned-stitched/[id]/route.ts` (127 lines).
+   398→
+   399→Action `sold` (lines 46-82):
+   400→- Verifies `record.status === 'available'`.
+   401→- Updates row: `status='sold'`, `soldAt`, `soldOrderReference` (from `markSoldSchema`).
+   402→- Audit log: `returned_stitched.sold`.
+   403→- **NO `processInventoryTransaction` call.** No loss record. No pool change. The `soldOrderReference` is free-text — no validation that it references a real Order.
+   404→
+   405→Action `write_off` (lines 83-120):
+   406→- Verifies `record.status === 'available'`.
+   407→- Updates row: `status='written_off'`, `writtenOffAt`, `writtenOffById`, `writeOffReason`.
+   408→- Audit log: `returned_stitched.written_off`.
+   409→- **NO `processInventoryTransaction` call.** No loss record. No pool change.
+   410→
+   411→#### E.4 Does it create `StockLossRecord`?
+   412→
+   413→**NO.** Verified by reading both routes — zero `db.stockLossRecord.create` calls.
+   414→
+   415→The ONLY endpoint that creates a loss record for a "returned stitched" item is the **OTHER** endpoint: `POST /api/inventory/receive-returned-stitched` (note: different file, different URL, different schema). That endpoint (`src/app/api/inventory/receive-returned-stitched/route.ts`):
+   416→- When `condition === 'damaged'`: creates a `StockLossRecord` with `lossType='damaged'`, `responsibleParty='courier'`, `damageType='other'`. Does NOT call `processInventoryTransaction` (assumes stock was already decremented at dispatch — audit flagged this assumption as unsafe in `INVENTORY_AUDIT.md` line 157).
+   417→- When `condition` is `perfect`/`good`/`open_box`: calls `processInventoryTransaction` with `return_stitched_received` (increments onHand + recalculates WAC).
+   418→
+   419→So there are TWO completely separate "receive returned stitched" endpoints, both doing partly-overlapping things:
+   420→- `/api/returned-stitched` (Returned Stock module) — neither decrements nor increments pool; never creates loss record.
+   421→- `/api/inventory/receive-returned-stitched` (Inventory Receive Stock module) — increments pool OR creates loss record.
+   422→
+   423→Neither references the other.
+   424→
+   425→#### E.5 Double-decrement risk
+   426→
+   427→See §B.5 Scenario 3 above. The Returned Stock module is a parallel record-keeping system that doesn't touch the inventory pool, so it doesn't directly double-decrement — but it creates a false sense of completeness: a user looking at the Returned Stock module sees a "written_off" row and assumes the loss is recorded, while the Stock Losses module shows nothing. The actual onHand pool may still contain the auto-incremented RTO stock (Scenario 3 in §B.5).
+   428→
+   429→---
+   430→
+   431→### F. Return Order Scan
+   432→
+   433→Files:
+   434→- `src/components/orders/order-scan-view.tsx` (543 lines)
+   435→- `src/lib/actions/scan.actions.ts` (356 lines)
+   436→- `src/app/api/scan/route.ts` (42 lines — thin wrapper around `processScan`)
+   437→
+   438→#### F.1 Current scan flow
+   439→
+   440→Six scan modes (defined at `order-scan-view.tsx:58-65`):
+   441→
+   442→| Mode | Action taken on scan | Backend call |
+   443→|---|---|---|
+   444→| `mark_processing` | Calls `markOrderProcessing(orderId)` | dynamic import in `scan.actions.ts:173` |
+   445→| `mark_packed` | Calls `markOrderPacked(orderId)` | dynamic import in `scan.actions.ts:193` |
+   446→| `warehouse_handover` | Sets `warehouseHandoverScannedAt = now` on the order/shipment | direct DB update at `scan.actions.ts:209-211` |
+   447→| `receive_return` | **NO action taken** — only logs scan event + returns entity details to UI | `scan.actions.ts:217-222` |
+   448→| `locate_cancelled` | Only validates status is `cancelled`; logs scan event | `scan.actions.ts:225-233` |
+   449→| `cancel_via_scan` | Returns entity for confirmation; staff must click "Confirm Cancel" → calls `confirmCancelAfterScan` → `cancelCourierBooking` | `scan.actions.ts:236-245`, `308-329` |
+   450→
+   451→#### F.2 Can it trigger RTO?
+   452→
+   453→**NO.** The `receive_return` mode explicitly does NOT call `processOrderReturn`. The code comment at `scan.actions.ts:219` says: *"Return entity details to UI — staff selects condition BEFORE calling processOrderReturn"*. But the UI (`order-scan-view.tsx`) has no follow-up action — it just displays the order items in the result panel (lines 285-300) and asks the staff to "select return condition to proceed" (toast message at line 221). The user must then navigate to Orders → Order Detail → click "RTO" → enter reason → submit.
+   454→
+   455→There is also NO `confirm_rto` action in the scan API (only `confirm_unpack` and `confirm_cancel` are handled — `scan/route.ts:20-30`).
+   456→
+   457→#### F.3 Can it record damage?
+   458→
+   459→**NO.** There is no inline damage-recording option in the scan UI. No `report-damaged` call. No `correctReturnItemCondition` call. The scan station is purely a barcode-lookup + simple-lifecycle-trigger tool.
+   460→
+   461→#### F.4 What's missing for the user's Problem 5
+   462→
+   463→The user wants the scan flow to:
+   464→1. **Confirm RTO in one go** — instead of scan → navigate to order detail → click RTO → enter reason → submit, the scan should immediately process the RTO (with a default reason like "Courier returned (RTO)") or pop a small inline prompt for the reason.
+   465→2. **Offer the damage/transit-loss option inline** — so when scanning a return, the staff can select "this came back damaged" or "transit loss" right there, and the system creates the appropriate `StockLossRecord` (+ reverse the auto-increment for damage, + claim tracking for transit loss) without needing to visit 3 separate modules.
+   466→
+   467→Currently neither is possible. The scan flow's `receive_return` mode is essentially a no-op that just identifies the order.
+   468→
+   469→---
+   470→
+   471→## Part 2: The 5 Problems (Detailed Analysis)
+   472→
+   473→### Problem 1: RTO + Returned Stock double-decrement
+   474→
+   475→**Detailed trace of the exact code path that causes double-counting:**
+   476→
+   477→1. **Dispatch time:** `dispatchOrder` in `src/lib/inventory.ts:791-817` calls `processInventoryTransaction` with `transactionType: 'sale_dispatched'`. At `inventory.ts:201-204`:
+   478→   ```ts
+   479→   case 'sale_dispatched':
+   480→     newOnHand -= absQty                    // 10 → 9
+   481→     newReserved = Math.max(0, newReserved - absQty)
+   482→   ```
+   483→   Result: onHand 10 → 9, reserved 1 → 0. An `InventoryTransaction` row is inserted with `quantity: -1`, `referenceType: 'order'`, `referenceId: orderId`.
+   484→
+   485→2. **RTO trigger (manual via order detail):** User clicks "RTO" button → opens `RtoDialog` (`order-detail-view.tsx:1371-1376`) → enters reason → `rtoMutation.mutate({ return_reason })` → `POST /api/orders/[id]/rto` → `processOrderReturn(orderId, reason)` (`order-return.actions.ts:52`).
+   486→
+   487→3. **Inside `processOrderReturn`** (lines 65-167): fetches order with items where `fulfillmentStatus: 'dispatched'`. For each dispatched item, looks up the original `sale_dispatched` txn (lines 99-109) to recover `costPerUnit`. Then at lines 114-167:
+   488→   - If MTO: `processInventoryTransaction({ transactionType: 'return_stitched_received', quantity, costPerUnit, referenceType: 'order', referenceId: orderId })`. At `inventory.ts:215-218`:
+   489→     ```ts
+   490→     case 'return_stitched_received':
+   491→       newOnHand += absQty                    // 9 → 10 (auto-assumed perfect)
+   492→       newAvgCost = calculateNewAvgCost(...)   // WAC recalculated
+   493→     ```
+   494→   - Else (stock-based): `processInventoryTransaction({ transactionType: 'return_resellable', ... })`. At `inventory.ts:211-214`: same effect — `newOnHand += absQty` + WAC recalc.
+   495→   - Sets `orderItem.autoProcessedAsPerfect = true`, `orderItem.needsReview = true`.
+   496→4. **Order status updated:** `order.status = 'rto'`, `order.returnedAt = now`.
+   497→
+   498→5. **User opens Returned Stock module:** `POST /api/returned-stitched` with `{ org_variant_id, condition: 'perfect', total_cost, original_order_reference: 'ORD-XXXX', return_reason: '...' }`. The endpoint creates a `ReturnedStitchedInventory` row with `status='available'`. **It does NOT call `processInventoryTransaction`** — so onHand stays at 10. No double-increment here. **BUT** the user now has TWO records of the same physical return: the auto-incremented pool (from RTO) AND the ReturnedStitchedInventory row. Neither references the other.
+   499→
+   500→6. **User opens Inventory → Receive Stock → Receive Returned Stitched:** `POST /api/inventory/receive-returned-stitched` with `{ org_variant_id, location_id, condition: 'perfect', total_cost, ... }`. The endpoint (`receive-returned-stitched/route.ts:101-118`) calls `processInventoryTransaction` with `return_stitched_received` → onHand 10 → 11. **Double-increment.** The system now believes 11 units exist; only 10 do.
+   501→
+   502→**For the "damage" sub-scenario:**
+   503→7. User opens Returns & RTO → Review Queue → sees the item with `needsReview=true` → clicks "Correct to Damaged" → `POST /api/orders/[id]/returns/review/correct?item_id=X` → `correctReturnItemCondition(X, 'damaged')`.
+   504→8. Inside `correctReturnItemCondition` (lines 280-322): calls `processInventoryTransaction` with `transactionType: 'damage_writeoff'` → onHand 11 → 10 (reverses ONE of the two prior increments; the other phantom increment from step 6 remains). Then creates `StockLossRecord` with `orderItemId=X`, `lossType='damaged'`, `responsibleParty='courier'`, `damageType='other'`.
+   505→9. **Net result:** onHand=10 (should be 9, since the item is actually damaged and was never physically returned to sellable stock), one `StockLossRecord` exists, one phantom `return_stitched_received` increment remains in the ledger with no offsetting write-off.
+   506→
+   507→**Why no DB-level protection exists:** `StockLossRecord.orderItemId` is NOT `@unique` (verified at `schema.prisma:1324`). Multiple loss records can exist for the same `orderItemId`. The `report-damaged` endpoint does NOT check for an existing loss record with the same `orderItemId` before creating a new one. The `receive-returned-stitched` endpoint does NOT check for an existing `return_stitched_received` txn for the same variant+location+order before creating another one.
+   508→
+   509→---
+   510→
+   511→### Problem 2: Cycle Count + Adjust Stock don't create `StockLossRecord`s
+   512→
+   513→**Detailed trace + evidence:**
+   514→
+   515→**Cycle Count, `damage_not_recorded` path** (`cycle-counts/[id]/route.ts:338-363`):
+   516→
+   517→```ts
+   518→} else {
+   519→  // Normal cycle_count_adjust for recording_error, transfer_not_recorded,
+   520→  // damage_not_recorded, or surplus
+   521→  const txnResult = await processInventoryTransaction({
+   522→    orgVariantId: item.orgVariantId,
+   523→    locationId: count.locationId,
+   524→    organizationId: orgId,
+   525→    companyId: company.id,
+   526→    employeeId: caller.id,
+   527→    transactionType: 'cycle_count_adjust',
+   528→    quantity: item.countedQuantity,   // SETS onHand to counted value
+   529→    costPerUnit: null,
+   530→    referenceType: 'cycle_count',
+   531→    referenceId: id,
+   532→    notes: `Cycle count adjustment: ${item.systemQuantity} → ${item.countedQuantity}`,
+   533→  })
+   534→  if (txnResult.success && txnResult.transactionId) {
+   535→    await db.cycleCountItem.update({
+   536→      where: { id: item.id },
+   537→      data: {
+   538→        adjustmentApproved: true,
+   539→        inventoryTxnId: txnResult.transactionId,
+   540→      },
+   541→    })
+   542→  }
+   543→}
+   544→```
+   545→
+   546→No `db.stockLossRecord.create` call anywhere in this branch. The `cycle_count_adjust` txn type SETS onHand directly (per `inventory.ts:231-235`), so the discrepancy is silently absorbed into the pool. The Stock Losses module shows nothing.
+   547→
+   548→**Adjust Stock, negative adjustment** (`inventory/adjust/route.ts:115-158`):
+   549→
+   550→```ts
+   551→} else {
+   552→  // Removing stock — use damage_writeoff as a generic removal type
+   553→  const txnResult = await processInventoryTransaction({
+   554→    orgVariantId: d.org_variant_id,
+   555→    locationId: d.location_id,
+   556→    organizationId: orgId,
+   557→    companyId: company.id,
+   558→    employeeId: caller.id,
+   559→    transactionType: 'damage_writeoff',     // ← masquerades as damage
+   560→    quantity: absQty,
+   561→    referenceType: 'manual',
+   562→    notes: `Manual adjustment: ${d.reason}. ${d.notes || ''}`,
+   563→  })
+   564→  // ... audit log + metric event ...
+   565→  return { success: true, transaction_id: txnResult.transactionId }
+   566→}
+   567→```
+   568→
+   569→No `db.stockLossRecord.create` call. The `damage_writeoff` txn decrements onHand but no loss record is created. The audit report (`INVENTORY_AUDIT.md` line 187) flagged this as `[HIGH] Negative adjustment masquerades as damage_writeoff`.
+   570→
+   571→**Evidence the Stock Losses dashboard will under-report:**
+   572→- `/api/stock-loss/stats` (`stats/route.ts:8-58`) only counts `db.stockLossRecord.findMany` rows. Since cycle-count `damage_not_recorded` and adjust-stock negative adjustments don't create loss rows, they don't appear in the stats. The dashboard's "Losses this month" KPI silently excludes them.
+   573→- `/api/inventory/dashboard` (`dashboard/route.ts`) DOES count `damage_writeoff` txn types in its movement summary (audit Module 1, line 49: "losses" bucket groups `supplier_return` under losses too). So the Inventory Dashboard may show a "loss" of 5 units while the Stock Losses module shows 0 losses — visually contradictory.
+   574→
+   575→**Double-decrement risk:**
+   576→1. Cycle count finds 2 missing → reason `damage_not_recorded` → onHand 10 → 8, NO loss record.
+   577→2. User opens Stock Losses → reports 2 damaged → onHand 8 → 6, loss record created.
+   578→3. Two separate `damage_writeoff`-family txns in the ledger for the same physical damage; onHand 4 units lower than it should be.
+   579→
+   580→Or for Adjust Stock:
+   581→1. User adjusts -5 with reason "5 damaged" → onHand 10 → 5, NO loss record.
+   582→2. Auditor sees no loss record → opens Stock Losses → reports 5 damaged → onHand 5 → 0.
+   583→
+   584→---
+   585→
+   586→### Problem 3: Courier responsibility + order linking in Stock Loss
+   587→
+   588→**Current state:**
+   589→
+   590→The `DamagedForm` UI (`src/components/inventory/losses-view.tsx:1170-1225`) collects: `variantId`, `locationId`, `quantity`, `damageType`, `responsibleParty` (enum: warehouse/courier/customer/employee), `notes`. **No order reference field, no order search, no orderItemId link.**
+   591→
+   592→The `reportDamagedLossSchema` (`validations/stock-loss.ts:17-37`):
+   593→
+   594→```ts
+   595→export const reportDamagedLossSchema = z.object({
+   596→  org_variant_id: z.string().min(1, 'Variant is required'),
+   597→  location_id: z.string().min(1, 'Location is required'),
+   598→  quantity: z.number().int().positive('Quantity must be positive'),
+   599→  damage_type: z.enum(['water_moisture', 'physical_impact', 'manufacturing_defect', 'transit_damage', 'storage_damage', 'other']),
+   600→  responsible_party: z.enum(['warehouse', 'courier', 'customer', 'employee']),
+   601→  evidence_urls: z.array(z.string().url()).default([]),
+   602→  notes: z.string().max(1000).optional().or(z.literal('')),
+   603→})
+   604→```
+   605→
+   606→**No `order_item_id`, no `order_reference_id`, no `linked_order_id`.** Even though the `StockLossRecord` schema HAS an `orderItemId` FK field (line 1324 of schema.prisma), the dedicated damaged-report endpoint never populates it.
+   607→
+   608→**What's missing:**
+   609→1. **Order picker / search component** in the DamagedForm. The Transit form already has a free-text `order_reference_id` input (`losses-view.tsx:1643, 1696-1699`) but it's plain text — no validation against real Orders, noautocomplete, no order-item selection.
+   610→2. **Conditional required field:** When `responsible_party='courier'`, the form should REQUIRE an order link (the courier can only be responsible in the context of a specific shipment). Currently you can select `courier` with no order context, making the loss record useless for filing a courier claim.
+   611→3. **Deduplication:** If a loss already exists for `(orderItemId, lossType='damaged')`, the form should warn or block the duplicate. Currently nothing prevents it (the `orderItemId` column is NOT `@unique`).
+   612→4. **`'supplier'` and `'unknown'` are missing from the `responsible_party` enum** in the Damaged form schema, even though the schema column allows them. A user can't manually record a supplier-caused damage via this form.
+   613→
+   614→---
+   615→
+   616→### Problem 4: Transit loss + RTO + Stock Losses
+   617→
+   618→**Current state:**
+   619→
+   620→`StockLossRecord.orderReferenceId` is a `String?` (line 1320 of schema.prisma) with the comment "for transit_loss: references the dispatched order (future)". The "future" tag indicates the original designer intended to upgrade this to a real FK but never did.
+   621→
+   622→The `reportTransitLossSchema` (`validations/stock-loss.ts:73-80`):
+   623→
+   624→```ts
+   625→export const reportTransitLossSchema = z.object({
+   626→  org_variant_id: z.string().min(1, 'Variant is required'),
+   627→  location_id: z.string().min(1, 'Dispatch location is required'),
+   628→  quantity: z.number().int().positive('Quantity must be positive'),
+   629→  order_reference_id: z.string().min(1, 'Order reference is required'),
+   630→  courier_claim_ref: z.string().max(100).optional().or(z.literal('')),
+   631→  notes: z.string().max(1000).optional().or(z.literal('')),
+   632→})
+   633→```
+   634→
+   635→`order_reference_id` is just `z.string().min(1)` — any non-empty string passes. The route (`report-transit/route.ts:72`) assigns it directly to `orderReferenceId: d.order_reference_id`. No DB lookup. No FK enforcement.
+   636→
+   637→The Transit form UI (`losses-view.tsx:1640-1680`) uses a plain `<Input>` for `orderRef`:
+   638→
+   639→```tsx
+   640→<Input
+   641→  id="tr-order"
+   642→  placeholder="e.g. ORD-2024-00982 / dispatch #DSP-5532"
+   643→  value={orderRef}
+   644→  onChange={(e) => setOrderRef(e.target.value)}
+   645→/>
+   646→```
+   647→
+   648→The placeholder literally suggests typing either an order number OR a dispatch number — neither is validated.
+   649→
+   650→**What's missing:**
+   651→1. **A real `orderId` FK** on `StockLossRecord` (or at minimum, the existing `orderReferenceId` should be upgraded to FK).
+   652→2. **An order picker** in the Transit form (and ideally Damaged form too) — same as Problem 3.
+   653→3. **Auto-linking when an order is in RTO state:** if a courier reports a transit loss for an order that's already RTO'd, the system should warn about potential double-recording (the RTO already auto-restocked; a transit-loss record without reversing that increment would be incorrect).
+   654→4. **No `inventoryTxnId` is set** for transit losses — by design (the stock was already decremented at `sale_dispatched` time). This is correct, BUT the `sale_dispatched` txn has `referenceType='order'` and `referenceId=orderId`, so the linkage is recoverable. The transit-loss record should at minimum surface the dispatch txn for the user.
+   655→
+   656→---
+   657→
+   658→### Problem 5: Return Order Scan integration
+   659→
+   660→**Current scan flow (verified in §F above):**
+   661→
+   662→The `receive_return` mode in `processScan` (`scan.actions.ts:218-222`) is essentially a no-op:
+   663→
+   664→```ts
+   665→case 'receive_return': {
+   666→  // Return entity details to UI — staff selects condition BEFORE calling processOrderReturn
+   667→  await logScanEvent(ctx, scanMode, lookup.entityType, lookup.entityId, trimmedTracking, 'success', undefined, scanStationLabel)
+   668→  return { success: true, data: { scanResult: 'success' as const, entity: lookup, message: `Order identified — select return condition to proceed` } }
+   669→}
+   670→```
+   671→
+   672→The comment explicitly admits the staff must "select return condition BEFORE calling processOrderReturn" — but the scan API has no follow-up endpoint to actually invoke `processOrderReturn` with a selected condition. The scan UI (`order-scan-view.tsx:217-222`) just displays the result and the staff is expected to manually navigate to the order detail page and trigger RTO.
+   673→
+   674→There is no `confirm_rto` action in the scan API (only `confirm_unpack` and `confirm_cancel` exist — `scan/route.ts:20-30`).
+   675→
+   676→**What's missing:**
+   677→1. **Inline RTO confirmation:** when scanning in `receive_return` mode, the UI should immediately show a small dialog with:
+   678→   - The order summary (already returned by the scan).
+   679→   - A "Confirm RTO" button that calls a new `confirm_rto` action in the scan API, which invokes `processOrderReturn(orderId, defaultReason)` with a default reason like "Courier returned (RTO)".
+   680→   - Optionally a reason input.
+   681→2. **Inline damage recording:** the dialog should also offer:
+   682→   - "Mark as Damaged" → calls a new `confirm_damage` action that triggers `correctReturnItemCondition(orderItemId, 'damaged')` for each item OR (better) opens a multi-item damage form.
+   683→   - "Mark as Transit Loss" → calls `POST /api/stock-loss/report-transit` with the order pre-filled.
+   684→3. **Combined flow:** ideally the scan should produce in one go: order identified → RTO processed → damage recorded (if applicable) → audit logs written. Currently this requires 3 separate modules (Scan → Order Detail → Returns Review Queue) and 3+ round-trips.
+   685→
+   686→---
+   687→
+   688→## Part 3: Proposed Unified Design
+   689→
+   690→### Principle: Single Source of Truth
+   691→
+   692→**`StockLossRecord` should be the ONLY place where loss-type stock decreases are recorded.** Every module that currently decrements onHand (or quarantines stock) due to loss/damage/theft/transit-loss/missing must:
+   693→
+   694→1. **Funnel through a single shared helper** — `recordStockLoss()` defined in a new `src/lib/stock-loss.ts`. This helper:
+   695→   - Accepts a typed input including `sourceModule`, `orderItemId?`, `orderId?`, `lossType`, `quantity`, `costPerUnit`, `responsibleParty`, `damageType?`, `investigationStatus`, `resolution`, `notes`, `evidence_urls`, `employeeId`.
+   696→   - **Checks for an existing loss record** matching `(orderItemId, lossType, sourceModule)` and refuses/merges if one exists (DB-level unique constraint — see Proposed Schema Changes).
+   697→   - **Calls `processInventoryTransaction` with the appropriate txn type** (`damage_writeoff` / `theft_writeoff` / `missing_writeoff` / `transit_loss` / `supplier_return` — note: NOT `cycle_count_adjust`; see below).
+   698→   - **Creates the `StockLossRecord` row with `inventoryTxnId` populated from the txn result** (no second-step update — eliminates the "loss exists with null txn" bug class).
+   699→   - **Wraps both writes in `db.$transaction`** for atomicity (eliminates the "txn fails, loss record orphaned" bug class).
+   700→   - Inserts audit log + metric event inside the same transaction.
+   701→
+   702→2. **For Cycle Count shortages, do NOT use `cycle_count_adjust` to absorb the discrepancy.** Instead:
+   703→   - For `damage_not_recorded` shortages: call `recordStockLoss(lossType='damaged', sourceModule='cycle_count', resolution='written_off', inventoryTxnType='damage_writeoff')` → creates loss record + decrements onHand by the shortage quantity. The onHand ends up at the counted value as a side-effect.
+   704→   - For `theft_suspected` / `unknown` shortages: call `recordStockLoss(lossType='missing', sourceModule='cycle_count', investigationStatus='open', quarantineOnly=true)` → quarantines + creates loss record WITHOUT adjusting onHand (the current implementation incorrectly sets onHand to counted value AND quarantines, which double-counts the shortage when the loss is later resolved as `written_off`).
+   705→   - For `recording_error` / `transfer_not_recorded` shortages: use `cycle_count_adjust` (no loss record) — these are data-entry corrections, not physical losses.
+   706→   - For surplus: use `cycle_count_adjust` (positive — but ideally switch to `manual_adjustment_in` per audit recommendation).
+   707→
+   708→3. **For Adjust Stock negative adjustments, branch by `reason` enum:**
+   709→   - If `reason` is `damage` / `theft` / `missing` → call `recordStockLoss(sourceModule='adjust_stock', lossType=reason)`.
+   710→   - If `reason` is `system_error` / `correction` / `transfer_not_recorded` → use `manual_adjustment_out` (a NEW txn type to be added — see audit recommendation #5; currently the negative side abuses `damage_writeoff`).
+   711→   - Add a proper `reason` enum to `adjustStockSchema`.
+   712→
+   713→4. **For RTO,** the current "auto-assume perfect, correct later" pattern is correct in spirit — physical inspection does take time. The fix is to:
+   714→   - Keep the auto-increment (`return_resellable` / `return_stitched_received`) at RTO time.
+   715→   - Keep the `needsReview=true` flag.
+   716→   - When `correctReturnItemCondition` runs, the existing reversal (`damage_writeoff`) + loss-record creation is correct — BUT extend it to:
+   717→     - Accept `damage_type`, `responsible_party`, `evidence_urls`, `notes` as input (currently hard-coded).
+   718→     - Set `sourceModule='rto'` on the loss record.
+   719→   - Add a `POST /api/scan` `confirm_rto` action that calls `processOrderReturn` inline (Problem 5 fix).
+   720→   - Add an `orderItemId @unique` constraint where `sourceModule IN ('rto', 'exchange')` — only one loss per orderItem per sourceModule (prevents Scenario 2 in §B.5).
+   721→
+   722→5. **For Returned Stock module,** either:
+   723→   - **Option A (preferred):** Delete the `/api/returned-stitched` module entirely and consolidate into `/api/inventory/receive-returned-stitched`. The two endpoints do overlapping things; only one should exist. The "Returned Stock" sidebar entry would then point to a read-only view of `StockLossRecord` rows with `sourceModule IN ('rto', 'receive_returned_stitched')` + `InventoryTransaction` rows with type `return_stitched_received`.
+   724→   - **Option B (lower-risk):** Keep `/api/returned-stitched` as a parallel record-keeping tool but require it to ALSO call `recordStockLoss` when `condition='damaged'` (with `sourceModule='returned_stitched'`) and to ALSO call `processInventoryTransaction('return_stitched_received')` when `condition` is `perfect`/`good`/`open_box`. Add a check: if a `StockLossRecord` already exists with `orderItemId=X` AND `sourceModule='rto'`, refuse the duplicate (or convert it to a no-op).
+   725→
+   726→6. **For Stock Losses dedicated module,** extend the Damaged form to accept `orderItemId` (proper FK) and `orderId` (FK) — with an order picker that searches by `flowopsOrderNumber` or `trackingNumber`. When `responsible_party='courier'`, make `orderId` required. Before creating the loss record, check: "Does a loss already exist for `(orderItemId, lossType='damaged')`?" If yes, refuse and surface the existing record.
+   727→
+   728→7. **For Supplier Returns,** the existing `supplierReturnId @unique` constraint already prevents duplicates. No change needed — but the supplier-return rejection should also wrap the `stockLossRecord.create` + the `supplier_return` txn in `db.$transaction`.
+   729→
+   730→8. **For Exchange old-item verification,** the existing `OrderExchange.oldItemStockLossId` back-link already provides dedup. Extend it: the `verifyExchangeOldItem` action should set `sourceModule='exchange'` and `orderItemId=exchange.originalOrderItemId` on the loss record, so it's properly linked.
+   731→
+   732→### Proposed Schema Changes
+   733→
+   734→```prisma
+   735→model StockLossRecord {
+   736→  // ... existing fields ...
+   737→
+   738→  // NEW: discriminator for which module created this loss
+   739→  sourceModule    String   @default("stock_loss")
+   740→  // stock_loss | rto | cycle_count | adjust_stock | returned_stitched |
+   741→  // receive_returned_stitched | exchange | supplier_return | return_scan
+   742→
+   743→  // UPGRADE: orderReferenceId → proper FK
+   744→  // (keep orderReferenceId as a deprecated free-text field for backward compat;
+   745→  // new code uses orderId)
+   746→  orderId         String?
+   747→  order           Order?   @relation("OrderStockLosses", fields: [orderId], references: [id])
+   748→
+   749→  // EXISTING: orderItemId (already an FK)
+   750→  orderItemId     String?
+   751→  orderItem       OrderItem? @relation(fields: [orderItemId], references: [id])
+   752→
+   753→  // NEW: FK to the originating cycle count item (replaces notes text)
+   754→  cycleCountItemId String?
+   755→  cycleCountItem  CycleCountItem? @relation(fields: [cycleCountItemId], references: [id])
+   756→
+   757→  // NEW: FK to the originating exchange (replaces OrderExchange.oldItemStockLossId)
+   758→  orderExchangeId String?
+   759→  orderExchange   OrderExchange? @relation("ExchangeOriginatedLoss", fields: [orderExchangeId], references: [id])
+   760→
+   761→  // EXISTING: supplierReturnId (already @unique)
+   762→
+   763→  // EXISTING: inventoryTxnId (already an FK; STOP updating post-create — populate at create time inside a transaction)
+   764→
+   765→  // NEW: unique constraint to prevent duplicate loss records for the same orderItem + lossType + sourceModule
+   766→  // Only enforced when orderItemId IS NOT NULL (partial unique index via raw SQL)
+   767→  // Example migration:
+   768→  //   CREATE UNIQUE INDEX stock_loss_orderitem_dedup
+   769→  //   ON stock_loss_records (order_item_id, loss_type, source_module)
+   770→  //   WHERE order_item_id IS NOT NULL;
+   771→
+   772→  @@index([companyId, lossType, investigationStatus])
+   773→  @@index([companyId, createdAt])
+   774→  @@index([orgVariantId])
+   775→  @@index([orderId])
+   776→  @@index([sourceModule])
+   777→}
+   778→```
+   779→
+   780→**Additional schema changes:**
+   781→
+   782→- `InventoryTransaction.transactionType` — add `'manual_adjustment_out'` so negative adjustments no longer abuse `damage_writeoff`. (Audit recommendation #5.)
+   783→- `InventoryTransaction.referenceType` — formalize the enum to include `'cycle_count_item'`, `'stock_loss'`, `'rto'`, `'exchange'`, `'return_scan'` (currently free-text String).
+   784→- `AdjustStockSchema.reason` — change from free-text to an enum: `'damage' | 'theft' | 'missing' | 'system_error' | 'transfer_not_recorded' | 'recording_error' | 'found_stock'`. Each enum value maps to a known downstream behavior.
+   785→- `CycleCountItem.discrepancyReason` — change from free-text String to an enum constraint (it's already documented as one but not enforced at the DB level).
+   786→- `ReturnedStitchedInventory.originalOrderReference` and `.soldOrderReference` — upgrade to `orderId` FK (or deprecate the model entirely per Option A above).
+   787→- `StockLossRecord.responsibleParty` — formalize the enum constraint at the DB level (currently free-text String).
+   788→
+   789→### Proposed Flow Changes (per module)
+   790→
+   791→1. **RTO** (`processOrderReturn` + `restockOrderForRto`): no change to the auto-increment logic. When `correctReturnItemCondition` is later called, it creates a `StockLossRecord` via `recordStockLoss({ sourceModule: 'rto', orderItemId: item.id, lossType: 'damaged', damageType: <user-provided>, responsibleParty: <user-provided>, ... })`. The unique constraint on `(orderItemId, lossType, sourceModule)` prevents a second correction from creating a duplicate loss record.
+   792→
+   793→2. **Cycle Count approve** (`cycle-counts/[id]/route.ts` PATCH action='approve'):
+   794→   - For `damage_not_recorded` shortage → call `recordStockLoss({ sourceModule: 'cycle_count', cycleCountItemId: item.id, lossType: 'damaged', resolution: 'written_off', inventoryTxnType: 'damage_writeoff' })` — the helper decrements onHand AND creates the loss record atomically.
+   795→   - For `theft_suspected` / `unknown` shortage → call `recordStockLoss({ sourceModule: 'cycle_count', cycleCountItemId: item.id, lossType: 'missing', investigationStatus: 'open', quarantineOnly: true })` — quarantines only, no onHand change (the onHand stays at system value; the investigation resolution will decide the final onHand).
+   796→   - For `recording_error` / `transfer_not_recorded` / surplus → use `cycle_count_adjust` as today (no loss record).
+   797→
+   798→3. **Adjust Stock** (`inventory/adjust/route.ts`):
+   799→   - If `quantity < 0 AND reason IN ('damage', 'theft', 'missing')` → call `recordStockLoss({ sourceModule: 'adjust_stock', lossType: reason, resolution: 'written_off', inventoryTxnType: '<reason>_writeoff' })`.
+   800→   - If `quantity < 0 AND reason IN ('system_error', 'transfer_not_recorded', 'recording_error')` → use the NEW `manual_adjustment_out` txn type (no loss record).
+   801→   - If `quantity > 0` → use `manual_adjustment_in` (no loss record).
+   802→
+   803→4. **Returned Stock** (`/api/returned-stitched`):
+   804→   - Option A: deprecate the module; consolidate into `/api/inventory/receive-returned-stitched` which already calls `recordStockLoss` for `condition='damaged'`. Extend that endpoint to set `sourceModule='receive_returned_stitched'` and accept `orderItemId`.
+   805→   - Option B: keep the module but require it to ALSO call `recordStockLoss` for `condition='damaged'` with `sourceModule='returned_stitched'` AND call `processInventoryTransaction('return_stitched_received')` for `condition='perfect'/'good'/'open_box'`. Add a dedup check against `(orderItemId, lossType, sourceModule)`.
+   806→
+   807→5. **Return Scan** (`scan.actions.ts` `receive_return` mode):
+   808→   - Replace the no-op with: return entity details + 3 action buttons in the UI: "Confirm RTO (Perfect)", "Confirm RTO + Damaged", "Record Transit Loss".
+   809→   - Add `confirm_rto` action → calls `processOrderReturn(orderId, 'Courier returned (RTO) — confirmed via scan')`.
+   810→   - Add `confirm_rto_damaged` action → calls `processOrderReturn(orderId, ...)` then for each item calls `recordStockLoss({ sourceModule: 'return_scan', orderItemId, lossType: 'damaged', damageType: 'transit_damage', responsibleParty: 'courier', resolution: 'written_off' })`.
+   811→   - Add `record_transit_loss` action → calls `recordStockLoss({ sourceModule: 'return_scan', orderId, lossType: 'transit_loss', responsibleParty: 'courier', courierClaimStatus: 'filed' })` (no inventory txn — stock already decremented at dispatch).
+   812→
+   813→6. **Stock Losses dedicated module:** remains the unified UI for viewing/managing ALL losses regardless of `sourceModule`. Add a `sourceModule` filter to the list endpoint and the UI. Extend the Damaged form with an `orderItemId` picker (with dedup check). Extend the Transit form with an `orderId` picker (replacing the free-text `order_reference_id`).
+   814→
+   815→### Prevention of Double-Decrement
+   816→
+   817→The single most important safeguard is the **partial unique index** on `StockLossRecord`:
+   818→
+   819→```sql
+   820→CREATE UNIQUE INDEX stock_loss_orderitem_dedup
+   821→ON stock_loss_records (order_item_id, loss_type, source_module)
+   822→WHERE order_item_id IS NOT NULL;
+   823→```
+   824→
+   825→This guarantees: for any given `OrderItem`, at most ONE loss record can exist per `(lossType, sourceModule)` combination. So:
+   826→- An orderItem can have ONE `damaged` loss from `sourceModule='rto'` AND ONE `damaged` loss from `sourceModule='return_scan'` (if the user re-scans and re-reports) — but NOT two `damaged` losses from `sourceModule='rto'`.
+   827→- An orderItem can have ONE `transit_loss` loss from `sourceModule='stock_loss'` AND ONE from `sourceModule='return_scan'` — but the user must explicitly choose which.
+   828→
+   829→The `recordStockLoss()` helper should:
+   830→1. Check `SELECT 1 FROM stock_loss_records WHERE order_item_id = $1 AND loss_type = $2 AND source_module = $3` BEFORE creating.
+   831→2. If exists: either throw an error with a link to the existing record, OR (configurable) update the existing record's quantity/notes and skip the new inventory txn.
+   832→3. Wrap the check + create + txn in `db.$transaction([...], { isolationLevel: 'Serializable' })` to close the race window between concurrent calls.
+   833→
+   834→For non-orderItem-linked losses (e.g. a warehouse-wide flood damage not tied to a specific order), no dedup is possible at the DB level — but the helper can still log a warning if a loss with the same `(orgVariantId, locationId, lossType, sourceModule, createdAt_within_1_hour)` already exists.
+   835→
+   836→---
+   837→
+   838→## Part 4: Implementation Priority
+   839→
+   840→1. **[Highest — eliminates the most common double-decrement]** Add the `recordStockLoss()` helper in `src/lib/stock-loss.ts`. Refactor `report-damaged`, `correctReturnItemCondition`, `cycle-counts/[id] approve` (Path X only), `receive-returned-stitched`, `exchange.actions.ts verifyExchangeOldItem`, and `supplier-returns/[id] PATCH (rejected)` to funnel through it. This eliminates the "loss exists with null inventoryTxnId" bug class and the "two loss records for the same orderItem" bug class in one stroke. *Effort: ~1 day.*
+   841→
+   842→2. **[Highest — schema migration]** Add the partial unique index `stock_loss_orderitem_dedup` on `(order_item_id, loss_type, source_module) WHERE order_item_id IS NOT NULL`. Add the `source_module` column (default `'stock_loss'`), `order_id` FK column, `cycle_count_item_id` FK column, `order_exchange_id` FK column. Backfill `source_module` for existing rows based on heuristics (if `supplierReturnId IS NOT NULL` → `'supplier_return'`; if `orderItemId IS NOT NULL` → `'rto'`; if `notes LIKE '%cycle count%'` → `'cycle_count'`; else `'stock_loss'`). *Effort: ~2 hours for migration + backfill.*
+   843→
+   844→3. **[High — fixes Problem 2]** Extend the Cycle Count approve flow to call `recordStockLoss` for `damage_not_recorded` shortages (currently silent). Extend Adjust Stock to call `recordStockLoss` for negative adjustments with `reason IN ('damage', 'theft', 'missing')` and add a new `manual_adjustment_out` txn type for non-loss negative adjustments. Add `reason` enum to `adjustStockSchema`. *Effort: ~4 hours.*
+   845→
+   846→4. **[High — fixes Problem 3]** Add an `OrderPicker` shared component (search by `flowopsOrderNumber` or `trackingNumber`). Use it in the Damaged form (with conditional required when `responsible_party='courier'`) and the Transit form (replacing the free-text `order_reference_id`). Wire the picker to set `orderItemId` (Damaged) and `orderId` (Transit) on the loss record. *Effort: ~6 hours.*
+   847→
+   848→5. **[Medium — fixes Problem 5]** Add `confirm_rto`, `confirm_rto_damaged`, `record_transit_loss` actions to `scan.actions.ts`. Extend the scan UI to show 3 action buttons when `receive_return` mode succeeds. Wire the buttons to the new actions. *Effort: ~4 hours.*
+   849→
+   850→6. **[Medium — fixes Problem 1 + Problem 4]** Decide on Option A vs Option B for the Returned Stock module:
+   851→   - **Option A (preferred, lower long-term maintenance):** deprecate `/api/returned-stitched` and the ReturnedStock module entirely; consolidate into `/api/inventory/receive-returned-stitched`. Add a redirect + a read-only "Returned Stock" view that queries `StockLossRecord` + `InventoryTransaction` filtered by `sourceModule IN ('rto', 'receive_returned_stitched')`. *Effort: ~1 day.*
+   852→   - **Option B (lower-risk, keeps existing UI):** keep `/api/returned-stitched` but require it to call `recordStockLoss` + `processInventoryTransaction` consistently. Add a dedup check. *Effort: ~4 hours.*
+   853→
+   854→7. **[Medium — observability]** Add a `source_module` filter to `GET /api/stock-loss` and to the Stock Losses list UI. Add a `source_module` breakdown to `GET /api/stock-loss/stats`. This makes it visible to the user that losses are now unified. *Effort: ~3 hours.*
+   855→
+   856→8. **[Low — cleanup]** Remove dead schemas `reportMissingLossSchema`, `createSupplierDisputeLossSchema`, `stockLossSchema`, `resolveStockLossSchema`. Migrate inventory routes from the legacy 4-query auth pattern (`getCurrentUser + userSetting + employee + rolePermission.count`) to `getWorkspace + requirePermission` (audit recommendation #3, ~26 routes). Add `requirePermission(PERMISSIONS.INVENTORY_VIEW)` to all GET endpoints (audit recommendation #4). *Effort: ~1 day.*
+   857→
+   858→9. **[Low — correctness]** Fix the cycle-count-theft-suspected path to NOT call `cycle_count_adjust` (which SETS onHand to counted value) when quarantining — leave onHand alone and let the loss resolution handle the final write-off. Currently the double-adjustment (cycle_count_adjust now + missing_writeoff later) causes onHand to go below the physically-counted value. *Effort: ~1 hour.*
+   859→
+   860→10. **[Low — completeness]** Add a `report-missing` endpoint (`POST /api/stock-loss/report-missing`) that consumes the existing `reportMissingLossSchema`. This makes the missing-loss type standalone (currently only cycle counts can create it). Required if warehouse staff discover theft outside of a cycle count. *Effort: ~2 hours.*
+   861→
+   862→---
+   863→
+   864→## Appendix: All 6 Code Paths That Create `StockLossRecord` Today
+   865→
+   866→| # | Module | File | Function/Route | lossType | Sets orderItemId? | Sets inventoryTxnId? | Sets sourceModule? | Atomic? |
+   867→|---|---|---|---|---|---|---|---|---|
+   868→| 1 | Stock Losses | `stock-loss/report-damaged/route.ts` | POST handler | `damaged` | NO | YES (via 2-step update) | NO (defaults to "stock_loss") | NO (3 separate writes) |
+   869→| 2 | Stock Losses | `stock-loss/report-theft/route.ts` | POST handler | `theft` | NO | NO (created at resolve time) | NO | NO (2 separate writes) |
+   870→| 3 | Stock Losses | `stock-loss/report-transit/route.ts` | POST handler | `transit_loss` | NO (sets `orderReferenceId` free-text) | NO (by design) | NO | YES (single write) |
+   871→| 4 | Cycle Count | `cycle-counts/[id]/route.ts` PATCH action='approve' | approve handler | `missing` (theft/unknown shortage) | NO | NO (txn exists but ID not linked) | NO | NO (4 separate writes per item) |
+   872→| 5 | RTO Review | `order-return.actions.ts` `correctReturnItemCondition` | POST `/api/orders/[id]/returns/review/correct` | `damaged` | **YES** | YES (linked to the reversal txn) | NO | NO (3 separate writes) |
+   873→| 6 | Receive Returned Stitched | `inventory/receive-returned-stitched/route.ts` | POST handler (damaged branch) | `damaged` | NO | NO (no txn created — assumes already decremented at dispatch) | NO | YES (single write) |
+   874→| 7 | Exchange Verification | `exchange.actions.ts` `verifyExchangeOldItem` | called from `/api/orders/[id]/exchanges/[exchangeId]/verify-old-item` | `damaged` | NO (sets `OrderExchange.oldItemStockLossId` back-link instead) | NO (no txn created for the damaged old item — assumes already decremented at dispatch) | NO | NO (3+ writes) |
+   875→| 8 | Supplier Return Rejection | `supplier-returns/[id]/route.ts` PATCH | PATCH handler (rejected branch) | `supplier_dispute` | NO | NO (the `supplier_return` txn was created at supplier-return CREATE time) | NO | YES (single write, but the supplier return txn was non-atomic with it) |
+   876→
+   877→**8 distinct create paths.** None share a helper. None set `sourceModule`. Only #5 (RTO review correction) sets `orderItemId`. Only #5 links `inventoryTxnId` at create time (the others either skip it or update it post-create, violating the append-only ledger principle). Only #8 has a DB-level uniqueness constraint (`supplierReturnId @unique`).
+   878→
+   879→This is the dis-unification the user is asking to fix.
+   880→
