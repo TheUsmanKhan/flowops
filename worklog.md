@@ -15771,3 +15771,40 @@ Stage Summary:
 - 21 of 22 bugs fixed (PROD-002 intentionally left open per user request)
 - Re-audit confirmed all fixes are correctly applied
 - Lint: 0 new errors introduced (2 pre-existing errors in unmodified files)
+
+---
+
+Task ID: INVENTORY-CORE-AUDIT
+Agent: Explore (read-only audit subagent)
+Task: Read-only investigation audit of FlowOps Inventory Core module
+
+Work Log:
+- Audited 11 API route files, 7 frontend components, src/lib/inventory.ts (959 lines), and 6 Prisma models.
+- Ran 13 live SQL diagnostic queries against Supabase (postgres.gobwxqkzfulbwhzbbsdj).
+- Verified PROD-002 cross-reference claim from PRODUCTS_AUDIT_FINAL.md (claim is HALF-TRUE).
+
+Findings:
+- Critical (2): INV-001 (reserved > onHand in real pool — cycle_count_adjust doesn't release quarantine), INV-002 (receive-returned-stitched route doesn't create ReturnedStitchedInventory row)
+- High (4): INV-003 (supplier_return txns all have NULL referenceId), INV-004 (production_order txns all have NULL referenceId), INV-005 (InventoryTransaction mutated — violates append-only), INV-006 (processInventoryTransaction non-atomic), INV-008 ([id] routes lack company-scoping)
+- Medium (3): INV-009 (supplier DELETE no dependency check), INV-010 (adjust-stock returns 500 not 400), INV-013 (adjust-stock creates StockLossRecord — design conflict with audit expectation)
+- Low (3): INV-007 (direct InventoryPool writes in purchase-orders routes), INV-011 (adjust-stock frontend checks onHand not available), INV-012 (InventoryPool readers use ad-hoc queries, no helper)
+
+Verified OK:
+- WAC math correct on 5 sampled transactions
+- AvgCostHistory 1:1 coverage with avgCost-changing txns (44/44, 0 orphans)
+- StockTransfer: all 7 transfers have exactly 2 txns (transfer_out + transfer_in), logistics NOT folded into costPerUnit
+- No duplicate InventoryPool rows (unique constraint enforced)
+- Dashboard correctly filters by companyId (org-wide leak fixed)
+- Receive stock first-ever detection handles new-location-for-existing-variant
+- Transfer route net-zero verified (code + DB)
+- KPI values fetched from API (not hardcoded)
+- Org-level vs company-level visually distinguished in locations/suppliers views
+- No hydration issues in frontend components
+- ProductionOrder.orderItemId linkage mechanism works (when called via order flow)
+
+Output: /home/z/my-project/INVENTORY_AUDIT_FINAL.md (full report with 13 BUG-ID entries + VERIFIED OK summary table + 12 prioritized recommendations)
+
+Stage Summary:
+- READ-ONLY audit complete. No code, schema, or data was modified.
+- 13 bugs documented across DB / API / Frontend / Cross-Module layers.
+- Top 2 critical fixes: INV-001 (cycle_count_adjust quarantine release) and INV-002 (ReturnedStitchedInventory row creation).

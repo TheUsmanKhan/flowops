@@ -1,0 +1,705 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useState } from 'react'
+     4→import { useForm } from 'react-hook-form'
+     5→import { zodResolver } from '@hookform/resolvers/zod'
+     6→import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+     7→import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
+     8→import { z } from 'zod'
+     9→import { toast } from 'sonner'
+    10→import { api, FetchError } from '@/lib/api-client'
+    11→import { useAppStore, useCan } from '@/stores/app-store'
+    12→import { PERMISSIONS } from '@/lib/permissions'
+    13→import { PageHeader } from '@/components/layout/dashboard-shell'
+    14→import { Button } from '@/components/ui/button'
+    15→import { Input } from '@/components/ui/input'
+    16→import { Label } from '@/components/ui/label'
+    17→import { Badge } from '@/components/ui/badge'
+    18→import { Card, CardContent } from '@/components/ui/card'
+    19→import { Skeleton } from '@/components/ui/skeleton'
+    20→import { Switch } from '@/components/ui/switch'
+    21→import {
+    22→  Select,
+    23→  SelectContent,
+    24→  SelectItem,
+    25→  SelectTrigger,
+    26→  SelectValue,
+    27→} from '@/components/ui/select'
+    28→import {
+    29→  Dialog,
+    30→  DialogContent,
+    31→  DialogDescription,
+    32→  DialogFooter,
+    33→  DialogHeader,
+    34→  DialogTitle,
+    35→} from '@/components/ui/dialog'
+    36→import {
+    37→  AlertDialog,
+    38→  AlertDialogAction,
+    39→  AlertDialogCancel,
+    40→  AlertDialogContent,
+    41→  AlertDialogDescription,
+    42→  AlertDialogFooter,
+    43→  AlertDialogHeader,
+    44→  AlertDialogTitle,
+    45→} from '@/components/ui/alert-dialog'
+    46→import {
+    47→  Warehouse,
+    48→  Building2,
+    49→  Store,
+    50→  Truck,
+    51→  AlertOctagon,
+    52→  Plus,
+    53→  Pencil,
+    54→  Star,
+    55→  MapPin,
+    56→  Eye,
+    57→  PowerOff,
+    58→  Loader2,
+    59→  Package,
+    60→  RefreshCw,
+    61→} from 'lucide-react'
+    62→
+    63→// ─────────────────────────────────────────────────────────────────────────────
+    64→// Types
+    65→// ─────────────────────────────────────────────────────────────────────────────
+    66→
+    67→type LocationType = 'warehouse' | 'dispatch_hub' | 'retail_store' | 'transit' | 'damaged_hold'
+    68→
+    69→interface InventoryLocation {
+    70→  id: string
+    71→  name: string
+    72→  locationType: LocationType
+    73→  city: string
+    74→  province: string
+    75→  countryCode: string
+    76→  isOrgLevel: boolean
+    77→  isDefault: boolean
+    78→  contactPerson: string | null
+    79→  contactPhone: string | null
+    80→}
+    81→
+    82→interface LocationsResponse {
+    83→  locations: InventoryLocation[]
+    84→}
+    85→
+    86→interface DashboardResponse {
+    87→  stockTable: Array<{ locationId: string; stockValue: number }>
+    88→}
+    89→
+    90→// ─────────────────────────────────────────────────────────────────────────────
+    91→// Display maps
+    92→// ─────────────────────────────────────────────────────────────────────────────
+    93→
+    94→const LOCATION_TYPE_META: Record<LocationType, { label: string; icon: typeof Warehouse }> = {
+    95→  warehouse: { label: 'Warehouse', icon: Warehouse },
+    96→  dispatch_hub: { label: 'Dispatch hub', icon: Truck },
+    97→  retail_store: { label: 'Retail store', icon: Store },
+    98→  transit: { label: 'Transit', icon: Truck },
+    99→  damaged_hold: { label: 'Damaged hold', icon: AlertOctagon },
+   100→}
+   101→
+   102→const LOCATION_TYPE_OPTIONS: { value: LocationType; label: string }[] = [
+   103→  { value: 'warehouse', label: 'Warehouse' },
+   104→  { value: 'dispatch_hub', label: 'Dispatch hub' },
+   105→  { value: 'retail_store', label: 'Retail store' },
+   106→  { value: 'transit', label: 'Transit' },
+   107→  { value: 'damaged_hold', label: 'Damaged hold' },
+   108→]
+   109→
+   110→const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
+   111→
+   112→function formatPKR(n: number): string {
+   113→  return `Rs. ${PKR.format(n)}`
+   114→}
+   115→
+   116→function getErrorMessage(err: unknown): string {
+   117→  if (err instanceof FetchError) return err.message
+   118→  if (err instanceof Error) return err.message
+   119→  return 'Something went wrong. Please try again.'
+   120→}
+   121→
+   122→// ─────────────────────────────────────────────────────────────────────────────
+   123→// Zod schema — matches the POST /api/inventory-locations body contract
+   124→// ─────────────────────────────────────────────────────────────────────────────
+   125→
+   126→const locationFormSchema = z.object({
+   127→  name: z.string().min(2, 'Name must be at least 2 characters').max(100, 'Name is too long'),
+   128→  locationType: z.enum([
+   129→    'warehouse',
+   130→    'dispatch_hub',
+   131→    'retail_store',
+   132→    'transit',
+   133→    'damaged_hold',
+   134→  ]),
+   135→  city: z.string().min(1, 'City is required').max(80, 'City is too long'),
+   136→  province: z.string().min(1, 'Province is required').max(80, 'Province is too long'),
+   137→  isDefault: z.boolean(),
+   138→  isOrgLevel: z.boolean(),
+   139→})
+   140→type LocationFormValues = z.infer<typeof locationFormSchema>
+   141→
+   142→const DEFAULT_FORM_VALUES: LocationFormValues = {
+   143→  name: '',
+   144→  locationType: 'warehouse',
+   145→  city: 'Lahore',
+   146→  province: 'Punjab',
+   147→  isDefault: false,
+   148→  isOrgLevel: false,
+   149→}
+   150→
+   151→// ─────────────────────────────────────────────────────────────────────────────
+   152→// Main view
+   153→// ─────────────────────────────────────────────────────────────────────────────
+   154→
+   155→export function LocationsView() {
+   156→  const navigate = useAppStore((s) => s.navigate)
+   157→  const can = useCan()
+   158→  const queryClient = useQueryClient()
+   159→
+   160→  const [createOpen, setCreateOpen] = useState(false)
+   161→  const [editTarget, setEditTarget] = useState<InventoryLocation | null>(null)
+   162→  const [deactivateTarget, setDeactivateTarget] = useState<InventoryLocation | null>(null)
+   163→  const [deactivateError, setDeactivateError] = useState<string | null>(null)
+   164→
+   165→  const canManage = can(PERMISSIONS.INVENTORY_MANAGE_LOCATIONS)
+   166→
+   167→  const locationsQuery = useQuery<LocationsResponse>({
+   168→    queryKey: ['locations'],
+   169→    queryFn: () => api.get<LocationsResponse>('/api/inventory-locations'),
+   170→    staleTime: 30_000,
+   171→  })
+   172→
+   173→  // Lightweight dashboard query to compute per-location stock value & variant count.
+   174→  const stockQuery = useQuery<DashboardResponse>({
+   175→    queryKey: ['inventory-dashboard'],
+   176→    queryFn: () => api.get<DashboardResponse>('/api/inventory/dashboard'),
+   177→    staleTime: 30_000,
+   178→  })
+   179→
+   180→  // Aggregate stock value + variant count by locationId.
+   181→  const stockByLocation = useMemo(() => {
+   182→    const map = new Map<string, { value: number; variantCount: number }>()
+   183→    for (const row of stockQuery.data?.stockTable ?? []) {
+   184→      const cur = map.get(row.locationId) ?? { value: 0, variantCount: 0 }
+   185→      cur.value += row.stockValue
+   186→      cur.variantCount += 1
+   187→      map.set(row.locationId, cur)
+   188→    }
+   189→    return map
+   190→  }, [stockQuery.data?.stockTable])
+   191→
+   192→  const locations = locationsQuery.data?.locations ?? []
+   193→
+   194→  // ── Mutations ────────────────────────────────────────────────────────────
+   195→  const createMutation = useIdempotentMutation<unknown, LocationFormValues>({
+   196→    url: '/api/inventory-locations',
+   197→    mutationOptions: {
+   198→      onSuccess: () => {
+   199→        toast.success('Location created.')
+   200→        void queryClient.invalidateQueries({ queryKey: ['locations'] })
+   201→        void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+   202→        setCreateOpen(false)
+   203→      },
+   204→      onError: (err) => toast.error(getErrorMessage(err)),
+   205→    },
+   206→  })
+   207→
+   208→  const editMutation = useMutation({
+   209→    mutationFn: async ({ id, payload }: { id: string; payload: Partial<LocationFormValues> }) =>
+   210→      api.patch(`/api/inventory-locations/${id}`, payload),
+   211→    onSuccess: () => {
+   212→      toast.success('Location updated.')
+   213→      void queryClient.invalidateQueries({ queryKey: ['locations'] })
+   214→      void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+   215→      setEditTarget(null)
+   216→    },
+   217→    onError: (err) => toast.error(getErrorMessage(err)),
+   218→  })
+   219→
+   220→  const setDefaultMutation = useMutation({
+   221→    mutationFn: async (id: string) => api.patch(`/api/inventory-locations/${id}`, { isDefault: true }),
+   222→    onSuccess: () => {
+   223→      toast.success('Default location set.')
+   224→      void queryClient.invalidateQueries({ queryKey: ['locations'] })
+   225→    },
+   226→    onError: (err) => toast.error(getErrorMessage(err)),
+   227→  })
+   228→
+   229→  const deactivateMutation = useMutation({
+   230→    mutationFn: async (id: string) => api.delete(`/api/inventory-locations/${id}`),
+   231→    onSuccess: () => {
+   232→      toast.success('Location deactivated.')
+   233→      void queryClient.invalidateQueries({ queryKey: ['locations'] })
+   234→      void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+   235→      setDeactivateTarget(null)
+   236→      setDeactivateError(null)
+   237→    },
+   238→    onError: (err) => {
+   239→      // 409 = stock still present — show inline in the dialog.
+   240→      const msg = getErrorMessage(err)
+   241→      setDeactivateError(msg)
+   242→      toast.error(msg)
+   243→    },
+   244→  })
+   245→
+   246→  return (
+   247→    <div className="space-y-6">
+   248→      <PageHeader
+   249→        title="Inventory Locations"
+   250→        description="Warehouses, dispatch hubs and retail outlets where stock is held."
+   251→        actions={
+   252→          <div className="flex items-center gap-2">
+   253→            <Button
+   254→              variant="outline"
+   255→              size="sm"
+   256→              onClick={() => {
+   257→                void locationsQuery.refetch()
+   258→                void stockQuery.refetch()
+   259→              }}
+   260→              disabled={locationsQuery.isFetching}
+   261→            >
+   262→              <RefreshCw
+   263→                className={locationsQuery.isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'}
+   264→              />
+   265→              Refresh
+   266→            </Button>
+   267→            {canManage && (
+   268→              <Button onClick={() => setCreateOpen(true)}>
+   269→                <Plus className="h-4 w-4" /> Add Location
+   270→              </Button>
+   271→            )}
+   272→          </div>
+   273→        }
+   274→      />
+   275→
+   276→      {locationsQuery.isLoading ? (
+   277→        <LocationsGridSkeleton />
+   278→      ) : locationsQuery.isError ? (
+   279→        <Card>
+   280→          <CardContent className="p-10 text-center">
+   281→            <p className="text-sm text-muted-foreground mb-4">
+   282→              Couldn&apos;t load locations. Please try again.
+   283→            </p>
+   284→            <Button variant="outline" onClick={() => locationsQuery.refetch()}>
+   285→              Try again
+   286→            </Button>
+   287→          </CardContent>
+   288→        </Card>
+   289→      ) : locations.length === 0 ? (
+   290→        <EmptyState onCreate={() => setCreateOpen(true)} canManage={canManage} />
+   291→      ) : (
+   292→        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+   293→          {locations.map((loc) => {
+   294→            const meta = LOCATION_TYPE_META[loc.locationType] ?? LOCATION_TYPE_META.warehouse
+   295→            const Icon = meta.icon
+   296→            const stock = stockByLocation.get(loc.id)
+   297→            return (
+   298→              <Card key={loc.id} className="overflow-hidden">
+   299→                <CardContent className="p-5 space-y-4">
+   300→                  <div className="flex items-start justify-between gap-2">
+   301→                    <div className="flex items-start gap-3 min-w-0">
+   302→                      <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 text-primary shrink-0">
+   303→                        <Icon className="h-5 w-5" />
+   304→                      </div>
+   305→                      <div className="min-w-0">
+   306→                        <div className="flex items-center gap-2 flex-wrap">
+   307→                          <h3 className="font-medium text-sm leading-tight truncate">{loc.name}</h3>
+   308→                          {loc.isDefault && (
+   309→                            <Badge className="bg-amber-100 text-amber-700 border-transparent text-[10px] gap-1">
+   310→                              <Star className="h-3 w-3" /> Default
+   311→                            </Badge>
+   312→                          )}
+   313→                        </div>
+   314→                        <p className="text-xs text-muted-foreground flex items-center gap-1 mt-0.5">
+   315→                          <MapPin className="h-3 w-3" />
+   316→                          {loc.city}, {loc.province}
+   317→                        </p>
+   318→                      </div>
+   319→                    </div>
+   320→                  </div>
+   321→
+   322→                  <div className="flex flex-wrap gap-1.5">
+   323→                    <Badge variant="secondary" className="text-[10px]">
+   324→                      {meta.label}
+   325→                    </Badge>
+   326→                    <Badge variant="outline" className="text-[10px]">
+   327→                      {loc.isOrgLevel ? (
+   328→                        <span className="flex items-center gap-1">
+   329→                          <Building2 className="h-3 w-3" /> Org-level
+   330→                        </span>
+   331→                      ) : (
+   332→                        <span className="flex items-center gap-1">
+   333→                          <Store className="h-3 w-3" /> Company
+   334→                        </span>
+   335→                      )}
+   336→                    </Badge>
+   337→                  </div>
+   338→
+   339→                  <div className="grid grid-cols-2 gap-3 pt-1 border-t">
+   340→                    <div>
+   341→                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+   342→                        Stock value
+   343→                      </p>
+   344→                      <p className="text-sm font-semibold tabular-nums">
+   345→                        {stock ? formatPKR(stock.value) : '—'}
+   346→                      </p>
+   347→                    </div>
+   348→                    <div>
+   349→                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+   350→                        Variants
+   351→                      </p>
+   352→                      <p className="text-sm font-semibold tabular-nums flex items-center gap-1">
+   353→                        <Package className="h-3.5 w-3.5 text-muted-foreground" />
+   354→                        {stock?.variantCount ?? 0}
+   355→                      </p>
+   356→                    </div>
+   357→                  </div>
+   358→
+   359→                  <div className="flex flex-wrap gap-2 pt-1">
+   360→                    <Button
+   361→                      size="sm"
+   362→                      variant="outline"
+   363→                      onClick={() => navigate({ name: 'inventory-location-detail', id: loc.id })}
+   364→                    >
+   365→                      <Eye className="h-3.5 w-3.5" /> View Stock
+   366→                    </Button>
+   367→                    {canManage && (
+   368→                      <>
+   369→                        <Button
+   370→                          size="sm"
+   371→                          variant="ghost"
+   372→                          onClick={() => setEditTarget(loc)}
+   373→                          aria-label={`Edit ${loc.name}`}
+   374→                        >
+   375→                          <Pencil className="h-3.5 w-3.5" /> Edit
+   376→                        </Button>
+   377→                        {!loc.isDefault && (
+   378→                          <Button
+   379→                            size="sm"
+   380→                            variant="ghost"
+   381→                            onClick={() => setDefaultMutation.mutate(loc.id)}
+   382→                            disabled={setDefaultMutation.isPending}
+   383→                            aria-label={`Set ${loc.name} as default`}
+   384→                          >
+   385→                            <Star className="h-3.5 w-3.5" /> Set Default
+   386→                          </Button>
+   387→                        )}
+   388→                        <Button
+   389→                          size="sm"
+   390→                          variant="ghost"
+   391→                          className="text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+   392→                          onClick={() => {
+   393→                            setDeactivateError(null)
+   394→                            setDeactivateTarget(loc)
+   395→                          }}
+   396→                          aria-label={`Deactivate ${loc.name}`}
+   397→                        >
+   398→                          <PowerOff className="h-3.5 w-3.5" /> Deactivate
+   399→                        </Button>
+   400→                      </>
+   401→                    )}
+   402→                  </div>
+   403→                </CardContent>
+   404→              </Card>
+   405→            )
+   406→          })}
+   407→        </div>
+   408→      )}
+   409→
+   410→      {/* ── Create dialog ──────────────────────────────────────────────────── */}
+   411→      <LocationFormDialog
+   412→        open={createOpen}
+   413→        onOpenChange={setCreateOpen}
+   414→        title="Add location"
+   415→        description="Warehouses and dispatch hubs where you receive and ship stock."
+   416→        submitLabel="Create location"
+   417→        loading={createMutation.isPending}
+   418→        onSubmit={(values) => createMutation.mutate(values)}
+   419→      />
+   420→
+   421→      {/* ── Edit dialog ────────────────────────────────────────────────────── */}
+   422→      {editTarget && (
+   423→        <LocationFormDialog
+   424→          open={!!editTarget}
+   425→          onOpenChange={(open) => {
+   426→            if (!open) setEditTarget(null)
+   427→          }}
+   428→          title={`Edit ${editTarget.name}`}
+   429→          description="Update the location details."
+   430→          submitLabel="Save changes"
+   431→          loading={editMutation.isPending}
+   432→          defaultValues={{
+   433→            name: editTarget.name,
+   434→            locationType: editTarget.locationType,
+   435→            city: editTarget.city,
+   436→            province: editTarget.province,
+   437→            isDefault: editTarget.isDefault,
+   438→            isOrgLevel: editTarget.isOrgLevel,
+   439→          }}
+   440→          onSubmit={(values) =>
+   441→            editMutation.mutate({ id: editTarget.id, payload: values })
+   442→          }
+   443→        />
+   444→      )}
+   445→
+   446→      {/* ── Deactivate dialog ──────────────────────────────────────────────── */}
+   447→      <AlertDialog
+   448→        open={!!deactivateTarget}
+   449→        onOpenChange={(open) => {
+   450→          if (!open) {
+   451→            setDeactivateTarget(null)
+   452→            setDeactivateError(null)
+   453→          }
+   454→        }}
+   455→      >
+   456→        <AlertDialogContent>
+   457→          <AlertDialogHeader>
+   458→            <AlertDialogTitle>Deactivate location?</AlertDialogTitle>
+   459→            <AlertDialogDescription>
+   460→              This will hide <strong>{deactivateTarget?.name}</strong> from active lists. Existing
+   461→              transactions and audit logs are preserved. The location can be re-activated later.
+   462→            </AlertDialogDescription>
+   463→          </AlertDialogHeader>
+   464→          {deactivateError && (
+   465→            <div className="rounded-md border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700">
+   466→              {deactivateError}
+   467→            </div>
+   468→          )}
+   469→          <AlertDialogFooter>
+   470→            <AlertDialogCancel>Cancel</AlertDialogCancel>
+   471→            <AlertDialogAction
+   472→              className="bg-rose-600 hover:bg-rose-700"
+   473→              disabled={deactivateMutation.isPending}
+   474→              onClick={(e) => {
+   475→                e.preventDefault()
+   476→                if (deactivateTarget) deactivateMutation.mutate(deactivateTarget.id)
+   477→              }}
+   478→            >
+   479→              {deactivateMutation.isPending ? (
+   480→                <>
+   481→                  <Loader2 className="h-4 w-4 animate-spin" /> Deactivating…
+   482→                </>
+   483→              ) : (
+   484→                'Deactivate'
+   485→              )}
+   486→            </AlertDialogAction>
+   487→          </AlertDialogFooter>
+   488→        </AlertDialogContent>
+   489→      </AlertDialog>
+   490→    </div>
+   491→  )
+   492→}
+   493→
+   494→// ─────────────────────────────────────────────────────────────────────────────
+   495→// Form dialog (used for both create & edit)
+   496→// ─────────────────────────────────────────────────────────────────────────────
+   497→
+   498→function LocationFormDialog({
+   499→  open,
+   500→  onOpenChange,
+   501→  title,
+   502→  description,
+   503→  submitLabel,
+   504→  loading,
+   505→  defaultValues,
+   506→  onSubmit,
+   507→}: {
+   508→  open: boolean
+   509→  onOpenChange: (open: boolean) => void
+   510→  title: string
+   511→  description: string
+   512→  submitLabel: string
+   513→  loading: boolean
+   514→  defaultValues?: LocationFormValues
+   515→  onSubmit: (values: LocationFormValues) => void
+   516→}) {
+   517→  const form = useForm<LocationFormValues>({
+   518→    resolver: zodResolver(locationFormSchema),
+   519→    defaultValues: defaultValues ?? DEFAULT_FORM_VALUES,
+   520→    values: defaultValues,
+   521→  })
+   522→
+   523→  const {
+   524→    register,
+   525→    handleSubmit,
+   526→    watch,
+   527→    setValue,
+   528→    reset,
+   529→    formState: { errors },
+   530→  } = form
+   531→
+   532→  // Reset form when dialog opens (so we don't show stale values from a previous session).
+   533→  useEffect(() => {
+   534→    if (open) reset(defaultValues ?? DEFAULT_FORM_VALUES)
+   535→  }, [open])
+   536→
+   537→  const locationType = watch('locationType')
+   538→  const isDefault = watch('isDefault')
+   539→  const isOrgLevel = watch('isOrgLevel')
+   540→
+   541→  return (
+   542→    <Dialog open={open} onOpenChange={onOpenChange}>
+   543→      <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto scrollbar-thin">
+   544→        <DialogHeader>
+   545→          <DialogTitle>{title}</DialogTitle>
+   546→          <DialogDescription>{description}</DialogDescription>
+   547→        </DialogHeader>
+   548→
+   549→        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+   550→          <div className="space-y-1.5">
+   551→            <Label htmlFor="loc-name">Name</Label>
+   552→            <Input
+   553→              id="loc-name"
+   554→              placeholder="e.g. Main Warehouse — Lahore"
+   555→              {...register('name')}
+   556→              autoFocus
+   557→            />
+   558→            {errors.name && <p className="text-xs text-rose-600">{errors.name.message}</p>}
+   559→          </div>
+   560→
+   561→          <div className="space-y-1.5">
+   562→            <Label htmlFor="loc-type">Location type</Label>
+   563→            <Select
+   564→              value={locationType}
+   565→              onValueChange={(v) => setValue('locationType', v as LocationFormValues['locationType'])}
+   566→            >
+   567→              <SelectTrigger id="loc-type">
+   568→                <SelectValue placeholder="Select type" />
+   569→              </SelectTrigger>
+   570→              <SelectContent>
+   571→                {LOCATION_TYPE_OPTIONS.map((o) => (
+   572→                  <SelectItem key={o.value} value={o.value}>
+   573→                    {o.label}
+   574→                  </SelectItem>
+   575→                ))}
+   576→              </SelectContent>
+   577→            </Select>
+   578→            {errors.locationType && (
+   579→              <p className="text-xs text-rose-600">{errors.locationType.message}</p>
+   580→            )}
+   581→          </div>
+   582→
+   583→          <div className="grid grid-cols-2 gap-3">
+   584→            <div className="space-y-1.5">
+   585→              <Label htmlFor="loc-city">City</Label>
+   586→              <Input id="loc-city" placeholder="Lahore" {...register('city')} />
+   587→              {errors.city && <p className="text-xs text-rose-600">{errors.city.message}</p>}
+   588→            </div>
+   589→            <div className="space-y-1.5">
+   590→              <Label htmlFor="loc-province">Province</Label>
+   591→              <Input id="loc-province" placeholder="Punjab" {...register('province')} />
+   592→              {errors.province && (
+   593→                <p className="text-xs text-rose-600">{errors.province.message}</p>
+   594→              )}
+   595→            </div>
+   596→          </div>
+   597→
+   598→          <div className="flex flex-col gap-3 pt-2 border-t">
+   599→            <label className="flex items-start justify-between gap-3 cursor-pointer">
+   600→              <div>
+   601→                <span className="text-sm font-medium flex items-center gap-1.5">
+   602→                  <Building2 className="h-4 w-4 text-muted-foreground" /> Org-level
+   603→                </span>
+   604→                <p className="text-xs text-muted-foreground">
+   605→                  Shared across all companies in this organization. Otherwise it&apos;s private to
+   606→                  your current company.
+   607→                </p>
+   608→              </div>
+   609→              <Switch
+   610→                checked={isOrgLevel}
+   611→                onCheckedChange={(v) => setValue('isOrgLevel', v)}
+   612→                aria-label="Org-level location"
+   613→              />
+   614→            </label>
+   615→            <label className="flex items-center justify-between gap-3 cursor-pointer">
+   616→              <div>
+   617→                <span className="text-sm font-medium flex items-center gap-1.5">
+   618→                  <Star className="h-4 w-4 text-amber-500" /> Default location
+   619→                </span>
+   620→                <p className="text-xs text-muted-foreground">
+   621→                  Used as the preselected destination for new stock.
+   622→                </p>
+   623→              </div>
+   624→              <Switch
+   625→                checked={isDefault}
+   626→                onCheckedChange={(v) => setValue('isDefault', v)}
+   627→                aria-label="Default location"
+   628→              />
+   629→            </label>
+   630→          </div>
+   631→
+   632→          <DialogFooter>
+   633→            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+   634→              Cancel
+   635→            </Button>
+   636→            <Button type="submit" disabled={loading}>
+   637→              {loading ? (
+   638→                <>
+   639→                  <Loader2 className="h-4 w-4 animate-spin" /> Saving…
+   640→                </>
+   641→              ) : (
+   642→                submitLabel
+   643→              )}
+   644→            </Button>
+   645→          </DialogFooter>
+   646→        </form>
+   647→      </DialogContent>
+   648→    </Dialog>
+   649→  )
+   650→}
+   651→
+   652→// ─────────────────────────────────────────────────────────────────────────────
+   653→// Skeletons & empty state
+   654→// ─────────────────────────────────────────────────────────────────────────────
+   655→
+   656→function LocationsGridSkeleton() {
+   657→  return (
+   658→    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+   659→      {Array.from({ length: 6 }).map((_, i) => (
+   660→        <Card key={i}>
+   661→          <CardContent className="p-5 space-y-4">
+   662→            <div className="flex items-start gap-3">
+   663→              <Skeleton className="h-10 w-10 rounded-lg" />
+   664→              <div className="flex-1 space-y-1.5">
+   665→                <Skeleton className="h-4 w-2/3" />
+   666→                <Skeleton className="h-3 w-1/2" />
+   667→              </div>
+   668→            </div>
+   669→            <div className="flex gap-2">
+   670→              <Skeleton className="h-5 w-20 rounded-full" />
+   671→              <Skeleton className="h-5 w-16 rounded-full" />
+   672→            </div>
+   673→            <div className="grid grid-cols-2 gap-3 pt-2 border-t">
+   674→              <Skeleton className="h-9" />
+   675→              <Skeleton className="h-9" />
+   676→            </div>
+   677→            <Skeleton className="h-8 w-full" />
+   678→          </CardContent>
+   679→        </Card>
+   680→      ))}
+   681→    </div>
+   682→  )
+   683→}
+   684→
+   685→function EmptyState({ onCreate, canManage }: { onCreate: () => void; canManage: boolean }) {
+   686→  return (
+   687→    <Card>
+   688→      <CardContent className="p-10 sm:p-14 text-center">
+   689→        <div className="mx-auto h-14 w-14 rounded-full bg-primary/10 flex items-center justify-center mb-4">
+   690→          <Warehouse className="h-7 w-7 text-primary" />
+   691→        </div>
+   692→        <h3 className="text-lg font-semibold">No locations yet</h3>
+   693→        <p className="text-sm text-muted-foreground mt-1 max-w-sm mx-auto">
+   694→          Add a warehouse, dispatch hub, or retail store to start receiving and tracking stock.
+   695→        </p>
+   696→        {canManage && (
+   697→          <Button className="mt-5" onClick={onCreate}>
+   698→            <Plus className="h-4 w-4" /> Create your first location
+   699→          </Button>
+   700→        )}
+   701→      </CardContent>
+   702→    </Card>
+   703→  )
+   704→}
+   705→
