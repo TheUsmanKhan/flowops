@@ -62,8 +62,9 @@ import { LeopardPreferencesSection } from '@/components/settings/leopard-prefere
 interface ConfigField {
   key: string
   label: string
-  type: 'text' | 'password'
+  type: 'text' | 'password' | 'boolean'
   required: boolean
+  description?: string
 }
 
 interface Provider {
