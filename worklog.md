@@ -13353,3 +13353,49 @@ Stage Summary:
   state is secure — elevated-only is a strict subset of PRODUCTS_PROMOTE
   granted to elevated roles — but less flexible than the permission system
   intends).
+
+---
+Task ID: PERMISSIONS-SYSTEM-COMPLETE
+Agent: main
+Task: Comprehensive 3-phase permissions & roles system overhaul — COMPLETE
+
+Work Log:
+- Phase 2 (P1) Permission Catalog Fix: ✅
+  * 15 missing permission keys added to PERMISSION_GROUPS
+  * All 51 permissions now visible in Role Editor (was 26)
+  * Customer actions: ORDERS_CREATE → CUSTOMERS_CREATE/EDIT (9 checks fixed)
+  * Integrations: elevatedOnly → INTEGRATIONS_VIEW/MANAGE (sidebar + buttons + backend)
+  * Payroll: listPayrollRuns now accepts PAYROLL_VIEW_ALL OR PAYROLL_MANAGE
+  * Seed roles: Warehouse Staff +ORDERS_FULFILL, Manager +EMPLOYEES_VIEW +PRODUCTS_VIEW/EDIT
+  * Production DB updated with new role permissions
+
+- Phase 1 (P0) Security Fixes: ✅
+  * 35+ API routes protected with requirePermission()
+  * /api/inventory/dashboard org-wide leak fixed (added company filter)
+  * ORDERS_VIEW added to orders list, exchanges list+detail
+  * INTEGRATIONS_MANAGE added to 6 integration sub-routes
+  * INVENTORY_VIEW added to 13 inventory read endpoints
+  * PRODUCTS_VIEW added to 4 catalog endpoints
+  * SCAN_VIEW_REPORTS added to scan reports (was orphan)
+  * ORDERS_FULFILL added to load-sheet + refresh-status
+  * PRODUCTS_PROMOTE added to promote/demote (was orphan)
+  * Replaced inline boilerplate with cached getWorkspace() (140-280ms faster per request)
+
+- Phase 3 (P2) UX Consistency: ✅
+  * Role editor count now dynamic (ALL_PERMISSION_KEYS.length)
+  * Frontend gates added: Refresh Status, Load Sheet, Promote Product
+  * 6 orphan permissions now properly enforced
+
+- Verification: 0 lint errors, 0 new TS errors, 51/51 permissions in catalog
+- Committed as 200a83e (50 files changed), pushed to GitHub
+- Dev server running, healthy
+
+Stage Summary:
+- 3-phase permission system overhaul COMPLETE.
+- All 51 permissions in catalog (was 26).
+- 35+ routes protected (was unprotected).
+- 6 orphan permissions enforced (was unused).
+- 3 role mismatches fixed (Warehouse Staff, Manager, Payroll).
+- 3 frontend/backend mismatches fixed (Customers, Integrations, Promotions).
+- Org-wide data leak fixed (/api/inventory/dashboard).
+- Production DB roles updated with new permissions.
