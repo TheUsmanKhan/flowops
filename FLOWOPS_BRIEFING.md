@@ -1622,7 +1622,7 @@ All creation flows use `useIdempotentMutation()` from `src/hooks/use-idempotent-
 ## 13. Background Jobs & Cron
 
 ### Vercel Cron (`vercel.json`)
-5. **Vercel cron** (`vercel.json`) — 5 cron schedules — but **only work on Vercel deployments** (the app currently runs on a long-lived Bun server, so these DON'T fire automatically):
+5. **Vercel cron** (`vercel.json`) — 6 cron schedules — but **only work on Vercel deployments** (the app currently runs on a long-lived Bun server, so these DON'T fire automatically):
 
 | Schedule | Path | Purpose |
 |---|---|---|
@@ -1631,12 +1631,14 @@ All creation flows use `useIdempotentMutation()` from `src/hooks/use-idempotent-
 | `0 */12 * * *` (12h) | `/api/cron/poll-leopard-safety-net` | Leopard safety-net poll |
 | `0 1 * * *` (daily 1AM) | `/api/cron/generate-scan-reports` | Generate scan reports |
 | `0 2 * * *` (daily 2AM) | `/api/cron/refresh-exchange-rates` | Fetch + store exchange rate snapshots |
+| `0 3 * * 0` (Sun 3AM) | `/api/cron/detect-inventory-drift` | Weekly drift-detection sweep (detection only — writes `inventory_pool.drift_detected_scheduled` audit logs; does NOT auto-correct) |
 
 ### In-Process Poller (`instrumentation.ts`)
-Since the app runs on a long-lived server (not Vercel), two background jobs are started in-process via Next.js's instrumentation hook:
+Since the app runs on a long-lived server (not Vercel), three background jobs are started in-process via Next.js's instrumentation hook:
 - **PostEx status poller**: every 30 minutes (matches vercel.json). Guarded by `ENABLE_IN_PROCESS_POLLER` env var (default `true`).
 - **Exchange rate refresh**: every 24 hours (matches vercel.json). Guarded by `ENABLE_IN_PROCESS_FX_REFRESH` env var (default `true`).
-- Both use dynamic `import()` inside async closures (avoids bundling at build time). Singleton guard via module-level boolean flags.
+- **Drift-detection sweep**: every 7 days (matches vercel.json). Guarded by `ENABLE_IN_PROCESS_DRIFT_CHECK` env var (default `true`). Runs `detectInventoryDrift()` from `src/lib/actions/detect-inventory-drift.ts` — same shared lib function the HTTP route calls. Detection-only: writes `inventory_pool.drift_detected_scheduled` audit logs (per-pool for NEW drift; single `clean_run` summary if zero new drift). Does NOT auto-correct.
+- All three use dynamic `import()` inside async closures (avoids bundling at build time). Singleton guard via module-level boolean flag (`pollerStarted`).
 
 ### Manual Triggers
 All cron routes accept GET (manual) + POST (cron-triggered with `x-cron-secret` header). The `CRON_SECRET` is `flowops-cron-secret-v1-change-in-production`.

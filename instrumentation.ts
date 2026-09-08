@@ -167,4 +167,58 @@ export async function register() {
   } else {
     console.log('[instrumentation] FX refresh DISABLED (ENABLE_IN_PROCESS_FX_REFRESH=false)')
   }
+
+  // ── Phase 4: in-process weekly drift-detection sweep ──
+  // Same pattern as the PostEx poller + FX refresh above: env flag +
+  // setInterval + dynamic import. Gated by ENABLE_IN_PROCESS_DRIFT_CHECK
+  // (default 'true'). Runs every 7 days (matches vercel.json schedule).
+  //
+  // DETECTION-ONLY: writes `inventory_pool.drift_detected_scheduled`
+  // audit logs for new drift pools (or a single "clean_run" summary if
+  // zero new drift). Does NOT auto-correct — operator must run
+  // scripts/correct-drift-pools.ts for safe pools or do manual data
+  // repair for ambiguous/ghost pools. See
+  // src/lib/actions/detect-inventory-drift.ts for the full detection
+  // logic and src/app/api/cron/detect-inventory-drift/route.ts for the
+  // HTTP entrypoint.
+  const enableDriftCheck = process.env.ENABLE_IN_PROCESS_DRIFT_CHECK !== 'false'
+  if (enableDriftCheck) {
+    const DRIFT_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days (matches vercel.json)
+    const DRIFT_INITIAL_DELAY_MS = 10 * 60 * 1000      // 10 min (let server warm up)
+
+    const startDriftCheck = async () => {
+      try {
+        console.log('[instrumentation] Starting weekly drift-detection sweep (every 7 days)')
+        setTimeout(async () => {
+          try {
+            const { detectInventoryDrift } = await import('@/lib/actions/detect-inventory-drift')
+            const result = await detectInventoryDrift()
+            console.log(
+              `[drift-check] Initial sweep: checked=${result.checked}, drifted=${result.drifted}, newDrift=${result.newDrift}, knownDrift=${result.knownDrift}`,
+            )
+          } catch (err) {
+            console.error('[drift-check] Initial sweep failed:', err instanceof Error ? err.message : err)
+          }
+        }, DRIFT_INITIAL_DELAY_MS)
+
+        setInterval(async () => {
+          try {
+            const { detectInventoryDrift } = await import('@/lib/actions/detect-inventory-drift')
+            const result = await detectInventoryDrift()
+            console.log(
+              `[drift-check] Sweep: checked=${result.checked}, drifted=${result.drifted}, newDrift=${result.newDrift}, knownDrift=${result.knownDrift}`,
+            )
+          } catch (err) {
+            console.error('[drift-check] Sweep failed:', err instanceof Error ? err.message : err)
+          }
+        }, DRIFT_INTERVAL_MS)
+      } catch (err) {
+        console.error('[instrumentation] Failed to start drift-detection sweep:', err instanceof Error ? err.message : err)
+      }
+    }
+
+    startDriftCheck()
+  } else {
+    console.log('[instrumentation] Drift-detection sweep DISABLED (ENABLE_IN_PROCESS_DRIFT_CHECK=false)')
+  }
 }

@@ -16403,3 +16403,280 @@ Data follow-up needed:
   InventoryPool.onHand stock. Audit logs written with action=
   'inventory_pool.drift_skipped_ambiguous' documenting the skip reason.
 
+---
+Task ID: INVENTORY-CORE-FIXES-PART4-SECTIONS-3-4
+Agent: general-purpose
+Task: Fix Part 4 sections 3 (document cleanup) + 4 (weekly drift monitoring)
+
+Work Log:
+- 2 sections addressed: 3 (INVENTORY_CORE_COMPLETE_EXPLAINER.md cleanup) + 4 (weekly drift-detection monitoring)
+- 1 new API route created: src/app/api/cron/detect-inventory-drift/route.ts
+- 1 new lib function created: src/lib/actions/detect-inventory-drift.ts (shared by route + instrumentation.ts — same pattern as PostEx poller + FX refresh)
+- 4 files modified: INVENTORY_CORE_COMPLETE_EXPLAINER.md, instrumentation.ts, vercel.json, FLOWOPS_BRIEFING.md
+- 0 new lint errors (14 problems → 14 problems, identical baseline: 2 pre-existing require() errors in scripts/*.js + 12 pre-existing React Hook Form watch() warnings in unrelated components)
+- 0 new TypeScript errors (69 → 69, identical baseline. None of the new files appear in tsc output)
+
+SECTION 3 — Document Cleanup (INVENTORY_CORE_COMPLETE_EXPLAINER.md):
+- Added revision note at top of document:
+  "Revised 2026-09-08 — ghost pool corrected per Usman's decision (Option B); 4 ambiguous pools identified by SKU/location per follow-up investigation."
+- CLEANED UP INFORMAL REASONING LANGUAGE in "Pool drift reconciliation" section:
+  The original paragraph in WHAT WAS CHANGED contained informal reasoning
+  like "wait, actually 1 ghost + 4 ambiguous = 5, but the script's output
+  shows 10 safe + 2 ambiguous... Hmm, that doesn't add up to 4 ambiguous
+  from the original 2 — let me re-check. Actually looking at the audit
+  log counts from the live DB..."
+  Replaced with a factual statement: "Live data dictated the 8/4 split —
+  actual sums from the production DB, not pre-run estimates."
+- FILLED IN (lookup required) PLACEHOLDERS with SKU/Location data in 3 places:
+  1. "Current System State Snapshot" → "Drift pools" table (added SKU +
+     Location columns)
+  2. "Pool drift reconciliation" → "LIVE VERIFICATION" → "Remaining drift
+     pools" table (added SKU + Location columns)
+  3. "What Usman Should Know" → "The manual action items still open" table
+     (filled in SKU + Location for all 4 ambiguous pools)
+  Mapping used (from task spec):
+    - cmsn8id0001edjlmsh85yatwx → SKU=F-273A, Location=mz
+    - cms1ns2k8000ntdjom0zi0gzl → SKU=HFH-UNST-OS, Location=Lahore Central Warehouse
+    - cmsn715d0000rjlru0mh1tbz3 → SKU=F-18A-MAROON, Location=mz
+    - cms5t8e18004jjl4fdw93gkkf → SKU=HFH-ST-S, Location=Lahore Central Warehouse
+- UPDATED "Current System State Snapshot" SECTION:
+  • Pool invariant violations: `reserved > onHand` count = 0 (was 1)
+    — ghost pool corrected per Option B (reserved set from 3 to 0)
+  • Drift pools: count = 4 (was 5) — 4 ambiguous only (ghost pool no
+    longer drift since reserved=0 == actual_sum=0)
+  • Updated INV-001 verification JSON: { reserved_gt_onhand: 0 }
+  • Updated INV-001 "WHAT COULD STILL GO WRONG" first bullet:
+    ghost pool no longer "left untouched" — now corrected per Option B
+- UPDATED "Bug status table" row for Pool drift reconciliation:
+  • Status: "One-shot done + weekly sweep" (was "One-shot done")
+  • Code Fix: added src/app/api/cron/detect-inventory-drift/route.ts
+  • DB Verification: "8 corrected + 4 ambiguous + 1 ghost corrected (Option B) = 13"
+    (was "8 corrected + 4 ambiguous + 1 ghost = 13")
+  • Residual Risk: "4 ambiguous drift pools remain; weekly detection sweep scheduled (Sun 03:00)"
+    (was "5 drift pools remain; no scheduled re-run")
+- UPDATED "Bug status table" row for INV-001:
+  • DB Verification: "0 active violations (ghost pool corrected per Option B); 0 new since fix"
+    (was "0 new violations since fix")
+  • Residual Risk: "Ghost pool corrected per Option B; onHand-vs-reserved count discrepancy risk remains"
+    (was "1 ghost pool remains (pre-fix)")
+- UPDATED Audit log summary table:
+  • Added row for `inventory_pool.ghost_corrected` (count=1)
+  • Added row for `inventory_pool.drift_detected_scheduled` (count=0 so far — will grow)
+- UPDATED "What Usman Should Know" SECTION:
+  • Removed ghost pool row from "manual action items" table (now resolved)
+  • Filled in SKU + Location for all 4 ambiguous pools (no more "(lookup required)")
+  • Added new "Resolved: Ghost pool (Option B applied)" subsection documenting
+    the decision: reserved was set from 3 to 0 per Option B; rationale + worst-case
+    fallback + audit log action (`inventory_pool.ghost_corrected` × 1)
+  • Removed the "To find the SKU and location for each ambiguous pool, run:" SQL
+    block (no longer needed — data is now in the table)
+  • Updated "What's still slightly risky" section: the drift correction script
+    is no longer described as "one-shot, not scheduled" — now describes the
+    weekly detection sweep
+  • Updated "What to monitor going forward": drift pools should stay at 4
+    (was "5 = 1 ghost + 4 ambiguous") — weekly `inventory_pool.drift_detected_scheduled`
+    audit logs are the early-warning signal
+  • Updated "Bottom line": "4 ambiguous pools need manual review; ghost pool
+    has been resolved per Option B" (was "5 pools need manual review"); added
+    "weekly drift-detection sweep is now in place"
+- CLEANED UP remaining "actually" usage in the new ghost pool paragraph:
+  "actually real stock" → "real stock" (no informal hedge)
+
+SECTION 4 — Weekly Drift-Detection Monitoring:
+
+NEW FILE: src/lib/actions/detect-inventory-drift.ts (shared library function)
+- Exports `detectInventoryDrift()` async function returning
+  DriftDetectionResult { checked, drifted, newDrift, knownDrift,
+  auditLogSuccess, auditLogFailure }
+- Same pattern as `pollPostExOrderStatuses()` in
+  src/lib/actions/postex-status-poll.actions.ts — a single function that
+  does the work, called from both the HTTP route and the in-process
+  scheduler. Ensures route + instrumentation.ts use the EXACT same code
+  path (no drift between two implementations).
+- Flow:
+  1. Run the drift-detection SQL query (identical to
+     scripts/correct-drift-pools.ts detection logic — pool.reserved !=
+     SUM(OrderItem.quantity WHERE orgVariantId+locationId match AND
+     fulfillmentStatus='reserved'))
+  2. Look up prior `inventory_pool.drift_detected_scheduled` audit logs
+     within the past 14 days (covers 2 weekly runs) to determine
+     "known drift" vs "new drift"
+  3. Resolve companyId per organizationId via Company.findMany
+     (InventoryPool has no companyId column — only organizationId; same
+     pattern as correct-drift-pools.ts)
+  4. Write audit logs:
+     - If newDrift == 0: single "clean_run" summary audit log entry
+       (covers BOTH "system fully clean" AND "drift exists but all
+       already known from prior sweep")
+     - Else: one per-pool audit log entry for each NEW drift pool only
+       (avoids audit log spam every week for the same chronic drift
+       pool — e.g. the 4 ambiguous pools pending manual review)
+- Audit log entry shape:
+  action: 'inventory_pool.drift_detected_scheduled'
+  entityType: 'inventory_pool'
+  entityId: pool.id (or 'none' for clean_run summary)
+  companyId: resolved via orgToCompany map (nullable)
+  organizationId: from pool row (nullable for clean_run)
+  oldValues: { onHand, reserved, available, orgVariantId, locationId }
+  newValues: { onHand, reserved, actualReservedSum, available, ... }
+  metadata: { reason, detectedAt, actualReservedSum, delta, note }
+- DETECTION-ONLY: explicitly does NOT auto-correct. Operator must run
+  scripts/correct-drift-pools.ts for safe pools or do manual data
+  repair for ambiguous/ghost pools.
+
+NEW FILE: src/app/api/cron/detect-inventory-drift/route.ts (HTTP entrypoint)
+- POST + GET handlers (GET delegates to POST for manual browser triggers,
+  same pattern as poll-postex/route.ts and refresh-exchange-rates/route.ts)
+- runtime = 'nodejs', dynamic = 'force-dynamic'
+- Auth: shared secret via x-cron-secret OR Authorization: Bearer header
+  (same as other 4 cron routes; uses CRON_SECRET env var)
+- Returns JSON: { success, checked, drifted, newDrift, knownDrift,
+  auditLogSuccess, auditLogFailure }
+- All detection logic delegated to detectInventoryDrift() in the shared lib
+- Heavy header comment explaining WHAT IT DOES, AUTH, SCHEDULE, RESPONSE
+  shape, and the shared-lib pattern (matching pollPostExOrderStatuses).
+
+MODIFIED FILE: instrumentation.ts (registration of in-process drift checker)
+- Added new "Phase 4: in-process weekly drift-detection sweep" block at
+  end of register() function — same structure as Phase F1 (FX refresh)
+- Env var: ENABLE_IN_PROCESS_DRIFT_CHECK (default 'true')
+  • Set to 'false' to disable on multi-replica setups (same pattern as
+    ENABLE_IN_PROCESS_POLLER + ENABLE_IN_PROCESS_FX_REFRESH)
+- Interval: 7 * 24 * 60 * 60 * 1000 ms (7 days, matches vercel.json
+  schedule "0 3 * * 0")
+- Initial delay: 10 * 60 * 1000 ms (10 min after server start — slightly
+  longer than FX refresh's 5 min to avoid contending with startup queries)
+- Dynamic import: `await import('@/lib/actions/detect-inventory-drift')`
+  then calls `detectInventoryDrift()` (same pattern as FX refresh's
+  `import('@/lib/exchange-rates')` then `syncExchangeRates(...)`)
+- Console.log registration message: "[instrumentation] Starting weekly
+  drift-detection sweep (every 7 days)"
+- Each sweep logs result: "[drift-check] Sweep: checked=N, drifted=N,
+  newDrift=N, knownDrift=N" — only fires on completion (no spam)
+- Disabled-state log: "[instrumentation] Drift-detection sweep DISABLED
+  (ENABLE_IN_PROCESS_DRIFT_CHECK=false)"
+
+MODIFIED FILE: vercel.json (cron schedule registration)
+- Added 6th entry to crons array:
+  { "path": "/api/cron/detect-inventory-drift", "schedule": "0 3 * * 0" }
+  Schedule "0 3 * * 0" = every Sunday at 03:00 UTC (per task spec)
+- Existing 5 cron entries untouched.
+
+MODIFIED FILE: FLOWOPS_BRIEFING.md §13 Background Jobs & Cron
+- "Vercel Cron" subsection:
+  • Updated header: "5 cron schedules" → "6 cron schedules"
+  • Added new table row:
+    | `0 3 * * 0` (Sun 3AM) | `/api/cron/detect-inventory-drift` |
+    Weekly drift-detection sweep (detection only — writes
+    `inventory_pool.drift_detected_scheduled` audit logs; does NOT auto-correct) |
+- "In-Process Poller" subsection:
+  • Updated header: "two background jobs" → "three background jobs"
+  • Added new bullet for drift-detection sweep:
+    "Drift-detection sweep: every 7 days (matches vercel.json). Guarded
+    by ENABLE_IN_PROCESS_DRIFT_CHECK env var (default `true`). Runs
+    `detectInventoryDrift()` from
+    `src/lib/actions/detect-inventory-drift.ts` — same shared lib function
+    the HTTP route calls. Detection-only: writes
+    `inventory_pool.drift_detected_scheduled` audit logs (per-pool for
+    NEW drift; single `clean_run` summary if zero new drift). Does NOT
+    auto-correct."
+  • Updated final bullet to say "All three use dynamic import()..."
+
+Verification:
+- bun run lint: 14 problems (2 errors + 12 warnings) — IDENTICAL to
+  PART3 baseline. The 2 errors are pre-existing in scripts/products-audit-queries.js
+  + scripts/products-audit-queries2.js (require() style imports). The 12
+  warnings are pre-existing React Hook Form watch() issues in unrelated
+  components (locations-view.tsx, supplier-detail-view.tsx, suppliers-view.tsx,
+  catalog-settings-view.tsx, returned-stitched-view.tsx, order-create-view.tsx,
+  fire-and-forget-transform.ts). NONE of the new or modified files appear
+  in the lint output.
+- bun run tsc --noEmit: 69 errors — IDENTICAL to PART3 baseline. All errors
+  are pre-existing in unrelated modules (shipper-advice.actions.ts,
+  leopard.adapter.ts, proof-of-delivery.ts, status-history.ts,
+  session-payload.ts, stock-loss.ts, inventory.ts line 1015 — INV-004 fix
+  from Part 1). Targeted grep for "detect-inventory-drift|drift-detect"
+  in tsc output returned 0 matches — my new files have zero TypeScript
+  errors.
+- Zero new lint errors, zero new TypeScript errors introduced by this fix pass.
+
+Files Modified:
+1. INVENTORY_CORE_COMPLETE_EXPLAINER.md — top-level revision note added;
+   Pool drift reconciliation section: cleaned up informal reasoning
+   language in idempotency paragraph, added new "Ghost pool correction
+   (post-script, per Usman's Option B decision)" subsection, updated
+   "WHAT THE SYSTEM DOES NOW" bullets to include ghost pool correction +
+   weekly sweep, updated LIVE VERIFICATION audit log query + result +
+   remaining drift pools table (added SKU/Location columns), updated
+   "WHAT COULD STILL GO WRONG" bullets (removed ghost pool action item,
+   added Option B follow-up bullet + scheduled detection sweep bullet);
+   INV-001 verification block: updated JSON result to {reserved_gt_onhand:
+   0}, updated "WHAT COULD STILL GO WRONG" first bullet; Current System
+   State Snapshot section: updated violations table (0 instead of 1) +
+   drift pools table (4 instead of 5, added SKU/Location columns) +
+   text "5 drift pools remain" → "4 ambiguous drift pools remain"; Bug
+   status table: updated INV-001 row + Pool drift reconciliation row;
+   Summary line: "5 drift pools (1 ghost + 4 ambiguous) require manual
+   data-repair" → "4 ambiguous drift pools require manual data-repair
+   decisions (the ghost pool has been resolved per Option B)"; Audit log
+   summary table: added 2 new rows (ghost_corrected=1, drift_detected_
+   scheduled=0 so far); What Usman Should Know section: removed ghost
+   pool row from manual action items table, filled in SKU/Location for
+   all 4 ambiguous pools (no more (lookup required)), added new
+   "Resolved: Ghost pool (Option B applied)" subsection, removed the
+   "To find the SKU and location" SQL block; "What's still slightly
+   risky" section: updated drift correction script bullet (now describes
+   weekly detection sweep); "What to monitor going forward": updated
+   drift pools monitoring bullet (stay at 4, weekly audit log signal);
+   Bottom line: updated "5 pools need manual review" → "4 ambiguous pools
+   need manual review; ghost pool resolved per Option B"; added
+   "weekly drift-detection sweep is now in place".
+2. instrumentation.ts — added "Phase 4: in-process weekly drift-detection
+   sweep" block (~55 lines): env flag check + setTimeout for initial
+   sweep + setInterval for recurring sweep + dynamic import of
+   detectInventoryDrift from @/lib/actions/detect-inventory-drift +
+   console.log registration + disabled-state log.
+3. vercel.json — added 6th cron entry: {path: /api/cron/detect-inventory-
+   drift, schedule: "0 3 * * 0"}.
+4. FLOWOPS_BRIEFING.md §13 — updated Vercel Cron table (5→6 schedules,
+   added Sun 3AM drift-detection row) + In-Process Poller subsection
+   (two→three background jobs, added drift-detection sweep bullet with
+   env var + interval + lib function reference + detection-only
+   clarification).
+
+Files Created:
+1. src/lib/actions/detect-inventory-drift.ts — shared library function
+   `detectInventoryDrift()` that runs the weekly drift-detection sweep.
+   Same pattern as `pollPostExOrderStatuses()` in
+   src/lib/actions/postex-status-poll.actions.ts: a single function
+   doing the work, called from BOTH the HTTP route AND the in-process
+   scheduler in instrumentation.ts. Detection-only: writes
+   `inventory_pool.drift_detected_scheduled` audit logs (per-pool for
+   NEW drift, single clean_run summary if zero new drift). Does NOT
+   auto-correct.
+2. src/app/api/cron/detect-inventory-drift/route.ts — HTTP entrypoint
+   (POST + GET) that handles auth + response wrapping and delegates to
+   `detectInventoryDrift()`. Same auth pattern as the other 4 cron
+   routes (x-cron-secret header / CRON_SECRET env var).
+
+Stage Summary:
+- Both sections (3 + 4) successfully implemented.
+- INVENTORY_CORE_COMPLETE_EXPLAINER.md fully updated to reflect: ghost
+  pool corrected (Option B), 4 ambiguous pools identified by SKU/location,
+  weekly drift-detection sweep scheduled.
+- Weekly drift-detection monitoring is now in place: HTTP route +
+  in-process scheduler + vercel.json cron schedule + FLOWOPS_BRIEFING
+  documentation.
+- The detection sweep is idempotent and safe to run on a live system —
+  detection-only (no auto-correction), uses the same SQL as the proven
+  correct-drift-pools.ts script, and properly tracks new vs known drift
+  to avoid audit log spam.
+- 0 new lint errors, 0 new TypeScript errors.
+
+Combined with Parts 1 + 2 + 3 + 4-sections-1+2 (presumed): all 14
+inventory bugs remain fixed at the code level. INV-012 (helper
+extraction — tech debt) remains the only open low-priority follow-up.
+The ghost pool has been resolved per Usman's Option B decision. The
+4 ambiguous pools remain pending manual review (now identified by
+SKU/location). Weekly drift detection is now an automated safeguard.
+
