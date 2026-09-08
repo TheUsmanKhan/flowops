@@ -16700,3 +16700,28 @@ Final state:
 - 13 drift_corrected audit logs + 9 auto_backordered audit logs
 
 Inventory Core module is now FULLY CLEAN.
+
+---
+Task ID: PO-PRODUCTION-AUDIT
+Agent: explore
+Task: READ-ONLY investigation audit of the FlowOps Purchase Orders & Production Orders (MTO fabric consumption) module
+
+Work Log:
+- Conducted a comprehensive READ-ONLY audit of the PO + Production Orders module covering schema, API routes, lib helpers, frontend components, and DB state.
+- Verified INV-001/002/003/004/006/007 fixes are correctly applied at the code level. Atomicity patterns via db.$transaction, INV-003/004 bidirectional linking, INV-007 canonical helpers — all confirmed.
+- Ran 17 DB integrity queries against the live Supabase Postgres DB. Found 3 stale InventoryPool.incoming=500 rows, 4 fabric_consumed_for_stitching txns with NULL referenceId (pre-fix legacy), 2 ReturnedStitchedInventory rows with NULL inventoryTxnId (pre-INV-002 legacy).
+- Confirmed 0 AvgCostHistory orphans; 0 PurchaseOrderItems with receivedQuantity > orderedQuantity; 0 ProductionOrders with NULL fabricVariantId/stitchedVariantId.
+- Found 9 issues total: 2 Critical (PO-001 missing permission on fulfill-mto route; PO-002 ProductionOrder completion automation silently skips when orderItemId=NULL — affects manual create + exchange-shipment MTO paths, 2 of 3 ProductionOrders in DB orphaned), 1 High (PO-003 stale incoming), 4 Medium (PO-004/005 legacy NULL links, PO-006 misleading cancel dialog text, PO-009 missing INVENTORY_VIEW on GET detail routes), 2 Low (PO-007 API/UI mismatch on manual creation, PO-008 no ProductionOrder detail view).
+- Also identified 7 lower-severity observations: PO-010 missing org-variant org-membership validation in PO create, PO-011/PO-013 non-atomic PO confirm/cancel, PO-012 allows received > ordered, PO-014 missing Zod on production PATCH, PO-015 no pagination on PO list, PO-016 missing client-side cost validation in receive dialog.
+- Confirmed frontend permission gating is correctly applied: Create/Confirm/Receive/Cancel/Update-status buttons all use useCan(PERMISSIONS.XXX). Cross-company isolation verified across all routes.
+- Wrote full audit report to /home/z/my-project/PO_PRODUCTION_AUDIT_FINAL.md (9 detailed bug entries + 7 additional observations + verification list of 14 confirmed-OK items).
+
+Stage Summary:
+- Audit COMPLETE. No code, schema, or data was modified.
+- 9 issues documented in BUG-ID format with layer, severity, location, description, expected/actual behavior, repro steps, and suspected root cause.
+- Highest priority: PO-001 (authz gap) and PO-002 (silent data loss on production completion) — both Critical.
+- Recommended remediation order: PO-001 → PO-002 → PO-009 → PO-003 → PO-006 → PO-004/PO-005 (backfill) → PO-007 → PO-008.
+- Legacy NULL-link rows (PO-004, PO-005) and stale incoming (PO-003) are pre-existing data integrity issues — the current code prevents new occurrences, but historical rows need manual backfill.
+
+Files Created:
+1. /home/z/my-project/PO_PRODUCTION_AUDIT_FINAL.md — the full structured markdown audit report.

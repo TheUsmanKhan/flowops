@@ -1,0 +1,927 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
+     6→import { toast } from 'sonner'
+     7→import { api, FetchError } from '@/lib/api-client'
+     8→import { useAppStore, useCan } from '@/stores/app-store'
+     9→import { PERMISSIONS } from '@/lib/permissions'
+    10→import { PageHeader } from '@/components/layout/dashboard-shell'
+    11→import { Button } from '@/components/ui/button'
+    12→import { Input } from '@/components/ui/input'
+    13→import { Label } from '@/components/ui/label'
+    14→import { Textarea } from '@/components/ui/textarea'
+    15→import { Badge } from '@/components/ui/badge'
+    16→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+    17→import { Skeleton } from '@/components/ui/skeleton'
+    18→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+    19→import {
+    20→  Select,
+    21→  SelectContent,
+    22→  SelectItem,
+    23→  SelectTrigger,
+    24→  SelectValue,
+    25→} from '@/components/ui/select'
+    26→import {
+    27→  Dialog,
+    28→  DialogContent,
+    29→  DialogDescription,
+    30→  DialogFooter,
+    31→  DialogHeader,
+    32→  DialogTitle,
+    33→} from '@/components/ui/dialog'
+    34→import {
+    35→  Table,
+    36→  TableBody,
+    37→  TableCell,
+    38→  TableHead,
+    39→  TableHeader,
+    40→  TableRow,
+    41→} from '@/components/ui/table'
+    42→import {
+    43→  ArrowLeft,
+    44→  Plus,
+    45→  Trash2,
+    46→  Search,
+    47→  AlertCircle,
+    48→  Loader2,
+    49→  ShoppingCart,
+    50→  Warehouse,
+    51→  Truck,
+    52→  Calendar,
+    53→  Wallet,
+    54→  Save,
+    55→  Send,
+    56→} from 'lucide-react'
+    57→
+    58→// ─────────────────────────────────────────────────────────────────────────────
+    59→// Types
+    60→// ─────────────────────────────────────────────────────────────────────────────
+    61→
+    62→interface Supplier {
+    63→  id: string
+    64→  name: string
+    65→  contactPerson: string | null
+    66→  paymentTerms: string
+    67→}
+    68→
+    69→interface SuppliersResponse {
+    70→  suppliers: Supplier[]
+    71→}
+    72→
+    73→interface InventoryLocation {
+    74→  id: string
+    75→  name: string
+    76→  locationType: string
+    77→  city: string
+    78→  isOrgLevel: boolean
+    79→  isDefault: boolean
+    80→}
+    81→
+    82→interface LocationsResponse {
+    83→  locations: InventoryLocation[]
+    84→}
+    85→
+    86→interface ProductsResponse {
+    87→  products: Array<{
+    88→    id: string
+    89→    title: string
+    90→    variants: Array<{
+    91→      id: string
+    92→      sku: string
+    93→      costPrice: number
+    94→      fulfillmentType: string
+    95→    }>
+    96→  }>
+    97→}
+    98→
+    99→interface LineItem {
+   100→  variantId: string
+   101→  sku: string
+   102→  productTitle: string
+   103→  costPrice: number
+   104→  quantity: number
+   105→  costPerUnit: number
+   106→}
+   107→
+   108→interface CreatePayload {
+   109→  supplier_id: string
+   110→  order_date?: string
+   111→  expected_delivery_date?: string
+   112→  delivery_location_id: string
+   113→  advance_payment: number
+   114→  payment_method?: string
+   115→  notes?: string
+   116→  items: Array<{
+   117→    org_variant_id: string
+   118→    ordered_quantity: number
+   119→    cost_per_unit: number
+   120→  }>
+   121→  status: 'draft' | 'ordered'
+   122→}
+   123→
+   124→interface CreateResponse {
+   125→  id: string
+   126→  poNumber: string
+   127→}
+   128→
+   129→// ─────────────────────────────────────────────────────────────────────────────
+   130→// Helpers
+   131→// ─────────────────────────────────────────────────────────────────────────────
+   132→
+   133→const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
+   134→function formatPKR(n: number): string {
+   135→  return `Rs. ${PKR.format(n)}`
+   136→}
+   137→
+   138→function getErrorMessage(err: unknown): string {
+   139→  if (err instanceof FetchError) return err.message
+   140→  if (err instanceof Error) return err.message
+   141→  return 'Something went wrong. Please try again.'
+   142→}
+   143→
+   144→function parseQty(v: string): number {
+   145→  if (v === '') return 0
+   146→  const n = Number(v)
+   147→  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
+   148→}
+   149→
+   150→function parseCost(v: string): number {
+   151→  if (v === '') return 0
+   152→  const n = Number(v)
+   153→  return Number.isFinite(n) && n >= 0 ? n : 0
+   154→}
+   155→
+   156→function todayISO(): string {
+   157→  return new Date().toISOString().split('T')[0]
+   158→}
+   159→
+   160→// ─────────────────────────────────────────────────────────────────────────────
+   161→// Main view
+   162→// ─────────────────────────────────────────────────────────────────────────────
+   163→
+   164→export function PoCreateView() {
+   165→  const navigate = useAppStore((s) => s.navigate)
+   166→  const can = useCan()
+   167→  const queryClient = useQueryClient()
+   168→
+   169→  const canManage = can(PERMISSIONS.INVENTORY_MANAGE_PURCHASE_ORDERS)
+   170→
+   171→  const [supplierId, setSupplierId] = useState('')
+   172→  const [deliveryLocationId, setDeliveryLocationId] = useState('')
+   173→  const [orderDate, setOrderDate] = useState(todayISO())
+   174→  const [expectedDeliveryDate, setExpectedDeliveryDate] = useState('')
+   175→  const [advancePayment, setAdvancePayment] = useState('0')
+   176→  const [paymentMethod, setPaymentMethod] = useState('')
+   177→  const [notes, setNotes] = useState('')
+   178→  const [items, setItems] = useState<LineItem[]>([])
+   179→  const [variantSearch, setVariantSearch] = useState('')
+   180→  const [createSupplierOpen, setCreateSupplierOpen] = useState(false)
+   181→
+   182→  // ── Data queries ─────────────────────────────────────────────────────────
+   183→  const suppliersQuery = useQuery<SuppliersResponse>({
+   184→    queryKey: ['suppliers'],
+   185→    queryFn: () => api.get<SuppliersResponse>('/api/suppliers'),
+   186→    staleTime: 30_000,
+   187→  })
+   188→
+   189→  const locationsQuery = useQuery<LocationsResponse>({
+   190→    queryKey: ['locations'],
+   191→    queryFn: () => api.get<LocationsResponse>('/api/inventory-locations'),
+   192→    staleTime: 30_000,
+   193→  })
+   194→
+   195→  const productsQuery = useQuery<ProductsResponse>({
+   196→    queryKey: ['products', 'for-po'],
+   197→    queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100'),
+   198→    staleTime: 60_000,
+   199→  })
+   200→
+   201→  const variantOptions = useMemo(() => {
+   202→    const list: Array<{
+   203→      variantId: string
+   204→      sku: string
+   205→      productTitle: string
+   206→      costPrice: number
+   207→      fulfillmentType: string
+   208→    }> = []
+   209→    for (const p of productsQuery.data?.products ?? []) {
+   210→      for (const v of p.variants) {
+   211→        list.push({
+   212→          variantId: v.id,
+   213→          sku: v.sku,
+   214→          productTitle: p.title,
+   215→          costPrice: v.costPrice,
+   216→          fulfillmentType: v.fulfillmentType,
+   217→        })
+   218→      }
+   219→    }
+   220→    return list
+   221→  }, [productsQuery.data])
+   222→
+   223→  const variantSearchResults = useMemo(() => {
+   224→    if (!variantSearch.trim()) return []
+   225→    const q = variantSearch.toLowerCase()
+   226→    return variantOptions
+   227→      .filter(
+   228→        (v) => v.sku.toLowerCase().includes(q) || v.productTitle.toLowerCase().includes(q),
+   229→      )
+   230→      .slice(0, 8)
+   231→  }, [variantOptions, variantSearch])
+   232→
+   233→  const totalUnits = useMemo(() => items.reduce((s, i) => s + i.quantity, 0), [items])
+   234→  const totalValue = useMemo(
+   235→    () => items.reduce((s, i) => s + i.quantity * i.costPerUnit, 0),
+   236→    [items],
+   237→  )
+   238→  const advance = parseCost(advancePayment)
+   239→  const balanceDue = Math.max(0, totalValue - advance)
+   240→
+   241→  const selectedSupplier = suppliersQuery.data?.suppliers.find((s) => s.id === supplierId)
+   242→  const selectedLocation = locationsQuery.data?.locations.find((l) => l.id === deliveryLocationId)
+   243→
+   244→  // Auto-select default location once.
+   245→  useEffect(() => {
+   246→    if (!deliveryLocationId && locationsQuery.data?.locations.length) {
+   247→      const def = locationsQuery.data.locations.find((l) => l.isDefault)
+   248→      setDeliveryLocationId(def?.id ?? locationsQuery.data.locations[0].id)
+   249→    }
+   250→  }, [deliveryLocationId, locationsQuery.data])
+   251→
+   252→  // ── Mutation ─────────────────────────────────────────────────────────────
+   253→  const createMutation = useIdempotentMutation<CreateResponse, CreatePayload>({
+   254→    url: '/api/purchase-orders',
+   255→    mutationOptions: {
+   256→      onSuccess: (data, vars) => {
+   257→        toast.success(
+   258→          vars.status === 'ordered'
+   259→            ? `PO ${data.poNumber} confirmed and sent.`
+   260→            : `Draft PO ${data.poNumber} saved.`,
+   261→        )
+   262→        void queryClient.invalidateQueries({ queryKey: ['purchase-orders'] })
+   263→        void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+   264→        navigate({ name: 'inventory-po-detail', id: data.id })
+   265→      },
+   266→      onError: (err) => toast.error(getErrorMessage(err)),
+   267→    },
+   268→  })
+   269→
+   270→  // ── Item manipulation ────────────────────────────────────────────────────
+   271→  const addVariant = (variant: (typeof variantOptions)[number]) => {
+   272→    setItems((prev) => {
+   273→      if (prev.some((i) => i.variantId === variant.variantId)) {
+   274→        toast.info('That variant is already in the order.')
+   275→        return prev
+   276→      }
+   277→      return [
+   278→        ...prev,
+   279→        {
+   280→          variantId: variant.variantId,
+   281→          sku: variant.sku,
+   282→          productTitle: variant.productTitle,
+   283→          costPrice: variant.costPrice,
+   284→          quantity: 1,
+   285→          costPerUnit: variant.costPrice,
+   286→        },
+   287→      ]
+   288→    })
+   289→    setVariantSearch('')
+   290→  }
+   291→
+   292→  const removeItem = (variantId: string) => {
+   293→    setItems((prev) => prev.filter((i) => i.variantId !== variantId))
+   294→  }
+   295→
+   296→  const updateItem = (variantId: string, patch: Partial<LineItem>) => {
+   297→    setItems((prev) =>
+   298→      prev.map((i) => (i.variantId === variantId ? { ...i, ...patch } : i)),
+   299→    )
+   300→  }
+   301→
+   302→  // ── Submit ───────────────────────────────────────────────────────────────
+   303→  const validate = (): string | null => {
+   304→    if (!supplierId) return 'Select a supplier.'
+   305→    if (!deliveryLocationId) return 'Select a delivery location.'
+   306→    if (items.length === 0) return 'Add at least one item to the order.'
+   307→    const invalid = items.find((i) => i.quantity <= 0 || i.costPerUnit < 0)
+   308→    if (invalid) return `Invalid quantity or cost for ${invalid.sku}.`
+   309→    if (advance > totalValue) return 'Advance payment cannot exceed total order value.'
+   310→    return null
+   311→  }
+   312→
+   313→  const submit = (status: 'draft' | 'ordered') => {
+   314→    const err = validate()
+   315→    if (err) {
+   316→      toast.error(err)
+   317→      return
+   318→    }
+   319→    const payload: CreatePayload = {
+   320→      supplier_id: supplierId,
+   321→      order_date: orderDate || undefined,
+   322→      expected_delivery_date: expectedDeliveryDate || undefined,
+   323→      delivery_location_id: deliveryLocationId,
+   324→      advance_payment: advance,
+   325→      payment_method: paymentMethod.trim() || undefined,
+   326→      notes: notes.trim() || undefined,
+   327→      items: items.map((i) => ({
+   328→        org_variant_id: i.variantId,
+   329→        ordered_quantity: i.quantity,
+   330→        cost_per_unit: i.costPerUnit,
+   331→      })),
+   332→      status,
+   333→    }
+   334→    createMutation.mutate(payload)
+   335→  }
+   336→
+   337→  const noSuppliers =
+   338→    !suppliersQuery.isLoading && (suppliersQuery.data?.suppliers.length ?? 0) === 0
+   339→  const noLocations =
+   340→    !locationsQuery.isLoading && (locationsQuery.data?.locations.length ?? 0) === 0
+   341→
+   342→  return (
+   343→    <div className="space-y-6">
+   344→      <PageHeader
+   345→        title="New Purchase Order"
+   346→        description="Order stock from a supplier. Confirm to send — drafts don't affect incoming stock."
+   347→        actions={
+   348→          <Button variant="outline" size="sm" onClick={() => navigate({ name: 'inventory-purchase-orders' })}>
+   349→            <ArrowLeft className="h-4 w-4" /> Back
+   350→          </Button>
+   351→        }
+   352→      />
+   353→
+   354→      {(noSuppliers || noLocations) && (
+   355→        <Alert>
+   356→          <AlertCircle className="h-4 w-4" />
+   357→          <AlertTitle>Before you create a PO</AlertTitle>
+   358→          <AlertDescription>
+   359→            You need at least one supplier and one inventory location.
+   360→            {noSuppliers && (
+   361→              <span className="block mt-1">
+   362→                <button
+   363→                  type="button"
+   364→                  className="font-medium underline underline-offset-4 hover:text-primary"
+   365→                  onClick={() => setCreateSupplierOpen(true)}
+   366→                >
+   367→                  Add a supplier
+   368→                </button>{' '}
+   369→                or visit the Suppliers page.
+   370→              </span>
+   371→            )}
+   372→            {noLocations && (
+   373→              <span className="block mt-1">
+   374→                <button
+   375→                  type="button"
+   376→                  className="font-medium underline underline-offset-4 hover:text-primary"
+   377→                  onClick={() => navigate({ name: 'inventory-locations' })}
+   378→                >
+   379→                  Create a location
+   380→                </button>{' '}
+   381→                first.
+   382→              </span>
+   383→            )}
+   384→          </AlertDescription>
+   385→        </Alert>
+   386→      )}
+   387→
+   388→      {!canManage && (
+   389→        <Alert variant="destructive">
+   390→          <AlertCircle className="h-4 w-4" />
+   391→          <AlertTitle>Permission required</AlertTitle>
+   392→          <AlertDescription>
+   393→            You don&apos;t have permission to manage purchase orders. Save your work elsewhere.
+   394→          </AlertDescription>
+   395→        </Alert>
+   396→      )}
+   397→
+   398→      <div className="grid gap-6 lg:grid-cols-3">
+   399→        {/* ── Left: form + items ────────────────────────────────────────── */}
+   400→        <div className="lg:col-span-2 space-y-4">
+   401→          {/* Header form */}
+   402→          <Card>
+   403→            <CardHeader className="pb-3">
+   404→              <CardTitle className="text-base flex items-center gap-2">
+   405→                <ShoppingCart className="h-4 w-4" /> Order details
+   406→              </CardTitle>
+   407→            </CardHeader>
+   408→            <CardContent className="space-y-4">
+   409→              <div className="grid sm:grid-cols-2 gap-4">
+   410→                <div className="space-y-1.5">
+   411→                  <Label htmlFor="po-supplier">
+   412→                    <span className="flex items-center justify-between">
+   413→                      <span className="flex items-center gap-1.5">
+   414→                        <Truck className="h-3.5 w-3.5" /> Supplier
+   415→                      </span>
+   416→                      <button
+   417→                        type="button"
+   418→                        className="text-[11px] text-primary hover:underline"
+   419→                        onClick={() => setCreateSupplierOpen(true)}
+   420→                      >
+   421→                        + Create new
+   422→                      </button>
+   423→                    </span>
+   424→                  </Label>
+   425→                  {suppliersQuery.isLoading ? (
+   426→                    <Skeleton className="h-9" />
+   427→                  ) : (
+   428→                    <Select value={supplierId} onValueChange={setSupplierId}>
+   429→                      <SelectTrigger id="po-supplier">
+   430→                        <SelectValue placeholder="Select supplier" />
+   431→                      </SelectTrigger>
+   432→                      <SelectContent>
+   433→                        {suppliersQuery.data?.suppliers.map((s) => (
+   434→                          <SelectItem key={s.id} value={s.id}>
+   435→                            {s.name}
+   436→                            {s.contactPerson ? ` · ${s.contactPerson}` : ''}
+   437→                          </SelectItem>
+   438→                        ))}
+   439→                      </SelectContent>
+   440→                    </Select>
+   441→                  )}
+   442→                  {selectedSupplier && (
+   443→                    <p className="text-xs text-muted-foreground">
+   444→                      Payment terms: {selectedSupplier.paymentTerms}
+   445→                    </p>
+   446→                  )}
+   447→                </div>
+   448→
+   449→                <div className="space-y-1.5">
+   450→                  <Label htmlFor="po-location">
+   451→                    <span className="flex items-center gap-1.5">
+   452→                      <Warehouse className="h-3.5 w-3.5" /> Delivery location
+   453→                    </span>
+   454→                  </Label>
+   455→                  {locationsQuery.isLoading ? (
+   456→                    <Skeleton className="h-9" />
+   457→                  ) : (
+   458→                    <Select value={deliveryLocationId} onValueChange={setDeliveryLocationId}>
+   459→                      <SelectTrigger id="po-location">
+   460→                        <SelectValue placeholder="Select location" />
+   461→                      </SelectTrigger>
+   462→                      <SelectContent>
+   463→                        {locationsQuery.data?.locations.map((l) => (
+   464→                          <SelectItem key={l.id} value={l.id}>
+   465→                            {l.name} {l.isDefault && '(default)'}
+   466→                          </SelectItem>
+   467→                        ))}
+   468→                      </SelectContent>
+   469→                    </Select>
+   470→                  )}
+   471→                </div>
+   472→              </div>
+   473→
+   474→              <div className="grid sm:grid-cols-2 gap-4">
+   475→                <div className="space-y-1.5">
+   476→                  <Label htmlFor="po-order-date">
+   477→                    <span className="flex items-center gap-1.5">
+   478→                      <Calendar className="h-3.5 w-3.5" /> Order date
+   479→                    </span>
+   480→                  </Label>
+   481→                  <Input
+   482→                    id="po-order-date"
+   483→                    type="date"
+   484→                    value={orderDate}
+   485→                    onChange={(e) => setOrderDate(e.target.value)}
+   486→                  />
+   487→                </div>
+   488→                <div className="space-y-1.5">
+   489→                  <Label htmlFor="po-expected">
+   490→                    <span className="flex items-center gap-1.5">
+   491→                      <Calendar className="h-3.5 w-3.5" /> Expected delivery
+   492→                    </span>
+   493→                  </Label>
+   494→                  <Input
+   495→                    id="po-expected"
+   496→                    type="date"
+   497→                    value={expectedDeliveryDate}
+   498→                    onChange={(e) => setExpectedDeliveryDate(e.target.value)}
+   499→                  />
+   500→                </div>
+   501→              </div>
+   502→            </CardContent>
+   503→          </Card>
+   504→
+   505→          {/* Search-to-add variants */}
+   506→          <Card>
+   507→            <CardHeader className="pb-3">
+   508→              <CardTitle className="text-base flex items-center justify-between">
+   509→                <span>Order items</span>
+   510→                <span className="text-xs text-muted-foreground font-normal">
+   511→                  {items.length} item{items.length === 1 ? '' : 's'} added
+   512→                </span>
+   513→              </CardTitle>
+   514→            </CardHeader>
+   515→            <CardContent className="space-y-3">
+   516→              <div className="relative">
+   517→                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+   518→                <Input
+   519→                  placeholder="Search by SKU or product title to add items…"
+   520→                  className="pl-9"
+   521→                  value={variantSearch}
+   522→                  onChange={(e) => setVariantSearch(e.target.value)}
+   523→                  disabled={productsQuery.isLoading}
+   524→                />
+   525→                {productsQuery.isLoading && (
+   526→                  <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 animate-spin text-muted-foreground" />
+   527→                )}
+   528→              </div>
+   529→
+   530→              {variantSearch.trim() && (
+   531→                <div className="rounded-md border bg-popover shadow-sm max-h-64 overflow-y-auto scrollbar-thin">
+   532→                  {variantSearchResults.length === 0 ? (
+   533→                    <div className="p-3 text-sm text-muted-foreground">
+   534→                      {productsQuery.isLoading
+   535→                        ? 'Loading variants…'
+   536→                        : 'No variants match your search.'}
+   537→                    </div>
+   538→                  ) : (
+   539→                    <ul className="divide-y">
+   540→                      {variantSearchResults.map((v) => (
+   541→                        <li key={v.variantId}>
+   542→                          <button
+   543→                            type="button"
+   544→                            onClick={() => addVariant(v)}
+   545→                            className="w-full text-left px-3 py-2 hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
+   546→                          >
+   547→                            <div className="min-w-0">
+   548→                              <p className="text-sm font-medium truncate">{v.productTitle}</p>
+   549→                              <p className="text-xs text-muted-foreground font-mono">{v.sku}</p>
+   550→                            </div>
+   551→                            <div className="flex items-center gap-2 shrink-0">
+   552→                              <span className="text-xs text-muted-foreground">
+   553→                                {formatPKR(v.costPrice)}
+   554→                              </span>
+   555→                              <Plus className="h-3.5 w-3.5 text-primary" />
+   556→                            </div>
+   557→                          </button>
+   558→                        </li>
+   559→                      ))}
+   560→                    </ul>
+   561→                  )}
+   562→                </div>
+   563→              )}
+   564→
+   565→              <div className="rounded-md border overflow-x-auto">
+   566→                <Table>
+   567→                  <TableHeader>
+   568→                    <TableRow>
+   569→                      <TableHead>Variant</TableHead>
+   570→                      <TableHead className="w-24">Qty</TableHead>
+   571→                      <TableHead className="w-32">Cost / unit</TableHead>
+   572→                      <TableHead className="text-right w-28">Line total</TableHead>
+   573→                      <TableHead className="w-10" />
+   574→                    </TableRow>
+   575→                  </TableHeader>
+   576→                  <TableBody>
+   577→                    {items.length === 0 ? (
+   578→                      <TableRow>
+   579→                        <TableCell
+   580→                          colSpan={5}
+   581→                          className="text-center text-sm text-muted-foreground py-8"
+   582→                        >
+   583→                          No items added yet. Search above to add variants.
+   584→                        </TableCell>
+   585→                      </TableRow>
+   586→                    ) : (
+   587→                      items.map((item) => (
+   588→                        <TableRow key={item.variantId}>
+   589→                          <TableCell>
+   590→                            <div className="flex flex-col">
+   591→                              <span className="text-sm font-medium">{item.productTitle}</span>
+   592→                              <span className="text-xs text-muted-foreground font-mono">
+   593→                                {item.sku}
+   594→                              </span>
+   595→                            </div>
+   596→                          </TableCell>
+   597→                          <TableCell>
+   598→                            <Input
+   599→                              type="number"
+   600→                              min="1"
+   601→                              step="1"
+   602→                              className="h-8 tabular-nums"
+   603→                              value={item.quantity}
+   604→                              onChange={(e) =>
+   605→                                updateItem(item.variantId, {
+   606→                                  quantity: parseQty(e.target.value),
+   607→                                })
+   608→                              }
+   609→                            />
+   610→                          </TableCell>
+   611→                          <TableCell>
+   612→                            <Input
+   613→                              type="number"
+   614→                              min="0"
+   615→                              step="0.01"
+   616→                              className="h-8 tabular-nums"
+   617→                              value={item.costPerUnit}
+   618→                              onChange={(e) =>
+   619→                                updateItem(item.variantId, {
+   620→                                  costPerUnit: parseCost(e.target.value),
+   621→                                })
+   622→                              }
+   623→                            />
+   624→                          </TableCell>
+   625→                          <TableCell className="text-right tabular-nums font-medium">
+   626→                            {formatPKR(item.quantity * item.costPerUnit)}
+   627→                          </TableCell>
+   628→                          <TableCell>
+   629→                            <Button
+   630→                              size="icon"
+   631→                              variant="ghost"
+   632→                              className="h-7 w-7 text-rose-600 hover:bg-rose-50"
+   633→                              onClick={() => removeItem(item.variantId)}
+   634→                              aria-label={`Remove ${item.sku}`}
+   635→                            >
+   636→                              <Trash2 className="h-3.5 w-3.5" />
+   637→                            </Button>
+   638→                          </TableCell>
+   639→                        </TableRow>
+   640→                      ))
+   641→                    )}
+   642→                  </TableBody>
+   643→                </Table>
+   644→              </div>
+   645→            </CardContent>
+   646→          </Card>
+   647→
+   648→          {/* Advance + notes */}
+   649→          <Card>
+   650→            <CardHeader className="pb-3">
+   651→              <CardTitle className="text-base flex items-center gap-2">
+   652→                <Wallet className="h-4 w-4" /> Advance payment & notes
+   653→              </CardTitle>
+   654→            </CardHeader>
+   655→            <CardContent className="space-y-4">
+   656→              <div className="grid sm:grid-cols-2 gap-4">
+   657→                <div className="space-y-1.5">
+   658→                  <Label htmlFor="po-advance">Advance payment (Rs.)</Label>
+   659→                  <Input
+   660→                    id="po-advance"
+   661→                    type="number"
+   662→                    min="0"
+   663→                    step="0.01"
+   664→                    className="tabular-nums"
+   665→                    value={advancePayment}
+   666→                    onChange={(e) => setAdvancePayment(e.target.value)}
+   667→                  />
+   668→                </div>
+   669→                <div className="space-y-1.5">
+   670→                  <Label htmlFor="po-method">Payment method (optional)</Label>
+   671→                  <Input
+   672→                    id="po-method"
+   673→                    placeholder="e.g. Bank transfer, Cash, Cheque #123"
+   674→                    value={paymentMethod}
+   675→                    onChange={(e) => setPaymentMethod(e.target.value)}
+   676→                  />
+   677→                </div>
+   678→              </div>
+   679→              <div className="space-y-1.5">
+   680→                <Label htmlFor="po-notes">Notes</Label>
+   681→                <Textarea
+   682→                  id="po-notes"
+   683→                  placeholder="Any internal notes for this PO…"
+   684→                  rows={3}
+   685→                  value={notes}
+   686→                  onChange={(e) => setNotes(e.target.value)}
+   687→                />
+   688→              </div>
+   689→            </CardContent>
+   690→          </Card>
+   691→        </div>
+   692→
+   693→        {/* ── Right: summary + submit ────────────────────────────────────── */}
+   694→        <div className="space-y-4">
+   695→          <Card className="lg:sticky lg:top-20">
+   696→            <CardHeader className="pb-3">
+   697→              <CardTitle className="text-base">Summary</CardTitle>
+   698→            </CardHeader>
+   699→            <CardContent className="space-y-4">
+   700→              <div className="space-y-2 text-sm">
+   701→                <SummaryRow label="Items" value={String(items.length)} />
+   702→                <SummaryRow label="Total units" value={String(totalUnits)} />
+   703→                <div className="pt-2 border-t">
+   704→                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+   705→                    Order value
+   706→                  </p>
+   707→                  <p className="text-xl font-semibold tabular-nums">{formatPKR(totalValue)}</p>
+   708→                </div>
+   709→                <SummaryRow label="Advance payment" value={formatPKR(advance)} />
+   710→                <div className="pt-2 border-t">
+   711→                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+   712→                    Balance due
+   713→                  </p>
+   714→                  <p className="text-lg font-semibold tabular-nums text-amber-700">
+   715→                    {formatPKR(balanceDue)}
+   716→                  </p>
+   717→                </div>
+   718→              </div>
+   719→
+   720→              <div className="rounded-md bg-muted/40 p-3 text-xs text-muted-foreground space-y-1">
+   721→                {selectedSupplier && (
+   722→                  <p>
+   723→                    <span className="font-medium text-foreground">Supplier:</span>{' '}
+   724→                    {selectedSupplier.name}
+   725→                  </p>
+   726→                )}
+   727→                {selectedLocation && (
+   728→                  <p>
+   729→                    <span className="font-medium text-foreground">Deliver to:</span>{' '}
+   730→                    {selectedLocation.name}
+   731→                  </p>
+   732→                )}
+   733→                {expectedDeliveryDate && (
+   734→                  <p>
+   735→                    <span className="font-medium text-foreground">Expected:</span>{' '}
+   736→                    {new Date(expectedDeliveryDate).toLocaleDateString('en-PK', {
+   737→                      day: '2-digit',
+   738→                      month: 'short',
+   739→                      year: 'numeric',
+   740→                    })}
+   741→                  </p>
+   742→                )}
+   743→              </div>
+   744→
+   745→              <div className="space-y-2">
+   746→                <Button
+   747→                  variant="outline"
+   748→                  className="w-full"
+   749→                  onClick={() => submit('draft')}
+   750→                  disabled={createMutation.isPending || !canManage}
+   751→                >
+   752→                  {createMutation.isPending && createMutation.variables?.status === 'draft' ? (
+   753→                    <>
+   754→                      <Loader2 className="h-4 w-4 animate-spin" /> Saving…
+   755→                    </>
+   756→                  ) : (
+   757→                    <>
+   758→                      <Save className="h-4 w-4" /> Save as Draft
+   759→                    </>
+   760→                  )}
+   761→                </Button>
+   762→                <Button
+   763→                  className="w-full"
+   764→                  onClick={() => submit('ordered')}
+   765→                  disabled={createMutation.isPending || !canManage}
+   766→                >
+   767→                  {createMutation.isPending && createMutation.variables?.status === 'ordered' ? (
+   768→                    <>
+   769→                      <Loader2 className="h-4 w-4 animate-spin" /> Confirming…
+   770→                    </>
+   771→                  ) : (
+   772→                    <>
+   773→                      <Send className="h-4 w-4" /> Confirm &amp; Send Order
+   774→                    </>
+   775→                  )}
+   776→                </Button>
+   777→              </div>
+   778→              <p className="text-[11px] text-muted-foreground text-center">
+   779→                <Badge variant="outline" className="text-[10px] mr-1">
+   780→                  Draft
+   781→                </Badge>
+   782→                doesn&apos;t reserve incoming stock.{' '}
+   783→                <Badge variant="outline" className="text-[10px] mx-1">
+   784→                  Ordered
+   785→                </Badge>
+   786→                increments incoming.
+   787→              </p>
+   788→            </CardContent>
+   789→          </Card>
+   790→        </div>
+   791→      </div>
+   792→
+   793→      {/* ── Inline supplier create dialog ─────────────────────────────────── */}
+   794→      <QuickCreateSupplierDialog
+   795→        open={createSupplierOpen}
+   796→        onOpenChange={setCreateSupplierOpen}
+   797→        onCreated={(id) => {
+   798→          setSupplierId(id)
+   799→          void queryClient.invalidateQueries({ queryKey: ['suppliers'] })
+   800→        }}
+   801→      />
+   802→    </div>
+   803→  )
+   804→}
+   805→
+   806→function SummaryRow({ label, value }: { label: string; value: string }) {
+   807→  return (
+   808→    <div className="flex items-center justify-between">
+   809→      <span className="text-sm text-muted-foreground">{label}</span>
+   810→      <span className="text-sm font-medium tabular-nums">{value}</span>
+   811→    </div>
+   812→  )
+   813→}
+   814→
+   815→// ─────────────────────────────────────────────────────────────────────────────
+   816→// Quick supplier create dialog (inline)
+   817→// ─────────────────────────────────────────────────────────────────────────────
+   818→
+   819→function QuickCreateSupplierDialog({
+   820→  open,
+   821→  onOpenChange,
+   822→  onCreated,
+   823→}: {
+   824→  open: boolean
+   825→  onOpenChange: (v: boolean) => void
+   826→  onCreated: (id: string) => void
+   827→}) {
+   828→  const [name, setName] = useState('')
+   829→  const [contactPerson, setContactPerson] = useState('')
+   830→  const [phone, setPhone] = useState('')
+   831→
+   832→  const createMutation = useIdempotentMutation<{ id: string; name: string }, {
+   833→    name: string
+   834→    contactPerson?: string
+   835→    phone?: string
+   836→    isOrgLevel: boolean
+   837→  }>({
+   838→    url: '/api/suppliers',
+   839→    mutationOptions: {
+   840→      onSuccess: (data) => {
+   841→        toast.success(`Supplier "${data.name}" created.`)
+   842→        onCreated(data.id)
+   843→        setName('')
+   844→        setContactPerson('')
+   845→        setPhone('')
+   846→        onOpenChange(false)
+   847→      },
+   848→      onError: (err) => toast.error(getErrorMessage(err)),
+   849→    },
+   850→  })
+   851→
+   852→  return (
+   853→    <Dialog open={open} onOpenChange={onOpenChange}>
+   854→      <DialogContent className="sm:max-w-md">
+   855→        <DialogHeader>
+   856→          <DialogTitle>Create new supplier</DialogTitle>
+   857→          <DialogDescription>
+   858→            Quick-add a supplier. You can fill in payment terms and more details from the
+   859→            Suppliers page later.
+   860→          </DialogDescription>
+   861→        </DialogHeader>
+   862→        <form
+   863→          onSubmit={(e) => {
+   864→            e.preventDefault()
+   865→            if (name.trim().length < 2) {
+   866→              toast.error('Name must be at least 2 characters.')
+   867→              return
+   868→            }
+   869→            createMutation.mutate({
+   870→              name: name.trim(),
+   871→              contactPerson: contactPerson.trim() || undefined,
+   872→              phone: phone.trim() || undefined,
+   873→              isOrgLevel: false,
+   874→            })
+   875→          }}
+   876→          className="space-y-3"
+   877→        >
+   878→          <div className="space-y-1.5">
+   879→            <Label htmlFor="qs-name">Name</Label>
+   880→            <Input
+   881→              id="qs-name"
+   882→              autoFocus
+   883→              placeholder="e.g. ABC Fabrics"
+   884→              value={name}
+   885→              onChange={(e) => setName(e.target.value)}
+   886→            />
+   887→          </div>
+   888→          <div className="grid grid-cols-2 gap-3">
+   889→            <div className="space-y-1.5">
+   890→              <Label htmlFor="qs-contact">Contact person</Label>
+   891→              <Input
+   892→                id="qs-contact"
+   893→                placeholder="Optional"
+   894→                value={contactPerson}
+   895→                onChange={(e) => setContactPerson(e.target.value)}
+   896→              />
+   897→            </div>
+   898→            <div className="space-y-1.5">
+   899→              <Label htmlFor="qs-phone">Phone</Label>
+   900→              <Input
+   901→                id="qs-phone"
+   902→                placeholder="Optional"
+   903→                value={phone}
+   904→                onChange={(e) => setPhone(e.target.value)}
+   905→              />
+   906→            </div>
+   907→          </div>
+   908→          <DialogFooter>
+   909→            <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+   910→              Cancel
+   911→            </Button>
+   912→            <Button type="submit" disabled={createMutation.isPending}>
+   913→              {createMutation.isPending ? (
+   914→                <>
+   915→                  <Loader2 className="h-4 w-4 animate-spin" /> Creating…
+   916→                </>
+   917→              ) : (
+   918→                'Create supplier'
+   919→              )}
+   920→            </Button>
+   921→          </DialogFooter>
+   922→        </form>
+   923→      </DialogContent>
+   924→    </Dialog>
+   925→  )
+   926→}
+   927→
