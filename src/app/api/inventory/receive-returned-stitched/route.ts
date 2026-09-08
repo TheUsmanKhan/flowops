@@ -4,7 +4,7 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction } from '@/lib/inventory'
+import { processReturnedStitchedReceipt } from '@/lib/inventory'
 import { receiveReturnedStitchedSchema } from '@/lib/validations/inventory'
 
 export const runtime = 'nodejs'
@@ -13,12 +13,22 @@ export const dynamic = 'force-dynamic'
 /**
  * Receive a returned made-to-order stitched item.
  *
- * If condition = 'damaged': does NOT add to stock. Creates a stock_loss_records
- * entry directly with loss_type = 'damaged', resolution = 'written_off'.
+ * INV-002 fix: now delegates to the canonical processReturnedStitchedReceipt()
+ * helper (in src/lib/inventory.ts) so EVERY receipt creates BOTH the
+ * ReturnedStitchedInventory register row AND the corresponding ledger / loss
+ * entry — with the bidirectional link set. Previously this route created only
+ * the inventory transaction (or only the loss record on the damaged path);
+ * the ReturnedStitchedInventory register row was skipped entirely.
  *
- * If condition = 'perfect'|'good'|'open_box': calls processInventoryTransaction
- * with type 'return_stitched_received', which creates the pool if needed and
- * flips track_inventory to TRUE on the variant (one-way).
+ * If condition = 'damaged': no stock addition. recordStockLoss creates a
+ * StockLossRecord (loss_type='damaged', sourceModule='returned_stitched')
+ * with createInventoryTransaction=false — onHand is unchanged because the
+ * returned item was never added to stock in the first place.
+ *
+ * If condition = 'perfect'|'good'|'open_box': processInventoryTransaction
+ * runs with type 'return_stitched_received', which creates the pool if
+ * needed, increments onHand, recalculates WAC, and flips track_inventory
+ * to TRUE on the variant (one-way).
  */
 export async function POST(req: Request) {
   try {
@@ -52,90 +62,51 @@ export async function POST(req: Request) {
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     const d = parsed.data
 
-    const costPerUnit = d.total_cost / d.quantity
-
-    if (d.condition === 'damaged') {
-      // Damaged → goes straight to stock_loss_records, no inventory addition.
-      //
-      // UNIFIED: now uses recordStockLoss() (was: direct db.stockLossRecord.create)
-      // so the loss is properly deduped + sourceModule is set. If a loss
-      // already exists for this order item + damaged + returned_stitched,
-      // it returns wasDuplicate=true (idempotent — no double-decrement).
-      const { recordStockLoss } = await import('@/lib/stock-loss')
-      const lossResult = await recordStockLoss({
-        organizationId: orgId,
-        companyId: company.id,
-        orgVariantId: d.org_variant_id,
-        locationId: d.location_id,
-        lossType: 'damaged',
-        sourceModule: 'returned_stitched',
-        quantity: d.quantity,
-        costPerUnit,
-        employeeId: caller.id,
-        subType: 'confirmed',
-        damageType: 'other',
-        responsibleParty: 'courier',
-        notes: `Damaged returned stitched item. ${d.notes || ''}`,
-        // createInventoryTransaction=false — this endpoint does NOT add
-        // stock for damaged items (the loss is just recorded, stock stays
-        // unchanged since the returned item was never added in the first place)
-        createInventoryTransaction: false,
-      })
-
-      if (!lossResult.success) {
-        throw new ApiError(500, `Failed to record damaged loss: ${lossResult.error}`)
-      }
-
-      const lossRecordId = lossResult.lossRecordId ?? 'dedup (already existed)'
-
-      insertAuditLog({
-        action: 'inventory.stitched_return_received',
-        entityType: 'stock_loss',
-        entityId: lossResult.lossRecordId ?? 'dedup',
-        companyId: company.id,
-        organizationId: orgId,
-        userId: user.id,
-        employeeId: caller.id,
-        newValues: { condition: 'damaged', quantity: d.quantity, totalCost: d.total_cost, wasDuplicate: lossResult.wasDuplicate },
-      })
-
-      return Response.json({
-        success: true,
-        loss_record_id: lossRecordId,
-        condition: 'damaged',
-        status: 'written_off',
-        was_duplicate: lossResult.wasDuplicate,
-      })
-    }
-
-    // Not damaged → add to stock via processInventoryTransaction
-    const txnResult = await processInventoryTransaction({
-      orgVariantId: d.org_variant_id,
-      locationId: d.location_id,
+    // Delegate to the canonical receipt processor (INV-002 fix).
+    // The function handles both the damaged and non-damaged branches,
+    // creates the ReturnedStitchedInventory register row, links the
+    // inventory transaction / loss record, and returns a unified result.
+    const result = await processReturnedStitchedReceipt({
       organizationId: orgId,
       companyId: company.id,
-      employeeId: caller.id,
-      transactionType: 'return_stitched_received',
+      orgVariantId: d.org_variant_id,
+      locationId: d.location_id,
       quantity: d.quantity,
-      costPerUnit,
-      referenceType: d.original_order_reference ? 'order' : 'manual',
-      referenceId: d.original_order_reference || null,
-      notes: `Returned stitched item (${d.condition}). ${d.notes || ''}`,
+      condition: d.condition,
+      totalCost: d.total_cost,
+      suggestedResalePrice: null,
+      originalOrderReference: d.original_order_reference || null,
+      returnReason: d.return_reason,
+      photos: d.photos,
+      notes: d.notes || null,
+      employeeId: caller.id,
     })
 
-    if (!txnResult.success) {
-      throw new ApiError(500, `Failed to receive returned item: ${txnResult.error}`)
+    if (!result.success) {
+      throw new ApiError(500, `Failed to receive returned stitched item: ${result.error}`)
     }
+
+    const costPerUnit = d.total_cost / d.quantity
 
     insertAuditLog({
       action: 'inventory.stitched_return_received',
-      entityType: 'variant',
-      entityId: d.org_variant_id,
+      entityType: result.lossRecordId ? 'stock_loss' : 'variant',
+      entityId: result.lossRecordId ?? result.recordId ?? d.org_variant_id,
       companyId: company.id,
       organizationId: orgId,
       userId: user.id,
       employeeId: caller.id,
-      newValues: { condition: d.condition, quantity: d.quantity, totalCost: d.total_cost, locationId: d.location_id },
+      newValues: {
+        condition: d.condition,
+        quantity: d.quantity,
+        totalCost: d.total_cost,
+        locationId: d.location_id,
+        status: result.status,
+        recordId: result.recordId,
+        inventoryTxnId: result.inventoryTxnId,
+        lossRecordId: result.lossRecordId,
+        wasDuplicate: result.wasDuplicate,
+      },
     })
 
     // ── Metric event (CRITICAL — powers stitched-return / reverse-logistics KPIs) ──
@@ -148,13 +119,30 @@ export async function POST(req: Request) {
       dimensions: {
         location_id: d.location_id,
         quantity: d.quantity,
+        condition: d.condition,
+        status: result.status ?? 'available',
         fabric_variant_id: (d as Record<string, unknown>).fabric_variant_id,
       },
     })
 
+    // Preserve the route's previous response shapes (one per branch).
+    // The `record_id` field is strictly additive — exposed now that the
+    // canonical function consistently creates the ReturnedStitchedInventory row.
+    if (d.condition === 'damaged') {
+      return Response.json({
+        success: true,
+        record_id: result.recordId,
+        loss_record_id: result.lossRecordId ?? 'dedup (already existed)',
+        condition: 'damaged',
+        status: 'written_off',
+        was_duplicate: result.wasDuplicate,
+      })
+    }
+
     return Response.json({
       success: true,
-      transaction_id: txnResult.transactionId,
+      record_id: result.recordId,
+      transaction_id: result.inventoryTxnId,
       condition: d.condition,
       status: 'available',
     })

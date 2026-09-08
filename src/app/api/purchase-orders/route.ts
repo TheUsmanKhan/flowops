@@ -4,7 +4,7 @@ import { getWorkspace, requirePermission, ApiError, handleError, readBody } from
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { generatePoNumber } from '@/lib/inventory'
+import { generatePoNumber, incrementIncomingStock } from '@/lib/inventory'
 import { z } from 'zod'
 
 export const runtime = 'nodejs'
@@ -164,24 +164,21 @@ export async function POST(req: Request) {
       })
 
       // If status = 'ordered': update incoming stock on the delivery location's pools
+      // INV-007 fix: use the canonical incrementIncomingStock() helper
+      // (in src/lib/inventory.ts) instead of writing to db.inventoryPool
+      // directly. The helper upserts the pool row and increments the
+      // `incoming` projection field — same behavior as the previous inline
+      // code, but routed through the single source of truth so any future
+      // change to the increment logic (e.g. side effects, validation) only
+      // needs to be applied in one place.
       if (d.status === 'ordered') {
         for (const item of po.items) {
-          // Find or create the pool and increment incoming
-          await db.inventoryPool.upsert({
-            where: {
-              orgVariantId_locationId: {
-                orgVariantId: item.orgVariantId,
-                locationId: d.delivery_location_id,
-              },
-            },
-            update: { incoming: { increment: item.orderedQuantity } },
-            create: {
-              orgVariantId: item.orgVariantId,
-              locationId: d.delivery_location_id,
-              organizationId: orgId,
-              incoming: item.orderedQuantity,
-            },
-          })
+          await incrementIncomingStock(
+            item.orgVariantId,
+            d.delivery_location_id,
+            orgId,
+            item.orderedQuantity,
+          )
         }
       }
 

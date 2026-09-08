@@ -16059,3 +16059,111 @@ Stage Summary:
 - 0 new lint errors introduced
 - All fixes verified via code grep + DB queries
 - Pre-existing data drift identified (13 pools) — needs one-time repair script
+
+---
+Task ID: INVENTORY-CORE-FIXES-PART2
+Agent: main
+Task: Fix Inventory Core bugs INV-002, 007, 009, 010, 011 + investigate INV-013 + re-grep INV-012
+
+Work Log:
+- 5 fixes implemented (INV-002, INV-007, INV-009, INV-010, INV-011)
+- 1 investigation-only (INV-013) — no code changes, options A/B presented
+- 1 re-grep audit (INV-012) — count reported below
+- 9 files modified, 0 new lint errors introduced (bun run lint: 14 problems → 14 problems, identical)
+- 0 new TypeScript errors introduced (bun run tsc --noEmit: 69 errors → 69 errors, identical)
+
+Fixes Applied:
+- INV-002: Returned-stitched flow unified — created canonical processReturnedStitchedReceipt() in src/lib/inventory.ts; both /api/returned-stitched and /api/inventory/receive-returned-stitched routes now delegate to it. EVERY receipt now creates BOTH the ReturnedStitchedInventory register row AND the corresponding InventoryTransaction (non-damaged) or StockLossRecord (damaged) with the bidirectional link set (ReturnedStitchedInventory.inventoryTxnId → InventoryTransaction.id).
+- INV-007: Purchase-orders routes now use canonical helpers — POST /api/purchase-orders calls incrementIncomingStock() instead of db.inventoryPool.upsert(); POST /api/purchase-orders/[id]/receive calls decrementIncomingStock() instead of db.inventoryPool.update(). All db.inventoryPool.(update|create|upsert|delete) calls now exclusively live in src/lib/inventory.ts (4 sites, all canonical helpers).
+- INV-009: Supplier DELETE dependency check added — queries PurchaseOrder.count({ where: { supplierId: id } }); if >0, returns HTTP 409 "Cannot delete supplier with existing purchase order history. Consider deactivating instead." Suppliers already support isActive=false (soft-delete) — the fix doesn't conflict, just blocks soft-delete when there are dependent rows.
+- INV-010: Adjust-stock negative adjustment now returns 400 instead of 500 — explicit pre-check BEFORE any database write: if (isNegative && (onHand + adjustmentQty) < reserved) → 400 "Cannot reduce stock below reserved quantity (X units reserved)". Avoids wasteful call into recordStockLoss → processInventoryTransaction (which would otherwise throw INSUFFICIENT_STOCK, log error, roll back).
+- INV-011: Frontend adjust-stock-view now checks available (onHand - reserved) instead of onHand — updated DashboardResponse interface to include reserved + available (already returned by the API); handleSubmit check now compares Math.abs(quantity) > (onHand - reserved); error message updated to: "X units are reserved for pending orders — you can only reduce available stock (Y available)".
+
+INV-013 Investigation (NO FIX APPLIED — options presented):
+
+1. When does the Adjust-Stock route create a StockLossRecord?
+   - ONLY on the negative-adjustment path (direction='remove', quantity < 0).
+   - Via recordStockLoss({...}) with: lossType='damaged' (or 'theft' if reason mentions "theft"), sourceModule='adjust_stock', quantity=absQty, costPerUnit=pool.avgCost, subType='confirmed', responsibleParty='warehouse', createInventoryTransaction=true (default).
+   - The positive-adjustment path (direction='add') does NOT create a loss record — only calls processInventoryTransaction with type='manual_adjustment_in'.
+   - The schema validation (adjustStockSchema.quantity.refine((v) => v !== 0)) rejects adjustment=0 at the Zod layer, so no empty-quantity loss record is ever written.
+
+2. Is there a dedup guard preventing double-recording?
+   - PARTIAL. The recordStockLoss() helper (src/lib/stock-loss.ts) uses the `stock_loss_orderitem_dedup_idx` partial unique index on (orderItemId, lossType, sourceModule) WHERE orderItemId IS NOT NULL.
+   - The dedup ONLY fires when orderItemId is set — adjust_stock does NOT pass orderItemId (it's not order-related, it's a manual adjustment).
+   - Therefore: each adjust_stock call creates a NEW StockLossRecord, no dedup protection. If the user later records the same loss in the dedicated Stock Losses module, a duplicate loss record is created (with sourceModule='stock_loss' instead of 'adjust_stock' — so the (orderItemId, lossType, sourceModule) tuple differs and the unique index doesn't fire).
+   - Double-decrement protection: the actual onHand decrement happens once via processInventoryTransaction's damage_writeoff call (inside recordStockLoss with createInventoryTransaction=true). If the user later goes to Stock Losses module AND selects the same variant+location+quantity+lossType, the second recordStockLoss call would decrement onHand AGAIN — true double-decrement. The audit's hypothesis ("If yes, document it. If no, remove the recordStockLoss call (and accept double-decrement risk).") is the live concern.
+
+3. Does the Stock Loss module UI show losses from Adjust Stock?
+   - YES. GET /api/stock-loss returns all StockLossRecords for the active company — no sourceModule filter. Losses created via adjust_stock (sourceModule='adjust_stock') appear in the same list as losses created via the dedicated Stock Losses module (sourceModule='stock_loss').
+   - The frontend losses-view.tsx component does NOT surface sourceModule as a column/filter — the user sees a uniform list. They cannot tell from the UI which losses came from Adjust Stock vs. the Stock Losses module directly.
+   - The audit repro: "GET /api/stock-loss — a StockLossRecord with sourceModule='adjust_stock', lossType='damaged', quantity=3 appears in the list" — confirmed by code inspection.
+
+4. Two options with tradeoffs:
+
+   OPTION A — Remove StockLossRecord creation from Adjust Stock:
+     Pros:
+       - Cleaner module boundary: Adjust Stock = pure inventory movement (positive or negative). Stock Loss = dedicated loss-reporting workflow with investigation/approval/insurance/courier-claim fields.
+       - Avoids semantic confusion: a negative adjustment for "Miscount on previous receipt" or "Found extra stock not in system" (negative correction) shouldn't create a damage-type loss record — but the current code creates one with lossType='damaged' for ANY negative adjustment, which is semantically wrong (the reason might be "theft" but defaults to "damaged").
+       - Eliminates the sourceModule='adjust_stock' ambiguity in the Stock Losses UI (no more mixed-source list).
+       - Aligns with the audit task's original expectation: "stock loss records should only come from the dedicated Stock Loss module."
+     Cons:
+       - Loses the implicit double-decrement protection. If user removes 5 units in Adjust Stock (reason: "Damaged in storage") AND later records a 5-unit loss in Stock Losses module for the same variant+location, onHand is decremented twice (once via adjust_stock's damage_writeoff, once via stock_loss's damage_writeoff).
+       - Stock Losses dashboard under-reports losses if users primarily use Adjust Stock (the more convenient UI) instead of the Stock Losses module form.
+       - Requires a UX decision: should the Adjust Stock "Remove" flow route through the Stock Losses module instead (e.g., redirect to /stock-loss/new with the variant+location+quantity pre-filled)? That's a bigger UX change.
+
+   OPTION B — Add dedup guard to adjust_stock losses:
+     Pros:
+       - Eliminates the double-decrement risk without removing the adjust_stock loss creation.
+       - Users can continue using the more convenient Adjust Stock UI; the system ensures no duplicate loss records.
+     Cons:
+       - Requires extending the dedup mechanism beyond (orderItemId, lossType, sourceModule) — adjust_stock doesn't have an orderItemId. A new index on (orgVariantId, locationId, lossType, sourceModule, date_or_hour) would be fragile (legitimate same-day adjustments would conflict).
+       - Alternative: pass a deterministic idempotency key (e.g., `adjust_stock:{auditLogId}` or `adjust_stock:{txnId}`) so the second call from Stock Losses module can be detected as a duplicate. But Stock Losses module form has no way to know the adjust_stock txnId — it would require a UI lookup ("is there an adjust_stock loss for this variant+location+qty in the last N hours?").
+       - Doesn't address the semantic concern: lossType='damaged' is hardcoded for negative adjustments regardless of the user's actual reason. A "Miscount on previous receipt" negative adjustment creates a damage-type loss record, polluting the Stock Losses dashboard with non-loss adjustments.
+       - Doesn't address the UI mixing concern (Stock Losses list still mixes sourceModule='adjust_stock' and sourceModule='stock_loss').
+
+   RECOMMENDATION: Option A is cleaner but requires accepting the double-decrement risk + a UX decision (route the Adjust Stock "Remove" flow through Stock Losses module). Option B is technically complex and doesn't address the semantic issues. The audit team should decide which tradeoff matters more. NOT FIXED in this task — investigation only.
+
+INV-012 Re-grep (count + report):
+- db.inventoryPool.findMany or db.inventoryPool.findFirst across src/ OUTSIDE src/lib/inventory.ts:
+  - 6 call sites in 4 unique files (audit said "14 sites" — discrepancy likely because the audit counted all reads including findUnique; the INV-012 task specifically asked for findMany + findFirst only).
+  - Files + line numbers:
+    1. src/app/api/returned-stitched/[id]/route.ts:75 — findFirst (mark-sold path)
+    2. src/app/api/returned-stitched/[id]/route.ts:139 — findFirst (write-off path)
+    3. src/app/api/cycle-counts/[id]/route.ts:133 — findMany (cycle count detail)
+    4. src/app/api/inventory-locations/[id]/route.ts:43 — findMany (location detail GET)
+    5. src/app/api/inventory-locations/[id]/route.ts:236 — findMany (location DELETE dependency check)
+    6. src/app/api/inventory/dashboard/route.ts:36 — findMany (dashboard stockTable)
+- If findUnique is also counted (broader interpretation), the count rises to 18 call sites in 15 unique files — including adjust/route.ts (INV-010 pre-check), transfers/route.ts, stock-loss/report-{transit,theft,damaged}/route.ts, scan/confirm-return/route.ts, production-orders/route.ts, lib/actions/{exchange-shipment,backorder,order,exchange}.actions.ts, cycle-counts/[id]/route.ts (second site).
+- Recommendation: extract a `getPoolAvailability(orgVariantId, locationId)` helper returning `{ onHand, reserved, available, avgCost }` and adopt it across these sites. Out of scope for INVENTORY-CORE-FIXES-PART2.
+
+INV-010 Additional verification (adjustment=0 wasteful writes):
+- The Zod schema (adjustStockSchema.quantity.refine((v) => v !== 0, 'Quantity must be non-zero...')) rejects quantity=0 at the validation layer — returns 400 BEFORE the route body executes.
+- No empty transaction row is ever written for quantity=0 — the route never calls processInventoryTransaction / recordStockLoss when quantity=0.
+- Confirmed: no wasteful empty-write behavior. The Zod schema already prevents it.
+
+INV-010 Boundary test (onHand=10, reserved=10, adjust=-1):
+- Pre-check fires: isNegative=true, projectedOnHand=10+(-1)=9, currentReserved=10, 9 < 10 → throws ApiError(400, "Cannot reduce stock below reserved quantity (10 units reserved)"). ✓
+
+Verification:
+- bun run lint: 14 problems (2 errors + 12 warnings) — IDENTICAL to pre-fix baseline. The 2 errors are in scripts/products-audit-queries.js (require() style imports — pre-existing, unrelated to inventory fixes). The 12 warnings are React Hook Form watch() memoization issues in unrelated components (catalog-settings-view.tsx, returned-stitched-view.tsx) — pre-existing.
+- bun run tsc --noEmit: 69 errors — IDENTICAL to pre-fix baseline. All errors are in unrelated modules (customer.actions, exchange-shipment.actions, leopard-webhook.actions, order.actions, shipper-advice.actions, leopard.adapter, proof-of-delivery.ts, status-history.ts, session-payload.ts, stock-loss.ts, and the one pre-existing error in inventory.ts at the checkAndFulfillMadeToOrderVariant fabricSourceVariantId null-check, lines 1015 — which is NOT my code, it's from the INV-004 fix in Part 1).
+- Zero new errors introduced by this fix pass.
+
+Files Modified:
+1. src/lib/inventory.ts — added processReturnedStitchedReceipt() canonical function + interfaces (ProcessReturnedStitchedInput, ProcessReturnedStitchedResult) + extensive docstring explaining the INV-002 fix, the damaged vs non-damaged branching, and the atomicity caveat.
+2. src/lib/validations/product.ts — added location_id (required) to returnedStitchedInventorySchema (needed so the old route can pass it to the canonical function — strictly necessary request-shape change for the INV-002 fix to work).
+3. src/app/api/returned-stitched/route.ts — refactored POST handler to call processReturnedStitchedReceipt(); preserved original response shape ({ success, record_id, status }); added insertMetricEvent for KPI tracking; idempotency-key support preserved.
+4. src/app/api/inventory/receive-returned-stitched/route.ts — refactored POST handler to call processReturnedStitchedReceipt(); preserved branch-specific response shapes (damaged: { success, loss_record_id, condition, status, was_duplicate }; non-damaged: { success, transaction_id, condition, status }); added `record_id` field to both branches (strictly additive).
+5. src/app/api/purchase-orders/route.ts — replaced inline db.inventoryPool.upsert() with call to incrementIncomingStock() from src/lib/inventory.ts.
+6. src/app/api/purchase-orders/[id]/receive/route.ts — replaced inline db.inventoryPool.findUnique() + db.inventoryPool.update() block with call to decrementIncomingStock() from src/lib/inventory.ts.
+7. src/app/api/suppliers/[id]/route.ts — added dependency check (PurchaseOrder.count by supplierId) before soft-delete in DELETE handler; returns 409 if any POs reference the supplier.
+8. src/app/api/inventory/adjust/route.ts — added explicit pre-check for negative adjustments that would push onHand below reserved; returns 400 with "Cannot reduce stock below reserved quantity (X units reserved)" instead of the previous 500 INSUFFICIENT_STOCK error. Updated the pool findUnique select to also fetch onHand + reserved (was only fetching avgCost).
+9. src/components/inventory/adjust-stock-view.tsx — updated DashboardResponse interface to include reserved + available (already returned by the API but not typed); changed handleSubmit validation from `Math.abs(quantity) > currentPool.onHand` to `Math.abs(quantity) > (currentPool.onHand - currentPool.reserved)`; updated error message to: "X units are reserved for pending orders — you can only reduce available stock (Y available)".
+
+Stage Summary:
+- 5 of 13 inventory bugs fixed in this pass (INV-002, 007, 009, 010, 011)
+- Combined with Part 1: 11 of 13 inventory bugs fixed (INV-001 through INV-011)
+- 0 new lint errors, 0 new TypeScript errors
+- INV-013 investigation report included (no fix — options A/B presented for team decision)
+- INV-012 re-grep report included (6 sites in 4 files outside src/lib/inventory.ts)
+- Remaining open: INV-013 (decision needed), INV-012 (helper extraction — low priority)

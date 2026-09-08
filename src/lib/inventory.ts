@@ -507,6 +507,236 @@ export async function processInventoryTransaction(
   }
 }
 
+// ──────────────────────────────────────────────────────────────
+// INV-002 fix — canonical returned-stitched receipt processor
+// ──────────────────────────────────────────────────────────────
+
+export interface ProcessReturnedStitchedInput {
+  organizationId: string
+  companyId: string
+  orgVariantId: string
+  /** Required — the inventory location receiving the returned item.
+   * Used to find/create the InventoryPool and link the InventoryTransaction
+   * (non-damaged path) or the StockLossRecord (damaged path). */
+  locationId: string
+  quantity: number
+  condition: 'perfect' | 'good' | 'open_box' | 'damaged'
+  /** Total cost for all `quantity` units (costPerUnit = totalCost / quantity). */
+  totalCost: number
+  suggestedResalePrice?: number | null
+  originalOrderReference?: string | null
+  returnReason: string
+  photos?: string[]
+  notes?: string | null
+  /** Employee creating the record — used as receivedById, writtenOffById
+   * (damaged path), and reportedById (StockLossRecord, damaged path). */
+  employeeId: string
+}
+
+export interface ProcessReturnedStitchedResult {
+  success: boolean
+  /** ReturnedStitchedInventory.id — always set on success. */
+  recordId?: string
+  /** InventoryTransaction.id — set on non-damaged path. NULL on damaged path
+   * (no stock movement occurs — the returned item was never added to stock). */
+  inventoryTxnId?: string | null
+  /** StockLossRecord.id — set on damaged path. NULL on non-damaged path. */
+  lossRecordId?: string | null
+  /** 'available' for non-damaged, 'written_off' for damaged. */
+  status?: 'available' | 'written_off'
+  /** Damaged path only — true if the loss already existed (idempotent no-op). */
+  wasDuplicate?: boolean
+  error?: string
+}
+
+/**
+ * Canonical returned-stitched receipt processor (INV-002 fix).
+ *
+ * Single entry point for receiving returned-stitched items — unifies the
+ * previously split flow across two routes:
+ *   - POST /api/returned-stitched                       (created register row only)
+ *   - POST /api/inventory/receive-returned-stitched     (created txn only)
+ *
+ * Both routes now delegate here so that EVERY receipt creates BOTH the
+ * ReturnedStitchedInventory register row AND the corresponding ledger /
+ * loss entry, with the bidirectional link set:
+ *
+ *   Non-damaged path (condition ∈ perfect|good|open_box):
+ *     1. Calls processInventoryTransaction({ type: 'return_stitched_received' })
+ *        → increments onHand, recalculates WAC, flips track_inventory=TRUE
+ *       on made_to_order variants (one-way).
+ *     2. Creates ReturnedStitchedInventory with status='available' and
+ *        inventoryTxnId=txn.id (the link).
+ *
+ *   Damaged path (condition = 'damaged'):
+ *     1. Calls recordStockLoss({ createInventoryTransaction: false })
+ *        → creates a StockLossRecord (dedup-safe, sourceModule='returned_stitched')
+ *        but does NOT decrement onHand (the returned item was never added to
+ *        stock, so there's nothing to remove — preserves the behavior of the
+ *        existing /api/inventory/receive-returned-stitched damaged path).
+ *     2. Creates ReturnedStitchedInventory with status='written_off',
+ *        writtenOffAt=now, writtenOffById=employeeId, inventoryTxnId=NULL
+ *        (no stock movement occurred).
+ *
+ * ATOMICITY: The register-row creation runs inside db.$transaction. Note
+ * that processInventoryTransaction / recordStockLoss internally use the
+ * global db client (not a passed-in tx), so they execute as SEPARATE
+ * transactions — full cross-call atomicity would require refactoring those
+ * helpers to accept a tx client (out of INV-002 scope, same caveat as the
+ * INV-006 fix). The current arrangement matches the behavior of the
+ * existing receive-returned-stitched route and is strictly better than the
+ * prior split flow: the register row is now consistently created with the
+ * link set, instead of being skipped entirely.
+ */
+export async function processReturnedStitchedReceipt(
+  input: ProcessReturnedStitchedInput,
+): Promise<ProcessReturnedStitchedResult> {
+  const {
+    organizationId,
+    companyId,
+    orgVariantId,
+    locationId,
+    quantity,
+    condition,
+    totalCost,
+    suggestedResalePrice = null,
+    originalOrderReference = null,
+    returnReason,
+    photos = [],
+    notes = null,
+    employeeId,
+  } = input
+
+  if (quantity <= 0) {
+    return { success: false, error: 'Quantity must be positive.' }
+  }
+
+  const isDamaged = condition === 'damaged'
+  const costPerUnit = totalCost / quantity
+
+  try {
+    if (isDamaged) {
+      // ── Damaged path: record loss, no stock movement ──
+      const { recordStockLoss } = await import('@/lib/stock-loss')
+      const lossResult = await recordStockLoss({
+        organizationId,
+        companyId,
+        orgVariantId,
+        locationId,
+        lossType: 'damaged',
+        sourceModule: 'returned_stitched',
+        quantity,
+        costPerUnit,
+        employeeId,
+        subType: 'confirmed',
+        damageType: 'other',
+        responsibleParty: 'courier',
+        notes: `Damaged returned stitched item. ${notes || ''}`,
+        // createInventoryTransaction=false — this endpoint does NOT add
+        // stock for damaged items (the loss is just recorded, stock stays
+        // unchanged since the returned item was never added in the first place)
+        createInventoryTransaction: false,
+      })
+
+      if (!lossResult.success) {
+        return { success: false, error: `Failed to record damaged loss: ${lossResult.error}` }
+      }
+
+      // Create the ReturnedStitchedInventory register row with status='written_off'.
+      // inventoryTxnId stays NULL — no stock movement occurred. Wrapped in
+      // db.$transaction per the INV-002 spec (single write here, but the
+      // wrapper documents the atomicity intent for future multi-write extensions).
+      const record = await db.$transaction(async (tx) => {
+        return tx.returnedStitchedInventory.create({
+          data: {
+            organizationId,
+            companyId,
+            orgVariantId,
+            quantity,
+            condition,
+            totalCost,
+            suggestedResalePrice,
+            originalOrderReference,
+            returnReason,
+            status: 'written_off',
+            photos: JSON.stringify(photos),
+            notes,
+            receivedById: employeeId,
+            writtenOffAt: new Date(),
+            writtenOffById: employeeId,
+            writeOffReason: 'Damaged on return',
+            inventoryTxnId: null,
+          },
+        })
+      })
+
+      return {
+        success: true,
+        recordId: record.id,
+        inventoryTxnId: null,
+        lossRecordId: lossResult.lossRecordId ?? null,
+        status: 'written_off',
+        wasDuplicate: lossResult.wasDuplicate,
+      }
+    }
+
+    // ── Non-damaged path: increment stock via processInventoryTransaction ──
+    const txnResult = await processInventoryTransaction({
+      orgVariantId,
+      locationId,
+      organizationId,
+      companyId,
+      employeeId,
+      transactionType: 'return_stitched_received',
+      quantity,
+      costPerUnit,
+      referenceType: originalOrderReference ? 'order' : 'manual',
+      referenceId: originalOrderReference || null,
+      notes: `Returned stitched item (${condition}). ${notes || ''}`,
+    })
+
+    if (!txnResult.success) {
+      return { success: false, error: `Failed to receive returned item: ${txnResult.error}` }
+    }
+
+    // Create the ReturnedStitchedInventory register row with status='available'
+    // and link it to the inventory transaction id. Wrapped in db.$transaction
+    // per the INV-002 spec.
+    const record = await db.$transaction(async (tx) => {
+      return tx.returnedStitchedInventory.create({
+        data: {
+          organizationId,
+          companyId,
+          orgVariantId,
+          quantity,
+          condition,
+          totalCost,
+          suggestedResalePrice,
+          originalOrderReference,
+          returnReason,
+          status: 'available',
+          photos: JSON.stringify(photos),
+          notes,
+          receivedById: employeeId,
+          inventoryTxnId: txnResult.transactionId ?? null,
+        },
+      })
+    })
+
+    return {
+      success: true,
+      recordId: record.id,
+      inventoryTxnId: txnResult.transactionId ?? null,
+      lossRecordId: null,
+      status: 'available',
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown returned-stitched receipt error'
+    console.error('[inventory] processReturnedStitchedReceipt error:', err)
+    return { success: false, error: msg }
+  }
+}
+
 /**
  * Check returned stock availability for a made_to_order variant.
  * Returns available inventory_pools rows across all locations.

@@ -2,8 +2,10 @@ import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
 import { getWorkspace, requirePermission, ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
+import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { returnedStitchedInventorySchema } from '@/lib/validations/product'
+import { processReturnedStitchedReceipt } from '@/lib/inventory'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -118,37 +120,39 @@ export async function POST(req: NextRequest) {
     // Core creation logic — wrapped in a closure so it can be run either
     // directly (no idempotency key, backwards-compatible) or via
     // withIdempotency() (prevents duplicate return-receive submissions).
+    //
+    // INV-002 fix: delegates to the canonical processReturnedStitchedReceipt()
+    // helper (in src/lib/inventory.ts) so EVERY receipt creates BOTH the
+    // ReturnedStitchedInventory register row AND the corresponding ledger /
+    // loss entry — with the bidirectional link set. Previously this route
+    // created only the register row (no inventory movement); the sibling
+    // route at /api/inventory/receive-returned-stitched created only the
+    // inventory transaction. Both now use the same canonical function.
     const receiveReturnedStitched = async () => {
-      const isDamaged = d.condition === 'damaged'
-      const record = await db.returnedStitchedInventory.create({
-        data: {
-          organizationId: orgId,
-          companyId,
-          orgVariantId: d.org_variant_id,
-          quantity: d.quantity,
-          condition: d.condition,
-          totalCost: d.total_cost,
-          suggestedResalePrice: d.suggested_resale_price ?? null,
-          originalOrderReference: d.original_order_reference || null,
-          returnReason: d.return_reason,
-          status: isDamaged ? 'written_off' : 'available',
-          photos: JSON.stringify(d.photos),
-          notes: d.notes || null,
-          receivedById: caller.id,
-          ...(isDamaged
-            ? {
-                writtenOffAt: new Date(),
-                writtenOffById: caller.id,
-                writeOffReason: 'Damaged on return',
-              }
-            : {}),
-        },
+      const result = await processReturnedStitchedReceipt({
+        organizationId: orgId,
+        companyId,
+        orgVariantId: d.org_variant_id,
+        locationId: d.location_id,
+        quantity: d.quantity,
+        condition: d.condition,
+        totalCost: d.total_cost,
+        suggestedResalePrice: d.suggested_resale_price ?? null,
+        originalOrderReference: d.original_order_reference || null,
+        returnReason: d.return_reason,
+        photos: d.photos,
+        notes: d.notes || null,
+        employeeId: caller.id,
       })
+
+      if (!result.success) {
+        throw new ApiError(500, `Failed to receive returned stitched item: ${result.error}`)
+      }
 
       insertAuditLog({
         action: 'returned_stitched.received',
         entityType: 'returned_stitched',
-        entityId: record.id,
+        entityId: result.recordId!,
         companyId,
         organizationId: orgId,
         userId: user!.id,
@@ -157,11 +161,32 @@ export async function POST(req: NextRequest) {
           condition: d.condition,
           totalCost: d.total_cost,
           variantId: d.org_variant_id,
-          status: record.status,
+          status: result.status,
+          inventoryTxnId: result.inventoryTxnId,
+          lossRecordId: result.lossRecordId,
         },
       })
 
-      return { success: true, record_id: record.id, status: record.status }
+      // Metric event (CRITICAL — powers stitched-return / reverse-logistics KPIs)
+      const costPerUnit = d.total_cost / d.quantity
+      insertMetricEvent({
+        companyId,
+        entityType: 'product',
+        entityId: d.org_variant_id,
+        metricKey: 'inventory.returned_stitched_received',
+        numericValue: d.quantity * costPerUnit,
+        dimensions: {
+          location_id: d.location_id,
+          quantity: d.quantity,
+          condition: d.condition,
+          status: result.status ?? 'available',
+        },
+      })
+
+      // Preserve the original response shape — { success, record_id, status }.
+      // Existing clients of this route continue to work; the inventory txn /
+      // loss record are now created as a side effect of the canonical function.
+      return { success: true, record_id: result.recordId, status: result.status }
     }
 
     if (idempotencyKey) {

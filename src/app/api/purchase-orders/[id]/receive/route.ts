@@ -4,7 +4,7 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
-import { processInventoryTransaction } from '@/lib/inventory'
+import { processInventoryTransaction, decrementIncomingStock } from '@/lib/inventory'
 import { z } from 'zod'
 import { NextRequest } from 'next/server'
 
@@ -145,27 +145,16 @@ export async function POST(
         })
 
         // Step 4: Decrement incoming on the pool (never below 0)
-        const pool = await db.inventoryPool.findUnique({
-          where: {
-            orgVariantId_locationId: {
-              orgVariantId: ri.org_variant_id,
-              locationId: po.deliveryLocationId,
-            },
-          },
-          select: { incoming: true },
-        })
-        if (pool) {
-          const newIncoming = Math.max(0, pool.incoming - ri.received_quantity)
-          await db.inventoryPool.update({
-            where: {
-              orgVariantId_locationId: {
-                orgVariantId: ri.org_variant_id,
-                locationId: po.deliveryLocationId,
-              },
-            },
-            data: { incoming: newIncoming },
-          })
-        }
+        // INV-007 fix: use the canonical decrementIncomingStock() helper
+        // (in src/lib/inventory.ts) instead of writing to db.inventoryPool
+        // directly. The helper handles the "never below 0" clamp and
+        // silently no-ops if the pool doesn't exist — same behavior as the
+        // previous inline code, but routed through the single source of truth.
+        await decrementIncomingStock(
+          ri.org_variant_id,
+          po.deliveryLocationId,
+          ri.received_quantity,
+        )
       } catch (postTxnErr) {
         // COMPENSATING ACTION: reverse the inventory transaction so stock
         // isn't left incremented without a receipt record. This prevents

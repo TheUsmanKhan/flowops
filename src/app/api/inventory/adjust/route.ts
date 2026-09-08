@@ -61,9 +61,48 @@ export async function POST(req: Request) {
           locationId: d.location_id,
         },
       },
-      select: { avgCost: true },
+      select: { avgCost: true, onHand: true, reserved: true },
     })
     const avgCostForMetric = pool ? Number(pool.avgCost) : 0
+
+    // ── INV-010 fix: explicit pre-check BEFORE any database write ──
+    //
+    // The audit repro: onHand=5, reserved=3 (available=2), adjust=-4 → the
+    // route currently returns HTTP 500 with "Adjustment failed:
+    // INSUFFICIENT_STOCK: Available 2, requested 4" (caught from
+    // processInventoryTransaction's OUT_TYPES check on damage_writeoff).
+    //
+    // HTTP semantics: this is a 400 (Bad Request — client supplied invalid
+    // input), not a 500 (server error). Pre-check here and short-circuit
+    // with a friendly 400 BEFORE the wasteful call into recordStockLoss →
+    // processInventoryTransaction (which would otherwise throw, log an error,
+    // and roll back the transaction).
+    //
+    // Boundary: onHand=10, reserved=10, adjust=-1 → newOnHand=9 < reserved=10
+    // → must return 400. ✓
+    //
+    // Edge case (pool doesn't exist): onHand=0, reserved=0, any negative
+    // adjustment → newOnHand goes negative, check fires with "0 units
+    // reserved" message. Slightly awkward but technically correct — there
+    // is no stock to remove. The 400 status is the important part.
+    //
+    // Adjustment=0: rejected at the Zod schema level
+    // (adjustStockSchema.quantity.refine((v) => v !== 0)) → returns 400
+    // BEFORE this pre-check runs. No empty transaction row is ever written.
+    // (Confirmed: the route never calls processInventoryTransaction /
+    // recordStockLoss when quantity=0 — the schema validation catches it
+    // first.)
+    if (!isPositive) {
+      const currentOnHand = pool?.onHand ?? 0
+      const currentReserved = pool?.reserved ?? 0
+      const projectedOnHand = currentOnHand + d.quantity // d.quantity is negative here
+      if (projectedOnHand < currentReserved) {
+        throw new ApiError(
+          400,
+          `Cannot reduce stock below reserved quantity (${currentReserved} units reserved)`,
+        )
+      }
+    }
 
     // Core creation logic — wrapped in a closure so it can be run either
     // directly (no idempotency key, backwards-compatible) or via

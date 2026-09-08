@@ -1,0 +1,1150 @@
+     1→import { db } from './db'
+     2→import { Decimal } from '@prisma/client/runtime/library'
+     3→import type { Prisma } from '@prisma/client'
+     4→import { insertAuditLog } from './audit'
+     5→
+     6→/**
+     7→ * THE CORE INVENTORY FUNCTION.
+     8→ *
+     9→ * This is the single point of truth for all stock movements. It:
+    10→ *   1. Finds or creates the inventory_pools row for variant+location
+    11→ *   2. Validates sufficient stock for OUT-direction transactions
+    12→ *   3. Recalculates WAC (weighted average cost) for IN-direction transactions
+    13→ *   4. Updates on_hand / reserved / avg_cost on the pool
+    14→ *   5. Inserts the immutable inventory_transactions ledger row
+    15→ *   6. Records avg_cost_history when avg_cost changes
+    16→ *   7. Flips track_inventory TRUE on made_to_order variants on first return
+    17→ *
+    18→ * ATOMICITY (INV-006 fix): Steps 1–7 are wrapped in a single
+    19→ * `db.$transaction` — either all writes commit, or none do. The
+    20→ * "ledger and pool always agree" guarantee now holds under partial failure.
+    21→ *
+    22→ * RESERVATION INVARIANT (INV-001 fix): For onHand-reducing transaction
+    23→ * types (cycle_count_adjust, damage_writeoff, theft_writeoff,
+    24→ * missing_writeoff, transit_loss, supplier_return,
+    25→ * fabric_consumed_for_stitching, transfer_out), if the new onHand drops
+    26→ * below the current reserved count, the newest-reserved OrderItems for
+    27→ * this variant+location are bumped to 'backordered' (oldest first
+    28→ * protected) until `reserved <= onHand` is restored. If bumping all
+    29→ * matching OrderItems still doesn't close the gap (ghost reservations
+    30→ * with no OrderItem row), newReserved is clamped to newOnHand and a
+    31→ * WARNING audit log is emitted.
+    32→ *
+    33→ * IMPORTANT: inventory_pools is NEVER written to directly from any other
+    34→ * code path — only through this function. This guarantees the ledger
+    35→ * and pool always agree.
+    36→ */
+    37→
+    38→export type TransactionType =
+    39→  | 'opening_stock'
+    40→  | 'purchase_received'
+    41→  | 'sale_dispatched'
+    42→  | 'order_reserved'
+    43→  | 'order_unreserved'
+    44→  | 'return_resellable'
+    45→  | 'return_damaged'
+    46→  | 'return_stitched_received'
+    47→  | 'transfer_out'
+    48→  | 'transfer_in'
+    49→  | 'cycle_count_adjust'
+    50→  | 'manual_adjustment_in'
+    51→  | 'damage_writeoff'
+    52→  | 'theft_writeoff'
+    53→  | 'missing_writeoff'
+    54→  | 'transit_loss'
+    55→  | 'supplier_return'
+    56→  | 'fabric_consumed_for_stitching'
+    57→
+    58→const OUT_TYPES: TransactionType[] = [
+    59→  'sale_dispatched',
+    60→  'transfer_out',
+    61→  'damage_writeoff',
+    62→  'theft_writeoff',
+    63→  'missing_writeoff',
+    64→  'transit_loss',
+    65→  'supplier_return',
+    66→  'fabric_consumed_for_stitching',
+    67→]
+    68→
+    69→const WAC_RECALC_TYPES: TransactionType[] = [
+    70→  'opening_stock',
+    71→  'purchase_received',
+    72→  'return_stitched_received',
+    73→  'transfer_in',
+    74→  'return_resellable',
+    75→]
+    76→
+    77→/**
+    78→ * Transaction types that REDUCE onHand (rather than just moving it between
+    79→ * pools, like transfer_out which is also a reducer at the source pool).
+    80→ *
+    81→ * Used by the reservation-invariant protection (INV-001 fix): if any of
+    82→ * these transaction types drops `newOnHand < newReserved`, the
+    83→ * newest-reserved OrderItems at this variant+location are bumped to
+    84→ * 'backordered' until the invariant is restored.
+    85→ */
+    86→const ONHAND_REDUCING_TYPES: TransactionType[] = [
+    87→  'cycle_count_adjust',
+    88→  'damage_writeoff',
+    89→  'theft_writeoff',
+    90→  'missing_writeoff',
+    91→  'transit_loss',
+    92→  'supplier_return',
+    93→  'fabric_consumed_for_stitching',
+    94→  'transfer_out',
+    95→]
+    96→
+    97→interface ProcessTxnInput {
+    98→  orgVariantId: string
+    99→  locationId: string
+   100→  organizationId: string
+   101→  companyId?: string | null
+   102→  employeeId?: string | null
+   103→  transactionType: TransactionType
+   104→  quantity: number // positive = in, negative = out
+   105→  costPerUnit?: number | null // if null, uses current avg_cost for OUT, or new_cost for IN
+   106→  referenceType?: string | null
+   107→  referenceId?: string | null
+   108→  notes?: string | null
+   109→  metadata?: Record<string, unknown> | null
+   110→}
+   111→
+   112→interface ProcessTxnResult {
+   113→  success: boolean
+   114→  transactionId?: string
+   115→  poolState?: {
+   116→    onHand: number
+   117→    reserved: number
+   118→    available: number
+   119→    avgCost: number
+   120→  }
+   121→  error?: string
+   122→}
+   123→
+   124→/**
+   125→ * Calculate new weighted average cost.
+   126→ * new_avg = (existing_qty × old_avg + new_qty × new_cost) / total_qty
+   127→ */
+   128→function calculateNewAvgCost(
+   129→  existingQty: number,
+   130→  oldAvg: number,
+   131→  newQty: number,
+   132→  newCost: number,
+   133→): number {
+   134→  const totalQty = existingQty + newQty
+   135→  if (totalQty <= 0) return 0
+   136→  return (existingQty * oldAvg + newQty * newCost) / totalQty
+   137→}
+   138→
+   139→/**
+   140→ * Process a single inventory transaction.
+   141→ * This function is the ONLY way to modify inventory_pools.
+   142→ */
+   143→export async function processInventoryTransaction(
+   144→  input: ProcessTxnInput,
+   145→): Promise<ProcessTxnResult> {
+   146→  const {
+   147→    orgVariantId,
+   148→    locationId,
+   149→    organizationId,
+   150→    companyId = null,
+   151→    employeeId = null,
+   152→    transactionType,
+   153→    quantity,
+   154→    referenceType = null,
+   155→    referenceId = null,
+   156→    notes = null,
+   157→    metadata = null,
+   158→  } = input
+   159→
+   160→  // For OUT transactions, quantity should be positive (we negate internally)
+   161→  // For IN transactions, quantity is positive
+   162→  const absQty = Math.abs(quantity)
+   163→
+   164→  try {
+   165→    // INV-006 fix: wrap the entire sequence (pool find/create → validate →
+   166→    // compute → optional reservation-bump → pool.update → ledger.create →
+   167→    // avgCostHistory.create) in a single database transaction. Either all
+   168→    // writes commit, or none do — restoring the "ledger and pool always
+   169→    // agree" guarantee claimed in the header comment.
+   170→    const result = await db.$transaction(async (tx) => {
+   171→      // 1. Find or create the inventory_pools row
+   172→      let pool = await tx.inventoryPool.findUnique({
+   173→        where: {
+   174→          orgVariantId_locationId: { orgVariantId, locationId },
+   175→        },
+   176→      })
+   177→
+   178→      if (!pool) {
+   179→        // First transaction ever for this variant+location — create pool with zeros
+   180→        pool = await tx.inventoryPool.create({
+   181→          data: {
+   182→            orgVariantId,
+   183→            locationId,
+   184→            organizationId,
+   185→            onHand: 0,
+   186→            reserved: 0,
+   187→            incoming: 0,
+   188→            avgCost: 0,
+   189→          },
+   190→        })
+   191→      }
+   192→
+   193→      // 2. Validate sufficient stock for OUT-direction transactions
+   194→      if (OUT_TYPES.includes(transactionType)) {
+   195→        const available = pool.onHand - pool.reserved
+   196→        if (available < absQty) {
+   197→          // Throw to abort the transaction — caught below and converted
+   198→          // back to a structured INSUFFICIENT_STOCK error response.
+   199→          throw new Error(
+   200→            `INSUFFICIENT_STOCK: Available ${available}, requested ${absQty}`,
+   201→          )
+   202→        }
+   203→      }
+   204→
+   205→      // 3. Determine cost_per_unit and compute new avg_cost
+   206→      const oldAvgCost = Number(pool.avgCost)
+   207→      let costPerUnit = input.costPerUnit ?? null
+   208→
+   209→      // For IN-direction WAC recalculation types
+   210→      if (WAC_RECALC_TYPES.includes(transactionType)) {
+   211→        if (costPerUnit === null) {
+   212→          costPerUnit = oldAvgCost // fallback if not provided
+   213→        }
+   214→      }
+   215→
+   216→      // For OUT types: use current avg_cost if not explicitly provided
+   217→      if (OUT_TYPES.includes(transactionType) && costPerUnit === null) {
+   218→        costPerUnit = oldAvgCost
+   219→      }
+   220→
+   221→      // For transfer_in: costPerUnit must be passed explicitly (sending location's cost)
+   222→      if (transactionType === 'transfer_in' && costPerUnit === null) {
+   223→        costPerUnit = oldAvgCost // fallback
+   224→      }
+   225→
+   226→      const finalCostPerUnit = costPerUnit ?? 0
+   227→
+   228→      // 4. Compute new pool state
+   229→      let newOnHand = pool.onHand
+   230→      let newReserved = pool.reserved
+   231→      let newAvgCost = oldAvgCost
+   232→      let newIncoming = pool.incoming
+   233→
+   234→      switch (transactionType) {
+   235→        case 'opening_stock':
+   236→          newOnHand += absQty
+   237→          newAvgCost = calculateNewAvgCost(pool.onHand, oldAvgCost, absQty, finalCostPerUnit)
+   238→          break
+   239→        case 'purchase_received':
+   240→          newOnHand += absQty
+   241→          newIncoming = Math.max(0, newIncoming - absQty)
+   242→          newAvgCost = calculateNewAvgCost(pool.onHand, oldAvgCost, absQty, finalCostPerUnit)
+   243→          break
+   244→        case 'sale_dispatched':
+   245→          newOnHand -= absQty
+   246→          newReserved = Math.max(0, newReserved - absQty)
+   247→          break
+   248→        case 'order_reserved':
+   249→          newReserved += absQty
+   250→          break
+   251→        case 'order_unreserved':
+   252→          newReserved = Math.max(0, newReserved - absQty)
+   253→          break
+   254→        case 'return_resellable':
+   255→          newOnHand += absQty
+   256→          newAvgCost = calculateNewAvgCost(pool.onHand, oldAvgCost, absQty, finalCostPerUnit)
+   257→          break
+   258→        case 'return_stitched_received':
+   259→          newOnHand += absQty
+   260→          newAvgCost = calculateNewAvgCost(pool.onHand, oldAvgCost, absQty, finalCostPerUnit)
+   261→          break
+   262→        case 'return_damaged':
+   263→          // No pool change — goes straight to stock_loss_records
+   264→          break
+   265→        case 'transfer_out':
+   266→          newOnHand -= absQty
+   267→          break
+   268→        case 'transfer_in':
+   269→          newOnHand += absQty
+   270→          // costPerUnit is the sending location's cost — do NOT recalculate WAC
+   271→          // The transferred stock keeps its original cost_per_unit exactly
+   272→          newAvgCost = calculateNewAvgCost(pool.onHand, oldAvgCost, absQty, finalCostPerUnit)
+   273→          break
+   274→        case 'cycle_count_adjust':
+   275→          // Set on_hand directly to counted value
+   276→          // quantity here represents the NEW on_hand value (positive)
+   277→          newOnHand = absQty
+   278→          break
+   279→        case 'manual_adjustment_in':
+   280→          // Manual positive adjustment — INCREMENT on_hand by the quantity
+   281→          // (unlike cycle_count_adjust which SETS on_hand to the quantity)
+   282→          newOnHand += absQty
+   283→          break
+   284→        case 'damage_writeoff':
+   285→        case 'theft_writeoff':
+   286→        case 'missing_writeoff':
+   287→        case 'transit_loss':
+   288→          newOnHand -= absQty
+   289→          break
+   290→        case 'supplier_return':
+   291→          newOnHand -= absQty
+   292→          break
+   293→        case 'fabric_consumed_for_stitching':
+   294→          newOnHand -= absQty
+   295→          break
+   296→      }
+   297→
+   298→      // --- RESERVATION INVARIANT PROTECTION (INV-001 fix) ---
+   299→      // After computing newOnHand, check if reserved > onHand.
+   300→      // For onHand-reducing transaction types, this means the available pool
+   301→      // has dropped below the reservations held against it — bump the
+   302→      // newest-reserved OrderItems to 'backordered' (oldest protected).
+   303→      if (
+   304→        ONHAND_REDUCING_TYPES.includes(transactionType) &&
+   305→        newReserved > newOnHand
+   306→      ) {
+   307→        const shortfall = newReserved - newOnHand
+   308→
+   309→        // Find reserved OrderItems for this variant+location, oldest first.
+   310→        // We iterate the list newest-first (reverse) to bump the most
+   311→        // recent reservations while protecting the earliest / oldest ones.
+   312→        const reservedItems = await tx.orderItem.findMany({
+   313→          where: {
+   314→            orgVariantId,
+   315→            reservedLocationId: locationId,
+   316→            fulfillmentStatus: 'reserved',
+   317→          },
+   318→          orderBy: { createdAt: 'asc' },
+   319→          select: {
+   320→            id: true,
+   321→            quantity: true,
+   322→            orderId: true,
+   323→            createdAt: true,
+   324→          },
+   325→        })
+   326→
+   327→        let bumpedQty = 0
+   328→        const reviewReason = `Inventory shortage — converted to backorder (${transactionType}${referenceId ? ', ref: ' + referenceId : ''})`
+   329→
+   330→        // Process newest first (end of the sorted-asc list)
+   331→        for (
+   332→          let i = reservedItems.length - 1;
+   333→          i >= 0 && bumpedQty < shortfall;
+   334→          i--
+   335→        ) {
+   336→          const item = reservedItems[i]
+   337→
+   338→          // Unreserve: decrement newReserved by the full item quantity
+   339→          newReserved = Math.max(0, newReserved - item.quantity)
+   340→
+   341→          // Set OrderItem to backordered + flag for human review
+   342→          await tx.orderItem.update({
+   343→            where: { id: item.id },
+   344→            data: {
+   345→              fulfillmentStatus: 'backordered',
+   346→              needsReview: true,
+   347→              needsReviewReason: reviewReason,
+   348→            },
+   349→          })
+   350→
+   351→          // Recompute the parent order's aggregated status from line items
+   352→          await tx.$queryRaw`SELECT recompute_order_status(${item.orderId}::TEXT)`
+   353→
+   354→          bumpedQty += item.quantity
+   355→        }
+   356→
+   357→        // Edge case: still not enough — "ghost" reservations exist on the
+   358→        // pool with no matching OrderItem row (e.g. orphaned by a past bug
+   359→        // or manually injected). Clamp newReserved to newOnHand to restore
+   360→        // the invariant and emit a WARNING audit log so an operator can
+   361→        // investigate the discrepancy.
+   362→        if (newReserved > newOnHand) {
+   363→          const clampedReserved = newReserved
+   364→          const shortfallRemaining = clampedReserved - newOnHand
+   365→          newReserved = newOnHand
+   366→
+   367→          insertAuditLog({
+   368→            action: 'inventory.reservation_clamp',
+   369→            entityType: 'inventory_pool',
+   370→            entityId: pool.id,
+   371→            organizationId,
+   372→            companyId,
+   373→            employeeId,
+   374→            oldValues: { reserved: clampedReserved, onHand: newOnHand },
+   375→            newValues: {
+   376→              reserved: newReserved,
+   377→              shortfallRemaining,
+   378→            },
+   379→            metadata: {
+   380→              transactionType,
+   381→              referenceType,
+   382→              referenceId,
+   383→              orgVariantId,
+   384→              locationId,
+   385→              shortfall,
+   386→              bumpedQty,
+   387→              reason: 'reservation_bump_exhausted_ghost_reservation',
+   388→            },
+   389→          })
+   390→        }
+   391→      }
+   392→      // --- END INV-001 fix ---
+   393→
+   394→      // 5. Update timestamps
+   395→      const now = new Date()
+   396→      const updateData: Record<string, unknown> = {
+   397→        onHand: newOnHand,
+   398→        reserved: newReserved,
+   399→        incoming: newIncoming,
+   400→        avgCost: newAvgCost,
+   401→        updatedAt: now,
+   402→      }
+   403→      if (
+   404→        transactionType === 'purchase_received' ||
+   405→        transactionType === 'opening_stock' ||
+   406→        transactionType === 'return_resellable' ||
+   407→        transactionType === 'return_stitched_received' ||
+   408→        transactionType === 'transfer_in'
+   409→      ) {
+   410→        updateData.lastReceivedAt = now
+   411→      }
+   412→      if (transactionType === 'sale_dispatched') {
+   413→        updateData.lastSoldAt = now
+   414→      }
+   415→      if (transactionType === 'cycle_count_adjust') {
+   416→        updateData.lastCountedAt = now
+   417→      }
+   418→
+   419→      await tx.inventoryPool.update({
+   420→        where: { id: pool.id },
+   421→        data: updateData,
+   422→      })
+   423→
+   424→      // 6. Handle track_inventory flip for made_to_order variants on first
+   425→      //    return OR on opening_stock entry (e.g. user confirms "pre-made bulk
+   426→      //    stock" for an MTO variant during product creation). One-way FALSE → TRUE.
+   427→      if (
+   428→        transactionType === 'return_stitched_received' ||
+   429→        transactionType === 'opening_stock'
+   430→      ) {
+   431→        const variant = await tx.orgProductVariant.findUnique({
+   432→          where: { id: orgVariantId },
+   433→          select: { trackInventory: true, fulfillmentType: true },
+   434→        })
+   435→        if (variant && !variant.trackInventory && variant.fulfillmentType === 'made_to_order') {
+   436→          // ONE-WAY flip: FALSE → TRUE (never back to FALSE)
+   437→          await tx.orgProductVariant.update({
+   438→            where: { id: orgVariantId },
+   439→            data: { trackInventory: true },
+   440→          })
+   441→        }
+   442→      }
+   443→
+   444→      // 7. Insert the inventory_transactions ledger row
+   445→      const txnQuantity = OUT_TYPES.includes(transactionType) ? -absQty : absQty
+   446→      const avgCostChanged = newAvgCost !== oldAvgCost
+   447→
+   448→      const txn = await tx.inventoryTransaction.create({
+   449→        data: {
+   450→          orgVariantId,
+   451→          locationId,
+   452→          organizationId,
+   453→          companyId,
+   454→          employeeId,
+   455→          transactionType,
+   456→          quantity: txnQuantity,
+   457→          costPerUnit: finalCostPerUnit,
+   458→          avgCostBefore: oldAvgCost,
+   459→          avgCostAfter: newAvgCost,
+   460→          referenceType,
+   461→          referenceId,
+   462→          notes,
+   463→          metadata: metadata ? JSON.stringify(metadata) : '{}',
+   464→          recordedAt: now,
+   465→        },
+   466→      })
+   467→
+   468→      // 8. Insert avg_cost_history if avg_cost changed
+   469→      if (avgCostChanged) {
+   470→        await tx.avgCostHistory.create({
+   471→          data: {
+   472→            orgVariantId,
+   473→            locationId,
+   474→            organizationId,
+   475→            avgCostBefore: oldAvgCost,
+   476→            avgCostAfter: newAvgCost,
+   477→            triggeredByTxnId: txn.id,
+   478→            triggerReason: transactionType,
+   479→          },
+   480→        })
+   481→      }
+   482→
+   483→      return {
+   484→        success: true,
+   485→        transactionId: txn.id,
+   486→        poolState: {
+   487→          onHand: newOnHand,
+   488→          reserved: newReserved,
+   489→          available: newOnHand - newReserved,
+   490→          avgCost: newAvgCost,
+   491→        },
+   492→      }
+   493→    })
+   494→
+   495→    return result
+   496→  } catch (err) {
+   497→    // INSUFFICIENT_STOCK is thrown from inside the transaction to force a
+   498→    // rollback. Convert it back to a structured error response (preserving
+   499→    // the original behavior callers depend on) without logging it as an
+   500→    // error — it is a validation failure, not a runtime fault.
+   501→    const msg = err instanceof Error ? err.message : 'Unknown inventory transaction error'
+   502→    if (msg.startsWith('INSUFFICIENT_STOCK:')) {
+   503→      return { success: false, error: msg }
+   504→    }
+   505→    console.error('[inventory] processInventoryTransaction error:', err)
+   506→    return { success: false, error: msg }
+   507→  }
+   508→}
+   509→
+   510→/**
+   511→ * Check returned stock availability for a made_to_order variant.
+   512→ * Returns available inventory_pools rows across all locations.
+   513→ */
+   514→export async function checkReturnedStockAvailability(variantId: string) {
+   515→  const pools = await db.inventoryPool.findMany({
+   516→    where: {
+   517→      orgVariantId: variantId,
+   518→      onHand: { gt: 0 },
+   519→    },
+   520→    include: {
+   521→      location: { select: { id: true, name: true } },
+   522→    },
+   523→  })
+   524→  return pools.map((p) => ({
+   525→    locationId: p.locationId,
+   526→    locationName: p.location.name,
+   527→    available: p.onHand - p.reserved,
+   528→    avgCost: Number(p.avgCost),
+   529→  }))
+   530→}
+   531→
+   532→/**
+   533→ * Get inventory summary for a product — powers the product detail Inventory tab.
+   534→ */
+   535→export async function getProductInventorySummary(productId: string) {
+   536→  const variants = await db.orgProductVariant.findMany({
+   537→    where: { productId },
+   538→    select: { id: true, sku: true, fulfillmentType: true, trackInventory: true },
+   539→  })
+   540→
+   541→  const result: Array<{
+   542→    variantId: string
+   543→    sku: string
+   544→    fulfillmentType: string
+   545→    trackInventory: boolean
+   546→    totalOnHand: number
+   547→    totalReserved: number
+   548→    totalAvailable: number
+   549→    totalValue: number
+   550→    locations: Array<{
+   551→      locationId: string
+   552→      locationName: string
+   553→      onHand: number
+   554→      reserved: number
+   555→      available: number
+   556→      avgCost: number
+   557→      incoming: number
+   558→    }>
+   559→  }> = []
+   560→  for (const variant of variants) {
+   561→    const pools = await db.inventoryPool.findMany({
+   562→      where: { orgVariantId: variant.id },
+   563→      include: {
+   564→        location: { select: { id: true, name: true } },
+   565→      },
+   566→    })
+   567→
+   568→    const totalOnHand = pools.reduce((sum, p) => sum + p.onHand, 0)
+   569→    const totalReserved = pools.reduce((sum, p) => sum + p.reserved, 0)
+   570→    const totalAvailable = totalOnHand - totalReserved
+   571→    const totalValue = pools.reduce((sum, p) => sum + Number(p.onHand) * Number(p.avgCost), 0)
+   572→
+   573→    result.push({
+   574→      variantId: variant.id,
+   575→      sku: variant.sku,
+   576→      fulfillmentType: variant.fulfillmentType,
+   577→      trackInventory: variant.trackInventory,
+   578→      totalOnHand,
+   579→      totalReserved,
+   580→      totalAvailable,
+   581→      totalValue,
+   582→      locations: pools.map((p) => ({
+   583→        locationId: p.locationId,
+   584→        locationName: p.location.name,
+   585→        onHand: p.onHand,
+   586→        reserved: p.reserved,
+   587→        available: p.onHand - p.reserved,
+   588→        avgCost: Number(p.avgCost),
+   589→        incoming: p.incoming,
+   590→      })),
+   591→    })
+   592→  }
+   593→
+   594→  return result
+   595→}
+   596→
+   597→/**
+   598→ * Generate a unique, sequential PO number per organization per year.
+   599→ *
+   600→ * Format: PO-YYYY-NNN (e.g. PO-2026-001, PO-2026-002, ...)
+   601→ *
+   602→ * ATOMIC & RACE-FREE: uses the get_next_sequence_number() Postgres function
+   603→ * which does INSERT ... ON CONFLICT DO UPDATE ... RETURNING in a single
+   604→ * atomic statement. Two concurrent calls will each get a DIFFERENT number
+   605→ * (guaranteed by Postgres's row-level locking).
+   606→ *
+   607→ * This REPLACES the old count+1 pattern which raced under concurrency —
+   608→ * two simultaneous PO creations would generate the same number, causing
+   609→ * a unique-constraint 500 error. See INVENTORY_AUDIT.md CRITICAL #2.
+   610→ *
+   611→ * The sequence counter persists in the number_sequences table, so it
+   612→ * survives restarts and is consistent across all server instances.
+   613→ */
+   614→export async function generatePoNumber(organizationId: string): Promise<string> {
+   615→  const year = new Date().getFullYear()
+   616→  const prefix = `PO-${year}-`
+   617→
+   618→  const result = await db.$queryRaw<{ n: number }[]>`
+   619→    SELECT get_next_sequence_number(${organizationId}::TEXT, 'po_number', ${year}::INT) AS n
+   620→  `
+   621→  const seq = result[0].n
+   622→
+   623→  return `${prefix}${String(seq).padStart(3, '0')}`
+   624→}
+   625→
+   626→/**
+   627→ * Increment incoming stock on a pool (for PO ordering).
+   628→ * This is the ONLY function that writes to inventory_pools.incoming directly
+   629→ * — it's a live projection field, not a ledgered movement.
+   630→ * Creates the pool row if it doesn't exist.
+   631→ */
+   632→export async function incrementIncomingStock(
+   633→  orgVariantId: string,
+   634→  locationId: string,
+   635→  organizationId: string,
+   636→  qty: number,
+   637→): Promise<void> {
+   638→  await db.inventoryPool.upsert({
+   639→    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+   640→    update: { incoming: { increment: qty } },
+   641→    create: {
+   642→      orgVariantId,
+   643→      locationId,
+   644→      organizationId,
+   645→      incoming: qty,
+   646→    },
+   647→  })
+   648→}
+   649→
+   650→/**
+   651→ * Decrement incoming stock (never below 0).
+   652→ * Used when cancelling POs or receiving against POs.
+   653→ */
+   654→export async function decrementIncomingStock(
+   655→  orgVariantId: string,
+   656→  locationId: string,
+   657→  qty: number,
+   658→): Promise<void> {
+   659→  const pool = await db.inventoryPool.findUnique({
+   660→    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+   661→    select: { incoming: true },
+   662→  })
+   663→  if (!pool) return
+   664→  const newIncoming = Math.max(0, pool.incoming - qty)
+   665→  await db.inventoryPool.update({
+   666→    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+   667→    data: { incoming: newIncoming },
+   668→  })
+   669→}
+   670→
+   671→/**
+   672→ * Check and fulfill a made-to-order variant.
+   673→ *
+   674→ * The central decision function:
+   675→ * 1. Check if returned stock is available for this variant
+   676→ * 2. If yes: return { source: 'existing_stock', location_id, available }
+   677→ * 3. If no: create a production order, consume fabric, return { source: 'fresh_production' }
+   678→ */
+   679→export async function checkAndFulfillMadeToOrderVariant(
+   680→  orgVariantId: string,
+   681→  quantity: number,
+   682→  companyId: string,
+   683→  preferredLocationId?: string,
+   684→): Promise<{
+   685→  source: 'existing_stock' | 'fresh_production'
+   686→  locationId?: string
+   687→  available?: number
+   688→  productionOrderId?: string
+   689→  estimatedCompletionDate?: Date
+   690→  error?: string
+   691→}> {
+   692→  // 1. Check returned stock availability
+   693→  const availability = await checkReturnedStockAvailability(orgVariantId)
+   694→  const totalAvailable = availability.reduce((sum, a) => sum + a.available, 0)
+   695→
+   696→  if (totalAvailable >= quantity) {
+   697→    // Use existing stock — find the best location (most available)
+   698→    const best = availability
+   699→      .filter((a) => a.available > 0)
+   700→      .sort((a, b) => b.available - a.available)[0]
+   701→    return {
+   702→      source: 'existing_stock',
+   703→      locationId: best.locationId,
+   704→      available: best.available,
+   705→    }
+   706→  }
+   707→
+   708→  // 2. Not enough returned stock — create a production order
+   709→  const variant = await db.orgProductVariant.findUnique({
+   710→    where: { id: orgVariantId },
+   711→    select: {
+   712→      id: true,
+   713→      fabricSourceVariantId: true,
+   714→      stitchingCharges: true,
+   715→      productionDays: true,
+   716→      organizationId: true,
+   717→    },
+   718→  })
+   719→
+   720→  if (!variant) return { source: 'fresh_production', error: 'Variant not found' }
+   721→  if (!variant.fabricSourceVariantId) {
+   722→    return { source: 'fresh_production', error: 'No fabric source variant linked to this made_to_order variant' }
+   723→  }
+   724→
+   725→  // Find fabric stock at the preferred location or any location with stock
+   726→  const fabricPools = await db.inventoryPool.findMany({
+   727→    where: {
+   728→      orgVariantId: variant.fabricSourceVariantId,
+   729→      onHand: { gt: 0 },
+   730→    },
+   731→    include: { location: { select: { id: true, name: true } } },
+   732→  })
+   733→
+   734→  const fabricLocation = preferredLocationId
+   735→    ? fabricPools.find((p) => p.locationId === preferredLocationId)
+   736→    : fabricPools[0]
+   737→
+   738→  if (!fabricLocation || fabricLocation.onHand - fabricLocation.reserved < quantity) {
+   739→    return {
+   740→      source: 'fresh_production',
+   741→      error: `Insufficient fabric stock. Available: ${fabricLocation?.onHand ?? 0}, required: ${quantity}`,
+   742→    }
+   743→  }
+   744→
+   745→  const fabricCost = Number(fabricLocation.avgCost) * quantity
+   746→  const estimatedCompletionDate = new Date()
+   747→  estimatedCompletionDate.setDate(estimatedCompletionDate.getDate() + (variant.productionDays || 5))
+   748→
+   749→  // INV-004 fix: previously the fabric_consumed_for_stitching
+   750→  // InventoryTransaction was created BEFORE the ProductionOrder record —
+   751→  // leaving the forward link (InventoryTransaction.referenceId →
+   752→  // ProductionOrder.id) NULL because the PO id didn't exist yet.
+   753→  // Now we create the ProductionOrder FIRST (with fabricTxnId=null),
+   754→  // then consume fabric with referenceId=productionOrder.id, then
+   755→  // backfill fabricTxnId on the ProductionOrder. All three writes are
+   756→  // wrapped in a db.$transaction so a failure in fabric consumption
+   757→  // rolls back the ProductionOrder creation (no orphan POs).
+   758→  // processInventoryTransaction internally uses db.$transaction (since
+   759→  // the INV-006 fix), which Prisma nests as a savepoint inside this
+   760→  // outer transaction.
+   761→  try {
+   762→    const result = await db.$transaction(async (tx) => {
+   763→      // 1. Create the ProductionOrder record (fabricTxnId is NULL
+   764→      //    at this point — backfilled in step 3).
+   765→      const po = await tx.productionOrder.create({
+   766→        data: {
+   767→          organizationId: variant.organizationId,
+   768→          companyId,
+   769→          stitchedVariantId: orgVariantId,
+   770→          fabricVariantId: variant.fabricSourceVariantId,
+   771→          fabricLocationId: fabricLocation.locationId,
+   772→          quantity,
+   773→          status: 'fabric_reserved',
+   774→          stitchingCost: new Decimal(Number(variant.stitchingCharges) || 0),
+   775→          fabricCost: new Decimal(fabricCost),
+   776→          estimatedCompletionDate,
+   777→          fabricTxnId: null,
+   778→        } as Prisma.ProductionOrderUncheckedCreateInput,
+   779→      })
+   780→
+   781→      // 2. Consume fabric with referenceId=po.id so the
+   782→      //    InventoryTransaction → ProductionOrder forward link is set
+   783→      //    at creation time (no subsequent mutation needed).
+   784→      const txnResult = await processInventoryTransaction({
+   785→        orgVariantId: variant.fabricSourceVariantId,
+   786→        locationId: fabricLocation.locationId,
+   787→        organizationId: variant.organizationId,
+   788→        companyId,
+   789→        transactionType: 'fabric_consumed_for_stitching',
+   790→        quantity,
+   791→        costPerUnit: Number(fabricLocation.avgCost),
+   792→        referenceType: 'production_order',
+   793→        referenceId: po.id,
+   794→      })
+   795→
+   796→      if (!txnResult.success) {
+   797→        // Throwing aborts the outer db.$transaction, rolling back the
+   798→        // ProductionOrder.create above.
+   799→        throw new Error(`Fabric consumption failed: ${txnResult.error}`)
+   800→      }
+   801→
+   802→      // 3. Backfill fabricTxnId on the ProductionOrder so the reverse
+   803→      //    link (ProductionOrder → InventoryTransaction) is set.
+   804→      await tx.productionOrder.update({
+   805→        where: { id: po.id },
+   806→        data: { fabricTxnId: txnResult.transactionId ?? null },
+   807→      })
+   808→
+   809→      return po
+   810→    })
+   811→
+   812→    return {
+   813→      source: 'fresh_production',
+   814→      productionOrderId: result.id,
+   815→      estimatedCompletionDate,
+   816→    }
+   817→  } catch (err) {
+   818→    const message = err instanceof Error ? err.message : 'Unknown error'
+   819→    return { source: 'fresh_production', error: message }
+   820→  }
+   821→}
+   822→
+   823→/**
+   824→ * Quarantine stock for theft/missing loss investigations.
+   825→ * Directly increments inventory_pools.reserved — does NOT call
+   826→ * process_inventory_transaction() since no actual movement has occurred.
+   827→ * This is a soft-hold that reduces available stock without touching on_hand.
+   828→ */
+   829→export async function quarantineStock(
+   830→  orgVariantId: string,
+   831→  locationId: string,
+   832→  quantity: number,
+   833→): Promise<{ success: boolean; error?: string }> {
+   834→  const pool = await db.inventoryPool.findUnique({
+   835→    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+   836→  })
+   837→  if (!pool) {
+   838→    return { success: false, error: 'No inventory pool exists for this variant+location.' }
+   839→  }
+   840→  const available = pool.onHand - pool.reserved
+   841→  if (available < quantity) {
+   842→    return { success: false, error: `Insufficient available stock. Available: ${available}, required: ${quantity}.` }
+   843→  }
+   844→  await db.inventoryPool.update({
+   845→    where: { id: pool.id },
+   846→    data: { reserved: { increment: quantity } },
+   847→  })
+   848→  return { success: true }
+   849→}
+   850→
+   851→/**
+   852→ * Release quarantined stock (reverse of quarantineStock).
+   853→ * Directly decrements inventory_pools.reserved.
+   854→ * Used when resolving theft/missing investigations (regardless of outcome —
+   855→ * the write_off path creates a separate transaction that decrements on_hand).
+   856→ */
+   857→export async function releaseQuarantine(
+   858→  orgVariantId: string,
+   859→  locationId: string,
+   860→  quantity: number,
+   861→): Promise<void> {
+   862→  const pool = await db.inventoryPool.findUnique({
+   863→    where: { orgVariantId_locationId: { orgVariantId, locationId } },
+   864→  })
+   865→  if (!pool) return
+   866→  const newReserved = Math.max(0, pool.reserved - quantity)
+   867→  await db.inventoryPool.update({
+   868→    where: { id: pool.id },
+   869→    data: { reserved: newReserved },
+   870→  })
+   871→}
+   872→
+   873→// ──────────────────────────────────────────────────────────────
+   874→// OMS hooks — reservation / unreservation / dispatch
+   875→// ──────────────────────────────────────────────────────────────
+   876→// These are thin wrappers around processInventoryTransaction() that
+   877→// the Order Management System calls at specific lifecycle points.
+   878→// They were stubbed in the original Inventory design and are now
+   879→// implemented for OMS Step 3.
+   880→
+   881→/**
+   882→ * Reserve stock for an order item. Increments inventory_pools.reserved
+   883→ * (does NOT touch on_hand — that happens at dispatch time). Records
+   884→ * an order_reserved transaction in the ledger.
+   885→ *
+   886→ * @returns { success, error? } — fails if insufficient available stock.
+   887→ */
+   888→export async function reserveStockForOrder(input: {
+   889→  orgVariantId: string
+   890→  locationId: string
+   891→  organizationId: string
+   892→  companyId: string
+   893→  employeeId?: string | null
+   894→  quantity: number
+   895→  orderId?: string
+   896→}): Promise<{ success: boolean; error?: string }> {
+   897→  // Check available stock first (available = onHand - reserved)
+   898→  const pool = await db.inventoryPool.findUnique({
+   899→    where: {
+   900→      orgVariantId_locationId: {
+   901→        orgVariantId: input.orgVariantId,
+   902→        locationId: input.locationId,
+   903→      },
+   904→    },
+   905→  })
+   906→  if (!pool) {
+   907→    return { success: false, error: 'No inventory pool exists for this variant+location.' }
+   908→  }
+   909→  const available = pool.onHand - pool.reserved
+   910→  if (available < input.quantity) {
+   911→    return {
+   912→      success: false,
+   913→      error: `Insufficient available stock. Available: ${available}, required: ${input.quantity}.`,
+   914→    }
+   915→  }
+   916→
+   917→  const result = await processInventoryTransaction({
+   918→    orgVariantId: input.orgVariantId,
+   919→    locationId: input.locationId,
+   920→    organizationId: input.organizationId,
+   921→    companyId: input.companyId,
+   922→    employeeId: input.employeeId,
+   923→    transactionType: 'order_reserved',
+   924→    quantity: input.quantity,
+   925→    referenceType: 'order',
+   926→    referenceId: input.orderId,
+   927→  })
+   928→
+   929→  if (!result.success) {
+   930→    return { success: false, error: result.error }
+   931→  }
+   932→  return { success: true }
+   933→}
+   934→
+   935→/**
+   936→ * Unreserve stock for an order item (e.g. on order cancellation).
+   937→ * Decrements inventory_pools.reserved. Records an order_unreserved
+   938→ * transaction. Does NOT touch on_hand.
+   939→ */
+   940→export async function unreserveStockForOrder(input: {
+   941→  orgVariantId: string
+   942→  locationId: string
+   943→  organizationId: string
+   944→  companyId: string
+   945→  employeeId?: string | null
+   946→  quantity: number
+   947→  orderId?: string
+   948→}): Promise<{ success: boolean; error?: string }> {
+   949→  const result = await processInventoryTransaction({
+   950→    orgVariantId: input.orgVariantId,
+   951→    locationId: input.locationId,
+   952→    organizationId: input.organizationId,
+   953→    companyId: input.companyId,
+   954→    employeeId: input.employeeId,
+   955→    transactionType: 'order_unreserved',
+   956→    quantity: input.quantity,
+   957→    referenceType: 'order',
+   958→    referenceId: input.orderId,
+   959→  })
+   960→
+   961→  if (!result.success) {
+   962→    return { success: false, error: result.error }
+   963→  }
+   964→  return { success: true }
+   965→}
+   966→
+   967→/**
+   968→ * Dispatch stock for an order item — deducts on_hand AND releases
+   969→ * the reservation. Records a sale_dispatched transaction. COGS is
+   970→ * locked at the pool's current avg_cost.
+   971→ */
+   972→export async function dispatchOrder(input: {
+   973→  orgVariantId: string
+   974→  locationId: string
+   975→  organizationId: string
+   976→  companyId: string
+   977→  employeeId?: string | null
+   978→  quantity: number
+   979→  orderId?: string
+   980→  /**
+   981→   * Optional metadata to attach to the sale_dispatched transaction at
+   982→   * creation time. Used by the exchange-shipment flow to tag txns with
+   983→   * `exchangeShipmentId` + `dispatch_source` for the idempotency check
+   984→   * (INV-005 fix — replaces the previous pattern of mutating the txn
+   985→   * post-creation via db.inventoryTransaction.updateMany, which violated
+   986→   * the append-only ledger contract).
+   987→   */
+   988→  metadata?: Record<string, unknown> | null
+   989→}): Promise<{ success: boolean; error?: string }> {
+   990→  const result = await processInventoryTransaction({
+   991→    orgVariantId: input.orgVariantId,
+   992→    locationId: input.locationId,
+   993→    organizationId: input.organizationId,
+   994→    companyId: input.companyId,
+   995→    employeeId: input.employeeId,
+   996→    transactionType: 'sale_dispatched',
+   997→    quantity: input.quantity,
+   998→    costPerUnit: null, // uses current avg_cost (locked at dispatch time)
+   999→    referenceType: 'order',
+  1000→    referenceId: input.orderId,
+  1001→    metadata: input.metadata ?? null,
+  1002→  })
+  1003→
+  1004→  if (!result.success) {
+  1005→    return { success: false, error: result.error }
+  1006→  }
+  1007→  return { success: true }
+  1008→}
+  1009→
+  1010→/**
+  1011→ * Restock inventory for an RTO (Return To Origin) order — session-free
+  1012→ * version for use by courier polling jobs and webhooks (which have no user
+  1013→ * session and therefore can't call processOrderReturn() which uses
+  1014→ * getWorkspace()).
+  1015→ *
+  1016→ * For each DISPATCHED order item:
+  1017→ *   - Looks up the original sale_dispatched transaction to recover the
+  1018→ *     cost-per-unit that was locked at dispatch time.
+  1019→ *   - Calls processInventoryTransaction with type 'return_resellable'
+  1020→ *     (for stock_based items) or 'return_stitched_received' (for
+  1021→ *     made_to_order items) — which increments onHand AND recalculates WAC.
+  1022→ *   - Marks the order item with fulfillmentStatus='returned' +
+  1023→ *     autoProcessedAsPerfect=true + needsReview=true so it surfaces in the
+  1024→ *     exception-review queue for physical spot-checking (same as the manual
+  1025→ *     processOrderReturn path).
+  1026→ *
+  1027→ * For CONFIRMED/PROCESSING (not-yet-dispatched) reserved items: calls
+  1028→ * unreserveStockForOrder to release the reservation (no onHand change since
+  1029→ * onHand was never decremented).
+  1030→ *
+  1031→ * This function is IDEMPOTENT — it skips items whose fulfillmentStatus is
+  1032→ * already 'returned' (set by a prior restock call) so re-running a poll
+  1033→ * cycle doesn't double-restock.
+  1034→ *
+  1035→ * @returns { success, itemsRestocked } — never throws (errors logged per-item).
+  1036→ */
+  1037→export async function restockOrderForRto(
+  1038→  orderId: string,
+  1039→  context: {
+  1040→    organizationId: string
+  1041→    companyId: string
+  1042→    employeeId?: string | null
+  1043→    returnReason?: string
+  1044→  },
+  1045→): Promise<{ success: boolean; itemsRestocked: number }> {
+  1046→  const order = await db.order.findUnique({
+  1047→    where: { id: orderId },
+  1048→    select: {
+  1049→      id: true,
+  1050→      status: true,
+  1051→      dispatchLocationId: true,
+  1052→      organizationId: true,
+  1053→      companyId: true,
+  1054→      items: {
+  1055→        include: {
+  1056→          orgVariant: {
+  1057→            select: { id: true, sku: true, costPrice: true, fulfillmentType: true },
+  1058→          },
+  1059→        },
+  1060→      },
+  1061→    },
+  1062→  })
+  1063→  if (!order) return { success: false, itemsRestocked: 0 }
+  1064→
+  1065→  const locationId = order.dispatchLocationId
+  1066→  if (!locationId) {
+  1067→    console.error(`[restockOrderForRto] Order ${orderId} has no dispatchLocationId — cannot restock`)
+  1068→    return { success: false, itemsRestocked: 0 }
+  1069→  }
+  1070→
+  1071→  let itemsRestocked = 0
+  1072→
+  1073→  for (const item of order.items) {
+  1074→    // Idempotency: skip items already processed (fulfillmentStatus='returned')
+  1075→    if (item.fulfillmentStatus === 'returned') continue
+  1076→
+  1077→    if (item.fulfillmentStatus === 'dispatched') {
+  1078→      // Dispatched item — onHand was decremented at dispatch. Restock it.
+  1079→      // Recover the cost-per-unit from the original sale_dispatched txn.
+  1080→      const dispatchTxn = await db.inventoryTransaction.findFirst({
+  1081→        where: {
+  1082→          orgVariantId: item.orgVariantId,
+  1083→          locationId,
+  1084→          transactionType: 'sale_dispatched',
+  1085→          referenceType: 'order',
+  1086→          referenceId: orderId,
+  1087→        },
+  1088→        select: { costPerUnit: true },
+  1089→        orderBy: { recordedAt: 'desc' },
+  1090→      })
+  1091→      const costPerUnit = dispatchTxn ? Number(dispatchTxn.costPerUnit) : Number(item.orgVariant.costPrice)
+  1092→
+  1093→      const txnType = item.fulfillmentTypeSnapshot === 'made_to_order'
+  1094→        ? 'return_stitched_received'
+  1095→        : 'return_resellable'
+  1096→
+  1097→      const txnResult = await processInventoryTransaction({
+  1098→        orgVariantId: item.orgVariantId,
+  1099→        locationId,
+  1100→        organizationId: order.organizationId,
+  1101→        companyId: order.companyId,
+  1102→        employeeId: context.employeeId ?? null,
+  1103→        transactionType: txnType,
+  1104→        quantity: item.quantity,
+  1105→        costPerUnit,
+  1106→        referenceType: 'order',
+  1107→        referenceId: orderId,
+  1108→        notes: `Auto-processed RTO return (assumed ${txnType === 'return_resellable' ? 'resellable' : 'perfect'}). Reason: ${context.returnReason ?? 'courier returned'}`,
+  1109→      })
+  1110→
+  1111→      if (txnResult.success) {
+  1112→        await db.orderItem.update({
+  1113→          where: { id: item.id },
+  1114→          data: {
+  1115→            fulfillmentStatus: 'returned',
+  1116→            autoProcessedAsPerfect: true,
+  1117→            needsReview: true,
+  1118→          },
+  1119→        })
+  1120→        itemsRestocked++
+  1121→      } else {
+  1122→        console.error(`[restockOrderForRto] Failed to restock item ${item.id}: ${txnResult.error}`)
+  1123→      }
+  1124→    } else if (item.fulfillmentStatus === 'reserved') {
+  1125→      // Reserved but not dispatched — just release the reservation.
+  1126→      const unreserveResult = await unreserveStockForOrder({
+  1127→        orgVariantId: item.orgVariantId,
+  1128→        locationId,
+  1129→        organizationId: order.organizationId,
+  1130→        companyId: order.companyId,
+  1131→        employeeId: context.employeeId ?? null,
+  1132→        quantity: item.quantity,
+  1133→        orderId,
+  1134→      })
+  1135→      if (unreserveResult.success) {
+  1136→        await db.orderItem.update({
+  1137→          where: { id: item.id },
+  1138→          data: { fulfillmentStatus: 'returned' },
+  1139→        })
+  1140→        itemsRestocked++
+  1141→      } else {
+  1142→        console.error(`[restockOrderForRto] Failed to unreserve item ${item.id}: ${unreserveResult.error}`)
+  1143→      }
+  1144→    }
+  1145→    // backordered / pending items: no inventory action needed
+  1146→  }
+  1147→
+  1148→  return { success: true, itemsRestocked }
+  1149→}
+  1150→

@@ -129,6 +129,31 @@ export async function DELETE(
     })
     if (!supplier) throw new ApiError(404, 'Supplier not found.')
 
+    // INV-009 fix: dependency check — block soft-delete if any PurchaseOrder
+    // references this supplier. Mirrors the pattern in DELETE
+    // /api/inventory-locations/[id] (which checks for pools with onHand > 0).
+    //
+    // Without this check, deactivating a supplier with PO history leaves the
+    // PurchaseOrder rows referencing a supplier that's no longer in the active
+    // list — PO dropdowns stop resolving the name, and the supplier silently
+    // disappears from new-PO creation flows. The user must instead deactivate
+    // via PATCH { isActive: false } (which already works) OR explicitly clear
+    // the PO history first.
+    //
+    // Suppliers already support isActive=false (soft-delete) at the schema
+    // level (Supplier.isActive @default(true)). This fix does NOT change that —
+    // suppliers without PO history continue to soft-delete normally. The block
+    // only fires when there's an actual dependent row that would be orphaned.
+    const poCount = await db.purchaseOrder.count({
+      where: { supplierId: id },
+    })
+    if (poCount > 0) {
+      throw new ApiError(
+        409,
+        'Cannot delete supplier with existing purchase order history. Consider deactivating instead.',
+      )
+    }
+
     await db.supplier.update({ where: { id }, data: { isActive: false } })
 
     insertAuditLog({

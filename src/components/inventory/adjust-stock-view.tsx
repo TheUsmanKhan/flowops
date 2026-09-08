@@ -63,6 +63,8 @@ interface DashboardResponse {
     locationId: string
     location: string
     onHand: number
+    reserved: number
+    available: number
     avgCost: number
   }>
 }
@@ -249,9 +251,15 @@ export function AdjustStockView() {
       toast.error('Provide a reason (at least 3 characters).')
       return
     }
-    if (direction === 'remove' && currentPool && Math.abs(quantity) > currentPool.onHand) {
+    if (direction === 'remove' && currentPool && Math.abs(quantity) > (currentPool.onHand - currentPool.reserved)) {
+      // INV-011 fix: check against AVAILABLE stock (onHand - reserved), not
+      // raw onHand. The backend rejects based on available (the
+      // processInventoryTransaction OUT_TYPES check), so the previous
+      // onHand-only check allowed submissions the backend would reject —
+      // resulting in a confusing HTTP 400/500 error after submission.
+      const available = currentPool.onHand - currentPool.reserved
       toast.error(
-        `Cannot remove ${Math.abs(quantity)} units — only ${currentPool.onHand} on hand.`,
+        `${currentPool.reserved} units are reserved for pending orders — you can only reduce available stock (${available} available)`,
       )
       return
     }

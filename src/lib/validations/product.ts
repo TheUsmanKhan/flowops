@@ -212,6 +212,12 @@ export type SelectiveAccessInput = z.infer<typeof selectiveAccessSchema>
 
 export const returnedStitchedInventorySchema = z.object({
   org_variant_id: z.string().min(1),
+  // INV-002 fix: location_id is now REQUIRED so the canonical
+  // processReturnedStitchedReceipt() can find/create the InventoryPool and
+  // link the resulting InventoryTransaction (non-damaged path) or
+  // StockLossRecord (damaged path). Previously this field was absent and
+  // the route only created the register row — no inventory movement.
+  location_id: z.string().min(1, 'Location is required'),
   quantity: z.number().int().positive().default(1),
   condition: z.enum(['perfect', 'good', 'open_box', 'damaged']),
   total_cost: z.number().positive('Total cost must be positive'),
