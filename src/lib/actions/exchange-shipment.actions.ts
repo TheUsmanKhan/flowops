@@ -525,7 +525,15 @@ export async function performExchangeShipmentDispatch(
   const inventorySkipped = !!existingDispatchTxn
 
   if (!inventorySkipped) {
-    // 4. Deduct stock via dispatchOrder() (mirrors dispatchOrderAction)
+    // 4. Deduct stock via dispatchOrder() (mirrors dispatchOrderAction).
+    //    INV-005 fix: pass metadata at creation time so the sale_dispatched
+    //    txn is tagged with exchangeShipmentId + dispatch_source when it
+    //    is created — eliminating the need for the post-creation
+    //    db.inventoryTransaction.updateMany() call that previously
+    //    violated the append-only ledger contract. The idempotency check
+    //    at step 3 looks up the txn via `metadata CONTAINS
+    //    "exchangeShipmentId":"..."` so it now finds the txn directly
+    //    without any mutation.
     const dispatchResult = await dispatchOrder({
       orgVariantId: shipment.newOrgVariantId,
       locationId,
@@ -533,31 +541,22 @@ export async function performExchangeShipmentDispatch(
       companyId: shipment.companyId,
       employeeId: context.triggeredByEmployeeId ?? null,
       quantity: shipment.quantity,
+      metadata: {
+        exchangeShipmentId,
+        dispatch_source: source,
+      },
     })
 
     if (!dispatchResult.success) {
       return { success: false, error: dispatchResult.error ?? 'Failed to dispatch stock.' }
     }
 
-    // Tag the newly-created txn with the exchangeShipmentId in metadata so
-    // future idempotency checks can find it. We do this by updating the most
-    // recent sale_dispatched txn for this variant+location.
-    await db.inventoryTransaction.updateMany({
-      where: {
-        transactionType: 'sale_dispatched',
-        orgVariantId: shipment.newOrgVariantId,
-        locationId,
-        // The txn was created seconds ago — match by recordedAt within the last minute
-        recordedAt: { gte: new Date(Date.now() - 60_000) },
-        metadata: '{}',
-      },
-      data: {
-        metadata: JSON.stringify({
-          exchangeShipmentId,
-          dispatch_source: source,
-        }),
-      },
-    }).catch((e) => console.error(`[performExchangeShipmentDispatch] failed to tag txn metadata:`, e))
+    // (Previously: db.inventoryTransaction.updateMany to mutate the
+    // metadata field of the most-recent sale_dispatched txn. This
+    // violated the schema's append-only ledger contract — see
+    // prisma/schema.prisma:1045. Removed as part of the INV-005 fix.
+    // The metadata is now set at txn creation time via dispatchOrder()
+    // above.)
   }
 
   // 5. Update the shipment

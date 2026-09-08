@@ -113,39 +113,69 @@ export async function POST(req: Request) {
 
     const fabricCost = Number(fabricPool.avgCost) * d.quantity
 
-    // Process the fabric consumption transaction
-    const txnResult = await processInventoryTransaction({
-      orgVariantId: d.fabric_variant_id,
-      locationId: d.fabric_location_id,
-      organizationId: orgId,
-      companyId: company.id,
-      employeeId: caller.id,
-      transactionType: 'fabric_consumed_for_stitching',
-      quantity: d.quantity,
-      costPerUnit: Number(fabricPool.avgCost),
-      referenceType: 'production_order',
-      notes: `Fabric consumed for stitched variant ${d.stitched_variant_id}`,
-    })
-    if (!txnResult.success) {
-      throw new ApiError(500, `Fabric consumption failed: ${txnResult.error}`)
-    }
+    // INV-004 fix: previously the fabric_consumed_for_stitching
+    // InventoryTransaction was created BEFORE the ProductionOrder record —
+    // leaving the forward link (InventoryTransaction.referenceId →
+    // ProductionOrder.id) NULL because the PO id didn't exist yet.
+    // Now we create the ProductionOrder FIRST (with fabricTxnId=null), then
+    // consume fabric with referenceId=productionOrder.id, then backfill
+    // fabricTxnId on the ProductionOrder. All three writes are wrapped in a
+    // db.$transaction so a failure in fabric consumption rolls back the
+    // ProductionOrder creation (no orphan POs). processInventoryTransaction
+    // internally uses db.$transaction (since the INV-006 fix), which Prisma
+    // nests as a savepoint inside this outer transaction.
+    const { order, transactionId } = await db.$transaction(async (tx) => {
+      // 1. Create the ProductionOrder record (fabricTxnId is NULL at this
+      //    point — backfilled in step 3).
+      const po = await tx.productionOrder.create({
+        data: {
+          organizationId: orgId,
+          companyId: company.id,
+          stitchedVariantId: d.stitched_variant_id,
+          fabricVariantId: d.fabric_variant_id,
+          fabricLocationId: d.fabric_location_id,
+          quantity: d.quantity,
+          status: 'fabric_reserved',
+          stitchingCost: d.stitching_cost,
+          fabricCost,
+          assignedTailor: d.assigned_tailor || null,
+          estimatedCompletionDate: d.estimated_completion_date ? new Date(d.estimated_completion_date) : null,
+          fabricTxnId: null,
+          createdById: caller.id,
+        },
+      })
 
-    const order = await db.productionOrder.create({
-      data: {
+      // 2. Process the fabric consumption transaction with referenceId=po.id
+      //    so the InventoryTransaction → ProductionOrder forward link is set
+      //    at creation time (no subsequent mutation needed).
+      const txnResult = await processInventoryTransaction({
+        orgVariantId: d.fabric_variant_id,
+        locationId: d.fabric_location_id,
         organizationId: orgId,
         companyId: company.id,
-        stitchedVariantId: d.stitched_variant_id,
-        fabricVariantId: d.fabric_variant_id,
-        fabricLocationId: d.fabric_location_id,
+        employeeId: caller.id,
+        transactionType: 'fabric_consumed_for_stitching',
         quantity: d.quantity,
-        status: 'fabric_reserved',
-        stitchingCost: d.stitching_cost,
-        fabricCost,
-        assignedTailor: d.assigned_tailor || null,
-        estimatedCompletionDate: d.estimated_completion_date ? new Date(d.estimated_completion_date) : null,
-        fabricTxnId: txnResult.transactionId ?? null,
-        createdById: caller.id,
-      },
+        costPerUnit: Number(fabricPool.avgCost),
+        referenceType: 'production_order',
+        referenceId: po.id,
+        notes: `Fabric consumed for stitched variant ${d.stitched_variant_id}`,
+      })
+      if (!txnResult.success) {
+        // Throwing aborts the outer db.$transaction, rolling back the
+        // ProductionOrder.create above. The catch block in POST() will
+        // convert this ApiError into a JSON error response.
+        throw new ApiError(500, `Fabric consumption failed: ${txnResult.error}`)
+      }
+
+      // 3. Backfill fabricTxnId on the ProductionOrder so the reverse
+      //    link (ProductionOrder → InventoryTransaction) is set.
+      await tx.productionOrder.update({
+        where: { id: po.id },
+        data: { fabricTxnId: txnResult.transactionId ?? null },
+      })
+
+      return { order: po, transactionId: txnResult.transactionId }
     })
 
     insertAuditLog({
@@ -164,7 +194,7 @@ export async function POST(req: Request) {
       },
     })
 
-    return Response.json({ id: order.id, status: order.status, fabricTxnId: txnResult.transactionId })
+    return Response.json({ id: order.id, status: order.status, fabricTxnId: transactionId })
   } catch (err) {
     return handleError(err)
   }

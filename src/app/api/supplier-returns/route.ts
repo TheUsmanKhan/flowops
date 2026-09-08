@@ -99,39 +99,70 @@ export async function POST(req: Request) {
     // directly (no idempotency key, backwards-compatible) or via
     // withIdempotency() (prevents duplicate supplier-return submissions).
     const createSupplierReturn = async () => {
-      // Process the inventory transaction (reduces on_hand using existing avg_cost)
-      const txnResult = await processInventoryTransaction({
-        orgVariantId: d.org_variant_id,
-        locationId: d.location_id,
-        organizationId: orgId,
-        companyId: company.id,
-        employeeId: caller.id,
-        transactionType: 'supplier_return',
-        quantity: d.quantity,
-        costPerUnit: d.cost_per_unit,
-        referenceType: 'supplier_return',
-        notes: d.notes || `Return to ${d.supplier_id}: ${d.reason}`,
-      })
-      if (!txnResult.success) {
-        throw new ApiError(500, `Inventory transaction failed: ${txnResult.error}`)
-      }
+      // INV-003 fix: previously the InventoryTransaction was created FIRST
+      // (with referenceType='supplier_return' but NO referenceId) and the
+      // SupplierReturn record SECOND — leaving the forward link
+      // (InventoryTransaction.referenceId → SupplierReturn.id) NULL.
+      // Now we create the SupplierReturn FIRST, then the InventoryTransaction
+      // with referenceId=record.id, then backfill inventoryTxnId on the
+      // SupplierReturn. Both writes are wrapped in a db.$transaction so a
+      // failure in the inventory deduction rolls back the SupplierReturn
+      // (and vice versa). processInventoryTransaction internally uses
+      // db.$transaction (since the INV-006 fix), which Prisma nests as a
+      // savepoint inside this outer transaction.
+      const { record, transactionId } = await db.$transaction(async (tx) => {
+        // 1. Create the SupplierReturn record (inventoryTxnId is NULL
+        //    at this point — backfilled in step 3 after the txn succeeds).
+        const rec = await tx.supplierReturn.create({
+          data: {
+            organizationId: orgId,
+            companyId: company.id,
+            purchaseOrderId: d.purchase_order_id || null,
+            supplierId: d.supplier_id,
+            orgVariantId: d.org_variant_id,
+            locationId: d.location_id,
+            quantity: d.quantity,
+            costPerUnit: d.cost_per_unit,
+            reason: d.reason,
+            status: 'pending',
+            notes: d.notes || null,
+            inventoryTxnId: null,
+            reportedById: caller.id,
+          },
+        })
 
-      const record = await db.supplierReturn.create({
-        data: {
-          organizationId: orgId,
-          companyId: company.id,
-          purchaseOrderId: d.purchase_order_id || null,
-          supplierId: d.supplier_id,
+        // 2. Process the inventory transaction (reduces on_hand using
+        //    existing avg_cost). Pass referenceId=rec.id so the
+        //    InventoryTransaction → SupplierReturn forward link is set
+        //    at creation time (no subsequent mutation needed).
+        const txnResult = await processInventoryTransaction({
           orgVariantId: d.org_variant_id,
           locationId: d.location_id,
+          organizationId: orgId,
+          companyId: company.id,
+          employeeId: caller.id,
+          transactionType: 'supplier_return',
           quantity: d.quantity,
           costPerUnit: d.cost_per_unit,
-          reason: d.reason,
-          status: 'pending',
-          notes: d.notes || null,
-          inventoryTxnId: txnResult.transactionId ?? null,
-          reportedById: caller.id,
-        },
+          referenceType: 'supplier_return',
+          referenceId: rec.id,
+          notes: d.notes || `Return to ${d.supplier_id}: ${d.reason}`,
+        })
+        if (!txnResult.success) {
+          // Throwing aborts the outer db.$transaction, rolling back the
+          // SupplierReturn.create above. The catch block in POST() will
+          // convert this ApiError into a JSON error response.
+          throw new ApiError(500, `Inventory transaction failed: ${txnResult.error}`)
+        }
+
+        // 3. Backfill inventoryTxnId on the SupplierReturn so the
+        //    reverse link (SupplierReturn → InventoryTransaction) is set.
+        await tx.supplierReturn.update({
+          where: { id: rec.id },
+          data: { inventoryTxnId: txnResult.transactionId ?? null },
+        })
+
+        return { record: rec, transactionId: txnResult.transactionId }
       })
 
       insertAuditLog({
@@ -159,7 +190,7 @@ export async function POST(req: Request) {
         },
       })
 
-      return { id: record.id, transactionId: txnResult.transactionId }
+      return { id: record.id, transactionId }
     }
 
     if (idempotencyKey) {

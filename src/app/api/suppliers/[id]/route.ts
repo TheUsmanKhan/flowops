@@ -37,7 +37,17 @@ export async function PATCH(
     if (!allowed) throw new ApiError(403, 'You lack permission to manage suppliers.')
 
     const { id } = await params
-    const supplier = await db.supplier.findFirst({ where: { id, organizationId: orgId } })
+    // INV-008 fix: company-scope the lookup. A user in Company A cannot
+    // PATCH Company B's supplier in the same org. Org-level shared
+    // suppliers (companyId=NULL) remain editable if the caller has
+    // INVENTORY_MANAGE_SUPPLIERS (or is elevated-tier).
+    const supplier = await db.supplier.findFirst({
+      where: {
+        id,
+        organizationId: orgId,
+        OR: [{ companyId: null }, { companyId: company.id }],
+      },
+    })
     if (!supplier) throw new ApiError(404, 'Supplier not found.')
 
     const body = await readBody<{
@@ -106,7 +116,17 @@ export async function DELETE(
     }
 
     const { id } = await params
-    const supplier = await db.supplier.findFirst({ where: { id, organizationId: orgId } })
+    // INV-008 fix: company-scope the lookup. A user in Company A cannot
+    // DELETE Company B's supplier in the same org. Org-level shared
+    // suppliers (companyId=NULL) remain deactivatable if the caller is
+    // elevated-tier (the gate above).
+    const supplier = await db.supplier.findFirst({
+      where: {
+        id,
+        organizationId: orgId,
+        OR: [{ companyId: null }, { companyId: company.id }],
+      },
+    })
     if (!supplier) throw new ApiError(404, 'Supplier not found.')
 
     await db.supplier.update({ where: { id }, data: { isActive: false } })

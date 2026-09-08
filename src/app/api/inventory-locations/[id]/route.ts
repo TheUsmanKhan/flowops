@@ -16,13 +16,26 @@ export async function GET(
   try {
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
+    const settings = await db.userSetting.findUnique({
+      where: { userId: user.id },
+      include: { activeCompany: true },
+    })
     const orgId = settings?.activeOrgId
-    if (!orgId) throw new ApiError(403, 'No active organization')
+    const company = settings?.activeCompany
+    if (!orgId || !company) throw new ApiError(403, 'No active company')
 
     const { id } = await params
+    // INV-008 fix: company-scope the lookup so a user in Company A cannot
+    // fetch Company B's location in the same org. Returns 404 (not found)
+    // rather than 403 (forbidden) to avoid leaking the record's existence.
+    // Org-level shared locations (companyId=NULL) remain accessible to all
+    // companies in the org.
     const location = await db.inventoryLocation.findFirst({
-      where: { id, organizationId: orgId },
+      where: {
+        id,
+        organizationId: orgId,
+        OR: [{ companyId: null }, { companyId: company.id }],
+      },
     })
     if (!location) throw new ApiError(404, 'Location not found.')
 
@@ -123,7 +136,17 @@ export async function PATCH(
     if (!allowed) throw new ApiError(403, 'You lack permission to manage locations.')
 
     const { id } = await params
-    const location = await db.inventoryLocation.findFirst({ where: { id, organizationId: orgId } })
+    // INV-008 fix: company-scope the lookup. A user in Company A cannot
+    // PATCH Company B's location in the same org. Org-level shared
+    // locations (companyId=NULL) remain editable if the caller has
+    // INVENTORY_MANAGE_LOCATIONS (or is elevated-tier).
+    const location = await db.inventoryLocation.findFirst({
+      where: {
+        id,
+        organizationId: orgId,
+        OR: [{ companyId: null }, { companyId: company.id }],
+      },
+    })
     if (!location) throw new ApiError(404, 'Location not found.')
 
     const body = await readBody<{
@@ -196,7 +219,17 @@ export async function DELETE(
     }
 
     const { id } = await params
-    const location = await db.inventoryLocation.findFirst({ where: { id, organizationId: orgId } })
+    // INV-008 fix: company-scope the lookup. A user in Company A cannot
+    // DELETE Company B's location in the same org. Org-level shared
+    // locations (companyId=NULL) remain deactivatable if the caller is
+    // elevated-tier (the gate above).
+    const location = await db.inventoryLocation.findFirst({
+      where: {
+        id,
+        organizationId: orgId,
+        OR: [{ companyId: null }, { companyId: company.id }],
+      },
+    })
     if (!location) throw new ApiError(404, 'Location not found.')
 
     // Check if any inventory_pools at this location have on_hand > 0

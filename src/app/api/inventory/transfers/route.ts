@@ -245,12 +245,35 @@ export async function GET() {
   try {
     const user = await getCurrentUser()
     if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
+    const settings = await db.userSetting.findUnique({
+      where: { userId: user.id },
+      include: { activeCompany: true },
+    })
     const orgId = settings?.activeOrgId
-    if (!orgId) throw new ApiError(403, 'No active organization')
+    const company = settings?.activeCompany
+    if (!orgId || !company) throw new ApiError(403, 'No active company')
 
+    // INV-008 fix: company-scope the list. A user in Company A should only
+    // see transfers where AT LEAST ONE of source/destination location is
+    // org-level shared (companyId=NULL) OR owned by the caller's company.
+    // Transfers between two Company B locations in the same org are hidden
+    // (would otherwise leak another company's stock movements).
     const transfers = await db.stockTransfer.findMany({
-      where: { organizationId: orgId },
+      where: {
+        organizationId: orgId,
+        OR: [
+          {
+            fromLocation: {
+              OR: [{ companyId: null }, { companyId: company.id }],
+            },
+          },
+          {
+            toLocation: {
+              OR: [{ companyId: null }, { companyId: company.id }],
+            },
+          },
+        ],
+      },
       include: {
         orgVariant: { select: { sku: true, product: { select: { title: true } } } },
         fromLocation: { select: { name: true } },

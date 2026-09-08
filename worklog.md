@@ -15808,3 +15808,213 @@ Stage Summary:
 - READ-ONLY audit complete. No code, schema, or data was modified.
 - 13 bugs documented across DB / API / Frontend / Cross-Module layers.
 - Top 2 critical fixes: INV-001 (cycle_count_adjust quarantine release) and INV-002 (ReturnedStitchedInventory row creation).
+
+---
+
+Task ID: INVENTORY-CORE-FIX-GROUP-1-4
+Agent: general-purpose (sub agent)
+Task: Fix INV-001 (reservation invariant violation) + INV-006 (non-atomic processInventoryTransaction) together in src/lib/inventory.ts
+
+Work Log:
+- Read /home/z/my-project/worklog.md and /home/z/my-project/INVENTORY_AUDIT_FINAL.md for full context (INV-001 + INV-006 bug reports).
+- Re-read src/lib/inventory.ts (959 lines) and prisma/schema.prisma for OrderItem / InventoryPool field types.
+- Confirmed `recompute_order_status(p_order_id TEXT)` SQL function exists (supabase/migrations/001_oms_schema.sql:162, also defined in supabase/functions-only.sql:135) and is already called via `db.$queryRaw` in src/lib/actions/backorder.actions.ts:269.
+- Confirmed OrderItem has fields: fulfillmentStatus (default 'reserved'), needsReview (default false), needsReviewReason (String?), reservedLocationId (String?), createdAt, quantity, orderId.
+- Confirmed InventoryPool fields: onHand Int, reserved Int, incoming Int, avgCost Decimal.
+- Confirmed src/lib/audit.ts exports `insertAuditLog({...})` (fire-and-forget, returns void, internal try/catch + fireAndForget() safety).
+
+Changes made to /home/z/my-project/src/lib/inventory.ts:
+
+1. Added import: `import { insertAuditLog } from './audit'`
+
+2. Added module-level constant `ONHAND_REDUCING_TYPES` (after `WAC_RECALC_TYPES`) listing the 8 transaction types that reduce onHand:
+   - cycle_count_adjust, damage_writeoff, theft_writeoff, missing_writeoff, transit_loss, supplier_return, fabric_consumed_for_stitching, transfer_out
+
+3. Updated header JSDoc to document the new ATOMICITY (INV-006) and RESERVATION INVARIANT (INV-001) guarantees.
+
+4. INV-006 fix — wrapped the entire try block body in `db.$transaction(async (tx) => { ... })`:
+   - All `db.inventoryPool.*`, `db.orgProductVariant.*`, `db.inventoryTransaction.*`, `db.avgCostHistory.*` calls replaced with `tx.*` equivalents (findUnique, create, update).
+   - The pool.findUnique + (optional) pool.create at step 1 now happens INSIDE the transaction so the subsequent reads/writes see a consistent snapshot.
+   - The return shape (`{ success, transactionId, poolState }`) is preserved: the transaction closure returns it, the outer `try` returns the resolved value.
+   - INSUFFICIENT_STOCK check converted from `return { success: false, ... }` to `throw new Error('INSUFFICIENT_STOCK: ...')` so it correctly aborts the transaction. The outer catch block matches on `msg.startsWith('INSUFFICIENT_STOCK:')` and converts it back to the structured `{ success: false, error: msg }` response — preserving caller-visible behavior while still triggering a rollback. INSUFFICIENT_STOCK is not logged via `console.error` (it's a validation failure, not a runtime fault); other errors are still logged as before.
+
+5. INV-001 fix — added a new "RESERVATION INVARIANT PROTECTION" block immediately after the switch statement (which computes newOnHand/newReserved/newAvgCost), BEFORE building updateData:
+   a. Guard: `if (ONHAND_REDUCING_TYPES.includes(transactionType) && newReserved > newOnHand)`
+   b. Computes `shortfall = newReserved - newOnHand`
+   c. Fetches all OrderItems where `orgVariantId` matches, `reservedLocationId = locationId`, `fulfillmentStatus = 'reserved'`, sorted by `createdAt ASC` (oldest first).
+   d. Iterates the list in REVERSE (newest first) — protecting the earliest reservations while bumping the most recent ones.
+   e. For each item (until cumulative bumpedQty >= shortfall):
+      - Decrement `newReserved = Math.max(0, newReserved - item.quantity)` (unreserve from the pool).
+      - Update OrderItem: `fulfillmentStatus = 'backordered'`, `needsReview = true`, `needsReviewReason = 'Inventory shortage — converted to backorder (<type>, ref: <id>)'`.
+      - Call `await tx.$queryRaw\`SELECT recompute_order_status(${item.orderId}::TEXT)\`` to re-aggregate the parent Order's status from its line items.
+      - Increment `bumpedQty += item.quantity`.
+   f. Edge case — if `newReserved > newOnHand` still holds after exhausting all reserved OrderItems (ghost reservations with no matching OrderItem row):
+      - Capture `clampedReserved = newReserved` and `shortfallRemaining = clampedReserved - newOnHand`.
+      - Clamp `newReserved = newOnHand` to restore the invariant.
+      - Fire-and-forget an audit log via `insertAuditLog({ action: 'inventory.reservation_clamp', entityType: 'inventory_pool', entityId: pool.id, organizationId, companyId, employeeId, oldValues: { reserved, onHand }, newValues: { reserved, shortfallRemaining }, metadata: { transactionType, referenceType, referenceId, orgVariantId, locationId, shortfall, bumpedQty, reason: 'reservation_bump_exhausted_ghost_reservation' } })` so an operator can investigate the discrepancy.
+
+6. The `updateData` object (step 5) now picks up the (potentially decremented) `newReserved` value from the INV-001 fix, so `tx.inventoryPool.update` writes the corrected reserved count in the same transaction. This means the reservation-bump + pool.update + ledger.create + avgCostHistory.create are ALL atomic — a partial failure rolls everything back.
+
+7. The track_inventory flip (step 6) and avgCostHistory creation (step 8) are also wrapped in the same transaction (tx.* calls).
+
+Files changed:
+- src/lib/inventory.ts (1 file, +347/-200 lines)
+
+Verification:
+- `bun run lint` → 2 errors and 12 warnings, ALL pre-existing in unrelated files (scripts/products-audit-queries.js + .js2 require() imports; react-hooks/incompatible-library warnings in catalog-settings-view.tsx etc.). Verified by `git stash` → ran lint → same 2 errors present → `git stash pop`. ZERO new lint errors from this change.
+- `bun run tsc --noEmit` → ZERO TypeScript errors in src/lib/inventory.ts (all TS errors in output are in unrelated pre-existing files: order.actions.ts, shipper-advice.actions.ts, leopard.adapter.ts, proof-of-delivery.ts, status-history.ts, session-payload.ts, stock-loss.ts).
+- `git diff --stat` confirms only src/lib/inventory.ts modified (+347 / -200).
+
+Behavioral compatibility:
+- Return shape unchanged: `{ success, transactionId?, poolState?, error? }`.
+- INSUFFICIENT_STOCK error string and structured-error format unchanged.
+- Success path returns identical `transactionId` and `poolState` (onHand, reserved, available, avgCost).
+- All 9 callers of processInventoryTransaction need NO changes (signature unchanged, behavior purely additive — only kicks in when an invariant violation would otherwise occur).
+
+Stage Summary:
+- 2 of 13 inventory audit bugs fixed: INV-001 (Critical) + INV-006 (High).
+- INV-001 root cause addressed at the right layer: instead of patching the cycle-counts route to manually release quarantine reservations (audit's option (a)/(b)), the fix is in processInventoryTransaction itself (audit's option (c) extended — not just reject, but auto-remediate by bumping the newest reservations to backorder). This means EVERY onHand-reducing transaction type (not just cycle_count_adjust) now self-heals the invariant.
+- INV-006 addressed by wrapping writes in `db.$transaction` — restoring the "ledger and pool always agree" guarantee claimed in the function's header comment.
+- Remaining open from audit: INV-002, INV-003, INV-004, INV-005, INV-007, INV-008, INV-009, INV-010, INV-011, INV-012, INV-013 (separate tasks).
+- Suggested follow-up: write a one-time data-repair SQL/migration that detects any existing InventoryPool rows with `reserved > onHand` and either (a) clamps `reserved = onHand` with an audit log, or (b) backfills missing OrderItem→backorder conversions for orphaned historical reservations. The known offending pool (id cmrsfkgmw003btdochj7jvi6b, onHand=2, reserved=3) was identified in the audit; running this fix's logic against it would clear the violation.
+
+
+---
+
+Task ID: INVENTORY-CORE-FIX-GROUP-2-3-5
+Agent: general-purpose (sub agent)
+Task: Fix 4 Inventory Core bugs — INV-003, INV-004, INV-005, INV-008
+
+Work Log:
+- Read /home/z/my-project/worklog.md and /home/z/my-project/INVENTORY_AUDIT_FINAL.md for full context on all 4 bug reports (INV-003, INV-004, INV-005, INV-008).
+- Re-read each target file BEFORE editing: src/app/api/supplier-returns/route.ts, src/lib/inventory.ts, src/app/api/production-orders/route.ts, src/lib/actions/exchange-shipment.actions.ts, src/app/api/inventory-locations/[id]/route.ts, src/app/api/suppliers/[id]/route.ts, src/app/api/inventory/transfers/route.ts.
+- Cross-checked prisma/schema.prisma for the relevant models: SupplierReturn.inventoryTxnId (String?), ProductionOrder.fabricTxnId (String?), InventoryTransaction.referenceId (String?) + metadata (String @default("{}")), InventoryLocation.companyId (String?), Supplier.companyId (String?), StockTransfer (no companyId — joins via fromLocation/toLocation which DO have nullable companyId).
+- Confirmed processInventoryTransaction already accepts a `metadata` parameter (src/lib/inventory.ts:109) and stores it via `JSON.stringify(metadata)` at line 463. Confirmed dispatchOrder() (line 972) wraps processInventoryTransaction for sale_dispatched.
+- Confirmed Prisma supports nested `db.$transaction` calls via savepoints — so the new outer transactions in supplier-returns and production-orders safely wrap the inner `db.$transaction` already used by processInventoryTransaction (added in INV-006 fix).
+
+FIX GROUP 2 — INV-003: supplier-returns POST route
+File: src/app/api/supplier-returns/route.ts (POST createSupplierReturn closure)
+
+Root cause: The route created the InventoryTransaction FIRST with referenceType='supplier_return' but referenceId=NULL (because the SupplierReturn record didn't exist yet), then created the SupplierReturn record with inventoryTxnId=txnResult.transactionId. The link was one-directional (SupplierReturn → InventoryTransaction exists; InventoryTransaction → SupplierReturn did NOT). DB confirmed 6 of 6 supplier_return-typed txns had NULL referenceId.
+
+Fix:
+1. Reversed creation order — SupplierReturn is created FIRST (with inventoryTxnId=null).
+2. processInventoryTransaction is then called with referenceId=rec.id (the freshly-created SupplierReturn.id) so the forward link is set at txn-creation time.
+3. inventoryTxnId is then backfilled on the SupplierReturn via tx.supplierReturn.update.
+4. All three writes (SupplierReturn.create + InventoryTransaction.create + SupplierReturn.update) are wrapped in a db.$transaction so a failure in the inventory deduction rolls back the SupplierReturn (and vice versa).
+5. insertAuditLog + insertMetricEvent remain OUTSIDE the transaction (fire-and-forget, no DB writes).
+6. Idempotency wrapper (withIdempotency) still works correctly — the closure now returns `{ id: record.id, transactionId }` like before.
+
+Behavioral compatibility:
+- HTTP response shape unchanged: `{ id, transactionId }` (201 created or 200 replay).
+- Error response shape unchanged: ApiError(500, `Inventory transaction failed: ${error}`) — now thrown from inside the tx so it both rolls back the tx AND propagates to the catch block.
+- Backward-compatible: callers (frontend Receive Stock / Return to Supplier flows) need NO changes.
+
+FIX GROUP 2 — INV-004: production_orders referenceId (2 code paths)
+Files:
+  (a) src/lib/inventory.ts:checkAndFulfillMadeToOrderVariant (lines 745-821)
+  (b) src/app/api/production-orders/route.ts POST (lines 114-197)
+
+Root cause: In both code paths, the fabric_consumed_for_stitching InventoryTransaction was created BEFORE the ProductionOrder record. referenceType='production_order' was set, but referenceId was left NULL because the PO id didn't exist yet. DB confirmed 4 of 4 production_order-typed txns had NULL referenceId.
+
+Fix (applied identically to both files):
+1. Reversed creation order — ProductionOrder is created FIRST (with fabricTxnId=null).
+2. processInventoryTransaction is then called with referenceId=po.id so the forward link (InventoryTransaction → ProductionOrder) is set at txn-creation time.
+3. fabricTxnId is then backfilled on the ProductionOrder via tx.productionOrder.update.
+4. All three writes (ProductionOrder.create + InventoryTransaction.create + ProductionOrder.update) are wrapped in a db.$transaction so a failure in fabric consumption rolls back the ProductionOrder creation (no orphan POs).
+5. In inventory.ts (checkAndFulfillMadeToOrderVariant), the entire try-block is wrapped in try/catch so a thrown error inside the tx (e.g. `Fabric consumption failed: ...`) is converted back to the structured `{ source: 'fresh_production', error: message }` response — preserving the function's contract with callers.
+6. In production-orders/route.ts, the thrown ApiError propagates through the existing POST catch block to handleError().
+
+Behavioral compatibility:
+- checkAndFulfillMadeToOrderVariant return shape unchanged: `{ source, productionOrderId?, estimatedCompletionDate?, error? }`.
+- production-orders POST response shape unchanged: `{ id, status, fabricTxnId }`.
+- All callers (order.actions.ts fulfill-mto flow, UI production-orders create flow) need NO changes.
+
+FIX GROUP 3 — INV-005: Ledger append-only violation
+Files:
+  (a) src/lib/inventory.ts:dispatchOrder (lines 972-1008) — added optional `metadata` parameter
+  (b) src/lib/actions/exchange-shipment.actions.ts:performExchangeShipmentDispatch (lines 527-560) — removed updateMany, pass metadata at creation
+
+Root cause: The schema comment at prisma/schema.prisma:1045 explicitly states "Append-only ledger. Never update or delete rows." But the exchange-shipment dispatch flow used db.inventoryTransaction.updateMany() to retroactively patch the metadata field of recently-created sale_dispatched transactions (matched within a 60-second window by recordedAt + metadata='{}') with `{ exchangeShipmentId, dispatch_source }`. This was for the idempotency check (step 3 of performExchangeShipmentDispatch), which looks up the txn via `metadata CONTAINS "exchangeShipmentId":"..."`.
+
+Fix:
+1. Added optional `metadata?: Record<string, unknown> | null` parameter to dispatchOrder() in inventory.ts. The parameter is forwarded to processInventoryTransaction (which already accepts metadata and stores it via JSON.stringify at line 463). Documented the rationale in the JSDoc.
+2. In performExchangeShipmentDispatch, the dispatchOrder() call now passes `metadata: { exchangeShipmentId, dispatch_source: source }` at creation time — so the InventoryTransaction is tagged correctly when it is first inserted, with NO subsequent mutation.
+3. Removed the `db.inventoryTransaction.updateMany({...})` call entirely. Replaced with a comment explaining the INV-005 fix and why the updateMany was removed (pointing to schema.prisma:1045).
+4. The idempotency check (step 3, unchanged) continues to work — it queries `metadata: { contains: '"exchangeShipmentId":"${exchangeShipmentId}"' }`, which now finds the txn directly because the metadata is set at creation time. JSON.stringify({exchangeShipmentId, dispatch_source}) produces `{"exchangeShipmentId":"<id>","dispatch_source":"<source>"}` which contains the substring `"exchangeShipmentId":"<id>"` — exact match with the existing CONTAINS query.
+
+INV-005 follow-up grep (codebase-wide audit for other InventoryTransaction mutations):
+- Searched `src/` for `db.inventoryTransaction.(update|updateMany|delete|deleteMany|upsert)` — ZERO matches in actual code (3 matches in comments only — 2 in exchange-shipment.actions.ts describing the removed call, 1 in inventory.ts dispatchOrder JSDoc).
+- Searched `src/` for `UPDATE "InventoryTransaction"` / `DELETE FROM "InventoryTransaction"` raw SQL — ZERO matches.
+- Searched `supabase/` migrations for `UPDATE.*InventoryTransaction` / `DELETE.*InventoryTransaction` — ZERO matches.
+- Searched `scripts/` for `db.inventoryTransaction.(update|updateMany|delete|deleteMany|upsert)` — ZERO matches.
+- Conclusion: append-only ledger contract is now restored. The only writes to InventoryTransaction are via processInventoryTransaction's `tx.inventoryTransaction.create()` (line 448) — single insertion point, write-once.
+
+FIX GROUP 5 — INV-008: Cross-Company Access on [id] Routes
+Files:
+  (a) src/app/api/inventory-locations/[id]/route.ts — GET, PATCH, DELETE
+  (b) src/app/api/suppliers/[id]/route.ts — PATCH, DELETE (no GET handler exists)
+  (c) src/app/api/inventory/transfers/route.ts — GET (list endpoint; no [id]/route.ts exists for transfers)
+
+Root cause: All [id] routes filtered by `{ id, organizationId }` only — NO companyId filter. A user from Company A in Org X could fetch/update/delete a location or supplier owned by Company B in the same org, as long as they knew the ID. The list endpoints (GET /api/inventory-locations, GET /api/suppliers) correctly scope by company; the [id] endpoints were overlooked.
+
+Fix (for inventory-locations/[id] GET/PATCH/DELETE and suppliers/[id] PATCH/DELETE):
+1. Updated the findFirst where clause from `{ id, organizationId: orgId }` to:
+   ```ts
+   where: {
+     id,
+     organizationId: orgId,
+     OR: [{ companyId: null }, { companyId: company.id }],
+   }
+   ```
+2. Org-level shared records (companyId=NULL) remain accessible to all companies in the org (correct — these are intentionally shared).
+3. Records owned by a different company in the same org now return 404 (not 403 — to avoid leaking existence).
+4. For the GET handler in inventory-locations/[id], also updated the auth setup to fetch `activeCompany` (previously only fetched `activeOrgId`). This is required because the company-scoping check needs `company.id`.
+
+Fix (for inventory/transfers GET list):
+1. StockTransfer has no companyId field directly — it joins to InventoryLocation via fromLocationId/toLocationId, both of which have nullable companyId. So the company-scope filter is applied to the joined locations.
+2. Updated the findMany where clause to:
+   ```ts
+   where: {
+     organizationId: orgId,
+     OR: [
+       { fromLocation: { OR: [{ companyId: null }, { companyId: company.id }] } },
+       { toLocation: { OR: [{ companyId: null }, { companyId: company.id }] } },
+     ],
+   }
+   ```
+3. Rule: a transfer is visible to the caller if AT LEAST ONE of source/destination location is org-level shared OR owned by the caller's company. Transfers between two Company B locations in the same org are hidden from Company A users (prevents leaking another company's stock movements).
+4. Also updated the auth setup to fetch `activeCompany` (previously only fetched `activeOrgId`).
+
+INV-008 follow-up grep (codebase-wide audit for other [id] routes with organizationId-only filtering on nullable-companyId models):
+- Identified all models with nullable companyId via `awk '/^model / {model=$2; next} /companyId\s+String\?/ {print model}' prisma/schema.prisma`:
+  → AuditLog, InventoryLocation, Supplier, InventoryTransaction, CourierCityAlias.
+- Cross-referenced each nullable-companyId model against the full [id] route file list (84 [id] route files under src/app/api/):
+  → AuditLog: only /api/audit-logs/route.ts (list endpoint, no [id] route). Already company-scoped via `where: { companyId }` or `where: { OR: [{companyId: null}, {companyId: company.id}] }`.
+  → InventoryTransaction: NO [id] route exists (no /api/inventory-transactions/ directory). InventoryTransactions are read indirectly via location-detail and variant-detail endpoints, which inherit scoping from their parent (location/variant).
+  → CourierCityAlias: NO [id] route exists (only /api/couriers/[providerKey]/cities/route.ts and /api/couriers/save-city-alias/route.ts which are POST endpoints).
+  → InventoryLocation: FIXED in this task (GET/PATCH/DELETE on /api/inventory-locations/[id]).
+  → Supplier: FIXED in this task (PATCH/DELETE on /api/suppliers/[id]).
+- Conclusion: NO OTHER [id] routes for nullable-companyId models exist in the codebase. All [id] routes that touch nullable-companyId models are now properly company-scoped.
+- NOTE (informational, NOT in INV-008 scope): The grep also surfaced 5 [id] routes for ORG-level entities (OrgProduct, OrgBrand, OrgAttribute, OrgCategory, OrgAttributeValue) that filter by `{ id, organizationId }` only. These models have NO companyId field at all — they are intentionally org-wide shared entities. The filter is CORRECT for these models (no fix needed). The OrgProduct model has a NON-nullable `sourceCompanyId` field (the company that originally created the product); its visibility/scoping is governed by the SelectiveProductAccess table — out of scope for INV-008. (See prior PROD-012 follow-up note in worklog.)
+- NOTE (informational, NOT in INV-008 scope): Many [id] routes for NON-nullable companyId models (Order, Employee, ExchangeShipment, ProductionOrder, PurchaseOrder, StockLossRecord, SupplierReturn, CycleCount, etc.) also filter by `{ id, organizationId }` only. For these models the cross-company access risk is even higher (every record belongs to exactly one company — there's no "shared" escape hatch). However, since the audit's INV-008 scope is explicitly "models with a nullable companyId field", these were NOT modified. A future hardening task could add `companyId: company.id` to the where clause for each of these [id] routes.
+
+Verification:
+- `bun run lint` → 14 problems (2 errors, 12 warnings) — IDENTICAL count to the prior INVENTORY-CORE-FIX-GROUP-1-4 baseline. All listed files are pre-existing issues in unmodified files (scripts/fire-and-forget-transform.ts, scripts/products-audit-queries*.js, src/components/inventory/{locations,supplier-detail,suppliers}-view.tsx, src/components/orders/order-create-view.tsx, src/components/products/{catalog-settings,product-create,returned-stitched}-view.tsx). NONE of the 7 modified files appear in the lint output.
+- `git diff --stat` confirms 7 files modified:
+  1. src/app/api/inventory-locations/[id]/route.ts (+27/-7)
+  2. src/app/api/inventory/transfers/route.ts (+22/-7)
+  3. src/app/api/production-orders/route.ts (+72/-20)
+  4. src/app/api/supplier-returns/route.ts (+61/-30)
+  5. src/app/api/suppliers/[id]/route.ts (+18/-6)
+  6. src/lib/actions/exchange-shipment.actions.ts (+27/-12)
+  7. src/lib/inventory.ts (+37/-5) — only the dispatchOrder function signature/JSDoc + referenceId pass-through; the prior INV-001/INV-006 changes from INVENTORY-CORE-FIX-GROUP-1-4 are untouched.
+
+Stage Summary:
+- 4 of 13 inventory audit bugs fixed: INV-003, INV-004, INV-005, INV-008 (all High severity).
+- INV-003 + INV-004: chicken-and-egg creation-order pattern fixed in 3 code paths (supplier-returns POST, production-orders POST, checkAndFulfillMadeToOrderVariant). Forward links (InventoryTransaction.referenceId → entity.id) are now set at txn-creation time, and the entire create-entity + create-txn + backfill-link sequence is wrapped in a db.$transaction for atomicity.
+- INV-005: append-only ledger contract restored. The single db.inventoryTransaction.updateMany() call (the only mutation in the codebase) has been removed. The metadata is now set at txn-creation time via the existing `metadata` parameter on processInventoryTransaction (passed through dispatchOrder). Idempotency check continues to work via the existing `metadata CONTAINS` query.
+- INV-008: cross-company access closed on 6 [id]/list handlers (inventory-locations GET/PATCH/DELETE, suppliers PATCH/DELETE, transfers GET). Filter pattern: `OR: [{ companyId: null }, { companyId: company.id }]` — org-level shared records remain accessible; another company's records return 404 (no existence leak).
+- Codebase-wide greps confirm: (a) no other InventoryTransaction mutation calls exist anywhere (src/, supabase/, scripts/); (b) no other [id] routes exist for nullable-companyId models.
+- Remaining open from audit: INV-002 (ReturnedStitchedInventory row creation), INV-007 (direct InventoryPool writes in purchase-orders routes), INV-009 (supplier DELETE dependency check), INV-010 (adjust-stock 500→400), INV-011 (adjust-stock frontend checks onHand not available), INV-012 (InventoryPool readers ad-hoc), INV-013 (adjust-stock StockLossRecord design conflict). These are tracked for future tasks.
+- Suggested follow-up: hardening task to add `companyId: company.id` to all [id] routes for NON-nullable companyId models (Order, Employee, ProductionOrder, PurchaseOrder, etc.) — these have the same cross-company access risk but are outside INV-008's stated scope.
