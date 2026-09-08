@@ -1,0 +1,537 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useRef } from 'react'
+     4→import { useQuery } from '@tanstack/react-query'
+     5→import dynamic from 'next/dynamic'
+     6→import { useAppStore } from '@/stores/app-store'
+     7→import { api } from '@/lib/api-client'
+     8→import { queryToRoute, replaceRouteInURL } from '@/lib/routing/url-sync'
+     9→import type { SessionResponse } from '@/lib/types'
+    10→import { Loader2 } from 'lucide-react'
+    11→import { PageHeader } from '@/components/layout/dashboard-shell'
+    12→import { Skeleton } from '@/components/ui/skeleton'
+    13→
+    14→// ─── Always-needed (NOT lazy-loaded) ────────────────────────────────
+    15→import { AuthShell } from '@/components/auth/auth-shell'
+    16→import { DashboardShell } from '@/components/layout/dashboard-shell'
+    17→
+    18→// ─── Route metadata (for route-aware loading fallback) ────────────
+    19→// This allows the PageHeader (containing the LCP text element) to render
+    20→// IMMEDIATELY when the lazy chunk starts loading, instead of waiting for
+    21→// the chunk to download + parse. The LCP text paints as soon as session
+    22→// hydration completes, not after the chunk arrives.
+    23→const ROUTE_METADATA: Record<string, { title: string; description?: string }> = {
+    24→  dashboard: { title: 'Dashboard' },
+    25→  products: { title: 'Products', description: 'Manage your product catalog, variants, and stitching options.' },
+    26→  'product-create': { title: 'Create Product', description: 'Add a new product to your catalog.' },
+    27→  'product-detail': { title: 'Product Details' },
+    28→  'product-settings': { title: 'Catalog Settings', description: 'Configure categories, brands, and attributes.' },
+    29→  'product-drafts': { title: 'Drafts' },
+    30→  'returned-stitched': { title: 'Returned Stock' },
+    31→  'org-catalog': { title: 'Org Catalog' },
+    32→  inventory: { title: 'Inventory Dashboard' },
+    33→  'inventory-locations': { title: 'Locations' },
+    34→  'inventory-location-detail': { title: 'Location Details' },
+    35→  'inventory-suppliers': { title: 'Suppliers' },
+    36→  'inventory-supplier-detail': { title: 'Supplier Details' },
+    37→  'inventory-receive': { title: 'Receive Stock' },
+    38→  'inventory-adjust': { title: 'Adjust Stock' },
+    39→  'inventory-transfer': { title: 'Transfer Stock' },
+    40→  'inventory-purchase-orders': { title: 'Purchase Orders' },
+    41→  'inventory-po-create': { title: 'Create Purchase Order' },
+    42→  'inventory-po-detail': { title: 'Purchase Order Details' },
+    43→  'inventory-supplier-returns': { title: 'Supplier Returns' },
+    44→  'inventory-production-orders': { title: 'Production Orders' },
+    45→  'inventory-losses': { title: 'Losses & Write-offs' },
+    46→  'inventory-loss-detail': { title: 'Loss Details' },
+    47→  'inventory-cycle-counts': { title: 'Cycle Counts' },
+    48→  orders: { title: 'Orders' },
+    49→  'order-create': { title: 'Create Order' },
+    50→  'order-detail': { title: 'Order Details' },
+    51→  'order-drafts': { title: 'Order Drafts' },
+    52→  'orders-pending-confirmation': { title: 'Pending Confirmation' },
+    53→  'orders-backordered': { title: 'Backordered Orders' },
+    54→  'orders-awaiting-production': { title: 'Awaiting Production' },
+    55→  'orders-ready-to-dispatch': { title: 'Ready to Dispatch' },
+    56→  'orders-returns': { title: 'Returns & RTO' },
+    57→  'orders-returns-review': { title: 'Returns Review' },
+    58→  'orders-cancelled': { title: 'Cancelled Orders' },
+    59→  exchanges: { title: 'Exchanges' },
+    60→  'exchange-detail': { title: 'Exchange Details' },
+    61→  customers: { title: 'Customers' },
+    62→  'customer-detail': { title: 'Customer Details' },
+    63→  'order-workflow-settings': { title: 'Order Workflow Settings' },
+    64→  'booking-workbench': { title: 'Booking Workbench' },
+    65→  'order-scan': { title: 'Order Scan' },
+    66→  employees: { title: 'Employees', description: 'Manage your company directory, roles, and employment status.' },
+    67→  'employees-invite': { title: 'Invite Employee' },
+    68→  'employee-detail': { title: 'Employee Details' },
+    69→  roles: { title: 'Roles & Permissions', description: 'System roles have elevated access and bypass all permission checks.' },
+    70→  'role-edit': { title: 'Edit Role' },
+    71→  organization: { title: 'Organization Settings' },
+    72→  'company-settings': { title: 'Company Settings', description: 'Manage your company profile, legal info, and preferences.' },
+    73→  settings: { title: 'Personal Settings' },
+    74→  audit: { title: 'Audit log', description: 'Immutable, append-only record of every action in this company.' },
+    75→  payroll: { title: 'Payroll' },
+    76→  'payroll-run-detail': { title: 'Payroll Run Details' },
+    77→  integrations: { title: 'Integrations' },
+    78→  'integration-logs': { title: 'Integration Logs' },
+    79→}
+    80→
+    81→// ─── Route-aware loading fallback ─────────────────────────────────
+    82→// Renders the PageHeader (with LCP text) + a content skeleton while the
+    83→// lazy chunk downloads. This makes the LCP element paint as soon as the
+    84→// DashboardShell renders, NOT after the chunk finishes loading.
+    85→const LoadingFallback = () => {
+    86→  const route = useAppStore((s) => s.route)
+    87→  const meta = ROUTE_METADATA[route.name]
+    88→  if (!meta) {
+    89→    return (
+    90→      <div className="flex items-center justify-center py-20">
+    91→        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+    92→      </div>
+    93→    )
+    94→  }
+    95→  return (
+    96→    <div className="space-y-6">
+    97→      <PageHeader title={meta.title} description={meta.description} />
+    98→      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+    99→        {Array.from({ length: 8 }).map((_, i) => (
+   100→          <Skeleton key={i} className="h-64 rounded-lg" />
+   101→        ))}
+   102→      </div>
+   103→    </div>
+   104→  )
+   105→}
+   106→
+   107→// ─── Auth views (small, but lazy-loaded to keep login page fast) ────
+   108→const LoginForm = dynamic(() => import('@/components/auth/login-form').then(m => ({ default: m.LoginForm })), { ssr: false, loading: LoadingFallback })
+   109→const RegisterForm = dynamic(() => import('@/components/auth/register-form').then(m => ({ default: m.RegisterForm })), { ssr: false, loading: LoadingFallback })
+   110→const ForgotPasswordForm = dynamic(() => import('@/components/auth/forgot-password-form').then(m => ({ default: m.ForgotPasswordForm })), { ssr: false, loading: LoadingFallback })
+   111→const ResetPasswordForm = dynamic(() => import('@/components/auth/reset-password-form').then(m => ({ default: m.ResetPasswordForm })), { ssr: false, loading: LoadingFallback })
+   112→
+   113→// ─── Onboarding views ──────────────────────────────────────────────
+   114→const OnboardingView = dynamic(() => import('@/components/onboarding/onboarding-view').then(m => ({ default: m.OnboardingView })), { ssr: false, loading: LoadingFallback })
+   115→const CreateOrganizationView = dynamic(() => import('@/components/onboarding/create-organization-view').then(m => ({ default: m.CreateOrganizationView })), { ssr: false, loading: LoadingFallback })
+   116→const CreateCompanyView = dynamic(() => import('@/components/onboarding/create-company-view').then(m => ({ default: m.CreateCompanyView })), { ssr: false, loading: LoadingFallback })
+   117→
+   118→// ─── Dashboard ─────────────────────────────────────────────────────
+   119→const DashboardHome = dynamic(() => import('@/components/dashboard/dashboard-home').then(m => ({ default: m.DashboardHome })), { ssr: false, loading: LoadingFallback })
+   120→
+   121→// ─── Employees ─────────────────────────────────────────────────────
+   122→const EmployeesView = dynamic(() => import('@/components/employees/employees-view').then(m => ({ default: m.EmployeesView })), { ssr: false, loading: LoadingFallback })
+   123→const InviteEmployeeView = dynamic(() => import('@/components/employees/invite-employee-view').then(m => ({ default: m.InviteEmployeeView })), { ssr: false, loading: LoadingFallback })
+   124→const EmployeeDetailView = dynamic(() => import('@/components/employees/employee-detail-view').then(m => ({ default: m.EmployeeDetailView })), { ssr: false, loading: LoadingFallback })
+   125→
+   126→// ─── Roles ─────────────────────────────────────────────────────────
+   127→const RolesView = dynamic(() => import('@/components/roles/roles-view').then(m => ({ default: m.RolesView })), { ssr: false, loading: LoadingFallback })
+   128→const RoleEditView = dynamic(() => import('@/components/roles/role-edit-view').then(m => ({ default: m.RoleEditView })), { ssr: false, loading: LoadingFallback })
+   129→
+   130→// ─── Settings ──────────────────────────────────────────────────────
+   131→const OrganizationView = dynamic(() => import('@/components/settings/organization-view').then(m => ({ default: m.OrganizationView })), { ssr: false, loading: LoadingFallback })
+   132→const CompanySettingsView = dynamic(() => import('@/components/settings/company-settings-view').then(m => ({ default: m.CompanySettingsView })), { ssr: false, loading: LoadingFallback })
+   133→const SettingsView = dynamic(() => import('@/components/settings/settings-view').then(m => ({ default: m.SettingsView })), { ssr: false, loading: LoadingFallback })
+   134→const AuditLogView = dynamic(() => import('@/components/settings/audit-log-view').then(m => ({ default: m.AuditLogView })), { ssr: false, loading: LoadingFallback })
+   135→const IntegrationsView = dynamic(() => import('@/components/settings/integrations-view').then(m => ({ default: m.IntegrationsView })), { ssr: false, loading: LoadingFallback })
+   136→const IntegrationLogsView = dynamic(() => import('@/components/settings/integration-logs-view').then(m => ({ default: m.IntegrationLogsView })), { ssr: false, loading: LoadingFallback })
+   137→
+   138→// ─── Payroll ───────────────────────────────────────────────────────
+   139→const PayrollView = dynamic(() => import('@/components/payroll/payroll-view').then(m => ({ default: m.PayrollView })), { ssr: false, loading: LoadingFallback })
+   140→const PayrollRunDetailView = dynamic(() => import('@/components/payroll/payroll-run-detail-view').then(m => ({ default: m.PayrollRunDetailView })), { ssr: false, loading: LoadingFallback })
+   141→
+   142→// ─── Products (largest: product-create 2321, catalog-settings 2289, product-detail 1949) ──
+   143→const ProductsView = dynamic(() => import('@/components/products/products-view').then(m => ({ default: m.ProductsView })), { ssr: false, loading: LoadingFallback })
+   144→const ProductCreateView = dynamic(() => import('@/components/products/product-create-view').then(m => ({ default: m.ProductCreateView })), { ssr: false, loading: LoadingFallback })
+   145→const ProductDetailView = dynamic(() => import('@/components/products/product-detail-view').then(m => ({ default: m.ProductDetailView })), { ssr: false, loading: LoadingFallback })
+   146→const CatalogSettingsView = dynamic(() => import('@/components/products/catalog-settings-view').then(m => ({ default: m.CatalogSettingsView })), { ssr: false, loading: LoadingFallback })
+   147→const ReturnedStitchedView = dynamic(() => import('@/components/products/returned-stitched-view').then(m => ({ default: m.ReturnedStitchedView })), { ssr: false, loading: LoadingFallback })
+   148→const OrgCatalogView = dynamic(() => import('@/components/products/org-catalog-view').then(m => ({ default: m.OrgCatalogView })), { ssr: false, loading: LoadingFallback })
+   149→
+   150→// ─── Inventory (largest: losses 2249, cycle-counts 2249) ───────────
+   151→const InventoryDashboardView = dynamic(() => import('@/components/inventory/inventory-dashboard-view').then(m => ({ default: m.InventoryDashboardView })), { ssr: false, loading: LoadingFallback })
+   152→const LocationsView = dynamic(() => import('@/components/inventory/locations-view').then(m => ({ default: m.LocationsView })), { ssr: false, loading: LoadingFallback })
+   153→const LocationDetailView = dynamic(() => import('@/components/inventory/location-detail-view').then(m => ({ default: m.LocationDetailView })), { ssr: false, loading: LoadingFallback })
+   154→const SuppliersView = dynamic(() => import('@/components/inventory/suppliers-view').then(m => ({ default: m.SuppliersView })), { ssr: false, loading: LoadingFallback })
+   155→const SupplierDetailView = dynamic(() => import('@/components/inventory/supplier-detail-view').then(m => ({ default: m.SupplierDetailView })), { ssr: false, loading: LoadingFallback })
+   156→const ReceiveStockView = dynamic(() => import('@/components/inventory/receive-stock-view').then(m => ({ default: m.ReceiveStockView })), { ssr: false, loading: LoadingFallback })
+   157→const AdjustStockView = dynamic(() => import('@/components/inventory/adjust-stock-view').then(m => ({ default: m.AdjustStockView })), { ssr: false, loading: LoadingFallback })
+   158→const TransferStockView = dynamic(() => import('@/components/inventory/transfer-stock-view').then(m => ({ default: m.TransferStockView })), { ssr: false, loading: LoadingFallback })
+   159→const PurchaseOrdersView = dynamic(() => import('@/components/inventory/purchase-orders-view').then(m => ({ default: m.PurchaseOrdersView })), { ssr: false, loading: LoadingFallback })
+   160→const PoCreateView = dynamic(() => import('@/components/inventory/po-create-view').then(m => ({ default: m.PoCreateView })), { ssr: false, loading: LoadingFallback })
+   161→const PoDetailView = dynamic(() => import('@/components/inventory/po-detail-view').then(m => ({ default: m.PoDetailView })), { ssr: false, loading: LoadingFallback })
+   162→const SupplierReturnsView = dynamic(() => import('@/components/inventory/supplier-returns-view').then(m => ({ default: m.SupplierReturnsView })), { ssr: false, loading: LoadingFallback })
+   163→const ProductionOrdersView = dynamic(() => import('@/components/inventory/production-orders-view').then(m => ({ default: m.ProductionOrdersView })), { ssr: false, loading: LoadingFallback })
+   164→const LossesView = dynamic(() => import('@/components/inventory/losses-view').then(m => ({ default: m.LossesView })), { ssr: false, loading: LoadingFallback })
+   165→const LossDetailView = dynamic(() => import('@/components/inventory/loss-detail-view').then(m => ({ default: m.LossDetailView })), { ssr: false, loading: LoadingFallback })
+   166→const CycleCountsView = dynamic(() => import('@/components/inventory/cycle-counts-view').then(m => ({ default: m.CycleCountsView })), { ssr: false, loading: LoadingFallback })
+   167→
+   168→// ─── Orders (largest: orders-view 2599, order-create 2390, order-detail 2040) ──
+   169→const OrdersView = dynamic(() => import('@/components/orders/orders-view').then(m => ({ default: m.OrdersView })), { ssr: false, loading: LoadingFallback })
+   170→const OrderCreateView = dynamic(() => import('@/components/orders/order-create-view').then(m => ({ default: m.OrderCreateView })), { ssr: false, loading: LoadingFallback })
+   171→const OrderDetailView = dynamic(() => import('@/components/orders/order-detail-view').then(m => ({ default: m.OrderDetailView })), { ssr: false, loading: LoadingFallback })
+   172→const OrdersPendingConfirmationView = dynamic(() => import('@/components/orders/orders-pending-confirmation-view').then(m => ({ default: m.OrdersPendingConfirmationView })), { ssr: false, loading: LoadingFallback })
+   173→const OrdersBackorderedView = dynamic(() => import('@/components/orders/orders-backordered-view').then(m => ({ default: m.OrdersBackorderedView })), { ssr: false, loading: LoadingFallback })
+   174→const OrdersAwaitingProductionView = dynamic(() => import('@/components/orders/orders-awaiting-production-view').then(m => ({ default: m.OrdersAwaitingProductionView })), { ssr: false, loading: LoadingFallback })
+   175→const OrdersReadyToDispatchView = dynamic(() => import('@/components/orders/orders-ready-to-dispatch-view').then(m => ({ default: m.OrdersReadyToDispatchView })), { ssr: false, loading: LoadingFallback })
+   176→const OrdersReturnsView = dynamic(() => import('@/components/orders/orders-returns-view').then(m => ({ default: m.OrdersReturnsView })), { ssr: false, loading: LoadingFallback })
+   177→const OrdersReturnsReviewView = dynamic(() => import('@/components/orders/orders-returns-review-view').then(m => ({ default: m.OrdersReturnsReviewView })), { ssr: false, loading: LoadingFallback })
+   178→const OrdersCancelledView = dynamic(() => import('@/components/orders/orders-cancelled-view').then(m => ({ default: m.OrdersCancelledView })), { ssr: false, loading: LoadingFallback })
+   179→const ExchangesView = dynamic(() => import('@/components/orders/exchanges-view').then(m => ({ default: m.ExchangesView })), { ssr: false, loading: LoadingFallback })
+   180→const ExchangeDetailView = dynamic(() => import('@/components/orders/exchange-detail-view').then(m => ({ default: m.ExchangeDetailView })), { ssr: false, loading: LoadingFallback })
+   181→const CustomersView = dynamic(() => import('@/components/orders/customers-view').then(m => ({ default: m.CustomersView })), { ssr: false, loading: LoadingFallback })
+   182→const CustomerDetailView = dynamic(() => import('@/components/orders/customer-detail-view').then(m => ({ default: m.CustomerDetailView })), { ssr: false, loading: LoadingFallback })
+   183→const OrderWorkflowSettingsView = dynamic(() => import('@/components/orders/order-workflow-settings-view').then(m => ({ default: m.OrderWorkflowSettingsView })), { ssr: false, loading: LoadingFallback })
+   184→const BookingWorkbenchView = dynamic(() => import('@/components/orders/booking-workbench-view').then(m => ({ default: m.BookingWorkbenchView })), { ssr: false, loading: LoadingFallback })
+   185→const OrderScanView = dynamic(() => import('@/components/orders/order-scan-view').then(m => ({ default: m.OrderScanView })), { ssr: false, loading: LoadingFallback })
+   186→
+   187→// ─── Shared ────────────────────────────────────────────────────────
+   188→const DraftsView = dynamic(() => import('@/components/shared/drafts-view').then(m => ({ default: m.DraftsView })), { ssr: false, loading: LoadingFallback })
+   189→
+   190→export default function Page() {
+   191→  const { hydrated, route, user, activeCompany, employee, setSession, setHydrated, navigate } =
+   192→    useAppStore()
+   193→
+   194→  // Track whether this is the first session fetch (cold start) vs a background
+   195→  // refetch (tab refocus, reconnect, invalidation). On the first fetch we show
+   196→  // a loading spinner; on background refetches we update the store silently.
+   197→  const isFirstFetchRef = useRef(true)
+   198→
+   199→  // ─── Session hydration via TanStack Query ──────────────────────────
+   200→  // This query intentionally overrides the app's global refetchOnWindowFocus:
+   201→  // false default. Session validity (active employee status, permissions,
+   202→  // platform-level access) is the one place where catching a change quickly
+   203→  // after the user returns to a background tab actually matters — e.g., an
+   204→  // employee terminated while their tab sat in the background should have
+   205→  // their UI reflect that promptly on refocus, not only on their next manual
+   206→  // page refresh. Every other view in this app is correctly left on the
+   207→  // global default because those views display data, not gate
+   208→  // security-sensitive UI. Do not "clean up" this override to match the
+   209→  // global default in future refactors.
+   210→  const sessionQuery = useQuery<SessionResponse>({
+   211→    queryKey: ['session', 'me'],
+   212→    queryFn: () => api.get<SessionResponse>('/api/auth/me'),
+   213→    staleTime: 60_000,
+   214→    refetchOnWindowFocus: true,
+   215→    refetchOnReconnect: true,
+   216→    retry: 1,
+   217→  })
+   218→
+   219→  // Wire session data into the Zustand store.
+   220→  useEffect(() => {
+   221→    const session = sessionQuery.data
+   222→    if (!session) return
+   223→
+   224→    // On the very first successful fetch, restore the URL route + set hydrated.
+   225→    if (isFirstFetchRef.current) {
+   226→      isFirstFetchRef.current = false
+   227→      const urlRoute = queryToRoute()
+   228→      const currentRoute = useAppStore.getState().route
+   229→
+   230→      setSession({
+   231→        user: session.user,
+   232→        activeCompany: session.activeCompany,
+   233→        companies: session.companies,
+   234→        employee: session.employee ?? undefined,
+   235→      })
+   236→
+   237→      // If the URL has a route, restore it (overrides the default 'login')
+   238→      if (urlRoute && urlRoute.name !== currentRoute.name) {
+   239→        if (session.user) {
+   240→          useAppStore.getState().navigate(urlRoute)
+   241→        }
+   242→      }
+   243→    } else {
+   244→      // Background refetch: update the store ONLY if the session data
+   245→      // actually changed, so the UI updates without a visible loading flicker.
+   246→      const currentUser = useAppStore.getState().user
+   247→      const currentActiveCompanyId = useAppStore.getState().activeCompany?.id
+   248→      const newActiveCompanyId = session.activeCompany?.id
+   249→      const newPermissions = session.employee?.permissions ?? []
+   250→      const currentPermissions = useAppStore.getState().employee?.permissions ?? []
+   251→
+   252→      const userChanged = currentUser?.id !== session.user?.id
+   253→      const companyChanged = currentActiveCompanyId !== newActiveCompanyId
+   254→      const permissionsChanged =
+   255→        newPermissions.length !== currentPermissions.length ||
+   256→        newPermissions.some((p, i) => p !== currentPermissions[i])
+   257→
+   258→      if (userChanged || companyChanged || permissionsChanged || !currentUser) {
+   259→        setSession({
+   260→          user: session.user,
+   261→          activeCompany: session.activeCompany,
+   262→          companies: session.companies,
+   263→          employee: session.employee ?? undefined,
+   264→        })
+   265→      }
+   266→    }
+   267→  }, [sessionQuery.data, setSession])
+   268→
+   269→  // On query error (401, network failure), mark hydrated so the login screen shows.
+   270→  useEffect(() => {
+   271→    if (sessionQuery.error && !hydrated) {
+   272→      setHydrated(true)
+   273→    }
+   274→  }, [sessionQuery.error, hydrated, setHydrated])
+   275→
+   276→  // Mark hydrated on first successful fetch (if not already set by setSession).
+   277→  useEffect(() => {
+   278→    if (sessionQuery.isSuccess && !hydrated) {
+   279→      setHydrated(true)
+   280→    }
+   281→  }, [sessionQuery.isSuccess, hydrated, setHydrated])
+   282→
+   283→  // Browser back/forward: sync URL → Zustand state
+   284→  // NOTE: The useFormGuard's use-browser-back-guard also listens to popstate.
+   285→  // When the guard is active (form is dirty), it re-pushes the URL to cancel
+   286→  // the back navigation. We need to make sure our handler doesn't fight it.
+   287→  // We use a global flag that the guard sets when it's intercepting.
+   288→  useEffect(() => {
+   289→    function handlePopState() {
+   290→      // If the form guard is intercepting, skip our sync — the guard will
+   291→      // handle the modal, and if the user confirms, the guard calls
+   292→      // window.history.back() which will trigger another popstate that we'll handle.
+   293→      if (typeof window !== 'undefined' && window.__formGuardIntercepting) {
+   294→        return
+   295→      }
+   296→      const urlRoute = queryToRoute()
+   297→      if (urlRoute) {
+   298→        // Use set() directly, NOT navigate(), to avoid pushing a new history entry
+   299→        useAppStore.setState({ route: urlRoute })
+   300→      }
+   301→    }
+   302→    window.addEventListener('popstate', handlePopState)
+   303→    return () => window.removeEventListener('popstate', handlePopState)
+   304→  }, [])
+   305→
+   306→  // URL sync: ensure the address bar always reflects the current route
+   307→  // (covers the case where user lands on "/" with no query string)
+   308→  // Must be before any early returns to satisfy React Hooks rules.
+   309→  useEffect(() => {
+   310→    if (hydrated) {
+   311→      replaceRouteInURL(route)
+   312→    }
+   313→     
+   314→  }, [hydrated, route.name, 'id' in route ? route.id : '', 'token' in route ? route.token : ''])
+   315→
+   316→  // Loading screen while hydrating (first session fetch only).
+   317→  // On background refetches, sessionQuery.isFetching is true but we DON'T show
+   318→  // a spinner — TanStack Query returns cached data instantly while revalidating.
+   319→  if (!hydrated) {
+   320→    return (
+   321→      <div className="min-h-screen flex items-center justify-center bg-background">
+   322→        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+   323→      </div>
+   324→    )
+   325→  }
+   326→
+   327→  // ---- Unauthenticated views ----
+   328→  if (!user) {
+   329→    if (route.name === 'register') {
+   330→      return (
+   331→        <AuthShell
+   332→          title="Create your account"
+   333→          subtitle="Start managing your e-commerce operations in minutes."
+   334→        >
+   335→          <RegisterForm />
+   336→        </AuthShell>
+   337→      )
+   338→    }
+   339→    if (route.name === 'forgot') {
+   340→      return (
+   341→        <AuthShell
+   342→          title="Reset your password"
+   343→          subtitle="We'll email you a secure recovery link."
+   344→        >
+   345→          <ForgotPasswordForm />
+   346→        </AuthShell>
+   347→      )
+   348→    }
+   349→    if (route.name === 'reset') {
+   350→      return (
+   351→        <AuthShell
+   352→          title="Set a new password"
+   353→          subtitle="Choose a strong password for your account."
+   354→        >
+   355→          <ResetPasswordForm token={route.token} />
+   356→        </AuthShell>
+   357→      )
+   358→    }
+   359→    // default: login
+   360→    return (
+   361→      <AuthShell
+   362→        title="Welcome back"
+   363→        subtitle="Sign in to your FlowOps workspace."
+   364→      >
+   365→        <LoginForm />
+   366→      </AuthShell>
+   367→    )
+   368→  }
+   369→
+   370→  // ---- Authenticated but not onboarded ----
+   371→  // Allow create-organization even before onboarding completes.
+   372→  if (user && route.name === 'create-organization') {
+   373→    return (
+   374→      <DashboardShell>
+   375→        <CreateOrganizationView onBack={() => navigate({ name: user.isOnboarded && activeCompany ? 'dashboard' : 'onboarding' })} />
+   376→      </DashboardShell>
+   377→    )
+   378→  }
+   379→  if (!user.isOnboarded || !activeCompany) {
+   380→    if (route.name === 'create-company') {
+   381→      return (
+   382→        <DashboardShell>
+   383→          <CreateCompanyView onBack={() => navigate({ name: 'onboarding' })} />
+   384→        </DashboardShell>
+   385→      )
+   386→    }
+   387→    return <OnboardingView />
+   388→  }
+   389→
+   390→  // ---- Authenticated + onboarded: dashboard shell ----
+   391→  return <DashboardShell>{renderRoute(route, employee)}</DashboardShell>
+   392→}
+   393→
+   394→function renderRoute(
+   395→  route: ReturnType<typeof useAppStore.getState>['route'],
+   396→  employee: ReturnType<typeof useAppStore.getState>['employee'],
+   397→) {
+   398→  switch (route.name) {
+   399→    case 'dashboard':
+   400→      return <DashboardHome />
+   401→    case 'employees':
+   402→      return <EmployeesView />
+   403→    case 'employees-invite':
+   404→      return <InviteEmployeeView />
+   405→    case 'employee-detail':
+   406→      return <EmployeeDetailView employeeId={route.id} />
+   407→    case 'roles':
+   408→      return <RolesView />
+   409→    case 'role-edit':
+   410→      return <RoleEditView roleId={route.id} />
+   411→    case 'organization':
+   412→      return <OrganizationView />
+   413→    case 'company-settings':
+   414→      return <CompanySettingsView />
+   415→    case 'settings':
+   416→      return <SettingsView />
+   417→    case 'audit':
+   418→      return <AuditLogView />
+   419→    case 'payroll':
+   420→      return <PayrollView />
+   421→    case 'payroll-run-detail':
+   422→      return <PayrollRunDetailView runId={route.id} />
+   423→    case 'create-organization':
+   424→      return <CreateOrganizationViewWithBack />
+   425→    case 'create-company':
+   426→      return <CreateCompanyViewWithBack orgId={route.orgId} />
+   427→    case 'products':
+   428→      return <ProductsView />
+   429→    case 'product-create':
+   430→      return <ProductCreateViewWithBack draftId={route.draftId} />
+   431→    case 'product-drafts':
+   432→      return <DraftsView />
+   433→    case 'product-detail':
+   434→      return <ProductDetailView productId={route.id} />
+   435→    case 'product-settings':
+   436→      return <CatalogSettingsView />
+   437→    case 'returned-stitched':
+   438→      return <ReturnedStitchedView />
+   439→    case 'org-catalog':
+   440→      return <OrgCatalogView />
+   441→    case 'inventory':
+   442→      return <InventoryDashboardView />
+   443→    case 'inventory-locations':
+   444→      return <LocationsView />
+   445→    case 'inventory-location-detail':
+   446→      return <LocationDetailView locationId={route.id} />
+   447→    case 'inventory-suppliers':
+   448→      return <SuppliersView />
+   449→    case 'inventory-supplier-detail':
+   450→      return <SupplierDetailView supplierId={route.id} />
+   451→    case 'inventory-receive':
+   452→      return <ReceiveStockView />
+   453→    case 'inventory-adjust':
+   454→      return <AdjustStockView />
+   455→    case 'inventory-transfer':
+   456→      return <TransferStockView />
+   457→    case 'inventory-purchase-orders':
+   458→      return <PurchaseOrdersView />
+   459→    case 'inventory-po-create':
+   460→      return <PoCreateView />
+   461→    case 'inventory-po-detail':
+   462→      return <PoDetailView poId={route.id} />
+   463→    case 'inventory-supplier-returns':
+   464→      return <SupplierReturnsView />
+   465→    case 'inventory-production-orders':
+   466→      return <ProductionOrdersView />
+   467→    case 'inventory-losses':
+   468→      return <LossesView />
+   469→    case 'inventory-loss-detail':
+   470→      return <LossDetailView lossId={route.id} />
+   471→    case 'inventory-cycle-counts':
+   472→      return <CycleCountsView />
+   473→    case 'orders':
+   474→      return <OrdersView />
+   475→    case 'order-create':
+   476→      return <OrderCreateViewWithBack draftId={route.draftId} />
+   477→    case 'order-drafts':
+   478→      return <DraftsView />
+   479→    case 'order-detail':
+   480→      return <OrderDetailView orderId={route.id} />
+   481→    case 'orders-pending-confirmation':
+   482→      return <OrdersPendingConfirmationView />
+   483→    case 'orders-backordered':
+   484→      return <OrdersBackorderedView />
+   485→    case 'orders-awaiting-production':
+   486→      return <OrdersAwaitingProductionView />
+   487→    case 'orders-ready-to-dispatch':
+   488→      return <OrdersReadyToDispatchView />
+   489→    case 'orders-returns':
+   490→      return <OrdersReturnsView />
+   491→    case 'orders-returns-review':
+   492→      return <OrdersReturnsReviewView />
+   493→    case 'orders-cancelled':
+   494→      return <OrdersCancelledView />
+   495→    case 'exchanges':
+   496→      return <ExchangesView />
+   497→    case 'exchange-detail':
+   498→      return <ExchangeDetailView exchangeId={route.id} />
+   499→    case 'customers':
+   500→      return <CustomersView />
+   501→    case 'customer-detail':
+   502→      return <CustomerDetailView customerId={route.id} />
+   503→    case 'order-workflow-settings':
+   504→      return <OrderWorkflowSettingsView />
+   505→    case 'booking-workbench':
+   506→      return <BookingWorkbenchView />
+   507→    case 'order-scan':
+   508→      return <OrderScanView />
+   509→    case 'integrations':
+   510→      return <IntegrationsView />
+   511→    case 'integration-logs':
+   512→      return <IntegrationLogsView />
+   513→    default:
+   514→      return <DashboardHome />
+   515→  }
+   516→}
+   517→
+   518→function CreateOrganizationViewWithBack() {
+   519→  const navigate = useAppStore((s) => s.navigate)
+   520→  return <CreateOrganizationView onBack={() => navigate({ name: 'dashboard' })} />
+   521→}
+   522→
+   523→function CreateCompanyViewWithBack({ orgId }: { orgId?: string }) {
+   524→  const navigate = useAppStore((s) => s.navigate)
+   525→  return <CreateCompanyView orgId={orgId} onBack={() => navigate({ name: 'organization' })} />
+   526→}
+   527→
+   528→function ProductCreateViewWithBack({ draftId }: { draftId?: string }) {
+   529→  const navigate = useAppStore((s) => s.navigate)
+   530→  return <ProductCreateView onBack={() => navigate({ name: 'products' })} draftId={draftId} />
+   531→}
+   532→
+   533→function OrderCreateViewWithBack({ draftId }: { draftId?: string }) {
+   534→  const navigate = useAppStore((s) => s.navigate)
+   535→  return <OrderCreateView onBack={() => navigate({ name: 'orders' })} draftId={draftId} />
+   536→}
+   537→

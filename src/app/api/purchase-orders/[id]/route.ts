@@ -1,6 +1,6 @@
 import { db } from '@/lib/db'
-import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError } from '@/lib/workspace'
+import { ApiError, getWorkspace, handleError, requirePermission } from '@/lib/workspace'
+import { PERMISSIONS } from '@/lib/permissions'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -12,11 +12,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    // PO-009 fix: previously used legacy `getCurrentUser()` pattern with no
+    // permission check — any employee could read full PO detail incl. pricing.
+    // Now uses getWorkspace() + requirePermission(INVENTORY_VIEW).
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INVENTORY_VIEW)
+    const companyId = ctx.company.id
 
     const { id } = await params
     const po = await db.purchaseOrder.findFirst({

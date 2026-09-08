@@ -42,6 +42,7 @@ const ROUTE_METADATA: Record<string, { title: string; description?: string }> = 
   'inventory-po-detail': { title: 'Purchase Order Details' },
   'inventory-supplier-returns': { title: 'Supplier Returns' },
   'inventory-production-orders': { title: 'Production Orders' },
+  'inventory-production-order-detail': { title: 'Production Order Details' },
   'inventory-losses': { title: 'Losses & Write-offs' },
   'inventory-loss-detail': { title: 'Loss Details' },
   'inventory-cycle-counts': { title: 'Cycle Counts' },
@@ -161,6 +162,7 @@ const PoCreateView = dynamic(() => import('@/components/inventory/po-create-view
 const PoDetailView = dynamic(() => import('@/components/inventory/po-detail-view').then(m => ({ default: m.PoDetailView })), { ssr: false, loading: LoadingFallback })
 const SupplierReturnsView = dynamic(() => import('@/components/inventory/supplier-returns-view').then(m => ({ default: m.SupplierReturnsView })), { ssr: false, loading: LoadingFallback })
 const ProductionOrdersView = dynamic(() => import('@/components/inventory/production-orders-view').then(m => ({ default: m.ProductionOrdersView })), { ssr: false, loading: LoadingFallback })
+const ProductionOrderDetailView = dynamic(() => import('@/components/inventory/production-order-detail-view').then(m => ({ default: m.ProductionOrderDetailView })), { ssr: false, loading: LoadingFallback })
 const LossesView = dynamic(() => import('@/components/inventory/losses-view').then(m => ({ default: m.LossesView })), { ssr: false, loading: LoadingFallback })
 const LossDetailView = dynamic(() => import('@/components/inventory/loss-detail-view').then(m => ({ default: m.LossDetailView })), { ssr: false, loading: LoadingFallback })
 const CycleCountsView = dynamic(() => import('@/components/inventory/cycle-counts-view').then(m => ({ default: m.CycleCountsView })), { ssr: false, loading: LoadingFallback })
@@ -464,6 +466,8 @@ function renderRoute(
       return <SupplierReturnsView />
     case 'inventory-production-orders':
       return <ProductionOrdersView />
+    case 'inventory-production-order-detail':
+      return <ProductionOrderDetailView productionOrderId={route.id} />
     case 'inventory-losses':
       return <LossesView />
     case 'inventory-loss-detail':

@@ -163,6 +163,7 @@ function isThisMonth(iso: string): boolean {
 
 export function ProductionOrdersView() {
   const can = useCan()
+  const navigate = useAppStore((s) => s.navigate)
   const queryClient = useQueryClient()
 
   const [search, setSearch] = useState('')
@@ -368,7 +369,11 @@ export function ProductionOrdersView() {
                     const isCancelled = o.status === 'cancelled'
                     const isDispatched = o.status === 'dispatched'
                     return (
-                      <TableRow key={o.id}>
+                      <TableRow
+                        key={o.id}
+                        className="cursor-pointer hover:bg-muted/40"
+                        onClick={() => navigate({ name: 'inventory-production-order-detail', id: o.id })}
+                      >
                         <TableCell>
                           <div className="flex flex-col">
                             <span className="font-medium text-sm">{o.productTitle}</span>
@@ -397,7 +402,7 @@ export function ProductionOrdersView() {
                         <TableCell className="text-sm text-muted-foreground whitespace-nowrap">
                           {formatDate(o.estimatedCompletionDate)}
                         </TableCell>
-                        <TableCell className="text-right">
+                        <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
                           {canManage && !isCancelled && !isDispatched ? (
                             <DropdownMenu>
                               <DropdownMenuTrigger asChild>
@@ -482,8 +487,9 @@ export function ProductionOrdersView() {
               {cancelTarget && (
                 <>
                   <strong>{cancelTarget.productTitle}</strong> ({cancelTarget.stitchedSku}) —
-                  quantity {cancelTarget.quantity}. Fabric has already been consumed and cannot be
-                  restored automatically.
+                  quantity {cancelTarget.quantity}. Cancelling this production order will
+                  automatically return the consumed fabric back to inventory. This action
+                  cannot be undone.
                 </>
               )}
             </AlertDialogDescription>

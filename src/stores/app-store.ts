@@ -57,6 +57,7 @@ export type AppRoute =
   | { name: 'inventory-losses' }
   | { name: 'inventory-loss-detail'; id: string }
   | { name: 'inventory-production-orders' }
+  | { name: 'inventory-production-order-detail'; id: string }
   | { name: 'inventory-cycle-counts' }
   // OMS
   | { name: 'orders' }

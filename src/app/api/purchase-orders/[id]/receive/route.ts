@@ -99,6 +99,21 @@ export async function POST(
       const poItem = po.items.find((item) => item.id === ri.purchase_order_item_id)
       if (!poItem) throw new ApiError(400, `PO item ${ri.purchase_order_item_id} not found on this PO.`)
 
+      // PO-012 fix: reject over-receipt. Previously the route would happily
+      // accept received_quantity values that pushed receivedQuantity ABOVE
+      // orderedQuantity — corrupting the PO's audit trail (PO would show
+      // 110/100 received = "fully received", but the supplier-side record
+      // would never match the order). Now we 400 with a clear message
+      // instead. The check uses poItem.receivedQuantity (the CURRENT
+      // received count, before this receipt is applied) — so partial
+      // receipts that bring received exactly up to ordered are still allowed.
+      if (poItem.receivedQuantity + ri.received_quantity > poItem.orderedQuantity) {
+        throw new ApiError(
+          400,
+          `Cannot receive ${ri.received_quantity} units of variant ${ri.org_variant_id}: only ${poItem.orderedQuantity - poItem.receivedQuantity} of ${poItem.orderedQuantity} units remain unreceived on this PO.`,
+        )
+      }
+
       // Step 1: Process the inventory transaction (purchase_received) —
       // this increments onHand + recalculates WAC.
       const txnResult = await processInventoryTransaction({

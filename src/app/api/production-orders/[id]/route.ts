@@ -1,8 +1,9 @@
 import { db } from '@/lib/db'
 import { getCurrentUser } from '@/lib/session'
-import { ApiError, handleError, readBody } from '@/lib/workspace'
+import { ApiError, getWorkspace, handleError, readBody, requirePermission } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { PERMISSIONS } from '@/lib/permissions'
+import { patchProductionOrderSchema } from '@/lib/validations/inventory'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -14,11 +15,12 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> },
 ) {
   try {
-    const user = await getCurrentUser()
-    if (!user) throw new ApiError(401, 'Not authenticated')
-    const settings = await db.userSetting.findUnique({ where: { userId: user.id } })
-    const companyId = settings?.activeCompanyId
-    if (!companyId) throw new ApiError(403, 'No active company')
+    // PO-009 fix: previously used legacy `getCurrentUser()` pattern with no
+    // permission check — any employee could read full production order
+    // detail incl. costs. Now uses getWorkspace() + requirePermission(INVENTORY_VIEW).
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.INVENTORY_VIEW)
+    const companyId = ctx.company.id
 
     const { id } = await params
     const order = await db.productionOrder.findFirst({
@@ -107,31 +109,57 @@ export async function PATCH(
     const body = await readBody<{
       status?: string
       assigned_tailor?: string
-      estimated_completion_date?: string
-      actual_completion_date?: string
+      estimated_completion_date?: string | null
+      actual_completion_date?: string | null
       cancellation_reason?: string
     }>(req)
+
+    // PO-014 fix: validate the structured fields with Zod before applying.
+    // The PATCH handler previously trusted body-supplied values for status,
+    // assigned_tailor, and the completion dates — a malformed status string
+    // or out-of-range date would be silently written to the DB. The schema
+    // below enforces:
+    //   - status ∈ {fabric_reserved, in_production, completed, dispatched,
+    //     cancelled} (matches the handler's transition logic)
+    //   - assigned_tailor is a string ≤ 100 chars
+    //   - estimated_completion_date / actual_completion_date are ISO 8601
+    //     datetime strings (or null to clear)
+    //
+    // `cancellation_reason` is intentionally NOT validated by the schema —
+    // it's only consumed when status='cancelled' and stored in a separate
+    // `cancellationReason` field. It's read directly from the body for
+    // backward compatibility with the existing cancel UI flow.
+    const parsed = patchProductionOrderSchema.safeParse({
+      status: body.status,
+      assigned_tailor: body.assigned_tailor,
+      estimated_completion_date: body.estimated_completion_date,
+      actual_completion_date: body.actual_completion_date,
+    })
+    if (!parsed.success) {
+      throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
+    }
+    const d = parsed.data
 
     const oldValues = { status: order.status, assignedTailor: order.assignedTailor }
 
     const updateData: Record<string, unknown> = {}
-    if (body.status) {
-      updateData.status = body.status
+    if (d.status) {
+      updateData.status = d.status
       // Set timestamps based on status transition
-      if (body.status === 'completed') {
+      if (d.status === 'completed') {
         updateData.actualCompletionDate = new Date()
       }
-      if (body.status === 'cancelled') {
+      if (d.status === 'cancelled') {
         updateData.cancelledAt = new Date()
         updateData.cancellationReason = body.cancellation_reason || null
       }
     }
-    if (body.assigned_tailor !== undefined) updateData.assignedTailor = body.assigned_tailor || null
-    if (body.estimated_completion_date !== undefined) {
-      updateData.estimatedCompletionDate = body.estimated_completion_date ? new Date(body.estimated_completion_date) : null
+    if (d.assigned_tailor !== undefined) updateData.assignedTailor = d.assigned_tailor || null
+    if (d.estimated_completion_date !== undefined) {
+      updateData.estimatedCompletionDate = d.estimated_completion_date ? new Date(d.estimated_completion_date) : null
     }
-    if (body.actual_completion_date !== undefined) {
-      updateData.actualCompletionDate = body.actual_completion_date ? new Date(body.actual_completion_date) : null
+    if (d.actual_completion_date !== undefined) {
+      updateData.actualCompletionDate = d.actual_completion_date ? new Date(d.actual_completion_date) : null
     }
 
     const updated = await db.productionOrder.update({
@@ -157,7 +185,7 @@ export async function PATCH(
     //    fabric_reserved / in_production / completed). If status was
     //    'pending' (fabric not yet consumed), there's nothing to reverse.
     if (
-      body.status === 'cancelled' &&
+      d.status === 'cancelled' &&
       oldValues.status !== 'cancelled' &&
       oldValues.status !== 'pending' &&
       order.fabricTxnId
@@ -211,75 +239,92 @@ export async function PATCH(
     }
 
     // ── Automation: when production order is marked "completed", add the
-    //    produced stock to inventory AND reserve it for the linked order item.
-    //    This closes the MTO cycle: production completes → stock exists →
-    //    order can be dispatched (performOrderDispatch will decrement onHand
-    //    and release reserved). Without this, dispatch would fail because no
-    //    inventory pool entry exists for the freshly-produced items.
-    if (body.status === 'completed' && oldValues.status !== 'completed' && order.orderItemId) {
+    //    produced stock to inventory AND (if linked) reserve it for the
+    //    waiting order item. This closes the MTO cycle: production
+    //    completes → stock exists → order can be dispatched (performOrderDispatch
+    //    will decrement onHand and release reserved). Without this, dispatch
+    //    would fail because no inventory pool entry exists for the freshly-
+    //    produced items.
+    //
+    //    PO-002 fix (CRITICAL): previously this entire block was guarded by
+    //    `if (order.orderItemId)`, which meant manual ProductionOrders and
+    //    exchange-shipment-triggered ones (NULL orderItemId) silently lost
+    //    their stitched stock — fabric was consumed but the output never
+    //    appeared in inventory. Now `opening_stock` is ALWAYS created for
+    //    the stitched variant; the `order_reserved` transaction (and the
+    //    order-item link update) only fires when `order.orderItemId` IS set.
+    if (d.status === 'completed' && oldValues.status !== 'completed') {
       try {
         const { processInventoryTransaction } = await import('@/lib/inventory')
 
-        // Fetch the linked order item + order to get the dispatch location
-        const orderItem = await db.orderItem.findUnique({
-          where: { id: order.orderItemId },
-          include: {
-            order: { select: { id: true, dispatchLocationId: true, organizationId: true, companyId: true } },
-            orgVariant: { select: { id: true, sku: true } },
-          },
+        // ALWAYS create opening_stock for the stitched variant. The stitched
+        // product is produced at the fabric location (the tailor's cutting
+        // and stitching station), so we add it there. For POs without an
+        // orderItemId, the stock sits available for future orders. For POs
+        // linked to an order item, we also create an order_reserved txn
+        // below so the stock is held for that specific order.
+        const addResult = await processInventoryTransaction({
+          orgVariantId: order.stitchedVariantId,
+          locationId: order.fabricLocationId,
+          organizationId: order.organizationId,
+          companyId: order.companyId,
+          employeeId: caller.id,
+          transactionType: 'opening_stock',
+          quantity: order.quantity,
+          costPerUnit: Number(order.stitchingCost) + Number(order.fabricCost),
+          referenceType: 'production_order',
+          referenceId: id,
+          notes: `Stock added from completed production order ${id}`,
         })
 
-        if (orderItem && orderItem.order.dispatchLocationId) {
-          const locationId = orderItem.order.dispatchLocationId
-          const orgVariantId = orderItem.orgVariantId
-          const organizationId = orderItem.order.organizationId
-          const companyId = orderItem.order.companyId
-          const quantity = orderItem.quantity
-
-          // Step 1: Add the produced stock to inventory (opening_stock increments onHand)
-          const addResult = await processInventoryTransaction({
-            orgVariantId,
-            locationId,
-            organizationId,
-            companyId,
-            employeeId: caller.id,
-            transactionType: 'opening_stock',
-            quantity,
-            referenceType: 'production_order',
-            referenceId: id,
-            notes: `Stock added from completed production order ${id}`,
-          })
-
-          if (addResult.success) {
-            // Step 2: Reserve the stock for the order (order_reserved increments reserved)
+        if (!addResult.success) {
+          console.error(`[production-orders] Failed to add stock after production completion: ${addResult.error}`)
+        } else {
+          // Only create order_reserved if the production order is linked to
+          // an order item — the reservation auto-holds the stock for that
+          // order so performOrderDispatch can release it later. POs without
+          // an orderItemId (manual / exchange-shipment-triggered) leave the
+          // stock available for future orders.
+          if (order.orderItemId) {
             const reserveResult = await processInventoryTransaction({
-              orgVariantId,
-              locationId,
-              organizationId,
-              companyId,
+              orgVariantId: order.stitchedVariantId,
+              locationId: order.fabricLocationId,
+              organizationId: order.organizationId,
+              companyId: order.companyId,
               employeeId: caller.id,
               transactionType: 'order_reserved',
-              quantity,
-              referenceType: 'order',
-              referenceId: orderItem.order.id,
-              notes: `Reserved for order after production completion`,
+              quantity: order.quantity,
+              referenceType: 'order_item',
+              referenceId: order.orderItemId,
+              notes: `Reserved for order item ${order.orderItemId} after production completion`,
             })
 
             if (reserveResult.success) {
-              // Step 3: Set reservedLocationId on the order item (if not already set)
-              // so performOrderDispatch knows where to dispatch from
-              if (!orderItem.reservedLocationId) {
-                await db.orderItem.update({
-                  where: { id: orderItem.id },
-                  data: { reservedLocationId: locationId },
+              // Set reservedLocationId on the order item (if not already
+              // set) so performOrderDispatch knows where to dispatch from.
+              // We use updateMany with a `reservedLocationId: null` filter
+              // to avoid clobbering a previously-reserved location.
+              try {
+                await db.orderItem.updateMany({
+                  where: { id: order.orderItemId, reservedLocationId: null },
+                  data: { reservedLocationId: order.fabricLocationId },
                 })
+              } catch (linkErr) {
+                console.error(
+                  `[production-orders] Failed to set reservedLocationId on order item ${order.orderItemId}:`,
+                  linkErr instanceof Error ? linkErr.message : linkErr,
+                )
               }
-              console.log(`[production-orders] Auto-stocked + reserved ${quantity} units of ${orderItem.orgVariant.sku} for order ${orderItem.order.id} after production completion`)
+              console.log(
+                `[production-orders] Auto-stocked + reserved ${order.quantity} units of variant ${order.stitchedVariantId} for order item ${order.orderItemId} after production completion (PO ${id})`,
+              )
             } else {
               console.error(`[production-orders] Failed to reserve stock after production completion: ${reserveResult.error}`)
             }
           } else {
-            console.error(`[production-orders] Failed to add stock after production completion: ${addResult.error}`)
+            console.log(
+              `[production-orders] Auto-stocked ${order.quantity} units of variant ${order.stitchedVariantId} from production order ${id} (no order item link — stock sits available)`,
+            )
           }
         }
       } catch (automationErr) {
@@ -298,7 +343,7 @@ export async function PATCH(
       userId: user.id,
       employeeId: caller.id,
       oldValues,
-      newValues: body,
+      newValues: { ...body, ...d },
     })
 
     return Response.json({ id: updated.id, status: updated.status })

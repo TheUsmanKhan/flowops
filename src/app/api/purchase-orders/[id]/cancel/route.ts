@@ -53,22 +53,39 @@ export async function POST(
     const body = await readBody<{ reason?: string }>(req)
     const reason = body.reason || 'No reason provided'
 
-    // Decrement incoming for each unreceived item
-    for (const item of po.items) {
-      const unreceived = item.orderedQuantity - item.receivedQuantity
-      if (unreceived > 0) {
-        await decrementIncomingStock(item.orgVariantId, po.deliveryLocationId, unreceived)
+    // PO-013 fix: wrap the PO status update + the incoming-stock decrement
+    // loop in a single db.$transaction so a failure in ANY decrement rolls
+    // back BOTH the PO status update AND all earlier decrements in this loop.
+    // Previously a mid-loop failure left the PO still in 'ordered' state but
+    // with some incoming projections already deflated — leading to the same
+    // "phantom incoming" symptom as PO-003 (warehouse shows 0 incoming for
+    // items that still have open POs).
+    //
+    // The decrementIncomingStock helper accepts the `tx` parameter and runs
+    // its upsert on the same transaction (see src/lib/inventory.ts).
+    await db.$transaction(async (tx) => {
+      // Decrement incoming for each unreceived item.
+      for (const item of po.items) {
+        const unreceived = item.orderedQuantity - item.receivedQuantity
+        if (unreceived > 0) {
+          await decrementIncomingStock(
+            item.orgVariantId,
+            po.deliveryLocationId,
+            unreceived,
+            tx,
+          )
+        }
       }
-    }
 
-    await db.purchaseOrder.update({
-      where: { id: poId },
-      data: {
-        status: 'cancelled',
-        cancelledAt: new Date(),
-        cancelledById: caller.id,
-        cancellationReason: reason,
-      },
+      await tx.purchaseOrder.update({
+        where: { id: poId },
+        data: {
+          status: 'cancelled',
+          cancelledAt: new Date(),
+          cancelledById: caller.id,
+          cancellationReason: reason,
+        },
+      })
     })
 
     insertAuditLog({

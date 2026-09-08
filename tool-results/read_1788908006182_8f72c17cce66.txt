@@ -1,0 +1,978 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useState } from 'react'
+     4→import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+     5→import { toast } from 'sonner'
+     6→import { api, FetchError } from '@/lib/api-client'
+     7→import { useAppStore, useCan } from '@/stores/app-store'
+     8→import { PERMISSIONS } from '@/lib/permissions'
+     9→import { PageHeader } from '@/components/layout/dashboard-shell'
+    10→import { Button } from '@/components/ui/button'
+    11→import { Input } from '@/components/ui/input'
+    12→import { Label } from '@/components/ui/label'
+    13→import { Textarea } from '@/components/ui/textarea'
+    14→import { Badge } from '@/components/ui/badge'
+    15→import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+    16→import { Skeleton } from '@/components/ui/skeleton'
+    17→import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+    18→import { Progress } from '@/components/ui/progress'
+    19→import {
+    20→  Dialog,
+    21→  DialogContent,
+    22→  DialogDescription,
+    23→  DialogFooter,
+    24→  DialogHeader,
+    25→  DialogTitle,
+    26→} from '@/components/ui/dialog'
+    27→import {
+    28→  AlertDialog,
+    29→  AlertDialogAction,
+    30→  AlertDialogCancel,
+    31→  AlertDialogContent,
+    32→  AlertDialogDescription,
+    33→  AlertDialogFooter,
+    34→  AlertDialogHeader,
+    35→  AlertDialogTitle,
+    36→} from '@/components/ui/alert-dialog'
+    37→import {
+    38→  Table,
+    39→  TableBody,
+    40→  TableCell,
+    41→  TableHead,
+    42→  TableHeader,
+    43→  TableRow,
+    44→} from '@/components/ui/table'
+    45→import {
+    46→  ArrowLeft,
+    47→  Truck,
+    48→  Warehouse,
+    49→  Calendar,
+    50→  Wallet,
+    51→  PackageCheck,
+    52→  AlertTriangle,
+    53→  Loader2,
+    54→  Send,
+    55→  Ban,
+    56→  CheckCircle2,
+    57→  History,
+    58→  RefreshCw,
+    59→} from 'lucide-react'
+    60→
+    61→// ─────────────────────────────────────────────────────────────────────────────
+    62→// Types — match GET /api/purchase-orders/{id}
+    63→// ─────────────────────────────────────────────────────────────────────────────
+    64→
+    65→type POStatus = 'draft' | 'ordered' | 'partially_received' | 'received' | 'cancelled'
+    66→
+    67→interface POItem {
+    68→  id: string
+    69→  variant: {
+    70→    id: string
+    71→    sku: string
+    72→    productTitle: string
+    73→  }
+    74→  orderedQuantity: number
+    75→  receivedQuantity: number
+    76→  costPerUnit: number
+    77→  lineTotal: number
+    78→  fullyReceived: boolean
+    79→}
+    80→
+    81→interface ReceiptItem {
+    82→  id: string
+    83→  purchaseOrderItemId: string
+    84→  receivedQuantity: number
+    85→  actualCostPerUnit: number
+    86→  shortageQuantity: number
+    87→  shortageReason: string | null
+    88→}
+    89→
+    90→interface Receipt {
+    91→  id: string
+    92→  receivedAt: string
+    93→  receivedBy: string
+    94→  notes: string | null
+    95→  items: ReceiptItem[]
+    96→}
+    97→
+    98→interface PODetail {
+    99→  id: string
+   100→  poNumber: string
+   101→  status: POStatus
+   102→  supplier: {
+   103→    id: string
+   104→    name: string
+   105→    contactPerson: string | null
+   106→    phone: string | null
+   107→    paymentTerms: string
+   108→  }
+   109→  deliveryLocation: { id: string; name: string }
+   110→  orderDate: string
+   111→  expectedDeliveryDate: string | null
+   112→  advancePayment: number
+   113→  paymentMethod: string | null
+   114→  notes: string | null
+   115→  totalItemsValue: number
+   116→  balanceDue: number
+   117→  items: POItem[]
+   118→  receipts: Receipt[]
+   119→}
+   120→
+   121→interface PODetailResponse {
+   122→  order: PODetail
+   123→}
+   124→
+   125→interface ReceivePayload {
+   126→  notes?: string
+   127→  items: Array<{
+   128→    purchase_order_item_id: string
+   129→    org_variant_id: string
+   130→    received_quantity: number
+   131→    actual_cost_per_unit: number
+   132→    shortage_quantity: number
+   133→    shortage_reason?: string
+   134→  }>
+   135→}
+   136→
+   137→// ─────────────────────────────────────────────────────────────────────────────
+   138→// Display maps
+   139→// ─────────────────────────────────────────────────────────────────────────────
+   140→
+   141→const STATUS_BADGE: Record<POStatus, { label: string; className: string }> = {
+   142→  draft: { label: 'Draft', className: 'bg-gray-100 text-gray-700 border-gray-200' },
+   143→  ordered: { label: 'Ordered', className: 'bg-sky-50 text-sky-700 border-sky-200' },
+   144→  partially_received: {
+   145→    label: 'Partially Received',
+   146→    className: 'bg-amber-50 text-amber-700 border-amber-200',
+   147→  },
+   148→  received: {
+   149→    label: 'Received',
+   150→    className: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+   151→  },
+   152→  cancelled: { label: 'Cancelled', className: 'bg-rose-50 text-rose-700 border-rose-200' },
+   153→}
+   154→
+   155→const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
+   156→function formatPKR(n: number): string {
+   157→  return `Rs. ${PKR.format(n)}`
+   158→}
+   159→
+   160→function formatDate(iso: string | null): string {
+   161→  if (!iso) return '—'
+   162→  try {
+   163→    return new Date(iso).toLocaleDateString('en-PK', {
+   164→      day: '2-digit',
+   165→      month: 'short',
+   166→      year: 'numeric',
+   167→    })
+   168→  } catch {
+   169→    return iso
+   170→  }
+   171→}
+   172→
+   173→function formatDateTime(iso: string): string {
+   174→  try {
+   175→    return new Date(iso).toLocaleString('en-PK', {
+   176→      day: '2-digit',
+   177→      month: 'short',
+   178→      hour: '2-digit',
+   179→      minute: '2-digit',
+   180→    })
+   181→  } catch {
+   182→    return iso
+   183→  }
+   184→}
+   185→
+   186→function getErrorMessage(err: unknown): string {
+   187→  if (err instanceof FetchError) return err.message
+   188→  if (err instanceof Error) return err.message
+   189→  return 'Something went wrong. Please try again.'
+   190→}
+   191→
+   192→// ─────────────────────────────────────────────────────────────────────────────
+   193→// Main view
+   194→// ─────────────────────────────────────────────────────────────────────────────
+   195→
+   196→export function PoDetailView({ poId }: { poId: string }) {
+   197→  const navigate = useAppStore((s) => s.navigate)
+   198→  const can = useCan()
+   199→  const queryClient = useQueryClient()
+   200→
+   201→  const canManage = can(PERMISSIONS.INVENTORY_MANAGE_PURCHASE_ORDERS)
+   202→  const canReceive = can(PERMISSIONS.INVENTORY_RECEIVE)
+   203→
+   204→  const [receiveOpen, setReceiveOpen] = useState(false)
+   205→  const [cancelOpen, setCancelOpen] = useState(false)
+   206→  const [cancelReason, setCancelReason] = useState('')
+   207→
+   208→  const detailQuery = useQuery<PODetailResponse>({
+   209→    queryKey: ['purchase-order', poId],
+   210→    queryFn: () => api.get<PODetailResponse>(`/api/purchase-orders/${poId}`),
+   211→    staleTime: 10_000,
+   212→  })
+   213→
+   214→  const order = detailQuery.data?.order
+   215→
+   216→  const isOverdue = useMemo(() => {
+   217→    if (!order?.expectedDeliveryDate) return false
+   218→    if (order.status === 'received' || order.status === 'cancelled') return false
+   219→    return new Date(order.expectedDeliveryDate) < new Date()
+   220→  }, [order])
+   221→
+   222→  const canCancel =
+   223→    order && order.status !== 'cancelled' && order.status !== 'received'
+   224→  const canConfirm = order && order.status === 'draft'
+   225→  const canReceiveStock =
+   226→    order &&
+   227→    order.status !== 'cancelled' &&
+   228→    order.status !== 'received' &&
+   229→    order.items.some((i) => !i.fullyReceived)
+   230→
+   231→  // ── Mutations ────────────────────────────────────────────────────────────
+   232→  const invalidateAll = () => {
+   233→    void queryClient.invalidateQueries({ queryKey: ['purchase-order', poId] })
+   234→    void queryClient.invalidateQueries({ queryKey: ['purchase-orders'] })
+   235→    void queryClient.invalidateQueries({ queryKey: ['inventory-dashboard'] })
+   236→    void queryClient.invalidateQueries({ queryKey: ['locations'] })
+   237→  }
+   238→
+   239→  const confirmMutation = useMutation({
+   240→    mutationFn: async () => api.post(`/api/purchase-orders/${poId}/confirm`),
+   241→    onSuccess: () => {
+   242→      toast.success('PO confirmed and sent. Incoming stock updated.')
+   243→      invalidateAll()
+   244→    },
+   245→    onError: (err) => toast.error(getErrorMessage(err)),
+   246→  })
+   247→
+   248→  const cancelMutation = useMutation({
+   249→    mutationFn: async () =>
+   250→      api.post(`/api/purchase-orders/${poId}/cancel`, { reason: cancelReason.trim() }),
+   251→    onSuccess: () => {
+   252→      toast.success('PO cancelled.')
+   253→      setCancelOpen(false)
+   254→      setCancelReason('')
+   255→      invalidateAll()
+   256→    },
+   257→    onError: (err) => toast.error(getErrorMessage(err)),
+   258→  })
+   259→
+   260→  if (detailQuery.isLoading) {
+   261→    return (
+   262→      <div className="space-y-6">
+   263→        <PageHeader title="Purchase Order" />
+   264→        <Skeleton className="h-32" />
+   265→        <Skeleton className="h-64" />
+   266→      </div>
+   267→    )
+   268→  }
+   269→
+   270→  if (detailQuery.isError || !order) {
+   271→    return (
+   272→      <div className="space-y-6">
+   273→        <PageHeader
+   274→          title="Purchase Order"
+   275→          actions={
+   276→            <Button
+   277→              variant="outline"
+   278→              size="sm"
+   279→              onClick={() => navigate({ name: 'inventory-purchase-orders' })}
+   280→            >
+   281→              <ArrowLeft className="h-4 w-4" /> Back
+   282→            </Button>
+   283→          }
+   284→        />
+   285→        <Card>
+   286→          <CardContent className="p-10 text-center">
+   287→            <p className="text-sm text-muted-foreground mb-4">
+   288→              {detailQuery.isError
+   289→                ? getErrorMessage(detailQuery.error)
+   290→                : 'Purchase order not found.'}
+   291→            </p>
+   292→            <Button variant="outline" onClick={() => detailQuery.refetch()}>
+   293→              Try again
+   294→            </Button>
+   295→          </CardContent>
+   296→        </Card>
+   297→      </div>
+   298→    )
+   299→  }
+   300→
+   301→  const badge = STATUS_BADGE[order.status]
+   302→  const totalReceivedValue = order.items.reduce(
+   303→    (s, i) => s + Math.min(i.receivedQuantity, i.orderedQuantity) * i.costPerUnit,
+   304→    0,
+   305→  )
+   306→
+   307→  return (
+   308→    <div className="space-y-6">
+   309→      <PageHeader
+   310→        title={`PO ${order.poNumber}`}
+   311→        description={`Created ${formatDate(order.orderDate)} · Ordered from ${order.supplier.name}`}
+   312→        actions={
+   313→          <div className="flex items-center gap-2">
+   314→            <Button
+   315→              variant="outline"
+   316→              size="sm"
+   317→              onClick={() => navigate({ name: 'inventory-purchase-orders' })}
+   318→            >
+   319→              <ArrowLeft className="h-4 w-4" /> Back
+   320→            </Button>
+   321→            <Button
+   322→              variant="outline"
+   323→              size="sm"
+   324→              onClick={() => detailQuery.refetch()}
+   325→              disabled={detailQuery.isFetching}
+   326→            >
+   327→              <RefreshCw
+   328→                className={detailQuery.isFetching ? 'h-4 w-4 animate-spin' : 'h-4 w-4'}
+   329→              />
+   330→              Refresh
+   331→            </Button>
+   332→          </div>
+   333→        }
+   334→      />
+   335→
+   336→      {/* ── Status header ──────────────────────────────────────────────────── */}
+   337→      <Card>
+   338→        <CardContent className="p-5">
+   339→          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+   340→            <div className="flex items-center gap-3 flex-wrap">
+   341→              <Badge variant="outline" className={badge.className}>
+   342→                {badge.label}
+   343→              </Badge>
+   344→              {isOverdue && (
+   345→                <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200">
+   346→                  <AlertTriangle className="h-3 w-3 mr-1" /> Overdue
+   347→                </Badge>
+   348→              )}
+   349→              <div className="text-sm text-muted-foreground">
+   350→                {order.items.length} item{order.items.length === 1 ? '' : 's'} ·{' '}
+   351→                {order.items.reduce((s, i) => s + i.orderedQuantity, 0)} units ordered
+   352→              </div>
+   353→            </div>
+   354→            <div className="flex items-center gap-2 flex-wrap">
+   355→              {canConfirm && canManage && (
+   356→                <Button
+   357→                  onClick={() => confirmMutation.mutate()}
+   358→                  disabled={confirmMutation.isPending}
+   359→                >
+   360→                  {confirmMutation.isPending ? (
+   361→                    <>
+   362→                      <Loader2 className="h-4 w-4 animate-spin" /> Confirming…
+   363→                    </>
+   364→                  ) : (
+   365→                    <>
+   366→                      <Send className="h-4 w-4" /> Confirm Draft
+   367→                    </>
+   368→                  )}
+   369→                </Button>
+   370→              )}
+   371→              {canReceiveStock && canReceive && (
+   372→                <Button onClick={() => setReceiveOpen(true)}>
+   373→                  <PackageCheck className="h-4 w-4" /> Receive Stock
+   374→                </Button>
+   375→              )}
+   376→              {canCancel && canManage && (
+   377→                <Button
+   378→                  variant="outline"
+   379→                  className="text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+   380→                  onClick={() => setCancelOpen(true)}
+   381→                >
+   382→                  <Ban className="h-4 w-4" /> Cancel PO
+   383→                </Button>
+   384→              )}
+   385→            </div>
+   386→          </div>
+   387→
+   388→          {isOverdue && (
+   389→            <Alert variant="destructive" className="mt-4">
+   390→              <AlertTriangle className="h-4 w-4" />
+   391→              <AlertTitle>This PO is overdue</AlertTitle>
+   392→              <AlertDescription>
+   393→                Expected delivery was {formatDate(order.expectedDeliveryDate)} but stock hasn&apos;t
+   394→                been fully received yet.
+   395→              </AlertDescription>
+   396→            </Alert>
+   397→          )}
+   398→        </CardContent>
+   399→      </Card>
+   400→
+   401→      <div className="grid gap-6 lg:grid-cols-3">
+   402→        {/* ── Items table ──────────────────────────────────────────────── */}
+   403→        <div className="lg:col-span-2 space-y-4">
+   404→          <Card>
+   405→            <CardHeader className="pb-3">
+   406→              <CardTitle className="text-base">Items</CardTitle>
+   407→            </CardHeader>
+   408→            <CardContent className="p-0">
+   409→              <div className="overflow-x-auto">
+   410→                <Table>
+   411→                  <TableHeader>
+   412→                    <TableRow>
+   413→                      <TableHead>Variant</TableHead>
+   414→                      <TableHead className="text-right">Ordered</TableHead>
+   415→                      <TableHead className="text-right">Received</TableHead>
+   416→                      <TableHead className="w-32">Progress</TableHead>
+   417→                      <TableHead className="text-right">Cost / unit</TableHead>
+   418→                      <TableHead className="text-right">Line total</TableHead>
+   419→                    </TableRow>
+   420→                  </TableHeader>
+   421→                  <TableBody>
+   422→                    {order.items.map((item) => {
+   423→                      const pct =
+   424→                        item.orderedQuantity === 0
+   425→                          ? 0
+   426→                          : Math.min(
+   427→                              100,
+   428→                              Math.round(
+   429→                                (item.receivedQuantity / item.orderedQuantity) * 100,
+   430→                              ),
+   431→                            )
+   432→                      return (
+   433→                        <TableRow key={item.id}>
+   434→                          <TableCell>
+   435→                            <div className="flex flex-col">
+   436→                              <span className="font-medium text-sm">{item.variant.productTitle}</span>
+   437→                              <span className="text-xs text-muted-foreground font-mono">
+   438→                                {item.variant.sku}
+   439→                              </span>
+   440→                            </div>
+   441→                          </TableCell>
+   442→                          <TableCell className="text-right tabular-nums">
+   443→                            {item.orderedQuantity}
+   444→                          </TableCell>
+   445→                          <TableCell className="text-right tabular-nums">
+   446→                            <span
+   447→                              className={
+   448→                                item.fullyReceived
+   449→                                  ? 'text-emerald-600 font-medium'
+   450→                                  : item.receivedQuantity > 0
+   451→                                    ? 'text-amber-600 font-medium'
+   452→                                    : 'text-muted-foreground'
+   453→                              }
+   454→                            >
+   455→                              {item.receivedQuantity}
+   456→                            </span>
+   457→                          </TableCell>
+   458→                          <TableCell>
+   459→                            <div className="flex items-center gap-2">
+   460→                              <Progress value={pct} className="h-2" />
+   461→                              <span className="text-[11px] text-muted-foreground tabular-nums w-8 text-right">
+   462→                                {pct}%
+   463→                              </span>
+   464→                            </div>
+   465→                          </TableCell>
+   466→                          <TableCell className="text-right tabular-nums text-muted-foreground">
+   467→                            {formatPKR(item.costPerUnit)}
+   468→                          </TableCell>
+   469→                          <TableCell className="text-right tabular-nums font-medium">
+   470→                            {formatPKR(item.lineTotal)}
+   471→                          </TableCell>
+   472→                        </TableRow>
+   473→                      )
+   474→                    })}
+   475→                  </TableBody>
+   476→                </Table>
+   477→              </div>
+   478→            </CardContent>
+   479→          </Card>
+   480→
+   481→          {/* ── Receipts history ──────────────────────────────────────── */}
+   482→          <Card>
+   483→            <CardHeader className="pb-3">
+   484→              <CardTitle className="text-base flex items-center gap-2">
+   485→                <History className="h-4 w-4" /> Receiving history
+   486→              </CardTitle>
+   487→            </CardHeader>
+   488→            <CardContent>
+   489→              {order.receipts.length === 0 ? (
+   490→                <div className="text-center py-8">
+   491→                  <PackageCheck className="h-8 w-8 mx-auto text-muted-foreground/40 mb-2" />
+   492→                  <p className="text-sm text-muted-foreground">
+   493→                    No receipts recorded yet for this PO.
+   494→                  </p>
+   495→                </div>
+   496→              ) : (
+   497→                <div className="space-y-3">
+   498→                  {order.receipts.map((r) => {
+   499→                    const totalReceived = r.items.reduce(
+   500→                      (s, i) => s + i.receivedQuantity,
+   501→                      0,
+   502→                    )
+   503→                    const totalValue = r.items.reduce(
+   504→                      (s, i) => s + i.receivedQuantity * i.actualCostPerUnit,
+   505→                      0,
+   506→                    )
+   507→                    return (
+   508→                      <div
+   509→                        key={r.id}
+   510→                        className="rounded-md border p-3 bg-muted/20"
+   511→                      >
+   512→                        <div className="flex items-center justify-between mb-2">
+   513→                          <div className="text-sm">
+   514→                            <span className="font-medium">{r.receivedBy}</span>
+   515→                            <span className="text-muted-foreground"> received </span>
+   516→                            <span className="font-medium tabular-nums">{totalReceived}</span>
+   517→                            <span className="text-muted-foreground"> units</span>
+   518→                          </div>
+   519→                          <span className="text-xs text-muted-foreground">
+   520→                            {formatDateTime(r.receivedAt)}
+   521→                          </span>
+   522→                        </div>
+   523→                        <div className="flex flex-wrap gap-1.5">
+   524→                          {r.items.map((ri) => {
+   525→                            const poItem = order.items.find(
+   526→                              (i) => i.id === ri.purchaseOrderItemId,
+   527→                            )
+   528→                            return (
+   529→                              <Badge
+   530→                                key={ri.id}
+   531→                                variant="outline"
+   532→                                className="text-[10px] font-mono"
+   533→                              >
+   534→                                {poItem?.variant.sku ?? '—'}: {ri.receivedQuantity} @{' '}
+   535→                                {formatPKR(ri.actualCostPerUnit)}
+   536→                                {ri.shortageQuantity > 0 && (
+   537→                                  <span className="text-rose-600 ml-1">
+   538→                                    (short {ri.shortageQuantity})
+   539→                                  </span>
+   540→                                )}
+   541→                              </Badge>
+   542→                            )
+   543→                          })}
+   544→                        </div>
+   545→                        {r.notes && (
+   546→                          <p className="text-xs text-muted-foreground mt-2 italic">
+   547→                            “{r.notes}”
+   548→                          </p>
+   549→                        )}
+   550→                        <p className="text-xs text-muted-foreground mt-1.5">
+   551→                          Receipt value: <span className="font-medium">{formatPKR(totalValue)}</span>
+   552→                        </p>
+   553→                      </div>
+   554→                    )
+   555→                  })}
+   556→                </div>
+   557→              )}
+   558→            </CardContent>
+   559→          </Card>
+   560→        </div>
+   561→
+   562→        {/* ── Right: meta ──────────────────────────────────────────────── */}
+   563→        <div className="space-y-4">
+   564→          <Card>
+   565→            <CardHeader className="pb-3">
+   566→              <CardTitle className="text-base">Order summary</CardTitle>
+   567→            </CardHeader>
+   568→            <CardContent className="space-y-3 text-sm">
+   569→              <SummaryRow
+   570→                icon={<Truck className="h-3.5 w-3.5" />}
+   571→                label="Supplier"
+   572→                value={order.supplier.name}
+   573→              />
+   574→              {order.supplier.contactPerson && (
+   575→                <SummaryRow label="Contact" value={order.supplier.contactPerson} />
+   576→              )}
+   577→              {order.supplier.phone && (
+   578→                <SummaryRow label="Phone" value={order.supplier.phone} />
+   579→              )}
+   580→              <SummaryRow label="Payment terms" value={order.supplier.paymentTerms} />
+   581→              <div className="border-t pt-3 space-y-2">
+   582→                <SummaryRow
+   583→                  icon={<Warehouse className="h-3.5 w-3.5" />}
+   584→                  label="Deliver to"
+   585→                  value={order.deliveryLocation.name}
+   586→                />
+   587→                <SummaryRow
+   588→                  icon={<Calendar className="h-3.5 w-3.5" />}
+   589→                  label="Order date"
+   590→                  value={formatDate(order.orderDate)}
+   591→                />
+   592→                <SummaryRow
+   593→                  icon={<Calendar className="h-3.5 w-3.5" />}
+   594→                  label="Expected"
+   595→                  value={formatDate(order.expectedDeliveryDate)}
+   596→                />
+   597→              </div>
+   598→              <div className="border-t pt-3 space-y-2">
+   599→                <SummaryRow
+   600→                  icon={<Wallet className="h-3.5 w-3.5" />}
+   601→                  label="Order value"
+   602→                  value={formatPKR(order.totalItemsValue)}
+   603→                />
+   604→                <SummaryRow label="Received value" value={formatPKR(totalReceivedValue)} />
+   605→                <SummaryRow
+   606→                  label="Advance paid"
+   607→                  value={formatPKR(order.advancePayment)}
+   608→                />
+   609→                <div className="flex items-center justify-between pt-2 border-t">
+   610→                  <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+   611→                    Balance due
+   612→                  </span>
+   613→                  <span className="text-base font-semibold text-amber-700 tabular-nums">
+   614→                    {formatPKR(order.balanceDue)}
+   615→                  </span>
+   616→                </div>
+   617→                {order.paymentMethod && (
+   618→                  <SummaryRow label="Payment method" value={order.paymentMethod} />
+   619→                )}
+   620→              </div>
+   621→              {order.notes && (
+   622→                <div className="border-t pt-3">
+   623→                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-1">
+   624→                    Notes
+   625→                  </p>
+   626→                  <p className="text-xs text-foreground whitespace-pre-wrap">{order.notes}</p>
+   627→                </div>
+   628→              )}
+   629→            </CardContent>
+   630→          </Card>
+   631→        </div>
+   632→      </div>
+   633→
+   634→      {/* ── Receive dialog ────────────────────────────────────────────────── */}
+   635→      {canReceiveStock && (
+   636→        <ReceiveDialog
+   637→          open={receiveOpen}
+   638→          onOpenChange={setReceiveOpen}
+   639→          po={order}
+   640→          onSuccess={() => {
+   641→            invalidateAll()
+   642→            setReceiveOpen(false)
+   643→          }}
+   644→        />
+   645→      )}
+   646→
+   647→      {/* ── Cancel dialog ──────────────────────────────────────────────────── */}
+   648→      <AlertDialog open={cancelOpen} onOpenChange={setCancelOpen}>
+   649→        <AlertDialogContent>
+   650→          <AlertDialogHeader>
+   651→            <AlertDialogTitle>Cancel PO {order.poNumber}?</AlertDialogTitle>
+   652→            <AlertDialogDescription>
+   653→              This will mark the PO as cancelled and release any reserved incoming stock for
+   654→              unreceived items. This action cannot be undone.
+   655→            </AlertDialogDescription>
+   656→          </AlertDialogHeader>
+   657→          <div className="space-y-1.5 py-2">
+   658→            <Label htmlFor="cancel-reason">Reason (optional)</Label>
+   659→            <Textarea
+   660→              id="cancel-reason"
+   661→              placeholder="e.g. Supplier couldn't deliver, no longer needed…"
+   662→              rows={3}
+   663→              value={cancelReason}
+   664→              onChange={(e) => setCancelReason(e.target.value)}
+   665→            />
+   666→          </div>
+   667→          <AlertDialogFooter>
+   668→            <AlertDialogCancel disabled={cancelMutation.isPending}>Keep PO</AlertDialogCancel>
+   669→            <AlertDialogAction
+   670→              className="bg-rose-600 hover:bg-rose-700"
+   671→              disabled={cancelMutation.isPending}
+   672→              onClick={(e) => {
+   673→                e.preventDefault()
+   674→                cancelMutation.mutate()
+   675→              }}
+   676→            >
+   677→              {cancelMutation.isPending ? (
+   678→                <>
+   679→                  <Loader2 className="h-4 w-4 animate-spin" /> Cancelling…
+   680→                </>
+   681→              ) : (
+   682→                <>
+   683→                  <Ban className="h-4 w-4" /> Cancel PO
+   684→                </>
+   685→              )}
+   686→            </AlertDialogAction>
+   687→          </AlertDialogFooter>
+   688→        </AlertDialogContent>
+   689→      </AlertDialog>
+   690→    </div>
+   691→  )
+   692→}
+   693→
+   694→function SummaryRow({
+   695→  icon,
+   696→  label,
+   697→  value,
+   698→}: {
+   699→  icon?: React.ReactNode
+   700→  label: string
+   701→  value: string
+   702→}) {
+   703→  return (
+   704→    <div className="flex items-center justify-between gap-2">
+   705→      <span className="text-muted-foreground flex items-center gap-1.5">
+   706→        {icon}
+   707→        {label}
+   708→      </span>
+   709→      <span className="font-medium text-right">{value}</span>
+   710→    </div>
+   711→  )
+   712→}
+   713→
+   714→// ─────────────────────────────────────────────────────────────────────────────
+   715→// Receive dialog — pre-filled with remaining quantities
+   716→// ─────────────────────────────────────────────────────────────────────────────
+   717→
+   718→interface ReceiveLine {
+   719→  itemId: string
+   720→  variantId: string
+   721→  sku: string
+   722→  productTitle: string
+   723→  remaining: number
+   724→  received: number
+   725→  actualCost: number
+   726→  shortage: number
+   727→  shortageReason: string
+   728→}
+   729→
+   730→function ReceiveDialog({
+   731→  open,
+   732→  onOpenChange,
+   733→  po,
+   734→  onSuccess,
+   735→}: {
+   736→  open: boolean
+   737→  onOpenChange: (v: boolean) => void
+   738→  po: PODetail
+   739→  onSuccess: () => void
+   740→}) {
+   741→  const [lines, setLines] = useState<ReceiveLine[]>([])
+   742→  const [notes, setNotes] = useState('')
+   743→
+   744→  // Initialize lines when opening.
+   745→  useEffect(() => {
+   746→    if (open) {
+   747→      setLines(
+   748→        po.items
+   749→          .filter((i) => !i.fullyReceived)
+   750→          .map((i) => ({
+   751→            itemId: i.id,
+   752→            variantId: i.variant.id,
+   753→            sku: i.variant.sku,
+   754→            productTitle: i.variant.productTitle,
+   755→            remaining: i.orderedQuantity - i.receivedQuantity,
+   756→            received: i.orderedQuantity - i.receivedQuantity,
+   757→            actualCost: i.costPerUnit,
+   758→            shortage: 0,
+   759→            shortageReason: '',
+   760→          })),
+   761→      )
+   762→      setNotes('')
+   763→    }
+   764→  }, [open, po])
+   765→
+   766→  const updateLine = (itemId: string, patch: Partial<ReceiveLine>) => {
+   767→    setLines((prev) =>
+   768→      prev.map((l) => {
+   769→        if (l.itemId !== itemId) return l
+   770→        const next = { ...l, ...patch }
+   771→        // Recompute shortage whenever received changes.
+   772→        if (patch.received !== undefined) {
+   773→          next.shortage = Math.max(0, next.remaining - patch.received)
+   774→        }
+   775→        return next
+   776→      }),
+   777→    )
+   778→  }
+   779→
+   780→  const totalReceivingValue = lines.reduce(
+   781→    (s, l) => s + l.received * l.actualCost,
+   782→    0,
+   783→  )
+   784→  const hasShortage = lines.some((l) => l.shortage > 0)
+   785→  const hasAnyReceived = lines.some((l) => l.received > 0)
+   786→
+   787→  const receiveMutation = useMutation({
+   788→    mutationFn: async (payload: ReceivePayload) =>
+   789→      api.post(`/api/purchase-orders/${po.id}/receive`, payload),
+   790→    onSuccess: (_data, vars) => {
+   791→      const total = vars.items.reduce((s, i) => s + i.received_quantity, 0)
+   792→      toast.success(`Received ${total} units against ${po.poNumber}.`)
+   793→      onSuccess()
+   794→    },
+   795→    onError: (err) => toast.error(getErrorMessage(err)),
+   796→  })
+   797→
+   798→  const handleSubmit = () => {
+   799→    if (!hasAnyReceived) {
+   800→      toast.error('Enter at least one received quantity.')
+   801→      return
+   802→    }
+   803→    // Require shortage reasons where applicable.
+   804→    const missingReason = lines.find((l) => l.shortage > 0 && !l.shortageReason.trim())
+   805→    if (missingReason) {
+   806→      toast.error(`Provide a shortage reason for ${missingReason.sku}.`)
+   807→      return
+   808→    }
+   809→    const payload: ReceivePayload = {
+   810→      notes: notes.trim() || undefined,
+   811→      items: lines
+   812→        .filter((l) => l.received > 0)
+   813→        .map((l) => ({
+   814→          purchase_order_item_id: l.itemId,
+   815→          org_variant_id: l.variantId,
+   816→          received_quantity: l.received,
+   817→          actual_cost_per_unit: l.actualCost,
+   818→          shortage_quantity: l.shortage,
+   819→          shortage_reason: l.shortage > 0 ? l.shortageReason.trim() : undefined,
+   820→        })),
+   821→    }
+   822→    receiveMutation.mutate(payload)
+   823→  }
+   824→
+   825→  return (
+   826→    <Dialog open={open} onOpenChange={onOpenChange}>
+   827→      <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto scrollbar-thin">
+   828→        <DialogHeader>
+   829→          <DialogTitle className="flex items-center gap-2">
+   830→            <PackageCheck className="h-4 w-4" /> Receive stock — {po.poNumber}
+   831→          </DialogTitle>
+   832→          <DialogDescription>
+   833→            Pre-filled with remaining quantities. Adjust the actually-received amount and cost
+   834→            per unit if they differ from the PO.
+   835→          </DialogDescription>
+   836→        </DialogHeader>
+   837→
+   838→        <div className="rounded-md border overflow-x-auto">
+   839→          <Table>
+   840→            <TableHeader>
+   841→              <TableRow>
+   842→                <TableHead>Variant</TableHead>
+   843→                <TableHead className="text-right">Remaining</TableHead>
+   844→                <TableHead className="w-28">Received</TableHead>
+   845→                <TableHead className="w-32">Cost / unit</TableHead>
+   846→                <TableHead className="text-right">Line total</TableHead>
+   847→              </TableRow>
+   848→            </TableHeader>
+   849→            <TableBody>
+   850→              {lines.map((l) => (
+   851→                <TableRow key={l.itemId}>
+   852→                  <TableCell>
+   853→                    <div className="flex flex-col">
+   854→                      <span className="font-medium text-sm">{l.productTitle}</span>
+   855→                      <span className="text-xs text-muted-foreground font-mono">{l.sku}</span>
+   856→                    </div>
+   857→                  </TableCell>
+   858→                  <TableCell className="text-right tabular-nums text-muted-foreground">
+   859→                    {l.remaining}
+   860→                  </TableCell>
+   861→                  <TableCell>
+   862→                    <Input
+   863→                      type="number"
+   864→                      min="0"
+   865→                      max={l.remaining}
+   866→                      step="1"
+   867→                      className="h-8 tabular-nums"
+   868→                      value={l.received}
+   869→                      onChange={(e) =>
+   870→                        updateLine(l.itemId, {
+   871→                          received: Math.max(0, parseQty(e.target.value)),
+   872→                        })
+   873→                      }
+   874→                    />
+   875→                  </TableCell>
+   876→                  <TableCell>
+   877→                    <Input
+   878→                      type="number"
+   879→                      min="0"
+   880→                      step="0.01"
+   881→                      className="h-8 tabular-nums"
+   882→                      value={l.actualCost}
+   883→                      onChange={(e) =>
+   884→                        updateLine(l.itemId, { actualCost: parseCost(e.target.value) })
+   885→                      }
+   886→                    />
+   887→                  </TableCell>
+   888→                  <TableCell className="text-right tabular-nums font-medium">
+   889→                    {formatPKR(l.received * l.actualCost)}
+   890→                  </TableCell>
+   891→                </TableRow>
+   892→              ))}
+   893→            </TableBody>
+   894→          </Table>
+   895→        </div>
+   896→
+   897→        {hasShortage && (
+   898→          <Alert variant="destructive">
+   899→            <AlertTriangle className="h-4 w-4" />
+   900→            <AlertTitle>Shortages detected</AlertTitle>
+   901→            <AlertDescription>
+   902→              The following items have received quantities less than remaining. A reason is
+   903→              required for each.
+   904→              <div className="mt-2 space-y-2">
+   905→                {lines
+   906→                  .filter((l) => l.shortage > 0)
+   907→                  .map((l) => (
+   908→                    <div key={l.itemId} className="space-y-1">
+   909→                      <Label htmlFor={`sr-${l.itemId}`} className="text-xs">
+   910→                        {l.sku} — short by {l.shortage} unit{l.shortage === 1 ? '' : 's'}
+   911→                      </Label>
+   912→                      <Input
+   913→                        id={`sr-${l.itemId}`}
+   914→                        placeholder="e.g. Damaged in transit, supplier short-shipped…"
+   915→                        value={l.shortageReason}
+   916→                        onChange={(e) =>
+   917→                          updateLine(l.itemId, { shortageReason: e.target.value })
+   918→                        }
+   919→                      />
+   920→                    </div>
+   921→                  ))}
+   922→              </div>
+   923→            </AlertDescription>
+   924→          </Alert>
+   925→        )}
+   926→
+   927→        <div className="space-y-1.5">
+   928→          <Label htmlFor="recv-notes">Notes (optional)</Label>
+   929→          <Textarea
+   930→            id="recv-notes"
+   931→            placeholder="Any context for this receipt…"
+   932→            rows={2}
+   933→            value={notes}
+   934→            onChange={(e) => setNotes(e.target.value)}
+   935→          />
+   936→        </div>
+   937→
+   938→        <DialogFooter className="flex items-center justify-between sm:justify-between gap-3">
+   939→          <div className="text-sm text-muted-foreground">
+   940→            Total receiving value:{' '}
+   941→            <span className="font-semibold text-foreground tabular-nums">
+   942→              {formatPKR(totalReceivingValue)}
+   943→            </span>
+   944→          </div>
+   945→          <div className="flex items-center gap-2">
+   946→            <Button variant="outline" onClick={() => onOpenChange(false)}>
+   947→              Cancel
+   948→            </Button>
+   949→            <Button onClick={handleSubmit} disabled={receiveMutation.isPending || !hasAnyReceived}>
+   950→              {receiveMutation.isPending ? (
+   951→                <>
+   952→                  <Loader2 className="h-4 w-4 animate-spin" /> Receiving…
+   953→                </>
+   954→              ) : (
+   955→                <>
+   956→                  <CheckCircle2 className="h-4 w-4" /> Confirm Receipt
+   957→                </>
+   958→              )}
+   959→            </Button>
+   960→          </div>
+   961→        </DialogFooter>
+   962→      </DialogContent>
+   963→    </Dialog>
+   964→  )
+   965→}
+   966→
+   967→function parseQty(v: string): number {
+   968→  if (v === '') return 0
+   969→  const n = Number(v)
+   970→  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0
+   971→}
+   972→
+   973→function parseCost(v: string): number {
+   974→  if (v === '') return 0
+   975→  const n = Number(v)
+   976→  return Number.isFinite(n) && n >= 0 ? n : 0
+   977→}
+   978→

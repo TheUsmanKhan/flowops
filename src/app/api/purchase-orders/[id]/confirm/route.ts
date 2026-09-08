@@ -49,21 +49,33 @@ export async function POST(
     if (!po) throw new ApiError(404, 'Purchase order not found.')
     if (po.status !== 'draft') throw new ApiError(400, `PO is not a draft (status: ${po.status}).`)
 
-    // Update status
-    await db.purchaseOrder.update({
-      where: { id: poId },
-      data: { status: 'ordered' },
-    })
+    // PO-011 fix: wrap the PO status update + the incoming-stock increment
+    // loop in a single db.$transaction so a failure in ANY increment rolls
+    // back BOTH the PO status update AND all earlier increments in this loop.
+    // Previously a mid-loop failure left the PO marked 'ordered' with only a
+    // partial incoming projection applied — the warehouse would show some
+    // items as "incoming" but not others, and cancelling the PO would not
+    // reverse the missing increments (PO-013 fix below relies on the same
+    // tx-aware decrementIncomingStock helper).
+    //
+    // The incrementIncomingStock helper accepts the `tx` parameter and runs
+    // its upsert on the same transaction (see src/lib/inventory.ts).
+    await db.$transaction(async (tx) => {
+      await tx.purchaseOrder.update({
+        where: { id: poId },
+        data: { status: 'ordered' },
+      })
 
-    // Increment incoming stock for each item
-    for (const item of po.items) {
-      await incrementIncomingStock(
-        item.orgVariantId,
-        po.deliveryLocationId,
-        orgId,
-        item.orderedQuantity,
-      )
-    }
+      for (const item of po.items) {
+        await incrementIncomingStock(
+          item.orgVariantId,
+          po.deliveryLocationId,
+          orgId,
+          item.orderedQuantity,
+          tx,
+        )
+      }
+    })
 
     insertAuditLog({
       action: 'purchase_order.confirmed',

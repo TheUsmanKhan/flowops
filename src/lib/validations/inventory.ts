@@ -131,6 +131,11 @@ export const receivePOItemSchema = z
   .object({
     purchase_order_item_id: z.string().min(1),
     received_quantity: z.number().int().min(0),
+    // PO-016 fix: explicitly reject negative cost per unit. The previous
+    // audit (PO_PRODUCTION_AUDIT_FINAL.md PO-016) noted this validation was
+    // already present at the server-side Zod layer — keeping it here as the
+    // canonical definition. The route's inline schema and the UI's parseCost
+    // helper both mirror this same `.min(0)` constraint.
     actual_cost_per_unit: z.number().min(0, 'Cost must be 0 or positive'),
     shortage_reason: z.string().max(500).optional().or(z.literal('')),
   })
@@ -146,6 +151,12 @@ export const receivePOSchema = z.object({
   items: z.array(receivePOItemSchema).min(1, 'At least one item is required'),
 })
 export type ReceivePOInput = z.infer<typeof receivePOSchema>
+
+// PO-016: alias `receiveSchema` for naming consistency with the receive
+// route's inline schema. Both refer to the same canonical definition above.
+// This makes the validation importable by name in callers that expect a
+// `receiveSchema` export.
+export const receiveSchema = receivePOSchema
 
 // ──────────────────────────────────────────────────────────────
 // SUPPLIER RETURNS
@@ -243,10 +254,37 @@ export const productionOrderSchema = z.object({
 })
 export type ProductionOrderInput = z.infer<typeof productionOrderSchema>
 
+// PO-014 fix: Zod validation for the PATCH /api/production-orders/[id]
+// endpoint. Previously the PATCH handler accepted an untyped body and
+// silently coerced any value (including malformed status strings and
+// out-of-range dates) into the DB write. Now the schema enforces:
+//   - status ∈ {fabric_reserved, in_production, completed, dispatched,
+//     cancelled} (matches the PATCH handler's existing transition logic)
+//   - assignedTailor is a string ≤ 100 chars (DB column constraint)
+//   - estimatedCompletionDate / actualCompletionDate are ISO 8601 datetime
+//     strings (or null to clear)
+//
+// `cancellation_reason` is NOT part of this schema because the PATCH handler
+// consumes it directly from the request body when status='cancelled' (it's
+// stored in `cancellationReason` on the ProductionOrder, not a top-level
+// field on the order row). The handler continues to read it from the raw
+// body via readBody for backward compatibility — the schema only validates
+// the structured fields above.
+export const patchProductionOrderSchema = z.object({
+  status: z
+    .enum(['fabric_reserved', 'in_production', 'completed', 'dispatched', 'cancelled'])
+    .optional(),
+  assigned_tailor: z.string().max(100).optional(),
+  estimated_completion_date: z.string().datetime().optional().or(z.null()),
+  actual_completion_date: z.string().datetime().optional().or(z.null()),
+})
+export type PatchProductionOrderInput = z.infer<typeof patchProductionOrderSchema>
+
 export const fulfillMadeToOrderSchema = z.object({
   org_variant_id: z.string().min(1),
   quantity: z.number().int().positive(),
-  company_id: z.string().min(1),
+  // PO-001: company_id is derived from the session via getWorkspace() in the
+  // fulfill-mto route — never trust a body-supplied company_id for authorization.
   preferred_location_id: z.string().optional(),
 })
 export type FulfillMadeToOrderInput = z.infer<typeof fulfillMadeToOrderSchema>

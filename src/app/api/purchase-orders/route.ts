@@ -38,20 +38,38 @@ export async function GET(req: Request) {
     const url = new URL(req.url)
     const status = url.searchParams.get('status') ?? ''
 
-    const orders = await db.purchaseOrder.findMany({
-      where: {
-        companyId,
-        ...(status ? { status } : {}),
-      },
-      include: {
-        supplier: { select: { name: true } },
-        deliveryLocation: { select: { name: true } },
-        items: { select: { costPerUnit: true, orderedQuantity: true, receivedQuantity: true } },
-        _count: { select: { items: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 50,
-    })
+    // PO-015 fix: pagination support. Defaults: page=1, pageSize=50 (matches
+    // the previous `take: 50` cap). Page index is 1-based. Caller can request
+    // up to pageSize=200 per page (defensive upper bound).
+    const pageRaw = Number.parseInt(url.searchParams.get('page') ?? '1', 10)
+    const pageSizeRaw = Number.parseInt(url.searchParams.get('pageSize') ?? '50', 10)
+    const page = Number.isFinite(pageRaw) && pageRaw > 0 ? pageRaw : 1
+    const pageSize =
+      Number.isFinite(pageSizeRaw) && pageSizeRaw > 0
+        ? Math.min(pageSizeRaw, 200)
+        : 50
+
+    const where = {
+      companyId,
+      ...(status ? { status } : {}),
+    }
+
+    // Run count + page in parallel for efficiency.
+    const [orders, total] = await Promise.all([
+      db.purchaseOrder.findMany({
+        where,
+        include: {
+          supplier: { select: { name: true } },
+          deliveryLocation: { select: { name: true } },
+          items: { select: { costPerUnit: true, orderedQuantity: true, receivedQuantity: true } },
+          _count: { select: { items: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+      }),
+      db.purchaseOrder.count({ where }),
+    ])
 
     return Response.json({
       orders: orders.map((po) => {
@@ -79,6 +97,9 @@ export async function GET(req: Request) {
           balanceDue: Math.max(0, totalItemsValue - Number(po.advancePayment)),
         }
       }),
+      total,
+      page,
+      pageSize,
     })
   } catch (err) {
     return handleError(err)
@@ -116,6 +137,29 @@ export async function POST(req: Request) {
     const parsed = createPoSchema.safeParse(body)
     if (!parsed.success) throw new ApiError(400, parsed.error.issues[0]?.message ?? 'Invalid input')
     const d = parsed.data
+
+    // PO-010 fix: validate each org_variant_id belongs to the caller's
+    // organization. Previously the POST handler trusted body-supplied
+    // variant IDs — a caller could create PO items referencing variants
+    // belonging to a different org (cross-tenant contamination). Now we
+    // verify all variant IDs resolve to rows in orgId before any write.
+    //
+    // Note: OrgProductVariant is an org-level table (no companyId column) —
+    // the orgId check is sufficient and correct.
+    const variantIds = d.items.map((i) => i.org_variant_id)
+    const validVariants = await db.orgProductVariant.findMany({
+      where: { id: { in: variantIds }, organizationId: orgId },
+      select: { id: true },
+    })
+    if (validVariants.length !== variantIds.length) {
+      // Find which IDs were invalid for a helpful error message.
+      const validSet = new Set(validVariants.map((v) => v.id))
+      const invalid = variantIds.filter((id) => !validSet.has(id))
+      throw new ApiError(
+        400,
+        `One or more variants do not belong to your organization. Invalid variant IDs: ${invalid.join(', ')}`,
+      )
+    }
 
     // Core creation logic — wrapped in a closure so it can be run either
     // directly (no idempotency key, backwards-compatible) or via

@@ -858,14 +858,22 @@ export async function generatePoNumber(organizationId: string): Promise<string> 
  * This is the ONLY function that writes to inventory_pools.incoming directly
  * — it's a live projection field, not a ledgered movement.
  * Creates the pool row if it doesn't exist.
+ *
+ * ATOMICITY (PO-011 / PO-013 fix): accepts an optional `tx` Prisma
+ * transaction client. When passed, the upsert runs on the caller's
+ * transaction so the increment commits/rolls back together with the
+ * PO status update. When omitted, falls back to the global `db` client
+ * (backwards-compatible with existing callers).
  */
 export async function incrementIncomingStock(
   orgVariantId: string,
   locationId: string,
   organizationId: string,
   qty: number,
+  tx?: Prisma.TransactionClient,
 ): Promise<void> {
-  await db.inventoryPool.upsert({
+  const client = tx ?? db
+  await client.inventoryPool.upsert({
     where: { orgVariantId_locationId: { orgVariantId, locationId } },
     update: { incoming: { increment: qty } },
     create: {
@@ -880,19 +888,24 @@ export async function incrementIncomingStock(
 /**
  * Decrement incoming stock (never below 0).
  * Used when cancelling POs or receiving against POs.
+ *
+ * ATOMICITY (PO-011 / PO-013 fix): accepts an optional `tx` Prisma
+ * transaction client for the same reason as incrementIncomingStock().
  */
 export async function decrementIncomingStock(
   orgVariantId: string,
   locationId: string,
   qty: number,
+  tx?: Prisma.TransactionClient,
 ): Promise<void> {
-  const pool = await db.inventoryPool.findUnique({
+  const client = tx ?? db
+  const pool = await client.inventoryPool.findUnique({
     where: { orgVariantId_locationId: { orgVariantId, locationId } },
     select: { incoming: true },
   })
   if (!pool) return
   const newIncoming = Math.max(0, pool.incoming - qty)
-  await db.inventoryPool.update({
+  await client.inventoryPool.update({
     where: { orgVariantId_locationId: { orgVariantId, locationId } },
     data: { incoming: newIncoming },
   })
