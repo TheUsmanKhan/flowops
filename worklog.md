@@ -16680,3 +16680,23 @@ The ghost pool has been resolved per Usman's Option B decision. The
 4 ambiguous pools remain pending manual review (now identified by
 SKU/location). Weekly drift detection is now an automated safeguard.
 
+
+---
+Task ID: AMBIGUOUS-POOLS-CORRECTED
+Agent: main
+Task: Apply recommended correction for all 4 ambiguous drift pools
+
+Work Log:
+- Reset 9 cancelled-order OrderItems from 'reserved' to 'pending' across 4 pools
+- Set pool.reserved = SUM of active (non-cancelled) reserved OrderItems
+- For 3 pools where reserved > onHand (stock shortage), applied backorder conversion:
+  - HFH-ST-S: 4 items bumped (qty 8), reserved 9→1
+  - HFH-UNST-OS: 4 items bumped (qty 7), reserved 12→5
+  - F-18A-MAROON: 1 item bumped (qty 1), reserved 2→1
+
+Final state:
+- Invariant violations: 0 ✅
+- Drift pools: 0 ✅
+- 13 drift_corrected audit logs + 9 auto_backordered audit logs
+
+Inventory Core module is now FULLY CLEAN.
