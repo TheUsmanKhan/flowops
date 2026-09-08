@@ -16018,3 +16018,44 @@ Stage Summary:
 - Codebase-wide greps confirm: (a) no other InventoryTransaction mutation calls exist anywhere (src/, supabase/, scripts/); (b) no other [id] routes exist for nullable-companyId models.
 - Remaining open from audit: INV-002 (ReturnedStitchedInventory row creation), INV-007 (direct InventoryPool writes in purchase-orders routes), INV-009 (supplier DELETE dependency check), INV-010 (adjust-stock 500→400), INV-011 (adjust-stock frontend checks onHand not available), INV-012 (InventoryPool readers ad-hoc), INV-013 (adjust-stock StockLossRecord design conflict). These are tracked for future tasks.
 - Suggested follow-up: hardening task to add `companyId: company.id` to all [id] routes for NON-nullable companyId models (Order, Employee, ProductionOrder, PurchaseOrder, etc.) — these have the same cross-company access risk but are outside INV-008's stated scope.
+
+---
+Task ID: INVENTORY-CORE-FIXES-PART1-COMPLETE
+Agent: main
+Task: Fix Inventory Core bugs INV-001,003,004,005,006,008 + verification
+
+Work Log:
+- 5 fix groups implemented (INV-001+006 combined, INV-003+004 combined, INV-005, INV-008)
+- 8 files modified, 862 insertions, 325 deletions
+- Committed as 02cccbb, pushed to GitHub
+
+Verification Questions Answered:
+1. ExchangeShipment reservations DO use the same InventoryPool.reserved counter
+   — included in the INV-001 bump pool selection
+2. recompute_order_status SQL function DOES produce 'partially_backordered'
+   when items are backordered — confirmed from source
+3. 13 pools have pre-existing drift (reserved != sum of OrderItem reservations)
+   — the clamp fallback handles this edge case
+
+Fixes Applied:
+- INV-001: Reservation invariant protection (auto-convert to backorder)
+- INV-003: SupplierReturn referenceId fixed (reversed creation order)
+- INV-004: ProductionOrder referenceId fixed (reversed creation order)
+- INV-005: Ledger append-only restored (removed updateMany)
+- INV-006: processInventoryTransaction now atomic ($transaction)
+- INV-008: Cross-company access blocked (companyId filter on [id] routes)
+
+Remaining Open (not in scope for this fix pass):
+- INV-002: receive-returned-stitched doesn't create ReturnedStitchedInventory row
+- INV-007: Direct InventoryPool writes in purchase-orders routes
+- INV-009: Supplier DELETE no dependency check
+- INV-010: Adjust-stock returns 500 instead of 400
+- INV-011: Frontend checks onHand instead of available
+- INV-012: 14 modules use raw ad-hoc queries (no shared helper)
+- INV-013: Adjust-stock creates StockLossRecord (module boundary)
+
+Stage Summary:
+- 6 of 13 inventory bugs fixed (all Critical + High)
+- 0 new lint errors introduced
+- All fixes verified via code grep + DB queries
+- Pre-existing data drift identified (13 pools) — needs one-time repair script
