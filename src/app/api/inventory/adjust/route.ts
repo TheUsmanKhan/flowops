@@ -154,56 +154,64 @@ export async function POST(req: Request) {
       } else {
         // Removing stock — use damage_writeoff as a generic removal type.
         //
-        // BUG FIX: Previously this branch only created the inventory
-        // transaction (decremented onHand) but NO StockLossRecord —
-        // leaving the Stock Losses module completely unaware that stock
-        // was lost/damaged. The user could then record the same loss
-        // AGAIN in the Stock Losses module → double-decrement.
+        // ── INV-013 FIX (PART3-Section D, Option A) ──────────────────────
+        // Previously this branch called recordStockLoss() which created a
+        // StockLossRecord (with sourceModule='adjust_stock') AND the
+        // damage_writeoff InventoryTransaction in one atomic operation.
         //
-        // Now we create a StockLossRecord via the unified recordStockLoss
-        // helper, which:
-        //   1. Creates the loss record (linked to the inventory txn)
-        //   2. Is dedup-safe (if the user re-records in Stock Losses, the
-        //      unique index prevents duplicate)
-        //   3. Uses sourceModule='adjust_stock' so it's traceable
-        // See STOCKLOSS_INVESTIGATION.md Problem 2.
-        const { recordStockLoss } = await import('@/lib/stock-loss')
-        const lossResult = await recordStockLoss({
-          organizationId: orgId,
-          companyId: company.id,
+        // PROBLEM: that conflated two distinct operations:
+        //   1. Adjust Stock = pure inventory count correction (positive OR
+        //      negative). The user is correcting a physical count, not
+        //      reporting a loss investigation.
+        //   2. Stock Losses module = dedicated loss-reporting workflow with
+        //      investigation/approval/insurance/courier-claim fields.
+        //
+        // Mixing the two meant:
+        //   - Every negative adjustment created a damage-type loss record,
+        //     even when the user's reason was "Miscount on previous receipt"
+        //     (semantically wrong — polluting the Stock Losses dashboard).
+        //   - Stock Losses UI showed a mixed-source list (adjust_stock +
+        //     stock_loss records) with no UI to distinguish them.
+        //   - If the user later recorded the same loss in the Stock Losses
+        //     module, the dedup index didn't fire (different sourceModule)
+        //     → potential double-decrement.
+        //
+        // FIX: Adjust Stock now performs ONLY the InventoryTransaction
+        // (decrement onHand via damage_writeoff). NO StockLossRecord is
+        // created. The onHand decrement still happens — the adjustment
+        // works exactly as before for count-correction purposes.
+        //
+        // Users wanting loss tracking (damage type, responsible party,
+        // investigation workflow, courier claim, insurance, etc.) must use
+        // the dedicated Stock Losses module form.
+        //
+        // The frontend adjust-stock-view.tsx now shows a helper text
+        // when the user selects a damage/theft/loss reason, pointing them
+        // to the Stock Losses module.
+        //
+        // Note: 'adjust_stock' is kept as a valid sourceModule value in
+        // stock-loss.ts for backwards compatibility with any historical
+        // records; it just won't be used for new records.
+        const txnType = d.reason.toLowerCase().includes('theft')
+          ? 'theft_writeoff'
+          : 'damage_writeoff'
+        const txnResult = await processInventoryTransaction({
           orgVariantId: d.org_variant_id,
           locationId: d.location_id,
-          // Infer loss type from the reason — if reason mentions "theft",
-          // use theft; otherwise default to damaged (manual adjustment
-          // is typically for damage correction).
-          lossType: d.reason.toLowerCase().includes('theft') ? 'theft' : 'damaged',
-          sourceModule: 'adjust_stock',
-          quantity: absQty,
-          costPerUnit: avgCostForMetric,
+          organizationId: orgId,
+          companyId: company.id,
           employeeId: caller.id,
-          subType: 'confirmed',
-          responsibleParty: 'warehouse',
+          transactionType: txnType,
+          quantity: absQty,
+          referenceType: 'manual',
           notes: `Manual adjustment: ${d.reason}. ${d.notes || ''}`,
-          // createInventoryTransaction=true (default) — recordStockLoss
-          // creates the damage_writeoff transaction itself, so we DON'T
-          // call processInventoryTransaction separately below (was the
-          // old behavior). This unifies the stock movement + loss record
-          // into one atomic-ish operation with rollback on failure.
         })
 
-        if (!lossResult.success) {
-          throw new ApiError(500, `Adjustment failed: ${lossResult.error}`)
-        }
-        if (lossResult.wasDuplicate) {
-          // Loss already recorded for this — the adjustment is still valid
-          // (the user might be re-adjusting). Don't fail, just log.
-          console.log(`[adjust-stock] Loss already existed for this item, continuing with adjustment.`)
+        if (!txnResult.success) {
+          throw new ApiError(500, `Adjustment failed: ${txnResult.error}`)
         }
 
-        // If recordStockLoss created the inventory transaction, use that
-        // txn ID; otherwise (createInventoryTransaction was false), create
-        // the txn directly (shouldn't happen here since we use default true).
-        const txnId = lossResult.inventoryTxnId
+        const txnId = txnResult.transactionId
 
         insertAuditLog({
           action: 'stock.adjusted',
@@ -213,7 +221,7 @@ export async function POST(req: Request) {
           organizationId: orgId,
           userId: user.id,
           employeeId: caller.id,
-          newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id, lossRecordId: lossResult.lossRecordId },
+          newValues: { adjustment: d.quantity, reason: d.reason, locationId: d.location_id },
         })
 
         // Metric event (CRITICAL — powers stock adjustment KPI)
@@ -227,11 +235,10 @@ export async function POST(req: Request) {
             location_id: d.location_id,
             direction: 'decrease',
             reason: d.reason,
-            loss_record_id: lossResult.lossRecordId ?? undefined,
           },
         })
 
-        return { success: true, transaction_id: txnId, loss_record_id: lossResult.lossRecordId }
+        return { success: true, transaction_id: txnId }
       }
     }
 

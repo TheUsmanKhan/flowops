@@ -106,6 +106,28 @@ const REASON_PRESETS = [
   'Other',
 ] as const
 
+// ── INV-013 FIX (PART3-Section D) ──────────────────────────────────────────
+// Adjust Stock no longer creates a StockLossRecord on negative adjustments.
+// When the user selects a damage/theft/loss reason AND a "Remove" direction,
+// we show a helper text pointing them to the dedicated Stock Losses module
+// (which has the full investigation/approval/insurance/courier-claim
+// workflow). Adjust Stock stays a pure count-correction tool.
+//
+// Loss-related reasons (preset list + 'Other' when notes mention keywords):
+//   - 'Damaged in storage'  → damage
+//   - 'Quality check failure' → damaged/defective
+//   - 'Other' (with notes mentioning damage/theft/loss keywords) → loss
+const LOSS_KEYWORDS = ['damage', 'damaged', 'theft', 'stolen', 'loss', 'lost', 'broken', 'destroyed', 'missing', 'shrinkage']
+
+function isLossRelatedReason(reason: string, notes: string): boolean {
+  if (reason === 'Damaged in storage' || reason === 'Quality check failure') return true
+  if (reason === 'Other') {
+    const text = notes.toLowerCase()
+    return LOSS_KEYWORDS.some((kw) => text.includes(kw))
+  }
+  return false
+}
+
 const PKR = new Intl.NumberFormat('en-PK', { maximumFractionDigits: 0 })
 function formatPKR(n: number): string {
   return `Rs. ${PKR.format(n)}`
@@ -479,6 +501,26 @@ export function AdjustStockView() {
                     onChange={(e) => setNotes(e.target.value)}
                     className="mt-2"
                   />
+                )}
+                {/* INV-013: helper text shown when user is removing stock with a
+                    damage/theft/loss reason — Adjust Stock no longer creates a
+                    StockLossRecord, so we route loss tracking to the Stock
+                    Losses module. */}
+                {direction === 'remove' && reason && isLossRelatedReason(reason, notes) && (
+                  <div className="mt-2 flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2.5 text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <p className="text-xs">
+                      For damage, theft, or loss tracking, use the{' '}
+                      <button
+                        type="button"
+                        className="font-medium underline underline-offset-2 hover:opacity-80"
+                        onClick={() => navigate({ name: 'inventory-losses' })}
+                      >
+                        Stock Losses module
+                      </button>{' '}
+                      instead. Adjust Stock is for count corrections only.
+                    </p>
+                  </div>
                 )}
               </div>
 

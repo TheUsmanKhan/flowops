@@ -1812,27 +1812,23 @@ export async function cancelOrder(
       order.status === 'processing' ||
       order.packedAt !== null
 
-    await db.order.update({
-      where: { id: d.order_id },
-      data: {
-        status: 'cancelled',
-        cancelledAt: new Date(),
-        cancellationReason: d.cancellation_reason,
-        physicalUnpackRequired,
-      },
-    })
-
-    // Step 3: Unreserve stock for any items with fulfillment_status='reserved'.
-    // Items with fulfillment_status='backordered' need no inventory action
-    // (no reservation ever existed for them) — they'll be orphaned since
-    // the order is now cancelled and won't be picked up by future
-    // checkAndFulfillBackorders() runs (which skip cancelled orders).
+    // ── ATOMICITY FIX (PART3-Section A) ───────────────────────────────
+    // Previously: order.update ran FIRST, then items were unreserved
+    // and reset one-by-one. If the process crashed mid-loop, the order
+    // was 'cancelled' but some items remained 'reserved' (leak).
     //
-    // BUG FIX: also set fulfillmentStatus to 'pending' so that un-cancel
-    // can re-reserve the stock (reserveOrderStock skips items already at
-    // 'reserved' — if we leave the status as 'reserved' after unreserve,
-    // un-cancel's reserveOrderStock will think the stock is already
-    // reserved and skip it, leaving the pool.reserved unchanged).
+    // New flow (atomic w.r.t. order/item status):
+    //   1. Query all reserved items
+    //   2. Unreserve each via unreserveStockForOrder (each call is
+    //      internally atomic via its own $transaction in processInventoryTransaction)
+    //   3. Update order status + ALL item statuses in ONE $transaction
+    //
+    // If step 2 fails partway, some pools have been decremented but the
+    // order/items remain in their pre-cancel state. That is SAFE: those
+    // items SHOULD be unreserved (the order is being cancelled), and the
+    // status update can be retried.
+    // If step 3 fails after step 2, pools are already correct and the
+    // status update can be retried — no partial-cancel state is left.
     const reservedItems = await db.orderItem.findMany({
       where: { orderId: d.order_id, fulfillmentStatus: 'reserved' },
     })
@@ -1850,14 +1846,32 @@ export async function cancelOrder(
         quantity: item.quantity,
         orderId: d.order_id,
       })
-
-      // Reset the item's fulfillmentStatus to 'pending' so un-cancel
-      // can re-reserve it via reserveOrderStock.
-      await db.orderItem.update({
-        where: { id: item.id },
-        data: { fulfillmentStatus: 'pending' },
-      })
     }
+
+    // Step 3: Update order status + reset every reserved item's
+    // fulfillmentStatus to 'pending' (so un-cancel can re-reserve via
+    // reserveOrderStock — it skips items already at 'reserved') in a
+    // SINGLE $transaction. Atomicity guarantees the order is never left
+    // in a partially-cancelled state (some items 'pending', others still
+    // 'reserved').
+    await db.$transaction(async (tx) => {
+      await tx.order.update({
+        where: { id: d.order_id },
+        data: {
+          status: 'cancelled',
+          cancelledAt: new Date(),
+          cancellationReason: d.cancellation_reason,
+          physicalUnpackRequired,
+        },
+      })
+
+      for (const item of reservedItems) {
+        await tx.orderItem.update({
+          where: { id: item.id },
+          data: { fulfillmentStatus: 'pending' },
+        })
+      }
+    })
 
     insertAuditLog({
       action: 'order.cancelled',

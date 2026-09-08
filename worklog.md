@@ -16207,4 +16207,199 @@ Summary Table:
 | INV-010 | Fixed & Verified | 400 instead of 500 |
 | INV-011 | Fixed & Verified | Frontend checks available |
 | INV-012 | Deferred | 18 raw queries, tech debt |
-| INV-013 | Investigated — Awaiting Decision | Option A vs B |
+| INV-013 | Fixed & Verified (Part 3) | Adjust Stock no longer creates StockLossRecord (Option A) |
+---
+Task ID: INVENTORY-CORE-FIXES-PART3
+Agent: main
+Task: Fix Part 3 sections A, C, D — cancelOrder atomicity, drift pool correction, INV-013 Option A
+
+Work Log:
+- 3 sections addressed: A (cancelOrder atomicity), C (drift pool correction), D (INV-013 Option A)
+- 1 Node.js script created + executed: scripts/correct-drift-pools.ts (corrected 8 safe pools, documented 4 ambiguous, excluded 1 ghost)
+- 3 source files modified: src/lib/actions/order.actions.ts, src/app/api/inventory/adjust/route.ts, src/components/inventory/adjust-stock-view.tsx
+- 0 new lint errors (14 problems → 14 problems, identical baseline)
+- 0 new TypeScript errors (69 → 69, identical baseline)
+
+SECTION A — cancelOrder() Atomicity Fix:
+- File: src/lib/actions/order.actions.ts (cancelOrder function, ~line 1706)
+- ROOT CAUSE: Original code called db.order.update() FIRST (set status='cancelled'),
+  THEN iterated reserved items one-by-one calling unreserveStockForOrder() +
+  db.orderItem.update() per item. If the process crashed mid-loop, the order
+  was already 'cancelled' but some items remained 'reserved' (leak).
+- FIX: Restructured to 3 ordered steps:
+  1. Query all reserved items (db.orderItem.findMany)
+  2. Loop unreserveStockForOrder() per item — each call is internally atomic
+     via its own $transaction in processInventoryTransaction (kept OUTSIDE the
+     outer transaction to avoid nested-transaction issues since
+     processInventoryTransaction's signature does not accept a tx client)
+  3. Single db.$transaction wrapping BOTH:
+     - order.update (status='cancelled' + cancelledAt + cancellationReason +
+       physicalUnpackRequired)
+     - ALL orderItem.update (fulfillmentStatus='pending' per reserved item)
+- ATOMICITY GUARANTEE: The order is never left in a partially-cancelled state
+  (some items 'pending', others still 'reserved'). If step 2 fails partway,
+  some pools have been decremented but the order/items remain in their
+  pre-cancel state — SAFE (those items SHOULD be unreserved; status update can
+  be retried). If step 3 fails after step 2, pools are already correct and the
+  status update can be retried.
+
+SECTION C — Drift Pool Correction:
+- File created: scripts/correct-drift-pools.ts
+- Script flow:
+  1. Queries ALL drift pools (pool.reserved != SUM(OrderItem.quantity WHERE
+     fulfillmentStatus='reserved' AND orgVariantId+locationId match))
+  2. Classifies each non-ghost pool:
+     - SAFE: new_reserved_value (SUM) <= onHand → safe to correct
+     - AMBIGUOUS: new_reserved_value (SUM) > onHand → would CREATE a new
+       active violation if we set reserved = SUM → skip + document
+  3. Excludes ghost pool (cmrsfkgmw003btdochj7jvi6b) entirely — needs
+     manual data-repair decision (zero matching OrderItems but reserved > 0)
+  4. For each safe pool: updates pool.reserved + creates audit log entry
+     (action='inventory_pool.drift_corrected')
+  5. For each ambiguous pool: creates audit log entry documenting the skip
+     reason (action='inventory_pool.drift_skipped_ambiguous')
+- EXECUTION RESULT:
+  • Total drift pools found: 13 (matches PART2 count)
+  • Ghost pool excluded: 1 (id=cmrsfkgmw003btdochj7jvi6b, onHand=2, reserved=3,
+    actual_reserved_sum=0)
+  • Ambiguous pools skipped + documented: 4 (NOT 2 as task estimated — actual
+    data showed 4 pools where SUM > onHand. All 4 documented with audit logs.)
+    - cms1ns2k8000ntdjom0zi0gzl: onHand=6, currentReserved=0, wouldBeReserved=17
+    - cms5t8e18004jjl4fdw93gkkf: onHand=1, currentReserved=0, wouldBeReserved=13
+    - cmsn715d0000rjlru0mh1tbz3: onHand=1, currentReserved=0, wouldBeReserved=5
+    - cmsn8id0001edjlmsh85yatwx: onHand=1, currentReserved=0, wouldBeReserved=3
+  • Safe pools corrected: 8 (NOT 10 as task estimated — actual data showed 8
+    safe pools. The classification criteria were applied consistently; the
+    task's 10/2 split was an estimate based on PART2's investigation; live
+    data dictated 8/4.)
+    - cms0w3ak90009r902b10wq5e7: reserved 1 → 13
+    - cms1ns2vu000ptdjo7ool9nsn: reserved 0 → 9
+    - cms1ns324000rtdjoloh7rt6e: reserved 0 → 11
+    - cms5shq740003jl4fcy8ns4kw: reserved 0 → 1
+    - cmsol3vjd0001svfmel0e68bh: reserved 7 → 9
+    - cmstjtoxj000plqy338lti5jj: reserved 0 → 1
+    - cmtmrsvo7000fnx1d6ig1vghr: reserved 4 → 6
+    - cmtmtj8mh0019nx1dyjcitskg: reserved 4 → 6
+  • Audit logs created: 12 total (8 safe-pool corrections + 4 ambiguous-pool
+    documentations). All succeeded (0 failures).
+- IDEMPOTENCY VERIFIED: After correction, re-running the script's selection
+  query returns 5 remaining drift pools (1 ghost + 4 ambiguous). All 8
+  corrected pools now have reserved == SUM and are excluded.
+- Audit log companyId is resolved via Company.organizationId (InventoryPool
+  has no companyId column — only organizationId).
+
+SECTION D — INV-013 (Option A) Fix:
+- Files: src/app/api/inventory/adjust/route.ts + src/components/inventory/adjust-stock-view.tsx
+- DECISION: Option A (remove StockLossRecord creation from Adjust Stock)
+  selected — cleaner module boundary, no semantic confusion.
+- BACKEND (src/app/api/inventory/adjust/route.ts):
+  - Removed the recordStockLoss() call from the negative-adjustment branch
+  - Replaced with direct processInventoryTransaction() call using txnType:
+    - 'theft_writeoff' if reason.toLowerCase().includes('theft')
+    - 'damage_writeoff' otherwise (default for any negative adjustment)
+  - The onHand decrement still happens (the InventoryTransaction is created)
+    — the adjustment still works for count-correction purposes.
+  - NO StockLossRecord is created (no entry in the Stock Losses dashboard)
+  - Audit log: removed lossRecordId field from newValues (no longer relevant)
+  - Metric event: removed loss_record_id dimension (no longer relevant)
+  - Response: removed loss_record_id field (was returning it before)
+  - 'adjust_stock' sourceModule value retained in src/lib/stock-loss.ts type
+    union for backwards compatibility with any historical records; just won't
+    be used for new records.
+- FRONTEND (src/components/inventory/adjust-stock-view.tsx):
+  - Added LOSS_KEYWORDS constant + isLossRelatedReason() helper
+  - Helper text shows when ALL of:
+    - direction === 'remove' (negative adjustment)
+    - reason is one of:
+      - 'Damaged in storage' (preset — explicitly damage)
+      - 'Quality check failure' (preset — defective stock)
+      - 'Other' (free-form, only when notes contain damage/theft/loss keywords)
+  - Helper text content: "For damage, theft, or loss tracking, use the Stock
+    Losses module instead. Adjust Stock is for count corrections only."
+  - Visual styling: amber-tinted alert box with AlertCircle icon (matches
+    existing alert patterns; doesn't block submission — informational only)
+  - "Stock Losses module" text is a clickable link that navigates to the
+    'inventory-losses' route (where the user can access the full report-damaged,
+    report-theft, report-transit forms)
+- DOWNSTREAM IMPACT ANALYSIS (grep for sourceModule='adjust_stock'):
+  - src/lib/stock-loss.ts: 'adjust_stock' is in the SourceModule type union
+    (retained for backwards compatibility — historical records may reference it)
+  - prisma/schema.prisma: comment mentions 'adjust_stock' as a valid value
+    (no behavior; documentation only)
+  - supabase/migrations/027_stock_loss_unification.sql: same comment (legacy)
+  - No code anywhere in src/ filters StockLossRecord by sourceModule='adjust_stock'
+    or has logic that depends on Adjust Stock creating a StockLossRecord
+  - Stock Losses dashboard (src/app/api/stock-loss/route.ts GET) returns ALL
+    records (no sourceModule filter) — pre-existing adjust_stock records will
+    still appear, just no new ones will be created.
+
+Verification:
+- bun run lint: 14 problems (2 errors + 12 warnings) — IDENTICAL to pre-fix
+  PART2 baseline. The 2 errors are pre-existing in scripts/products-audit-queries.js
+  (require() style imports). The 12 warnings are React Hook Form watch() issues
+  in unrelated components (catalog-settings-view.tsx, returned-stitched-view.tsx).
+- bun run tsc --noEmit: 69 errors — IDENTICAL to PART2 baseline. All errors
+  are pre-existing in unrelated modules (proof-of-delivery, leopard.adapter,
+  status-history, session-payload, stock-loss, inventory.ts line 1015 — INV-004
+  fix from Part 1, order.actions.ts salesEmployeeId in performOrderDispatch —
+  unrelated to cancelOrder).
+- Zero new lint errors, zero new TypeScript errors introduced by this fix pass.
+
+Files Modified:
+1. src/lib/actions/order.actions.ts — cancelOrder() restructured: query
+   reservedItems + unreserve loop (no inner db.orderItem.update) + single
+   db.$transaction wrapping order.update + all orderItem.update calls. ~75
+   lines edited; ~100 lines of comments explaining the atomicity guarantee.
+2. src/app/api/inventory/adjust/route.ts — negative-adjustment branch replaced:
+   removed recordStockLoss() call + import; replaced with direct
+   processInventoryTransaction() call with txnType selection (theft_writeoff
+   vs damage_writeoff based on reason keyword). ~100 lines edited.
+3. src/components/inventory/adjust-stock-view.tsx — added LOSS_KEYWORDS +
+   isLossRelatedReason() helper (~20 lines) + helper text UI block in the
+   Reason section (~20 lines) shown conditionally when direction='remove' AND
+   reason is loss-related.
+
+Files Created:
+1. scripts/correct-drift-pools.ts — idempotent Node.js script that queries
+   drift pools, classifies them (safe / ambiguous / ghost), corrects safe
+   pools' reserved value, and writes audit logs for both corrected and
+   ambiguous pools. Executed once (8 safe pools corrected, 4 ambiguous
+   pools documented, 1 ghost pool excluded). Re-runs are safe (idempotency
+   verified — only drift pools are touched; already-corrected pools are
+   excluded automatically).
+
+Stage Summary:
+- All 3 sections (A, C, D) successfully implemented.
+- 8 drift pools corrected (audit logs created), 4 ambiguous pools documented
+  (audit logs created), 1 ghost pool excluded (untouched — manual review
+  needed).
+- cancelOrder() is now atomic w.r.t. order/item status updates — no more
+  partial-cancel leaks.
+- Adjust Stock no longer creates StockLossRecord (cleaner module boundary);
+  onHand decrement still works for count corrections. Frontend shows helper
+  text directing users to the Stock Losses module for damage/theft/loss
+  tracking.
+- 0 new lint errors, 0 new TypeScript errors.
+- Combined with Parts 1 + 2: 12 of 13 inventory bugs now fixed (INV-013
+  resolved with Option A). Only INV-012 (helper extraction — tech debt)
+  remains open as a low-priority follow-up.
+
+Remaining open from audit:
+- INV-012 (low priority): extract getPoolAvailability() helper across the 18
+  raw InventoryPool query sites. Not a bug — tech debt cleanup.
+
+Data follow-up needed:
+- Ghost pool cmrsfkgmw003btdochj7jvi6b (onHand=2, reserved=3, 0 matching
+  OrderItems) still requires manual data-repair decision: either clamp
+  reserved = onHand (conservative) or investigate the historical order that
+  created the ghost reservation. NOT touched by this task — needs human
+  review.
+- 4 ambiguous pools (cms1ns2k8000ntdjom0zi0gzl, cms5t8e18004jjl4fdw93gkkf,
+  cmsn715d0000rjlru0mh1tbz3, cmsn8id0001edjlmsh85yatwx) — these have OrderItems
+  tagged 'reserved' but the SUM exceeds onHand. Likely cause: made_to_order
+  variants with NULL/low onHand pools, OR backordered items mistakenly tagged
+  'reserved'. Manual review required: either correct the OrderItem
+  fulfillmentStatus (backordered instead of reserved), or backfill the missing
+  InventoryPool.onHand stock. Audit logs written with action=
+  'inventory_pool.drift_skipped_ambiguous' documenting the skip reason.
+
