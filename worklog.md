@@ -16167,3 +16167,44 @@ Stage Summary:
 - INV-013 investigation report included (no fix — options A/B presented for team decision)
 - INV-012 re-grep report included (6 sites in 4 files outside src/lib/inventory.ts)
 - Remaining open: INV-013 (decision needed), INV-012 (helper extraction — low priority)
+
+---
+Task ID: INVENTORY-CORE-FIXES-PART2-COMPLETE
+Agent: main
+Task: Inventory Core Part 2 — 5 fixes + 2 investigations
+
+Work Log:
+- 5 bugs fixed (INV-002, 007, 009, 010, 011)
+- 1 investigated, not fixed (INV-013 — needs business decision)
+- 13 drift pools investigated (Section 1)
+- INV-012 count confirmed (6 findMany/findFirst + 12 findUnique = 18 total)
+- Committed as 22c3a27 (13 files), pushed to GitHub
+
+SECTION 1 — 13 Pre-Existing Drift Pools (INVESTIGATE ONLY):
+- 1 ACTIVE VIOLATION: Pool cmrsfkgmw003btdochj7jvi6b (onHand=2, reserved=3, 0 OrderItems — ghost reservation)
+- 12 pools with reserved < actual OrderItem sum (cancelled orders not properly unreserved)
+- Root cause: cancelOrder() didn't always call unreserveStockForOrder
+- Recommendation: auto-correct safe pools (set reserved = sum of active OrderItem.reserved), manual review for ghost reservation
+
+SECTION 7 — INV-013 (INVESTIGATE ONLY):
+- Adjust-Stock creates StockLossRecord on negative adjustments with loss reason
+- NO dedup guard (adjust_stock doesn't pass orderItemId, so dedup index never fires)
+- Stock Loss module UI shows all records regardless of sourceModule
+- Option A (remove from Adjust Stock) recommended but needs decision
+
+Summary Table:
+| Bug | Status | Note |
+|-----|--------|------|
+| INV-001 | Fixed & Verified (Part 1) | Reservation invariant protection |
+| INV-002 | Fixed & Verified | Canonical processReturnedStitchedReceipt() |
+| INV-003 | Fixed & Verified (Part 1) | SupplierReturn creation order reversed |
+| INV-004 | Fixed & Verified (Part 1) | ProductionOrder creation order reversed |
+| INV-005 | Fixed & Verified (Part 1) | Append-only restored |
+| INV-006 | Fixed & Verified (Part 1) | $transaction wrapper |
+| INV-007 | Fixed & Verified | incrementIncomingStock/decrementIncomingStock |
+| INV-008 | Fixed & Verified (Part 1) | Cross-company companyId filter |
+| INV-009 | Fixed & Verified | Supplier DELETE dependency check |
+| INV-010 | Fixed & Verified | 400 instead of 500 |
+| INV-011 | Fixed & Verified | Frontend checks available |
+| INV-012 | Deferred | 18 raw queries, tech debt |
+| INV-013 | Investigated — Awaiting Decision | Option A vs B |
