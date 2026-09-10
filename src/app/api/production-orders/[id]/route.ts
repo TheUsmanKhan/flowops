@@ -91,7 +91,15 @@ export async function PATCH(
     if (!companyId || !orgId) throw new ApiError(403, 'No active company')
 
     const { id } = await params
-    const order = await db.productionOrder.findFirst({ where: { id, companyId } })
+    // F4 fix: include the orderItem relation so we can resolve the parent
+    // orderId for the order_reserved transaction below. processInventoryTransaction
+    // now sets `orderId = referenceId` whenever referenceType is 'order' or
+    // 'order_item' — so callers must pass the parent ORDER id (not the order
+    // item id) as referenceId, otherwise the orderId column FK will reject it.
+    const order = await db.productionOrder.findFirst({
+      where: { id, companyId },
+      include: { orderItem: { select: { orderId: true } } },
+    })
     if (!order) throw new ApiError(404, 'Production order not found.')
 
     const caller = await db.employee.findFirst({
@@ -286,6 +294,13 @@ export async function PATCH(
           // an orderItemId (manual / exchange-shipment-triggered) leave the
           // stock available for future orders.
           if (order.orderItemId) {
+            // F4 fix: pass the parent ORDER id (not the order item id) as
+            // referenceId when referenceType='order_item'. processInventoryTransaction
+            // now sets `orderId = referenceId` whenever referenceType is 'order'
+            // or 'order_item' — so callers must pass the parent ORDER id,
+            // otherwise the orderId column FK will reject the insert.
+            // The orderItemId is preserved in the notes for audit traceability.
+            const parentOrderId = order.orderItem?.orderId ?? null
             const reserveResult = await processInventoryTransaction({
               orgVariantId: order.stitchedVariantId,
               locationId: order.fabricLocationId,
@@ -295,8 +310,8 @@ export async function PATCH(
               transactionType: 'order_reserved',
               quantity: order.quantity,
               referenceType: 'order_item',
-              referenceId: order.orderItemId,
-              notes: `Reserved for order item ${order.orderItemId} after production completion`,
+              referenceId: parentOrderId,
+              notes: `Reserved for order item ${order.orderItemId}${parentOrderId ? ` (order ${parentOrderId})` : ''} after production completion`,
             })
 
             if (reserveResult.success) {

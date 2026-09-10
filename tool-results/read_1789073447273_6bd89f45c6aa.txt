@@ -1,0 +1,1352 @@
+     1→'use client'
+     2→
+     3→import { useEffect, useMemo, useState } from 'react'
+     4→import { useForm } from 'react-hook-form'
+     5→import { zodResolver } from '@hookform/resolvers/zod'
+     6→import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+     7→import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
+     8→import { z } from 'zod'
+     9→import { toast } from 'sonner'
+    10→import { api, FetchError } from '@/lib/api-client'
+    11→import { cn } from '@/lib/utils'
+    12→import { PageHeader } from '@/components/layout/dashboard-shell'
+    13→import { Button } from '@/components/ui/button'
+    14→import { Input } from '@/components/ui/input'
+    15→import { Label } from '@/components/ui/label'
+    16→import { Textarea } from '@/components/ui/textarea'
+    17→import { Badge } from '@/components/ui/badge'
+    18→import {
+    19→  Card,
+    20→  CardContent,
+    21→} from '@/components/ui/card'
+    22→import { Skeleton } from '@/components/ui/skeleton'
+    23→import {
+    24→  Select,
+    25→  SelectContent,
+    26→  SelectItem,
+    27→  SelectTrigger,
+    28→  SelectValue,
+    29→} from '@/components/ui/select'
+    30→import {
+    31→  Dialog,
+    32→  DialogContent,
+    33→  DialogDescription,
+    34→  DialogFooter,
+    35→  DialogHeader,
+    36→  DialogTitle,
+    37→} from '@/components/ui/dialog'
+    38→import {
+    39→  Table,
+    40→  TableBody,
+    41→  TableCell,
+    42→  TableHead,
+    43→  TableHeader,
+    44→  TableRow,
+    45→} from '@/components/ui/table'
+    46→import {
+    47→  Loader2,
+    48→  Plus,
+    49→  RotateCcw,
+    50→  Package,
+    51→  AlertCircle,
+    52→  Check,
+    53→  X,
+    54→  DollarSign,
+    55→  TrendingDown,
+    56→} from 'lucide-react'
+    57→
+    58→// ─────────────────────────────────────────────────────────────────────────────
+    59→// Types — match the API response contract
+    60→// ─────────────────────────────────────────────────────────────────────────────
+    61→
+    62→type ReturnedCondition = 'perfect' | 'good' | 'open_box' | 'damaged'
+    63→type ReturnedStatus = 'available' | 'sold' | 'written_off'
+    64→
+    65→interface VariantNested {
+    66→  id: string
+    67→  sku: string
+    68→  attributeValues: Record<string, string>
+    69→  product: { id: string; title: string; slug: string }
+    70→}
+    71→
+    72→interface ReturnedItem {
+    73→  id: string
+    74→  variant: VariantNested
+    75→  quantity: number
+    76→  condition: ReturnedCondition
+    77→  totalCost: number
+    78→  suggestedResalePrice: number | null
+    79→  returnReason: string
+    80→  status: ReturnedStatus
+    81→  photos: string[]
+    82→  notes: string | null
+    83→  receivedAt: string
+    84→  soldAt: string | null
+    85→  writtenOffAt: string | null
+    86→  writeOffReason: string | null
+    87→}
+    88→
+    89→interface ReturnedStats {
+    90→  availableCount: number
+    91→  totalValue: number
+    92→  writtenOffThisMonth: number
+    93→}
+    94→
+    95→interface ProductsResponse {
+    96→  products: Array<{
+    97→    id: string
+    98→    title: string
+    99→    slug: string
+   100→    variants: Array<{
+   101→      id: string
+   102→      sku: string
+   103→      costPrice: number
+   104→      fulfillmentType: 'stock_based' | 'made_to_order'
+   105→      stitchingType: string | null
+   106→    }>
+   107→  }>
+   108→}
+   109→
+   110→// ─────────────────────────────────────────────────────────────────────────────
+   111→// Constants / Display maps
+   112→// ─────────────────────────────────────────────────────────────────────────────
+   113→
+   114→type StatusFilter = 'all' | ReturnedStatus
+   115→
+   116→const STATUS_FILTER_OPTIONS: { value: StatusFilter; label: string }[] = [
+   117→  { value: 'all', label: 'All statuses' },
+   118→  { value: 'available', label: 'Available' },
+   119→  { value: 'sold', label: 'Sold' },
+   120→  { value: 'written_off', label: 'Written off' },
+   121→]
+   122→
+   123→const STATUS_BADGE_STYLES: Record<ReturnedStatus, string> = {
+   124→  available: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+   125→  sold: 'bg-gray-100 text-gray-700 border-gray-200',
+   126→  written_off: 'bg-rose-50 text-rose-700 border-rose-200',
+   127→}
+   128→
+   129→const STATUS_LABELS: Record<ReturnedStatus, string> = {
+   130→  available: 'Available',
+   131→  sold: 'Sold',
+   132→  written_off: 'Written off',
+   133→}
+   134→
+   135→const CONDITION_BADGE_STYLES: Record<ReturnedCondition, string> = {
+   136→  perfect: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+   137→  good: 'bg-sky-50 text-sky-700 border-sky-200',
+   138→  open_box: 'bg-amber-50 text-amber-700 border-amber-200',
+   139→  damaged: 'bg-rose-50 text-rose-700 border-rose-200',
+   140→}
+   141→
+   142→const CONDITION_LABELS: Record<ReturnedCondition, string> = {
+   143→  perfect: 'Perfect',
+   144→  good: 'Good',
+   145→  open_box: 'Open box',
+   146→  damaged: 'Damaged',
+   147→}
+   148→
+   149→const CONDITION_OPTIONS: {
+   150→  value: ReturnedCondition
+   151→  label: string
+   152→  description: string
+   153→}[] = [
+   154→  { value: 'perfect', label: 'Perfect', description: 'Unused, tags on, no defects.' },
+   155→  { value: 'good', label: 'Good', description: 'Lightly used, minor signs of wear.' },
+   156→  { value: 'open_box', label: 'Open box', description: 'Packaging opened, item intact.' },
+   157→  { value: 'damaged', label: 'Damaged', description: 'Torn, stained, or otherwise unsellable.' },
+   158→]
+   159→
+   160→const RETURN_REASON_OPTIONS = [
+   161→  { value: 'RTO', label: 'RTO (Return to Origin)' },
+   162→  { value: 'Refused at door', label: 'Refused at door' },
+   163→  { value: 'Size issue', label: 'Size issue' },
+   164→  { value: 'Wrong item', label: 'Wrong item' },
+   165→  { value: 'Other', label: 'Other' },
+   166→] as const
+   167→
+   168→// ─────────────────────────────────────────────────────────────────────────────
+   169→// Zod schema for the "Record a Return" form
+   170→// ─────────────────────────────────────────────────────────────────────────────
+   171→
+   172→const recordReturnSchema = z
+   173→  .object({
+   174→    org_variant_id: z.string().min(1, 'Select a variant'),
+   175→    quantity: z
+   176→      .number({ error: 'Enter a number' })
+   177→      .int('Quantity must be a whole number')
+   178→      .min(1, 'Quantity must be at least 1'),
+   179→    condition: z.enum(['perfect', 'good', 'open_box', 'damaged']),
+   180→    fabricStitchingCost: z
+   181→      .number({ error: 'Enter a number' })
+   182→      .min(0, 'Cannot be negative'),
+   183→    outgoingCourier: z
+   184→      .number({ error: 'Enter a number' })
+   185→      .min(0, 'Cannot be negative'),
+   186→    returnCourier: z
+   187→      .number({ error: 'Enter a number' })
+   188→      .min(0, 'Cannot be negative'),
+   189→    return_reason: z.enum([
+   190→      'RTO',
+   191→      'Refused at door',
+   192→      'Size issue',
+   193→      'Wrong item',
+   194→      'Other',
+   195→    ]),
+   196→    custom_reason: z.string().optional().or(z.literal('')),
+   197→    original_order_reference: z.string().optional().or(z.literal('')),
+   198→    notes: z
+   199→      .string()
+   200→      .max(1000, 'Notes must be 1000 characters or fewer')
+   201→      .optional()
+   202→      .or(z.literal('')),
+   203→  })
+   204→  .superRefine((data, ctx) => {
+   205→    const total = data.fabricStitchingCost + data.outgoingCourier + data.returnCourier
+   206→    if (total <= 0) {
+   207→      ctx.addIssue({
+   208→        code: z.ZodIssueCode.custom,
+   209→        message: 'Total cost must be greater than 0',
+   210→        path: ['fabricStitchingCost'],
+   211→      })
+   212→    }
+   213→    if (data.return_reason === 'Other' && !data.custom_reason?.trim()) {
+   214→      ctx.addIssue({
+   215→        code: z.ZodIssueCode.custom,
+   216→        message: 'Please specify the reason',
+   217→        path: ['custom_reason'],
+   218→      })
+   219→    }
+   220→  })
+   221→
+   222→type RecordReturnForm = z.infer<typeof recordReturnSchema>
+   223→
+   224→// ─────────────────────────────────────────────────────────────────────────────
+   225→// Helpers
+   226→// ─────────────────────────────────────────────────────────────────────────────
+   227→
+   228→function formatPrice(n: number): string {
+   229→  return new Intl.NumberFormat('en-US', {
+   230→    maximumFractionDigits: 2,
+   231→    minimumFractionDigits: 0,
+   232→  }).format(n)
+   233→}
+   234→
+   235→function formatDate(iso: string | null): string {
+   236→  if (!iso) return '—'
+   237→  try {
+   238→    const d = new Date(iso)
+   239→    return d.toLocaleDateString('en-US', {
+   240→      year: 'numeric',
+   241→      month: 'short',
+   242→      day: 'numeric',
+   243→    })
+   244→  } catch {
+   245→    return '—'
+   246→  }
+   247→}
+   248→
+   249→function formatAttributeValues(values: Record<string, string>): string {
+   250→  const entries = Object.entries(values || {})
+   251→  if (entries.length === 0) return ''
+   252→  return entries.map(([k, v]) => `${k}: ${v}`).join(' · ')
+   253→}
+   254→
+   255→function getErrorMessage(err: unknown): string {
+   256→  if (err instanceof FetchError) return err.message
+   257→  if (err instanceof Error) return err.message
+   258→  return 'Something went wrong. Please try again.'
+   259→}
+   260→
+   261→/** Parse a numeric input value, returning 0 for empty/invalid input. */
+   262→function parseNumberInput(v: string): number {
+   263→  if (v === '' || v === '-') return 0
+   264→  const n = Number(v)
+   265→  return Number.isFinite(n) ? n : 0
+   266→}
+   267→
+   268→// ─────────────────────────────────────────────────────────────────────────────
+   269→// Main view
+   270→// ─────────────────────────────────────────────────────────────────────────────
+   271→
+   272→export function ReturnedStitchedView() {
+   273→  const queryClient = useQueryClient()
+   274→  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+   275→  const [recordOpen, setRecordOpen] = useState(false)
+   276→  const [soldTarget, setSoldTarget] = useState<string | null>(null)
+   277→  const [writeOffTarget, setWriteOffTarget] = useState<string | null>(null)
+   278→
+   279→  // ---- Stats query ----
+   280→  const statsQuery = useQuery<ReturnedStats>({
+   281→    queryKey: ['returned-stitched-stats'],
+   282→    queryFn: () => api.get<ReturnedStats>('/api/returned-stitched/stats'),
+   283→    staleTime: 30_000,
+   284→  })
+   285→
+   286→  // ---- Items query (depends on status filter) ----
+   287→  const itemsQuery = useQuery<{ items: ReturnedItem[] }>({
+   288→    queryKey: ['returned-stitched', { status: statusFilter }],
+   289→    queryFn: () => {
+   290→      const qs = statusFilter === 'all' ? '' : `?status=${statusFilter}`
+   291→      return api.get<{ items: ReturnedItem[] }>(`/api/returned-stitched${qs}`)
+   292→    },
+   293→    staleTime: 15_000,
+   294→  })
+   295→
+   296→  // ---- Invalidation helper ----
+   297→  const invalidateAll = () => {
+   298→    void queryClient.invalidateQueries({ queryKey: ['returned-stitched'] })
+   299→    void queryClient.invalidateQueries({ queryKey: ['returned-stitched-stats'] })
+   300→  }
+   301→
+   302→  // ---- Mutations ----
+   303→  const receiveMutation = useIdempotentMutation<unknown, {
+   304→    org_variant_id: string
+   305→    quantity: number
+   306→    condition: ReturnedCondition
+   307→    total_cost: number
+   308→    return_reason: string
+   309→    original_order_reference?: string
+   310→    photos: string[]
+   311→    notes?: string
+   312→  }>({
+   313→    url: '/api/returned-stitched',
+   314→    mutationOptions: {
+   315→      onSuccess: (_data, vars) => {
+   316→        const msg =
+   317→          vars.condition === 'damaged'
+   318→            ? 'Damaged item recorded and written off.'
+   319→            : 'Return recorded — item is now available stock.'
+   320→        toast.success(msg)
+   321→        invalidateAll()
+   322→        setRecordOpen(false)
+   323→      },
+   324→      onError: (err) => toast.error(getErrorMessage(err)),
+   325→    },
+   326→  })
+   327→
+   328→  const markSoldMutation = useMutation({
+   329→    mutationFn: async ({ id, reference }: { id: string; reference: string }) =>
+   330→      api.post(`/api/returned-stitched/${id}`, {
+   331→        action: 'sold',
+   332→        sold_order_reference: reference,
+   333→      }),
+   334→    onSuccess: () => {
+   335→      toast.success('Item marked as sold.')
+   336→      invalidateAll()
+   337→      setSoldTarget(null)
+   338→    },
+   339→    onError: (err) => toast.error(getErrorMessage(err)),
+   340→  })
+   341→
+   342→  const writeOffMutation = useMutation({
+   343→    mutationFn: async ({ id, reason }: { id: string; reason: string }) =>
+   344→      api.post(`/api/returned-stitched/${id}`, {
+   345→        action: 'write_off',
+   346→        reason,
+   347→      }),
+   348→    onSuccess: () => {
+   349→      toast.success('Item written off.')
+   350→      invalidateAll()
+   351→      setWriteOffTarget(null)
+   352→    },
+   353→    onError: (err) => toast.error(getErrorMessage(err)),
+   354→  })
+   355→
+   356→  const items = itemsQuery.data?.items ?? []
+   357→  const stats = statsQuery.data
+   358→
+   359→  return (
+   360→    <div className="space-y-6">
+   361→      <PageHeader
+   362→        title="Returned Stitched Inventory"
+   363→        description="Track stitched items that come back. Reuse, resell, or write them off cleanly."
+   364→        actions={
+   365→          <Button onClick={() => setRecordOpen(true)}>
+   366→            <Plus className="h-4 w-4" /> Record a Return
+   367→          </Button>
+   368→        }
+   369→      />
+   370→
+   371→      {/* ── Stats row ───────────────────────────────────────── */}
+   372→      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+   373→        <StatCard
+   374→          label="Available pieces"
+   375→          value={stats ? `${stats.availableCount}` : null}
+   376→          icon={<Package className="h-5 w-5" />}
+   377→          iconClassName="bg-emerald-100 text-emerald-700"
+   378→          loading={statsQuery.isLoading}
+   379→        />
+   380→        <StatCard
+   381→          label="Total value (available)"
+   382→          value={stats ? `Rs. ${formatPrice(stats.totalValue)}` : null}
+   383→          icon={<DollarSign className="h-5 w-5" />}
+   384→          iconClassName="bg-sky-100 text-sky-700"
+   385→          loading={statsQuery.isLoading}
+   386→        />
+   387→        <StatCard
+   388→          label="Written off this month"
+   389→          value={stats ? `${stats.writtenOffThisMonth}` : null}
+   390→          icon={<TrendingDown className="h-5 w-5" />}
+   391→          iconClassName="bg-rose-100 text-rose-700"
+   392→          loading={statsQuery.isLoading}
+   393→        />
+   394→      </div>
+   395→
+   396→      {/* ── Filter ──────────────────────────────────────────── */}
+   397→      <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:justify-between">
+   398→        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+   399→          <RotateCcw className="h-4 w-4" />
+   400→          {itemsQuery.isFetching
+   401→            ? 'Refreshing…'
+   402→            : `${items.length} item${items.length === 1 ? '' : 's'}${
+   403→                statusFilter === 'all'
+   404→                  ? ''
+   405→                  : ` · ${STATUS_FILTER_OPTIONS.find((o) => o.value === statusFilter)?.label ?? ''}`
+   406→              }`}
+   407→        </div>
+   408→        <Select
+   409→          value={statusFilter}
+   410→          onValueChange={(v) => setStatusFilter(v as StatusFilter)}
+   411→        >
+   412→          <SelectTrigger className="w-full sm:w-48">
+   413→            <SelectValue placeholder="Filter by status" />
+   414→          </SelectTrigger>
+   415→          <SelectContent>
+   416→            {STATUS_FILTER_OPTIONS.map((opt) => (
+   417→              <SelectItem key={opt.value} value={opt.value}>
+   418→                {opt.label}
+   419→              </SelectItem>
+   420→            ))}
+   421→          </SelectContent>
+   422→        </Select>
+   423→      </div>
+   424→
+   425→      {/* ── Table / states ──────────────────────────────────── */}
+   426→      {itemsQuery.isLoading ? (
+   427→        <TableSkeleton />
+   428→      ) : itemsQuery.isError ? (
+   429→        <Card>
+   430→          <CardContent className="p-10 text-center space-y-4">
+   431→            <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-full bg-rose-50 text-rose-600">
+   432→              <AlertCircle className="h-5 w-5" />
+   433→            </div>
+   434→            <p className="text-sm text-muted-foreground">
+   435→              Couldn&apos;t load returned items. The server may have restarted.
+   436→            </p>
+   437→            <Button variant="outline" onClick={() => itemsQuery.refetch()}>
+   438→              Try again
+   439→            </Button>
+   440→          </CardContent>
+   441→        </Card>
+   442→      ) : items.length === 0 ? (
+   443→        <Card>
+   444→          <CardContent className="p-10 text-center space-y-4">
+   445→            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
+   446→              <RotateCcw className="h-6 w-6" />
+   447→            </div>
+   448→            <div className="space-y-1">
+   449→              <p className="text-sm font-medium">No returned items yet.</p>
+   450→              <p className="text-sm text-muted-foreground">
+   451→                Record a return when a stitched item comes back.
+   452→              </p>
+   453→            </div>
+   454→            <Button onClick={() => setRecordOpen(true)}>
+   455→              <Plus className="h-4 w-4" /> Record a Return
+   456→            </Button>
+   457→          </CardContent>
+   458→        </Card>
+   459→      ) : (
+   460→        <Card>
+   461→          <CardContent className="p-0">
+   462→            <Table>
+   463→              <TableHeader>
+   464→                <TableRow>
+   465→                  <TableHead>Variant</TableHead>
+   466→                  <TableHead className="w-[60px] text-center">Qty</TableHead>
+   467→                  <TableHead className="w-[110px]">Condition</TableHead>
+   468→                  <TableHead className="w-[110px] text-right">Cost</TableHead>
+   469→                  <TableHead className="w-[120px]">Status</TableHead>
+   470→                  <TableHead className="w-[120px]">Received</TableHead>
+   471→                  <TableHead className="w-[160px] text-right">Actions</TableHead>
+   472→                </TableRow>
+   473→              </TableHeader>
+   474→              <TableBody>
+   475→                {items.map((item) => (
+   476→                  <ReturnedRow
+   477→                    key={item.id}
+   478→                    item={item}
+   479→                    onMarkSold={(id) => setSoldTarget(id)}
+   480→                    onWriteOff={(id) => setWriteOffTarget(id)}
+   481→                  />
+   482→                ))}
+   483→              </TableBody>
+   484→            </Table>
+   485→          </CardContent>
+   486→        </Card>
+   487→      )}
+   488→
+   489→      {/* ── Record a Return dialog ──────────────────────────── */}
+   490→      <RecordReturnDialog
+   491→        open={recordOpen}
+   492→        onOpenChange={(o) => {
+   493→          if (!receiveMutation.isPending) setRecordOpen(o)
+   494→        }}
+   495→        submitting={receiveMutation.isPending}
+   496→        onSubmit={(payload) => receiveMutation.mutate(payload)}
+   497→      />
+   498→
+   499→      {/* ── Mark Sold / Write-off dialogs ───────────────────── */}
+   500→      <MarkSoldDialog
+   501→        open={soldTarget !== null}
+   502→        onOpenChange={(o) => {
+   503→          if (!markSoldMutation.isPending) setSoldTarget(o ? soldTarget : null)
+   504→        }}
+   505→        submitting={markSoldMutation.isPending}
+   506→        onSubmit={(reference) => {
+   507→          if (soldTarget) {
+   508→            markSoldMutation.mutate({ id: soldTarget, reference })
+   509→          }
+   510→        }}
+   511→      />
+   512→
+   513→      <WriteOffDialog
+   514→        open={writeOffTarget !== null}
+   515→        onOpenChange={(o) => {
+   516→          if (!writeOffMutation.isPending) setWriteOffTarget(o ? writeOffTarget : null)
+   517→        }}
+   518→        submitting={writeOffMutation.isPending}
+   519→        onSubmit={(reason) => {
+   520→          if (writeOffTarget) {
+   521→            writeOffMutation.mutate({ id: writeOffTarget, reason })
+   522→          }
+   523→        }}
+   524→      />
+   525→    </div>
+   526→  )
+   527→}
+   528→
+   529→// ─────────────────────────────────────────────────────────────────────────────
+   530→// Stat card
+   531→// ─────────────────────────────────────────────────────────────────────────────
+   532→
+   533→function StatCard({
+   534→  label,
+   535→  value,
+   536→  icon,
+   537→  iconClassName,
+   538→  loading,
+   539→}: {
+   540→  label: string
+   541→  value: string | null
+   542→  icon: React.ReactNode
+   543→  iconClassName: string
+   544→  loading: boolean
+   545→}) {
+   546→  return (
+   547→    <Card>
+   548→      <CardContent className="p-5">
+   549→        <div className="flex items-start justify-between gap-3">
+   550→          <div className="space-y-1 min-w-0">
+   551→            <p className="text-xs font-medium text-muted-foreground truncate">{label}</p>
+   552→            {loading ? (
+   553→              <Skeleton className="h-7 w-20" />
+   554→            ) : (
+   555→              <p className="text-2xl font-semibold tracking-tight truncate">{value ?? '—'}</p>
+   556→            )}
+   557→          </div>
+   558→          <div
+   559→            className={cn(
+   560→              'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg',
+   561→              iconClassName,
+   562→            )}
+   563→          >
+   564→            {icon}
+   565→          </div>
+   566→        </div>
+   567→      </CardContent>
+   568→    </Card>
+   569→  )
+   570→}
+   571→
+   572→// ─────────────────────────────────────────────────────────────────────────────
+   573→// Table skeleton
+   574→// ─────────────────────────────────────────────────────────────────────────────
+   575→
+   576→function TableSkeleton() {
+   577→  return (
+   578→    <Card>
+   579→      <CardContent className="p-0">
+   580→        <div className="space-y-0">
+   581→          {Array.from({ length: 5 }).map((_, i) => (
+   582→            <div
+   583→              key={i}
+   584→              className="flex items-center gap-4 border-b px-4 py-4 last:border-b-0"
+   585→            >
+   586→              <Skeleton className="h-4 w-[200px]" />
+   587→              <Skeleton className="h-4 w-[40px]" />
+   588→              <Skeleton className="h-5 w-[80px] rounded-full" />
+   589→              <Skeleton className="h-4 w-[60px] ml-auto" />
+   590→              <Skeleton className="h-5 w-[80px] rounded-full" />
+   591→              <Skeleton className="h-4 w-[80px]" />
+   592→              <Skeleton className="h-8 w-[100px]" />
+   593→            </div>
+   594→          ))}
+   595→        </div>
+   596→      </CardContent>
+   597→    </Card>
+   598→  )
+   599→}
+   600→
+   601→// ─────────────────────────────────────────────────────────────────────────────
+   602→// Table row
+   603→// ─────────────────────────────────────────────────────────────────────────────
+   604→
+   605→function ReturnedRow({
+   606→  item,
+   607→  onMarkSold,
+   608→  onWriteOff,
+   609→}: {
+   610→  item: ReturnedItem
+   611→  onMarkSold: (id: string) => void
+   612→  onWriteOff: (id: string) => void
+   613→}) {
+   614→  const attrs = formatAttributeValues(item.variant.attributeValues)
+   615→  const isAvailable = item.status === 'available'
+   616→
+   617→  return (
+   618→    <TableRow>
+   619→      <TableCell>
+   620→        <div className="flex flex-col gap-0.5 min-w-[180px]">
+   621→          <span className="text-sm font-medium leading-tight line-clamp-1">
+   622→            {item.variant.product.title}
+   623→          </span>
+   624→          <span className="text-xs text-muted-foreground font-mono">
+   625→            {item.variant.sku}
+   626→          </span>
+   627→          {attrs && (
+   628→            <span className="text-xs text-muted-foreground line-clamp-1">{attrs}</span>
+   629→          )}
+   630→        </div>
+   631→      </TableCell>
+   632→      <TableCell className="text-center text-sm tabular-nums">{item.quantity}</TableCell>
+   633→      <TableCell>
+   634→        <Badge
+   635→          variant="outline"
+   636→          className={cn('text-xs', CONDITION_BADGE_STYLES[item.condition])}
+   637→        >
+   638→          {CONDITION_LABELS[item.condition]}
+   639→        </Badge>
+   640→      </TableCell>
+   641→      <TableCell className="text-right text-sm tabular-nums">
+   642→        Rs. {formatPrice(item.totalCost)}
+   643→      </TableCell>
+   644→      <TableCell>
+   645→        <Badge
+   646→          variant="outline"
+   647→          className={cn('text-xs', STATUS_BADGE_STYLES[item.status])}
+   648→        >
+   649→          {STATUS_LABELS[item.status]}
+   650→        </Badge>
+   651→      </TableCell>
+   652→      <TableCell className="text-sm text-muted-foreground">
+   653→        {formatDate(item.receivedAt)}
+   654→      </TableCell>
+   655→      <TableCell className="text-right">
+   656→        {isAvailable ? (
+   657→          <div className="flex items-center justify-end gap-2">
+   658→            <Button
+   659→              size="sm"
+   660→              variant="outline"
+   661→              onClick={() => onMarkSold(item.id)}
+   662→            >
+   663→              <Check className="h-3.5 w-3.5" /> Mark Sold
+   664→            </Button>
+   665→            <Button
+   666→              size="sm"
+   667→              variant="ghost"
+   668→              className="text-rose-600 hover:text-rose-700 hover:bg-rose-50"
+   669→              onClick={() => onWriteOff(item.id)}
+   670→            >
+   671→              <X className="h-3.5 w-3.5" /> Write Off
+   672→            </Button>
+   673→          </div>
+   674→        ) : (
+   675→          <span className="text-xs text-muted-foreground">—</span>
+   676→        )}
+   677→      </TableCell>
+   678→    </TableRow>
+   679→  )
+   680→}
+   681→
+   682→// ─────────────────────────────────────────────────────────────────────────────
+   683→// Record a Return dialog — full RHF + Zod form
+   684→// ─────────────────────────────────────────────────────────────────────────────
+   685→
+   686→interface RecordReturnPayload {
+   687→  org_variant_id: string
+   688→  quantity: number
+   689→  condition: ReturnedCondition
+   690→  total_cost: number
+   691→  return_reason: string
+   692→  original_order_reference?: string
+   693→  photos: string[]
+   694→  notes?: string
+   695→}
+   696→
+   697→function RecordReturnDialog({
+   698→  open,
+   699→  onOpenChange,
+   700→  submitting,
+   701→  onSubmit,
+   702→}: {
+   703→  open: boolean
+   704→  onOpenChange: (open: boolean) => void
+   705→  submitting: boolean
+   706→  onSubmit: (payload: RecordReturnPayload) => void
+   707→}) {
+   708→  // ---- Fetch products to populate made_to_order variant dropdown ----
+   709→  const productsQuery = useQuery<ProductsResponse>({
+   710→    queryKey: ['products', { for_return_form: true }],
+   711→    queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100'),
+   712→    enabled: open,
+   713→    staleTime: 60_000,
+   714→  })
+   715→
+   716→  // Flatten to made_to_order variants only (with product title for context)
+   717→  const mtoVariants = useMemo(() => {
+   718→    const prods = productsQuery.data?.products ?? []
+   719→    const list: {
+   720→      id: string
+   721→      sku: string
+   722→      costPrice: number
+   723→      productTitle: string
+   724→      productSlug: string
+   725→    }[] = []
+   726→    for (const p of prods) {
+   727→      for (const v of p.variants) {
+   728→        if (v.fulfillmentType === 'made_to_order') {
+   729→          list.push({
+   730→            id: v.id,
+   731→            sku: v.sku,
+   732→            costPrice: v.costPrice,
+   733→            productTitle: p.title,
+   734→            productSlug: p.slug,
+   735→          })
+   736→        }
+   737→      }
+   738→    }
+   739→    return list
+   740→  }, [productsQuery.data])
+   741→
+   742→  // ---- RHF setup ----
+   743→  const form = useForm<RecordReturnForm>({
+   744→    resolver: zodResolver(recordReturnSchema),
+   745→    mode: 'onChange',
+   746→    defaultValues: {
+   747→      org_variant_id: '',
+   748→      quantity: 1,
+   749→      condition: 'perfect',
+   750→      fabricStitchingCost: 0,
+   751→      outgoingCourier: 0,
+   752→      returnCourier: 0,
+   753→      return_reason: 'RTO',
+   754→      custom_reason: '',
+   755→      original_order_reference: '',
+   756→      notes: '',
+   757→    },
+   758→  })
+   759→
+   760→  const {
+   761→    register,
+   762→    handleSubmit,
+   763→    watch,
+   764→    setValue,
+   765→    reset,
+   766→    formState: { errors },
+   767→  } = form
+   768→
+   769→  const selectedVariantId = watch('org_variant_id')
+   770→  const condition = watch('condition')
+   771→  const returnReason = watch('return_reason')
+   772→  const fabricStitchingCost = watch('fabricStitchingCost')
+   773→  const outgoingCourier = watch('outgoingCourier')
+   774→  const returnCourier = watch('returnCourier')
+   775→  const notesValue = watch('notes')
+   776→
+   777→  const totalCost =
+   778→    (Number(fabricStitchingCost) || 0) +
+   779→    (Number(outgoingCourier) || 0) +
+   780→    (Number(returnCourier) || 0)
+   781→
+   782→  // ---- Reset form when dialog opens ----
+   783→  useEffect(() => {
+   784→    if (open) {
+   785→      reset({
+   786→        org_variant_id: '',
+   787→        quantity: 1,
+   788→        condition: 'perfect',
+   789→        fabricStitchingCost: 0,
+   790→        outgoingCourier: 0,
+   791→        returnCourier: 0,
+   792→        return_reason: 'RTO',
+   793→        custom_reason: '',
+   794→        original_order_reference: '',
+   795→        notes: '',
+   796→      })
+   797→    }
+   798→  }, [open, reset])
+   799→
+   800→  // ---- When a variant is selected, prefill fabric+stitching cost from variant costPrice ----
+   801→  useEffect(() => {
+   802→    if (!selectedVariantId) return
+   803→    const v = mtoVariants.find((x) => x.id === selectedVariantId)
+   804→    if (v) {
+   805→      setValue('fabricStitchingCost', v.costPrice, { shouldValidate: true })
+   806→    }
+   807→  }, [selectedVariantId, mtoVariants, setValue])
+   808→
+   809→  // ---- Submit handler ----
+   810→  function onValid(values: RecordReturnForm) {
+   811→    const finalReason =
+   812→      values.return_reason === 'Other'
+   813→        ? values.custom_reason?.trim() || 'Other'
+   814→        : values.return_reason
+   815→
+   816→    const payload: RecordReturnPayload = {
+   817→      org_variant_id: values.org_variant_id,
+   818→      quantity: values.quantity,
+   819→      condition: values.condition,
+   820→      total_cost: totalCost,
+   821→      return_reason: finalReason,
+   822→      original_order_reference:
+   823→        values.original_order_reference?.trim() || undefined,
+   824→      photos: [],
+   825→      notes: values.notes?.trim() || undefined,
+   826→    }
+   827→    onSubmit(payload)
+   828→  }
+   829→
+   830→  return (
+   831→    <Dialog open={open} onOpenChange={onOpenChange}>
+   832→      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+   833→        <DialogHeader>
+   834→          <DialogTitle>Record a returned stitched item</DialogTitle>
+   835→          <DialogDescription>
+   836→            Log an item that came back. Damaged items are written off automatically
+   837→            and will not appear as available stock.
+   838→          </DialogDescription>
+   839→        </DialogHeader>
+   840→
+   841→        <form onSubmit={handleSubmit(onValid)} className="space-y-5">
+   842→          {/* ── Variant select ──────────────────────────────── */}
+   843→          <div className="space-y-2">
+   844→            <Label htmlFor="org_variant_id">
+   845→              Returned variant <span className="text-rose-600">*</span>
+   846→            </Label>
+   847→            <input type="hidden" {...register('org_variant_id')} />
+   848→            <Select
+   849→              value={selectedVariantId}
+   850→              onValueChange={(v) => setValue('org_variant_id', v, { shouldValidate: true })}
+   851→              disabled={productsQuery.isLoading}
+   852→            >
+   853→              <SelectTrigger id="org_variant_id" aria-label="Returned variant">
+   854→                <SelectValue
+   855→                  placeholder={
+   856→                    productsQuery.isLoading
+   857→                      ? 'Loading variants…'
+   858→                      : mtoVariants.length === 0
+   859→                        ? 'No made-to-order variants found'
+   860→                        : 'Select a made-to-order variant'
+   861→                  }
+   862→                />
+   863→              </SelectTrigger>
+   864→              <SelectContent className="max-h-72">
+   865→                {mtoVariants.map((v) => (
+   866→                  <SelectItem key={v.id} value={v.id}>
+   867→                    <div className="flex flex-col">
+   868→                      <span className="text-sm">{v.productTitle}</span>
+   869→                      <span className="text-xs text-muted-foreground font-mono">
+   870→                        {v.sku} · Rs. {formatPrice(v.costPrice)}
+   871→                      </span>
+   872→                    </div>
+   873→                  </SelectItem>
+   874→                ))}
+   875→                {mtoVariants.length === 0 && !productsQuery.isLoading && (
+   876→                  <div className="px-2 py-3 text-xs text-muted-foreground text-center">
+   877→                    No made-to-order variants in your catalog.
+   878→                  </div>
+   879→                )}
+   880→              </SelectContent>
+   881→            </Select>
+   882→            <p className="text-xs text-muted-foreground">
+   883→              Only made-to-order variants are eligible — these are the stitched items that can come back.
+   884→            </p>
+   885→            {errors.org_variant_id && (
+   886→              <p className="text-xs text-rose-600">{errors.org_variant_id.message}</p>
+   887→            )}
+   888→          </div>
+   889→
+   890→          {/* ── Quantity ────────────────────────────────────── */}
+   891→          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+   892→            <div className="space-y-2">
+   893→              <Label htmlFor="quantity">
+   894→                Quantity <span className="text-rose-600">*</span>
+   895→              </Label>
+   896→              <Input
+   897→                id="quantity"
+   898→                type="number"
+   899→                min={1}
+   900→                step={1}
+   901→                {...register('quantity', {
+   902→                  setValueAs: (v) => {
+   903→                    if (v === '' || v === null || v === undefined) return undefined
+   904→                    const n = typeof v === 'number' ? v : Number(v)
+   905→                    return Number.isFinite(n) ? Math.floor(n) : undefined
+   906→                  },
+   907→                })}
+   908→              />
+   909→              {errors.quantity && (
+   910→                <p className="text-xs text-rose-600">{errors.quantity.message}</p>
+   911→              )}
+   912→            </div>
+   913→          </div>
+   914→
+   915→          {/* ── Condition radio cards ───────────────────────── */}
+   916→          <div className="space-y-2">
+   917→            <Label>
+   918→              Condition <span className="text-rose-600">*</span>
+   919→            </Label>
+   920→            <input type="hidden" {...register('condition')} />
+   921→            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+   922→              {CONDITION_OPTIONS.map((opt) => {
+   923→                const selected = condition === opt.value
+   924→                return (
+   925→                  <button
+   926→                    key={opt.value}
+   927→                    type="button"
+   928→                    onClick={() => setValue('condition', opt.value, { shouldValidate: true })}
+   929→                    aria-pressed={selected}
+   930→                    className={cn(
+   931→                      'flex flex-col gap-1 rounded-lg border p-3 text-left transition-colors text-sm',
+   932→                      selected
+   933→                        ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
+   934→                        : 'border-input hover:bg-muted/50',
+   935→                    )}
+   936→                  >
+   937→                    <div className="flex items-center justify-between">
+   938→                      <span className="font-medium">{opt.label}</span>
+   939→                      <span
+   940→                        className={cn(
+   941→                          'flex h-4 w-4 items-center justify-center rounded-full border',
+   942→                          selected ? 'border-primary' : 'border-muted-foreground/40',
+   943→                        )}
+   944→                      >
+   945→                        {selected && (
+   946→                          <span className="h-2 w-2 rounded-full bg-primary" />
+   947→                        )}
+   948→                      </span>
+   949→                    </div>
+   950→                    <span className="text-xs text-muted-foreground leading-snug">
+   951→                      {opt.description}
+   952→                    </span>
+   953→                  </button>
+   954→                )
+   955→              })}
+   956→            </div>
+   957→            {errors.condition && (
+   958→              <p className="text-xs text-rose-600">{errors.condition.message}</p>
+   959→            )}
+   960→
+   961→            {condition === 'damaged' && (
+   962→              <div className="flex items-start gap-2 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
+   963→                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+   964→                <p>
+   965→                  Damaged items are written off immediately and will not appear as available stock.
+   966→                </p>
+   967→              </div>
+   968→            )}
+   969→          </div>
+   970→
+   971→          {/* ── Total cost breakdown ────────────────────────── */}
+   972→          <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
+   973→            <div className="flex items-center justify-between">
+   974→              <p className="text-sm font-medium">Total cost breakdown</p>
+   975→              <p className="text-xs text-muted-foreground">
+   976→                Total: <span className="font-semibold text-foreground">Rs. {formatPrice(totalCost)}</span>
+   977→              </p>
+   978→            </div>
+   979→            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+   980→              <div className="space-y-1.5">
+   981→                <Label htmlFor="fabricStitchingCost" className="text-xs">
+   982→                  Fabric + stitching
+   983→                </Label>
+   984→                <Input
+   985→                  id="fabricStitchingCost"
+   986→                  type="number"
+   987→                  min={0}
+   988→                  step="0.01"
+   989→                  {...register('fabricStitchingCost', {
+   990→                    setValueAs: (v) =>
+   991→                      v === '' || v === null || v === undefined
+   992→                        ? 0
+   993→                        : typeof v === 'number'
+   994→                          ? v
+   995→                          : parseNumberInput(String(v)),
+   996→                  })}
+   997→                />
+   998→                {errors.fabricStitchingCost && (
+   999→                  <p className="text-xs text-rose-600">
+  1000→                    {errors.fabricStitchingCost.message}
+  1001→                  </p>
+  1002→                )}
+  1003→              </div>
+  1004→              <div className="space-y-1.5">
+  1005→                <Label htmlFor="outgoingCourier" className="text-xs">
+  1006→                  Outgoing courier
+  1007→                </Label>
+  1008→                <Input
+  1009→                  id="outgoingCourier"
+  1010→                  type="number"
+  1011→                  min={0}
+  1012→                  step="0.01"
+  1013→                  {...register('outgoingCourier', {
+  1014→                    setValueAs: (v) =>
+  1015→                      v === '' || v === null || v === undefined
+  1016→                        ? 0
+  1017→                        : typeof v === 'number'
+  1018→                          ? v
+  1019→                          : parseNumberInput(String(v)),
+  1020→                  })}
+  1021→                />
+  1022→                {errors.outgoingCourier && (
+  1023→                  <p className="text-xs text-rose-600">
+  1024→                    {errors.outgoingCourier.message}
+  1025→                  </p>
+  1026→                )}
+  1027→              </div>
+  1028→              <div className="space-y-1.5">
+  1029→                <Label htmlFor="returnCourier" className="text-xs">
+  1030→                  Return courier
+  1031→                </Label>
+  1032→                <Input
+  1033→                  id="returnCourier"
+  1034→                  type="number"
+  1035→                  min={0}
+  1036→                  step="0.01"
+  1037→                  {...register('returnCourier', {
+  1038→                    setValueAs: (v) =>
+  1039→                      v === '' || v === null || v === undefined
+  1040→                        ? 0
+  1041→                        : typeof v === 'number'
+  1042→                          ? v
+  1043→                          : parseNumberInput(String(v)),
+  1044→                  })}
+  1045→                />
+  1046→                {errors.returnCourier && (
+  1047→                  <p className="text-xs text-rose-600">
+  1048→                    {errors.returnCourier.message}
+  1049→                  </p>
+  1050→                )}
+  1051→              </div>
+  1052→            </div>
+  1053→            <p className="text-xs text-muted-foreground">
+  1054→              Total is computed as fabric+stitching + outgoing + return courier.
+  1055→            </p>
+  1056→          </div>
+  1057→
+  1058→          {/* ── Return reason ───────────────────────────────── */}
+  1059→          <div className="space-y-2">
+  1060→            <Label>
+  1061→              Return reason <span className="text-rose-600">*</span>
+  1062→            </Label>
+  1063→            <input type="hidden" {...register('return_reason')} />
+  1064→            <Select
+  1065→              value={returnReason}
+  1066→              onValueChange={(v) =>
+  1067→                setValue('return_reason', v as RecordReturnForm['return_reason'], {
+  1068→                  shouldValidate: true,
+  1069→                })
+  1070→              }
+  1071→            >
+  1072→              <SelectTrigger>
+  1073→                <SelectValue placeholder="Choose a reason" />
+  1074→              </SelectTrigger>
+  1075→              <SelectContent>
+  1076→                {RETURN_REASON_OPTIONS.map((opt) => (
+  1077→                  <SelectItem key={opt.value} value={opt.value}>
+  1078→                    {opt.label}
+  1079→                  </SelectItem>
+  1080→                ))}
+  1081→              </SelectContent>
+  1082→            </Select>
+  1083→            {errors.return_reason && (
+  1084→              <p className="text-xs text-rose-600">{errors.return_reason.message}</p>
+  1085→            )}
+  1086→
+  1087→            {returnReason === 'Other' && (
+  1088→              <div className="space-y-1.5 pt-1">
+  1089→                <Label htmlFor="custom_reason" className="text-xs">
+  1090→                  Specify reason <span className="text-rose-600">*</span>
+  1091→                </Label>
+  1092→                <Input
+  1093→                  id="custom_reason"
+  1094→                  placeholder="Describe the reason for return"
+  1095→                  {...register('custom_reason')}
+  1096→                />
+  1097→                {errors.custom_reason && (
+  1098→                  <p className="text-xs text-rose-600">
+  1099→                    {errors.custom_reason.message}
+  1100→                  </p>
+  1101→                )}
+  1102→              </div>
+  1103→            )}
+  1104→          </div>
+  1105→
+  1106→          {/* ── Original order reference ────────────────────── */}
+  1107→          <div className="space-y-2">
+  1108→            <Label htmlFor="original_order_reference" className="text-xs">
+  1109→              Original order reference (optional)
+  1110→            </Label>
+  1111→            <Input
+  1112→              id="original_order_reference"
+  1113→              placeholder="e.g. ORD-2024-00123"
+  1114→              {...register('original_order_reference')}
+  1115→            />
+  1116→          </div>
+  1117→
+  1118→          {/* ── Notes ───────────────────────────────────────── */}
+  1119→          <div className="space-y-2">
+  1120→            <Label htmlFor="notes" className="text-xs">
+  1121→              Notes (optional)
+  1122→            </Label>
+  1123→            <Textarea
+  1124→              id="notes"
+  1125→              rows={3}
+  1126→              placeholder="Inspection notes, damage description, follow-up actions…"
+  1127→              {...register('notes')}
+  1128→            />
+  1129→            <div className="flex items-center justify-between">
+  1130→              {errors.notes ? (
+  1131→                <p className="text-xs text-rose-600">{errors.notes.message}</p>
+  1132→              ) : (
+  1133→                <span />
+  1134→              )}
+  1135→              <p className="text-xs text-muted-foreground tabular-nums">
+  1136→                {(notesValue ?? '').length} / 1000
+  1137→              </p>
+  1138→            </div>
+  1139→          </div>
+  1140→
+  1141→          {/* ── Footer ──────────────────────────────────────── */}
+  1142→          <DialogFooter>
+  1143→            <Button
+  1144→              type="button"
+  1145→              variant="outline"
+  1146→              onClick={() => onOpenChange(false)}
+  1147→              disabled={submitting}
+  1148→            >
+  1149→              Cancel
+  1150→            </Button>
+  1151→            <Button type="submit" disabled={submitting}>
+  1152→              {submitting ? (
+  1153→                <>
+  1154→                  <Loader2 className="h-4 w-4 animate-spin" />
+  1155→                  Saving…
+  1156→                </>
+  1157→              ) : (
+  1158→                <>
+  1159→                  <Check className="h-4 w-4" />
+  1160→                  Record Return
+  1161→                </>
+  1162→              )}
+  1163→            </Button>
+  1164→          </DialogFooter>
+  1165→        </form>
+  1166→      </DialogContent>
+  1167→    </Dialog>
+  1168→  )
+  1169→}
+  1170→
+  1171→// ─────────────────────────────────────────────────────────────────────────────
+  1172→// Mark Sold dialog
+  1173→// ─────────────────────────────────────────────────────────────────────────────
+  1174→
+  1175→function MarkSoldDialog({
+  1176→  open,
+  1177→  onOpenChange,
+  1178→  submitting,
+  1179→  onSubmit,
+  1180→}: {
+  1181→  open: boolean
+  1182→  onOpenChange: (open: boolean) => void
+  1183→  submitting: boolean
+  1184→  onSubmit: (reference: string) => void
+  1185→}) {
+  1186→  const [reference, setReference] = useState('')
+  1187→
+  1188→  // Reset on close
+  1189→  useEffect(() => {
+  1190→    if (!open) setReference('')
+  1191→  }, [open])
+  1192→
+  1193→  const trimmed = reference.trim()
+  1194→  const canSubmit = trimmed.length > 0 && !submitting
+  1195→
+  1196→  return (
+  1197→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1198→      <DialogContent className="sm:max-w-md">
+  1199→        <DialogHeader>
+  1200→          <DialogTitle>Mark item as sold</DialogTitle>
+  1201→          <DialogDescription>
+  1202→            Enter the order reference for this resale. The item will move from
+  1203→            &ldquo;available&rdquo; to &ldquo;sold&rdquo;.
+  1204→          </DialogDescription>
+  1205→        </DialogHeader>
+  1206→
+  1207→        <form
+  1208→          onSubmit={(e) => {
+  1209→            e.preventDefault()
+  1210→            if (canSubmit) onSubmit(trimmed)
+  1211→          }}
+  1212→          className="space-y-4"
+  1213→        >
+  1214→          <div className="space-y-2">
+  1215→            <Label htmlFor="sold_reference">
+  1216→              Sold order reference <span className="text-rose-600">*</span>
+  1217→            </Label>
+  1218→            <Input
+  1219→              id="sold_reference"
+  1220→              autoFocus
+  1221→              placeholder="e.g. ORD-2024-00456"
+  1222→              value={reference}
+  1223→              onChange={(e) => setReference(e.target.value)}
+  1224→              disabled={submitting}
+  1225→            />
+  1226→            {trimmed.length === 0 && reference.length > 0 && (
+  1227→              <p className="text-xs text-rose-600">Reference is required.</p>
+  1228→            )}
+  1229→          </div>
+  1230→
+  1231→          <DialogFooter>
+  1232→            <Button
+  1233→              type="button"
+  1234→              variant="outline"
+  1235→              onClick={() => onOpenChange(false)}
+  1236→              disabled={submitting}
+  1237→            >
+  1238→              Cancel
+  1239→            </Button>
+  1240→            <Button type="submit" disabled={!canSubmit}>
+  1241→              {submitting ? (
+  1242→                <>
+  1243→                  <Loader2 className="h-4 w-4 animate-spin" />
+  1244→                  Saving…
+  1245→                </>
+  1246→              ) : (
+  1247→                <>
+  1248→                  <Check className="h-4 w-4" />
+  1249→                  Mark Sold
+  1250→                </>
+  1251→              )}
+  1252→            </Button>
+  1253→          </DialogFooter>
+  1254→        </form>
+  1255→      </DialogContent>
+  1256→    </Dialog>
+  1257→  )
+  1258→}
+  1259→
+  1260→// ─────────────────────────────────────────────────────────────────────────────
+  1261→// Write-off dialog
+  1262→// ─────────────────────────────────────────────────────────────────────────────
+  1263→
+  1264→function WriteOffDialog({
+  1265→  open,
+  1266→  onOpenChange,
+  1267→  submitting,
+  1268→  onSubmit,
+  1269→}: {
+  1270→  open: boolean
+  1271→  onOpenChange: (open: boolean) => void
+  1272→  submitting: boolean
+  1273→  onSubmit: (reason: string) => void
+  1274→}) {
+  1275→  const [reason, setReason] = useState('')
+  1276→
+  1277→  useEffect(() => {
+  1278→    if (!open) setReason('')
+  1279→  }, [open])
+  1280→
+  1281→  const trimmed = reason.trim()
+  1282→  const canSubmit = trimmed.length >= 3 && !submitting
+  1283→
+  1284→  return (
+  1285→    <Dialog open={open} onOpenChange={onOpenChange}>
+  1286→      <DialogContent className="sm:max-w-md">
+  1287→        <DialogHeader>
+  1288→          <DialogTitle>Write off this item</DialogTitle>
+  1289→          <DialogDescription>
+  1290→            Writing off permanently removes the item from available stock. This
+  1291→            cannot be undone.
+  1292→          </DialogDescription>
+  1293→        </DialogHeader>
+  1294→
+  1295→        <form
+  1296→          onSubmit={(e) => {
+  1297→            e.preventDefault()
+  1298→            if (canSubmit) onSubmit(trimmed)
+  1299→          }}
+  1300→          className="space-y-4"
+  1301→        >
+  1302→          <div className="space-y-2">
+  1303→            <Label htmlFor="writeoff_reason">
+  1304→              Reason <span className="text-rose-600">*</span>
+  1305→            </Label>
+  1306→            <Textarea
+  1307→              id="writeoff_reason"
+  1308→              autoFocus
+  1309→              rows={3}
+  1310→              placeholder="Why is this item being written off?"
+  1311→              value={reason}
+  1312→              onChange={(e) => setReason(e.target.value)}
+  1313→              disabled={submitting}
+  1314→            />
+  1315→            <p className="text-xs text-muted-foreground">
+  1316→              Must be at least 3 characters.
+  1317→            </p>
+  1318→          </div>
+  1319→
+  1320→          <DialogFooter>
+  1321→            <Button
+  1322→              type="button"
+  1323→              variant="outline"
+  1324→              onClick={() => onOpenChange(false)}
+  1325→              disabled={submitting}
+  1326→            >
+  1327→              Cancel
+  1328→            </Button>
+  1329→            <Button
+  1330→              type="submit"
+  1331→              variant="destructive"
+  1332→              disabled={!canSubmit}
+  1333→            >
+  1334→              {submitting ? (
+  1335→                <>
+  1336→                  <Loader2 className="h-4 w-4 animate-spin" />
+  1337→                  Writing off…
+  1338→                </>
+  1339→              ) : (
+  1340→                <>
+  1341→                  <X className="h-4 w-4" />
+  1342→                  Write Off
+  1343→                </>
+  1344→              )}
+  1345→            </Button>
+  1346→          </DialogFooter>
+  1347→        </form>
+  1348→      </DialogContent>
+  1349→    </Dialog>
+  1350→  )
+  1351→}
+  1352→

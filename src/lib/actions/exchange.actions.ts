@@ -20,8 +20,8 @@
  * INVENTORY INTEGRATION:
  *   verifyOldItemReceived() is the ONLY function that processes the old item's
  *   return in inventory. It calls processInventoryTransaction() directly (the
- *   same function the /api/inventory/receive-returned-stitched and
- *   /api/inventory/receive routes use) — we do NOT reimplement that logic.
+ *   same function the /api/inventory/receive route uses) — we do NOT
+ *   reimplement that logic.
  *   For damaged items, a stock_loss_records entry is created directly.
  *
  * Every mutation calls insertAuditLog() AND insertMetricEvent(), and returns
@@ -603,7 +603,7 @@ export async function verifyOldItemReceived(
       }
     } else {
       // Not damaged → add to stock via processInventoryTransaction
-      // (same function the /api/inventory/receive-returned-stitched route uses)
+      // (the canonical stock-movement helper used across the inventory system)
       const txnType =
         exchange.originalOrderItem.fulfillmentTypeSnapshot === 'made_to_order'
           ? 'return_stitched_received'

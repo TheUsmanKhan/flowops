@@ -83,6 +83,12 @@ export interface RecordStockLossInput {
   /** The cycle count item this shortage came from (traceability). */
   cycleCountItemId?: string | null
 
+  /** The supplier return this dispute came from (F6 fix — enables the
+   * back-relation SupplierReturn.linkedLossRecord and powers the
+   * supplier-dispute card on the Stock Losses dashboard). Only set when
+   * lossType='supplier_dispute'. */
+  supplierReturnId?: string | null
+
   /** Who is reporting/recording this loss. */
   employeeId: string
 
@@ -136,6 +142,7 @@ export async function recordStockLoss(
     costPerUnit,
     orderItemId = null,
     cycleCountItemId = null,
+    supplierReturnId = null,
     employeeId,
     subType = null,
     damageType = null,
@@ -181,6 +188,11 @@ export async function recordStockLoss(
         sourceModule,
         orderItemId,
         cycleCountItemId,
+        // F6 fix: link back to the originating supplier return so the
+        // SupplierReturn.linkedLossRecord back-relation is populated.
+        // (Unique constraint on supplierReturnId means re-calling
+        // recordStockLoss for the same dispute returns wasDuplicate=true.)
+        supplierReturnId,
         investigationStatus: sourceModule === 'stock_loss' ? 'none' : 'closed',
         resolution: sourceModule === 'stock_loss' ? null : 'written_off',
       },

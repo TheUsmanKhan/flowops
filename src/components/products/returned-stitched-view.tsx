@@ -1,11 +1,7 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useIdempotentMutation } from '@/hooks/use-idempotent-mutation'
-import { z } from 'zod'
 import { toast } from 'sonner'
 import { api, FetchError } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
@@ -45,7 +41,6 @@ import {
 } from '@/components/ui/table'
 import {
   Loader2,
-  Plus,
   RotateCcw,
   Package,
   AlertCircle,
@@ -92,21 +87,6 @@ interface ReturnedStats {
   writtenOffThisMonth: number
 }
 
-interface ProductsResponse {
-  products: Array<{
-    id: string
-    title: string
-    slug: string
-    variants: Array<{
-      id: string
-      sku: string
-      costPrice: number
-      fulfillmentType: 'stock_based' | 'made_to_order'
-      stitchingType: string | null
-    }>
-  }>
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants / Display maps
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,81 +126,6 @@ const CONDITION_LABELS: Record<ReturnedCondition, string> = {
   damaged: 'Damaged',
 }
 
-const CONDITION_OPTIONS: {
-  value: ReturnedCondition
-  label: string
-  description: string
-}[] = [
-  { value: 'perfect', label: 'Perfect', description: 'Unused, tags on, no defects.' },
-  { value: 'good', label: 'Good', description: 'Lightly used, minor signs of wear.' },
-  { value: 'open_box', label: 'Open box', description: 'Packaging opened, item intact.' },
-  { value: 'damaged', label: 'Damaged', description: 'Torn, stained, or otherwise unsellable.' },
-]
-
-const RETURN_REASON_OPTIONS = [
-  { value: 'RTO', label: 'RTO (Return to Origin)' },
-  { value: 'Refused at door', label: 'Refused at door' },
-  { value: 'Size issue', label: 'Size issue' },
-  { value: 'Wrong item', label: 'Wrong item' },
-  { value: 'Other', label: 'Other' },
-] as const
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Zod schema for the "Record a Return" form
-// ─────────────────────────────────────────────────────────────────────────────
-
-const recordReturnSchema = z
-  .object({
-    org_variant_id: z.string().min(1, 'Select a variant'),
-    quantity: z
-      .number({ error: 'Enter a number' })
-      .int('Quantity must be a whole number')
-      .min(1, 'Quantity must be at least 1'),
-    condition: z.enum(['perfect', 'good', 'open_box', 'damaged']),
-    fabricStitchingCost: z
-      .number({ error: 'Enter a number' })
-      .min(0, 'Cannot be negative'),
-    outgoingCourier: z
-      .number({ error: 'Enter a number' })
-      .min(0, 'Cannot be negative'),
-    returnCourier: z
-      .number({ error: 'Enter a number' })
-      .min(0, 'Cannot be negative'),
-    return_reason: z.enum([
-      'RTO',
-      'Refused at door',
-      'Size issue',
-      'Wrong item',
-      'Other',
-    ]),
-    custom_reason: z.string().optional().or(z.literal('')),
-    original_order_reference: z.string().optional().or(z.literal('')),
-    notes: z
-      .string()
-      .max(1000, 'Notes must be 1000 characters or fewer')
-      .optional()
-      .or(z.literal('')),
-  })
-  .superRefine((data, ctx) => {
-    const total = data.fabricStitchingCost + data.outgoingCourier + data.returnCourier
-    if (total <= 0) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Total cost must be greater than 0',
-        path: ['fabricStitchingCost'],
-      })
-    }
-    if (data.return_reason === 'Other' && !data.custom_reason?.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: 'Please specify the reason',
-        path: ['custom_reason'],
-      })
-    }
-  })
-
-type RecordReturnForm = z.infer<typeof recordReturnSchema>
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -258,21 +163,19 @@ function getErrorMessage(err: unknown): string {
   return 'Something went wrong. Please try again.'
 }
 
-/** Parse a numeric input value, returning 0 for empty/invalid input. */
-function parseNumberInput(v: string): number {
-  if (v === '' || v === '-') return 0
-  const n = Number(v)
-  return Number.isFinite(n) ? n : 0
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Main view
 // ─────────────────────────────────────────────────────────────────────────────
+//
+// NOTE (MERGE-RETURNED-STITCHED-INTO-RTO): The "Record a Return" / Add form
+// was removed from this view — returned-stitched register rows are now
+// created automatically by restockOrderForRto() when a made_to_order item
+// is restocked from an RTO. This view now manages the existing pool only:
+// list, filter, mark as sold, write off.
 
 export function ReturnedStitchedView() {
   const queryClient = useQueryClient()
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
-  const [recordOpen, setRecordOpen] = useState(false)
   const [soldTarget, setSoldTarget] = useState<string | null>(null)
   const [writeOffTarget, setWriteOffTarget] = useState<string | null>(null)
 
@@ -300,31 +203,6 @@ export function ReturnedStitchedView() {
   }
 
   // ---- Mutations ----
-  const receiveMutation = useIdempotentMutation<unknown, {
-    org_variant_id: string
-    quantity: number
-    condition: ReturnedCondition
-    total_cost: number
-    return_reason: string
-    original_order_reference?: string
-    photos: string[]
-    notes?: string
-  }>({
-    url: '/api/returned-stitched',
-    mutationOptions: {
-      onSuccess: (_data, vars) => {
-        const msg =
-          vars.condition === 'damaged'
-            ? 'Damaged item recorded and written off.'
-            : 'Return recorded — item is now available stock.'
-        toast.success(msg)
-        invalidateAll()
-        setRecordOpen(false)
-      },
-      onError: (err) => toast.error(getErrorMessage(err)),
-    },
-  })
-
   const markSoldMutation = useMutation({
     mutationFn: async ({ id, reference }: { id: string; reference: string }) =>
       api.post(`/api/returned-stitched/${id}`, {
@@ -360,12 +238,7 @@ export function ReturnedStitchedView() {
     <div className="space-y-6">
       <PageHeader
         title="Returned Stitched Inventory"
-        description="Track stitched items that come back. Reuse, resell, or write them off cleanly."
-        actions={
-          <Button onClick={() => setRecordOpen(true)}>
-            <Plus className="h-4 w-4" /> Record a Return
-          </Button>
-        }
+        description="Returned made-to-order pieces — automatically registered on RTO. Mark as sold, write off, or reuse for future MTO orders."
       />
 
       {/* ── Stats row ───────────────────────────────────────── */}
@@ -448,12 +321,10 @@ export function ReturnedStitchedView() {
             <div className="space-y-1">
               <p className="text-sm font-medium">No returned items yet.</p>
               <p className="text-sm text-muted-foreground">
-                Record a return when a stitched item comes back.
+                Made-to-order items will appear here automatically when their
+                orders come back as RTOs.
               </p>
             </div>
-            <Button onClick={() => setRecordOpen(true)}>
-              <Plus className="h-4 w-4" /> Record a Return
-            </Button>
           </CardContent>
         </Card>
       ) : (
@@ -485,16 +356,6 @@ export function ReturnedStitchedView() {
           </CardContent>
         </Card>
       )}
-
-      {/* ── Record a Return dialog ──────────────────────────── */}
-      <RecordReturnDialog
-        open={recordOpen}
-        onOpenChange={(o) => {
-          if (!receiveMutation.isPending) setRecordOpen(o)
-        }}
-        submitting={receiveMutation.isPending}
-        onSubmit={(payload) => receiveMutation.mutate(payload)}
-      />
 
       {/* ── Mark Sold / Write-off dialogs ───────────────────── */}
       <MarkSoldDialog
@@ -676,495 +537,6 @@ function ReturnedRow({
         )}
       </TableCell>
     </TableRow>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Record a Return dialog — full RHF + Zod form
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface RecordReturnPayload {
-  org_variant_id: string
-  quantity: number
-  condition: ReturnedCondition
-  total_cost: number
-  return_reason: string
-  original_order_reference?: string
-  photos: string[]
-  notes?: string
-}
-
-function RecordReturnDialog({
-  open,
-  onOpenChange,
-  submitting,
-  onSubmit,
-}: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  submitting: boolean
-  onSubmit: (payload: RecordReturnPayload) => void
-}) {
-  // ---- Fetch products to populate made_to_order variant dropdown ----
-  const productsQuery = useQuery<ProductsResponse>({
-    queryKey: ['products', { for_return_form: true }],
-    queryFn: () => api.get<ProductsResponse>('/api/products?pageSize=100'),
-    enabled: open,
-    staleTime: 60_000,
-  })
-
-  // Flatten to made_to_order variants only (with product title for context)
-  const mtoVariants = useMemo(() => {
-    const prods = productsQuery.data?.products ?? []
-    const list: {
-      id: string
-      sku: string
-      costPrice: number
-      productTitle: string
-      productSlug: string
-    }[] = []
-    for (const p of prods) {
-      for (const v of p.variants) {
-        if (v.fulfillmentType === 'made_to_order') {
-          list.push({
-            id: v.id,
-            sku: v.sku,
-            costPrice: v.costPrice,
-            productTitle: p.title,
-            productSlug: p.slug,
-          })
-        }
-      }
-    }
-    return list
-  }, [productsQuery.data])
-
-  // ---- RHF setup ----
-  const form = useForm<RecordReturnForm>({
-    resolver: zodResolver(recordReturnSchema),
-    mode: 'onChange',
-    defaultValues: {
-      org_variant_id: '',
-      quantity: 1,
-      condition: 'perfect',
-      fabricStitchingCost: 0,
-      outgoingCourier: 0,
-      returnCourier: 0,
-      return_reason: 'RTO',
-      custom_reason: '',
-      original_order_reference: '',
-      notes: '',
-    },
-  })
-
-  const {
-    register,
-    handleSubmit,
-    watch,
-    setValue,
-    reset,
-    formState: { errors },
-  } = form
-
-  const selectedVariantId = watch('org_variant_id')
-  const condition = watch('condition')
-  const returnReason = watch('return_reason')
-  const fabricStitchingCost = watch('fabricStitchingCost')
-  const outgoingCourier = watch('outgoingCourier')
-  const returnCourier = watch('returnCourier')
-  const notesValue = watch('notes')
-
-  const totalCost =
-    (Number(fabricStitchingCost) || 0) +
-    (Number(outgoingCourier) || 0) +
-    (Number(returnCourier) || 0)
-
-  // ---- Reset form when dialog opens ----
-  useEffect(() => {
-    if (open) {
-      reset({
-        org_variant_id: '',
-        quantity: 1,
-        condition: 'perfect',
-        fabricStitchingCost: 0,
-        outgoingCourier: 0,
-        returnCourier: 0,
-        return_reason: 'RTO',
-        custom_reason: '',
-        original_order_reference: '',
-        notes: '',
-      })
-    }
-  }, [open, reset])
-
-  // ---- When a variant is selected, prefill fabric+stitching cost from variant costPrice ----
-  useEffect(() => {
-    if (!selectedVariantId) return
-    const v = mtoVariants.find((x) => x.id === selectedVariantId)
-    if (v) {
-      setValue('fabricStitchingCost', v.costPrice, { shouldValidate: true })
-    }
-  }, [selectedVariantId, mtoVariants, setValue])
-
-  // ---- Submit handler ----
-  function onValid(values: RecordReturnForm) {
-    const finalReason =
-      values.return_reason === 'Other'
-        ? values.custom_reason?.trim() || 'Other'
-        : values.return_reason
-
-    const payload: RecordReturnPayload = {
-      org_variant_id: values.org_variant_id,
-      quantity: values.quantity,
-      condition: values.condition,
-      total_cost: totalCost,
-      return_reason: finalReason,
-      original_order_reference:
-        values.original_order_reference?.trim() || undefined,
-      photos: [],
-      notes: values.notes?.trim() || undefined,
-    }
-    onSubmit(payload)
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle>Record a returned stitched item</DialogTitle>
-          <DialogDescription>
-            Log an item that came back. Damaged items are written off automatically
-            and will not appear as available stock.
-          </DialogDescription>
-        </DialogHeader>
-
-        <form onSubmit={handleSubmit(onValid)} className="space-y-5">
-          {/* ── Variant select ──────────────────────────────── */}
-          <div className="space-y-2">
-            <Label htmlFor="org_variant_id">
-              Returned variant <span className="text-rose-600">*</span>
-            </Label>
-            <input type="hidden" {...register('org_variant_id')} />
-            <Select
-              value={selectedVariantId}
-              onValueChange={(v) => setValue('org_variant_id', v, { shouldValidate: true })}
-              disabled={productsQuery.isLoading}
-            >
-              <SelectTrigger id="org_variant_id" aria-label="Returned variant">
-                <SelectValue
-                  placeholder={
-                    productsQuery.isLoading
-                      ? 'Loading variants…'
-                      : mtoVariants.length === 0
-                        ? 'No made-to-order variants found'
-                        : 'Select a made-to-order variant'
-                  }
-                />
-              </SelectTrigger>
-              <SelectContent className="max-h-72">
-                {mtoVariants.map((v) => (
-                  <SelectItem key={v.id} value={v.id}>
-                    <div className="flex flex-col">
-                      <span className="text-sm">{v.productTitle}</span>
-                      <span className="text-xs text-muted-foreground font-mono">
-                        {v.sku} · Rs. {formatPrice(v.costPrice)}
-                      </span>
-                    </div>
-                  </SelectItem>
-                ))}
-                {mtoVariants.length === 0 && !productsQuery.isLoading && (
-                  <div className="px-2 py-3 text-xs text-muted-foreground text-center">
-                    No made-to-order variants in your catalog.
-                  </div>
-                )}
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Only made-to-order variants are eligible — these are the stitched items that can come back.
-            </p>
-            {errors.org_variant_id && (
-              <p className="text-xs text-rose-600">{errors.org_variant_id.message}</p>
-            )}
-          </div>
-
-          {/* ── Quantity ────────────────────────────────────── */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="quantity">
-                Quantity <span className="text-rose-600">*</span>
-              </Label>
-              <Input
-                id="quantity"
-                type="number"
-                min={1}
-                step={1}
-                {...register('quantity', {
-                  setValueAs: (v) => {
-                    if (v === '' || v === null || v === undefined) return undefined
-                    const n = typeof v === 'number' ? v : Number(v)
-                    return Number.isFinite(n) ? Math.floor(n) : undefined
-                  },
-                })}
-              />
-              {errors.quantity && (
-                <p className="text-xs text-rose-600">{errors.quantity.message}</p>
-              )}
-            </div>
-          </div>
-
-          {/* ── Condition radio cards ───────────────────────── */}
-          <div className="space-y-2">
-            <Label>
-              Condition <span className="text-rose-600">*</span>
-            </Label>
-            <input type="hidden" {...register('condition')} />
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              {CONDITION_OPTIONS.map((opt) => {
-                const selected = condition === opt.value
-                return (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    onClick={() => setValue('condition', opt.value, { shouldValidate: true })}
-                    aria-pressed={selected}
-                    className={cn(
-                      'flex flex-col gap-1 rounded-lg border p-3 text-left transition-colors text-sm',
-                      selected
-                        ? 'border-primary bg-primary/5 ring-1 ring-primary/30'
-                        : 'border-input hover:bg-muted/50',
-                    )}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium">{opt.label}</span>
-                      <span
-                        className={cn(
-                          'flex h-4 w-4 items-center justify-center rounded-full border',
-                          selected ? 'border-primary' : 'border-muted-foreground/40',
-                        )}
-                      >
-                        {selected && (
-                          <span className="h-2 w-2 rounded-full bg-primary" />
-                        )}
-                      </span>
-                    </div>
-                    <span className="text-xs text-muted-foreground leading-snug">
-                      {opt.description}
-                    </span>
-                  </button>
-                )
-              })}
-            </div>
-            {errors.condition && (
-              <p className="text-xs text-rose-600">{errors.condition.message}</p>
-            )}
-
-            {condition === 'damaged' && (
-              <div className="flex items-start gap-2 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
-                <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                <p>
-                  Damaged items are written off immediately and will not appear as available stock.
-                </p>
-              </div>
-            )}
-          </div>
-
-          {/* ── Total cost breakdown ────────────────────────── */}
-          <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
-            <div className="flex items-center justify-between">
-              <p className="text-sm font-medium">Total cost breakdown</p>
-              <p className="text-xs text-muted-foreground">
-                Total: <span className="font-semibold text-foreground">Rs. {formatPrice(totalCost)}</span>
-              </p>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="fabricStitchingCost" className="text-xs">
-                  Fabric + stitching
-                </Label>
-                <Input
-                  id="fabricStitchingCost"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  {...register('fabricStitchingCost', {
-                    setValueAs: (v) =>
-                      v === '' || v === null || v === undefined
-                        ? 0
-                        : typeof v === 'number'
-                          ? v
-                          : parseNumberInput(String(v)),
-                  })}
-                />
-                {errors.fabricStitchingCost && (
-                  <p className="text-xs text-rose-600">
-                    {errors.fabricStitchingCost.message}
-                  </p>
-                )}
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="outgoingCourier" className="text-xs">
-                  Outgoing courier
-                </Label>
-                <Input
-                  id="outgoingCourier"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  {...register('outgoingCourier', {
-                    setValueAs: (v) =>
-                      v === '' || v === null || v === undefined
-                        ? 0
-                        : typeof v === 'number'
-                          ? v
-                          : parseNumberInput(String(v)),
-                  })}
-                />
-                {errors.outgoingCourier && (
-                  <p className="text-xs text-rose-600">
-                    {errors.outgoingCourier.message}
-                  </p>
-                )}
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="returnCourier" className="text-xs">
-                  Return courier
-                </Label>
-                <Input
-                  id="returnCourier"
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  {...register('returnCourier', {
-                    setValueAs: (v) =>
-                      v === '' || v === null || v === undefined
-                        ? 0
-                        : typeof v === 'number'
-                          ? v
-                          : parseNumberInput(String(v)),
-                  })}
-                />
-                {errors.returnCourier && (
-                  <p className="text-xs text-rose-600">
-                    {errors.returnCourier.message}
-                  </p>
-                )}
-              </div>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              Total is computed as fabric+stitching + outgoing + return courier.
-            </p>
-          </div>
-
-          {/* ── Return reason ───────────────────────────────── */}
-          <div className="space-y-2">
-            <Label>
-              Return reason <span className="text-rose-600">*</span>
-            </Label>
-            <input type="hidden" {...register('return_reason')} />
-            <Select
-              value={returnReason}
-              onValueChange={(v) =>
-                setValue('return_reason', v as RecordReturnForm['return_reason'], {
-                  shouldValidate: true,
-                })
-              }
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Choose a reason" />
-              </SelectTrigger>
-              <SelectContent>
-                {RETURN_REASON_OPTIONS.map((opt) => (
-                  <SelectItem key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {errors.return_reason && (
-              <p className="text-xs text-rose-600">{errors.return_reason.message}</p>
-            )}
-
-            {returnReason === 'Other' && (
-              <div className="space-y-1.5 pt-1">
-                <Label htmlFor="custom_reason" className="text-xs">
-                  Specify reason <span className="text-rose-600">*</span>
-                </Label>
-                <Input
-                  id="custom_reason"
-                  placeholder="Describe the reason for return"
-                  {...register('custom_reason')}
-                />
-                {errors.custom_reason && (
-                  <p className="text-xs text-rose-600">
-                    {errors.custom_reason.message}
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* ── Original order reference ────────────────────── */}
-          <div className="space-y-2">
-            <Label htmlFor="original_order_reference" className="text-xs">
-              Original order reference (optional)
-            </Label>
-            <Input
-              id="original_order_reference"
-              placeholder="e.g. ORD-2024-00123"
-              {...register('original_order_reference')}
-            />
-          </div>
-
-          {/* ── Notes ───────────────────────────────────────── */}
-          <div className="space-y-2">
-            <Label htmlFor="notes" className="text-xs">
-              Notes (optional)
-            </Label>
-            <Textarea
-              id="notes"
-              rows={3}
-              placeholder="Inspection notes, damage description, follow-up actions…"
-              {...register('notes')}
-            />
-            <div className="flex items-center justify-between">
-              {errors.notes ? (
-                <p className="text-xs text-rose-600">{errors.notes.message}</p>
-              ) : (
-                <span />
-              )}
-              <p className="text-xs text-muted-foreground tabular-nums">
-                {(notesValue ?? '').length} / 1000
-              </p>
-            </div>
-          </div>
-
-          {/* ── Footer ──────────────────────────────────────── */}
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => onOpenChange(false)}
-              disabled={submitting}
-            >
-              Cancel
-            </Button>
-            <Button type="submit" disabled={submitting}>
-              {submitting ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Saving…
-                </>
-              ) : (
-                <>
-                  <Check className="h-4 w-4" />
-                  Record Return
-                </>
-              )}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
   )
 }
 

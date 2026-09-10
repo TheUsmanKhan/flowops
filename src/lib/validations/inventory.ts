@@ -292,16 +292,9 @@ export type FulfillMadeToOrderInput = z.infer<typeof fulfillMadeToOrderSchema>
 // ──────────────────────────────────────────────────────────────
 // RETURNED STITCHED ITEM
 // ──────────────────────────────────────────────────────────────
-
-export const receiveReturnedStitchedSchema = z.object({
-  org_variant_id: z.string().min(1),
-  location_id: z.string().min(1),
-  quantity: z.number().int().positive(),
-  condition: z.enum(['perfect', 'good', 'open_box', 'damaged']),
-  total_cost: z.number().positive('Total cost must be positive'),
-  return_reason: z.string().min(3, 'Return reason is required').max(500),
-  photos: z.array(z.string().url()).default([]),
-  notes: z.string().max(1000).optional().or(z.literal('')),
-  original_order_reference: z.string().optional().or(z.literal('')),
-})
-export type ReceiveReturnedStitchedInput = z.infer<typeof receiveReturnedStitchedSchema>
+//
+// NOTE (MERGE-RETURNED-STITCHED-INTO-RTO): the create/receive schema
+// `receiveReturnedStitchedSchema` was removed along with the deleted
+// /api/inventory/receive-returned-stitched route — returned-stitched rows
+// are now created automatically by restockOrderForRto(). Manage-side
+// validation (mark-sold, write-off) lives in src/lib/validations/product.ts.

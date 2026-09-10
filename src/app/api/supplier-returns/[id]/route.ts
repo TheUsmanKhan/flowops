@@ -4,6 +4,7 @@ import { ApiError, handleError, readBody } from '@/lib/workspace'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
+import { recordStockLoss } from '@/lib/stock-loss'
 import { NextRequest } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -77,38 +78,87 @@ export async function PATCH(
       })
     }
 
-    // If status = 'rejected': auto-create a supplier_dispute stock_loss_records entry
+    // If status = 'rejected': auto-create a supplier_dispute stock_loss_records entry.
+    //
+    // F6 fix: previously this code created the StockLossRecord directly via
+    // db.stockLossRecord.create, bypassing the unified recordStockLoss()
+    // helper. That left sourceModule=NULL — so the supplier-dispute losses
+    // didn't show up in any sourceModule-filtered view (the Stock Losses
+    // dashboard's "Source: Supplier Return" filter, the supplier-dispute
+    // KPI breakdown, etc.). Now we route through recordStockLoss() which:
+    //   - Sets sourceModule='supplier_return' (the canonical value for the
+    //     StockLossSourceModule enum — the audit's "supplier_dispute"
+    //     refers to the lossType, which we preserve as 'supplier_dispute').
+    //   - Sets investigationStatus='closed' + resolution='written_off' (the
+    //     helper's defaults for non-stock_loss sourceModules) instead of
+    //     the old 'none'/'written_off' combo that suggested an open
+    //     investigation even though the dispute was just resolved.
+    //   - Links the StockLossRecord back to the SupplierReturn via the
+    //     supplierReturnId back-relation (the helper now accepts this).
+    //   - Uses createInventoryTransaction=false because the supplier_return
+    //     InventoryTransaction was ALREADY created when the SupplierReturn
+    //     was first POSTed (POST /api/supplier-returns route.ts). Creating
+    //     another supplier_return txn here would double-decrement onHand.
     if (body.status === 'rejected' && !record.linkedLossRecord) {
-      const lossRecord = await db.stockLossRecord.create({
-        data: {
-          organizationId: orgId,
-          companyId,
-          orgVariantId: record.orgVariantId,
-          locationId: record.locationId,
-          lossType: 'supplier_dispute',
-          subType: 'confirmed',
-          quantity: record.quantity,
-          costPerUnit: record.costPerUnit,
-          investigationStatus: 'none',
-          resolution: 'written_off',
-          responsibleParty: 'supplier',
-          notes: `Auto-created from rejected supplier return. ${body.notes || ''}`,
-          reportedById: caller.id,
-          resolvedById: caller.id,
-          resolvedAt: new Date(),
-          supplierReturnId: id,
-        },
-      })
-      insertAuditLog({
-        action: 'stock_loss.supplier_dispute_created',
-        entityType: 'stock_loss',
-        entityId: lossRecord.id,
-        companyId,
+      const lossResult = await recordStockLoss({
         organizationId: orgId,
-        userId: user.id,
+        companyId,
+        orgVariantId: record.orgVariantId,
+        locationId: record.locationId,
+        lossType: 'supplier_dispute',
+        sourceModule: 'supplier_return',
+        quantity: record.quantity,
+        costPerUnit: Number(record.costPerUnit),
+        supplierReturnId: id,
         employeeId: caller.id,
-        newValues: { supplierReturnId: id, quantity: record.quantity },
+        subType: 'confirmed',
+        responsibleParty: 'supplier',
+        notes: `Auto-created from rejected supplier return. ${body.notes || ''}`,
+        // See comment above — the original supplier_return txn already
+        // decremented onHand when the SupplierReturn was created.
+        createInventoryTransaction: false,
       })
+
+      let lossRecordId: string | null = null
+      if (lossResult.success && !lossResult.wasDuplicate && lossResult.lossRecordId) {
+        lossRecordId = lossResult.lossRecordId
+        // Backfill resolvedById + resolvedAt — recordStockLoss sets
+        // reportedById but doesn't set resolvedById/resolvedAt. The
+        // existing direct-create code set these (the dispute is resolved
+        // by the rejection), so we preserve that behavior.
+        await db.stockLossRecord.update({
+          where: { id: lossRecordId },
+          data: {
+            resolvedById: caller.id,
+            resolvedAt: new Date(),
+          },
+        })
+      } else if (lossResult.wasDuplicate) {
+        // Loss was already recorded for this supplier return — shouldn't
+        // happen because we check !record.linkedLossRecord above, but
+        // recordStockLoss's dedup catches it gracefully if it does.
+        console.log(`[supplier-returns] Loss already recorded for return ${id}, skipping.`)
+      } else if (!lossResult.success) {
+        // Real error — log it but don't fail the PATCH. The supplier
+        // return IS marked as rejected; the loss record can be created
+        // manually later if needed.
+        console.error(
+          `[supplier-returns] Failed to auto-create stock loss record for rejected return ${id}: ${lossResult.error}`,
+        )
+      }
+
+      if (lossRecordId) {
+        insertAuditLog({
+          action: 'stock_loss.supplier_dispute_created',
+          entityType: 'stock_loss',
+          entityId: lossRecordId,
+          companyId,
+          organizationId: orgId,
+          userId: user.id,
+          employeeId: caller.id,
+          newValues: { supplierReturnId: id, quantity: record.quantity, sourceModule: 'supplier_return' },
+        })
+      }
     }
 
     insertAuditLog({

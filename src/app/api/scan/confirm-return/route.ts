@@ -69,13 +69,33 @@ export async function POST(req: NextRequest) {
       throw new ApiError(404, 'Order not found.')
     }
 
-    // ── 2. Confirm RTO (processOrderReturn adds stock back) ──
-    const returnResult = await processOrderReturn(body.orderId, body.returnReason.trim())
+    // ── 2. Confirm RTO ──
+    // F2 fix: pass the scanned condition to processOrderReturn so it picks
+    // the right inventory transaction type per item:
+    //   - condition='perfect' | 'good': creates +return_resellable /
+    //     +return_stitched_received (adds stock back).
+    //   - condition='damaged': creates ONE return_damaged txn per item
+    //     (NO pool change — stock stays decremented from the original
+    //     sale_dispatched). Previously, the damaged path created TWO
+    //     offsetting transactions per item (+return_resellable then
+    //     -damage_writeoff via recordStockLoss), which was net-zero on
+    //     onHand but generated 2 noisy ledger entries.
+    const returnResult = await processOrderReturn(
+      body.orderId,
+      body.returnReason.trim(),
+      { condition: body.condition },
+    )
     if (!returnResult.success) {
       throw new ApiError(400, returnResult.error ?? 'Failed to process return')
     }
 
     // ── 3. If damaged, record the loss ──
+    // F2 fix: call recordStockLoss with createInventoryTransaction=false
+    // because processOrderReturn already created the single return_damaged
+    // ledger entry per item. A separate damage_writeoff txn would
+    // double-decrement onHand AND re-introduce the 2-txn-per-item noise.
+    // We just need the StockLossRecord for the Stock Losses dashboard +
+    // financial reporting.
     let lossResult: { wasDuplicate: boolean; lossRecordId: string | null } = {
       wasDuplicate: false,
       lossRecordId: null,
@@ -116,7 +136,12 @@ export async function POST(req: NextRequest) {
           damageType: body.damageType || 'other',
           responsibleParty: 'courier',
           notes: `Damaged return confirmed via Return Order Scan. Order: ${order.flowopsOrderNumber}. Reason: ${body.returnReason}. ${body.notes || ''}`,
-          createInventoryTransaction: true,
+          // F2 fix: do NOT create another inventory transaction —
+          // processOrderReturn already created the single return_damaged
+          // txn per item. Setting this to false creates ONLY the
+          // StockLossRecord (for the Stock Losses dashboard + financial
+          // reporting) without an additional damage_writeoff ledger entry.
+          createInventoryTransaction: false,
         })
 
         if (result.success && result.wasDuplicate) {
@@ -155,8 +180,8 @@ export async function POST(req: NextRequest) {
       message:
         body.condition === 'damaged'
           ? lossResult.wasDuplicate
-            ? 'Return confirmed + damage was already recorded (dedup — no duplicate created).'
-            : 'Return confirmed + damage recorded + stock adjusted.'
+            ? 'Return confirmed + damage was already recorded (dedup — no duplicate created). Stock stays decremented (damaged, not resellable).'
+            : 'Return confirmed + damage recorded. Stock stays decremented (damaged, not resellable).'
           : 'Return confirmed. Item added back to inventory.',
     })
   } catch (err) {

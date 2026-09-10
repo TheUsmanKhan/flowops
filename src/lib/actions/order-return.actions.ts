@@ -52,12 +52,27 @@ interface ActionResult<T = unknown> {
 export async function processOrderReturn(
   orderId: string,
   returnReason: string,
+  options?: {
+    /** The condition the returned items are in. Default 'perfect'.
+     *  - 'perfect' | 'good': add stock back via return_resellable / return_stitched_received
+     *  - 'damaged': create a single return_damaged txn (NO pool change —
+     *    stock stays decremented from the original sale_dispatched; the
+     *    caller is responsible for creating the StockLossRecord via
+     *    recordStockLoss with createInventoryTransaction=false). This
+     *    avoids the previous 2-offsetting-txn pattern (+return_resellable
+     *    followed by -damage_writeoff) that was net-zero on onHand but
+     *    created 2 noisy ledger entries per returned item. */
+    condition?: 'perfect' | 'good' | 'damaged'
+  },
 ): Promise<ActionResult<{ itemsProcessed: number }>> {
   try {
     const parsed = processOrderReturnSchema.safeParse({ orderId, returnReason })
     if (!parsed.success) {
       return { success: false, error: parsed.error.issues[0]?.message ?? 'Invalid input' }
     }
+
+    const condition = options?.condition ?? 'perfect'
+    const isDamaged = condition === 'damaged'
 
     const ctx = await getWorkspace()
     await requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)
@@ -122,7 +137,46 @@ export async function processOrderReturn(
       const costPerUnit = dispatchTxn ? Number(dispatchTxn.costPerUnit) : Number(item.orgVariant.costPrice)
       const totalCost = costPerUnit * item.quantity
 
-      if (item.fulfillmentTypeSnapshot === 'made_to_order') {
+      if (isDamaged) {
+        // F2 fix: when the caller knows the items are damaged (e.g. the
+        // scan/confirm-return flow with condition='damaged'), use a single
+        // return_damaged transaction (NO pool change) instead of creating
+        // +return_resellable followed by -damage_writeoff. The previous
+        // pattern was net-zero on onHand but generated 2 noisy ledger
+        // entries per returned item. The caller is responsible for
+        // creating the StockLossRecord via recordStockLoss with
+        // createInventoryTransaction=false (since this return_damaged
+        // txn already serves as the single ledger entry).
+        const txnResult = await processInventoryTransaction({
+          orgVariantId: item.orgVariantId,
+          locationId,
+          organizationId: order.organizationId,
+          companyId: ctx.company.id,
+          employeeId: ctx.employee.id,
+          transactionType: 'return_damaged',
+          quantity: item.quantity,
+          costPerUnit,
+          referenceType: 'order',
+          referenceId: orderId,
+          notes: `Auto-processed RTO return (damaged). Reason: ${returnReason}`,
+        })
+
+        if (txnResult.success) {
+          await db.orderItem.update({
+            where: { id: item.id },
+            data: {
+              // ORD-004: previously MISSING — OrderItem.fulfillmentStatus
+              // stayed 'dispatched' after RTO, causing warehouse reports /
+              // item-count queries to over-count "currently dispatched" items.
+              // Now correctly transitions to 'returned'.
+              fulfillmentStatus: 'returned',
+              autoProcessedAsPerfect: false, // damaged — NOT marked as perfect
+              needsReview: false,            // already known damaged — no review needed
+            },
+          })
+          itemsProcessed++
+        }
+      } else if (item.fulfillmentTypeSnapshot === 'made_to_order') {
         // Call processInventoryTransaction with type 'return_stitched_received'
         // This adds stock back AND flips track_inventory to TRUE (one-way)
         const txnResult = await processInventoryTransaction({

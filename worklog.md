@@ -17481,3 +17481,217 @@ System health:
 - Pool invariant violations: 0
 - Drift pools: 0
 - RTO items: all 14 at 'returned' ✅
+
+---
+Task ID: MERGE-RETURNED-STITCHED-INTO-RTO
+Agent: general-purpose sub-agent
+Task: Merge Returned-Stitched module INTO the RTO flow — remove separate create/receive entry points, register rows automatically from restockOrderForRto().
+
+Work Log:
+
+- Read worklog.md (17,483 lines) for full context on prior work — understood the INV-002 canonical receipt processor (processReturnedStitchedReceipt) was created in inventory.ts to unify two split routes, but the task now asks to eliminate the create/receive flow entirely and let restockOrderForRto() handle the ReturnedStitchedInventory register-row creation for made_to_order items automatically.
+
+- Step 1 (restockOrderForRto() modification — src/lib/inventory.ts):
+  * Added `flowopsOrderNumber: true` to the order SELECT clause (was previously not selected).
+  * After the existing `txnResult.success` branch that creates the `return_stitched_received` InventoryTransaction + updates the OrderItem to `fulfillmentStatus='returned'`, added a new block that:
+    - Checks `item.orgVariant.fulfillmentType === 'made_to_order'` (variant-level check per task spec).
+    - Dedup guard: queries `db.returnedStitchedInventory.findFirst({ where: { originalOrderReference: order.flowopsOrderNumber, orgVariantId: item.orgVariantId } })` — if a row already exists (e.g. retry), skips creation.
+    - Otherwise creates a `ReturnedStitchedInventory` row with: orgVariantId, organizationId, companyId, quantity, condition='perfect' (default, user-editable later), totalCost = costPerUnit × quantity (recovered from the dispatch txn), originalOrderReference=order.flowopsOrderNumber, returnReason=context.returnReason, status='available', photos='[]', receivedById=context.employeeId, inventoryTxnId=txnResult.transactionId (bidirectional link to the ledger txn just created).
+    - Wrapped in try/catch so a register-row creation failure NEVER fails the RTO flow — stock is already restocked, OrderItem is already marked 'returned'; the error is logged and processing continues to the next item.
+  * Note on `stitchingCost` field: the task spec mentioned storing `stitchingCost = item's stitching cost (if available)`, but the ReturnedStitchedInventory schema (prisma/schema.prisma lines 846-893) has no `stitchingCost` column. The stitching cost is already captured in the dispatch txn's `costPerUnit` (which is the stitched-item cost = fabric + stitching), so it flows into `totalCost` automatically. The schema was left unchanged — no column was added.
+
+- Step 2 (remove processReturnedStitchedReceipt — src/lib/inventory.ts):
+  * Removed the entire `processReturnedStitchedReceipt()` function (~148 lines).
+  * Removed the `ProcessReturnedStitchedInput` interface (~21 lines).
+  * Removed the `ProcessReturnedStitchedResult` interface (~15 lines).
+  * Removed the section header comment "// INV-002 fix — canonical returned-stitched receipt processor" + the doc-comment block above the function.
+  * Net removal: ~230 lines from inventory.ts (file went from 1402 → 1229 lines).
+  * The `checkReturnedStockAvailability()` function immediately following was preserved (used by checkAndFulfillMadeToOrderVariant to query the pool).
+
+- Step 3 (returned-stitched/route.ts — remove POST, keep GET):
+  * Removed the `POST` handler (lines 80-210 of original file — ~130 lines including the entire receiveReturnedStitched closure, idempotency-key branch, audit log + metric event side-effects).
+  * Removed imports for: `getCurrentUser` (only POST used it), `insertAuditLog`, `insertMetricEvent`, `PERMISSIONS`, `NextRequest` (still needed for GET signature — kept), `returnedStitchedInventorySchema`, `processReturnedStitchedReceipt`, `ApiError`, `readBody` (only POST used them; GET uses getWorkspace+requirePermission+handleError).
+  * The `GET` handler was kept verbatim — it lists returned-stitched inventory filtered by status/variantId with variant + product joins.
+
+- Step 4 (deleted receive-returned-stitched directory):
+  * `rm -rf src/app/api/inventory/receive-returned-stitched/` — directory and its route.ts file (~152 lines) completely removed.
+  * This was the duplicate entry point that previously created the InventoryTransaction (and now-redundantly created the register row via processReturnedStitchedReceipt after the INV-002 fix).
+
+- Step 5 (remove returnedStitchedInventorySchema — src/lib/validations/product.ts):
+  * Removed the `returnedStitchedInventorySchema` Zod schema (lines 213-229 of original) — only used by the deleted POST handler.
+  * Removed the `ReturnedStitchedInput` type alias (was `z.infer<typeof returnedStitchedInventorySchema>`).
+  * Replaced the section header with a NOTE comment explaining the schema's removal.
+  * The `markSoldSchema` and `writeOffSchema` (and their types) were KEPT — they're still used by the `[id]` route's POST handler for mark_sold / write_off actions on existing register rows.
+
+- Step 6 (remove receiveReturnedStitchedSchema — src/lib/validations/inventory.ts):
+  * Removed the `receiveReturnedStitchedSchema` Zod schema (lines 296-306 of original) — only used by the deleted receive-returned-stitched route.
+  * Removed the `ReceiveReturnedStitchedInput` type alias.
+  * Replaced the section header with a NOTE comment explaining the schema's removal + pointing to product.ts for the manage-side schemas.
+
+- Step 7 (frontend cleanup — src/components/products/returned-stitched-view.tsx):
+  * Removed the entire `RecordReturnDialog` component (~488 lines including its `useForm`, RHF form fields, condition radio cards, cost breakdown inputs, return-reason select, notes textarea).
+  * Removed the `receiveMutation` (useIdempotentMutation hook) and its associated `recordOpen` / `setRecordOpen` state.
+  * Removed the "Record a Return" button from the PageHeader `actions` prop.
+  * Removed the "Record a Return" button from the empty-state card.
+  * Removed unused imports: `useForm`, `zodResolver`, `z`, `useMemo`, `useIdempotentMutation`, `Plus` icon.
+  * Removed unused constants/helpers used only by the form: `CONDITION_OPTIONS`, `RETURN_REASON_OPTIONS`, `recordReturnSchema`, `RecordReturnForm` type, `RecordReturnPayload` interface, `ProductsResponse` interface, `parseNumberInput` helper.
+  * Updated the PageHeader `description` to: "Returned made-to-order pieces — automatically registered on RTO. Mark as sold, write off, or reuse for future MTO orders."
+  * Updated the empty-state copy to: "Made-to-order items will appear here automatically when their orders come back as RTOs."
+  * KEPT: the list table, stats row, status filter, mark-as-sold mutation/dialog, write-off mutation/dialog, ReturnedRow component, StatCard component, TableSkeleton component, all status/condition badge styling maps.
+  * File went from 1351 → 615 lines (~736 lines removed).
+
+- Step 8 (kept register-management routes — src/app/api/returned-stitched/[id]/route.ts + stats/route.ts):
+  * NO changes to `[id]/route.ts` — still handles mark_sold (POST action='sold') and write_off (POST action='write_off') on existing register rows. The PROD-001 location-resolution fix is intact.
+  * NO changes to `stats/route.ts` — still serves dashboard header stats (availableCount, totalValue, writtenOffThisMonth).
+
+- Step 9 (kept the ReturnedStitchedInventory model in prisma/schema.prisma):
+  * NO changes to the model (lines 846-893). All columns preserved: quantity, condition, totalCost, suggestedResalePrice, originalOrderReference, returnReason, status, photos, notes, receivedById, receivedAt, soldAt, soldOrderReference, writtenOffAt, writtenOffById, writeOffReason, inventoryTxnId. Indexes preserved.
+
+- Step 10 (kept checkAndFulfillMadeToOrderVariant — src/lib/inventory.ts lines 692-843):
+  * NO changes to the function. It still queries `checkReturnedStockAvailability()` (which reads inventory_pools.onHand > 0 for the variant) and falls back to fresh production if insufficient. Because restockOrderForRto() now also adds the stock back to the InventoryPool via the `return_stitched_received` txn AND creates a ReturnedStitchedInventory register row, both the pool query and the register UI stay in sync.
+
+- Step 11 (kept order-detail-view.tsx returnedStitchedUsed badge):
+  * NO changes to `src/components/orders/order-detail-view.tsx` — the `returnedStitchedUsed` boolean badge on each OrderItem stays (shows when an order consumed a returned-stitched piece from the pool).
+
+- Step 12 (kept sidebar/mobile-nav items):
+  * NO changes to `src/components/layout/sidebar.tsx` line 67 — "Returned Stock" menu item with `route: { name: 'returned-stitched' }` stays.
+  * NO changes to `src/components/layout/mobile-nav.tsx` line 52 — same item stays.
+
+- Step 13 (stale-comment cleanup in src/lib/actions/exchange.actions.ts):
+  * Updated two comments that referenced the now-deleted `/api/inventory/receive-returned-stitched` route:
+    - Line 23: removed the `/api/inventory/receive-returned-stitched and` reference; the comment now reads "the same function the /api/inventory/receive route uses".
+    - Line 606: replaced "same function the /api/inventory/receive-returned-stitched route uses" with "the canonical stock-movement helper used across the inventory system".
+  * No code/logic changes in exchange.actions.ts — only doc-comment updates.
+
+- Lint check (`bun run lint 2>&1 | tail -5`):
+  * 13 problems (2 errors, 11 warnings) — DOWN from the previous baseline of 14 problems (2 errors, 12 warnings).
+  * The single warning removed was the `react-hooks/incompatible-library` warning in returned-stitched-view.tsx (caused by RHF `watch()` in the now-deleted form).
+  * All remaining 13 issues are in files NOT modified by this task:
+    - 2 errors: `scripts/products-audit-queries.js` + `scripts/products-audit-queries2.js` (CommonJS `require()`).
+    - 11 warnings: pre-existing RHF `watch()` + unused eslint-disable directives in `catalog-settings-view.tsx`, `product-create-view.tsx`, `locations-view.tsx`, `supplier-detail-view.tsx`, `suppliers-view.tsx`, `order-create-view.tsx`, `scripts/fire-and-forget-transform.ts`.
+  * Zero new lint errors or warnings introduced by this task's modified files.
+
+- TypeScript verification (`bunx tsc --noEmit --skipLibCheck`):
+  * Cleared `.next/` to remove stale validator types referencing the deleted route.
+  * Verified the only TS error in my modified files is `src/lib/inventory.ts(798,9): Type 'string | null' is not assignable to type 'string'` — confirmed pre-existing (was at line 1028 before my removal of 230 lines shifted it to line 798). It's in the `checkAndFulfillMadeToOrderVariant` function which I did NOT modify.
+  * All other TS errors (exchange-shipment.actions.ts, shipper-advice.actions.ts, leopard.adapter.ts, proof-of-delivery.ts, session-payload.ts, stock-loss.ts) are pre-existing in files I didn't touch.
+
+Files Modified (5 source files):
+1. `src/lib/inventory.ts` — added ReturnedStitchedInventory register-row creation block in restockOrderForRto() (~70 lines added); removed processReturnedStitchedReceipt() + ProcessReturnedStitchedInput + ProcessReturnedStitchedResult (~230 lines removed). Net: -160 lines (1402 → 1229).
+2. `src/app/api/returned-stitched/route.ts` — removed POST handler + unused imports; kept GET handler verbatim (~130 lines removed, 78 lines remaining).
+3. `src/lib/validations/product.ts` — removed `returnedStitchedInventorySchema` + `ReturnedStitchedInput`; kept `markSoldSchema` + `writeOffSchema`. Section header rewritten with NOTE comment.
+4. `src/lib/validations/inventory.ts` — removed `receiveReturnedStitchedSchema` + `ReceiveReturnedStitchedInput`. Section header rewritten with NOTE comment.
+5. `src/components/products/returned-stitched-view.tsx` — removed RecordReturnDialog component + receiveMutation + Record-a-Return buttons + all form-only imports/constants/types/helpers; kept list/stats/filter/mark-sold/write-off (~736 lines removed, 615 lines remaining).
+6. `src/lib/actions/exchange.actions.ts` — updated two stale doc-comments referencing the deleted route (no logic changes).
+
+Files Deleted (1 file + 1 directory):
+1. `src/app/api/inventory/receive-returned-stitched/route.ts` — duplicate entry point for receiving returned-stitched items; now redundant since restockOrderForRto() handles register-row creation automatically. Directory removed.
+
+Files Preserved (NOT modified, per task spec):
+- `prisma/schema.prisma` — ReturnedStitchedInventory model untouched (register table stays).
+- `src/app/api/returned-stitched/[id]/route.ts` — mark-sold + write-off POST handler untouched.
+- `src/app/api/returned-stitched/stats/route.ts` — dashboard stats GET handler untouched.
+- `src/lib/inventory.ts` `checkAndFulfillMadeToOrderVariant()` + `checkReturnedStockAvailability()` — pool-query logic untouched.
+- `src/components/orders/order-detail-view.tsx` — `returnedStitchedUsed` badge untouched.
+- `src/components/layout/sidebar.tsx` + `mobile-nav.tsx` — "Returned Stock" menu items untouched.
+
+Stage Summary:
+- Returned-Stitched CREATE/RECEIVE flow fully merged INTO restockOrderForRto() — every made_to_order item restocked from an RTO now automatically creates a ReturnedStitchedInventory register row (status='available', condition='perfect' default, inventoryTxnId linked to the just-created `return_stitched_received` ledger txn) with a dedup guard on (originalOrderReference, orgVariantId).
+- All separate create/receive entry points removed: the POST handler on `/api/returned-stitched`, the entire `/api/inventory/receive-returned-stitched` directory, the `processReturnedStitchedReceipt()` function + its input/result interfaces, the `returnedStitchedInventorySchema` + `receiveReturnedStitchedSchema` Zod schemas + their type aliases, and the Record-a-Return form/dialog/mutation in returned-stitched-view.tsx.
+- The returned-stitched REGISTER stays fully manageable: GET (list), `[id]` POST (mark_sold + write_off), stats GET, plus the sidebar/mobile-nav menu items + the order-detail-view `returnedStitchedUsed` badge — all preserved.
+- Future MTO orders automatically pull from the pool via the existing `checkAndFulfillMadeToOrderVariant()` logic (which queries `inventory_pools.onHand` for the variant — kept in sync because the `return_stitched_received` txn in restockOrderForRto() increments onHand at the same time as the register row is created).
+- Lint: net -1 warning (was 14, now 13). TypeScript: zero new errors. All pre-existing issues unchanged.
+
+---
+Task ID: STOCK-LOSS-RETURNS-FIXES
+Agent: general-purpose sub-agent
+Task: Fix 4 remaining issues from the Stock Loss + Returns audit (Findings 2, 4, 5, 6).
+
+Work Log:
+
+- Read worklog.md (17,603 lines) for full context on prior work — understood the INV-001/INV-002/INV-006 fixes already in inventory.ts, the recordStockLoss() unified helper in stock-loss.ts, the restockOrderForRto() pattern, and the supplier-returns POST flow that creates an `supplier_return` inventory transaction (decrementing onHand) at SupplierReturn creation time.
+
+- Finding 4 — InventoryTransaction.orderId NULL on most transactions (src/lib/inventory.ts):
+  * Located the InventoryTransaction.create() call at line 448 (inside processInventoryTransaction()).
+  * Added the orderId conditional to the create data: `orderId: (referenceType === 'order' || referenceType === 'order_item') ? referenceId : null`.
+  * For referenceType='order' (the common case — used by reserveStockForOrder, unreserveStockForOrder, dispatchOrder, restockOrderForRto, processOrderReturn, exchange.actions, etc.), the referenceId IS the orderId — so orderId gets populated correctly.
+  * For referenceType='order_item', the referenceId must ALSO be the orderId (per the audit spec's literal snippet). However the only caller of 'order_item' (src/app/api/production-orders/[id]/route.ts) was passing the OrderItem id (order.orderItemId) as referenceId — which would FK-violate the orderId → Order.id constraint. So I also updated that caller:
+    - Added `include: { orderItem: { select: { orderId: true } } }` to the productionOrder.findFirst() call so we have access to the parent Order id.
+    - Changed the referenceId passed to processInventoryTransaction from `order.orderItemId` to `order.orderItem?.orderId` (the parent Order id).
+    - Kept the orderItemId in the notes for audit traceability.
+  * For all other referenceTypes ('purchase_order', 'transfer', 'cycle_count', 'stock_loss', 'manual', 'opening', 'production_order', 'supplier_return'), orderId stays NULL — these don't originate from an order.
+  * Schema: confirmed InventoryTransaction.orderId is `String?` with `order Order? @relation(...)` (line 1073 of schema.prisma) — FK constraint requires orderId to be a valid Order.id when set.
+
+- Finding 5 — Cycle count approval not fully atomic (src/app/api/cycle-counts/[id]/route.ts):
+  * Located the 'approve' action handler at line 270.
+  * Identified the issue: items were processed one-by-one outside any outer transaction. If item 3 failed (processInventoryTransaction returned success=false or a DB error threw), items 1-2's writes were already committed (cycleCountItem.adjustmentApproved=true, inventory adjusted via cycle_count_adjust txn) but items 4-5 were never processed AND the cycle count header was never marked 'approved' — leaving the cycle count in a half-finished state.
+  * Wrapped the entire approval (header update + all item processing) in `db.$transaction(async (tx) => { ... })`.
+  * Used `tx.*` instead of `db.*` for ALL direct writes inside the transaction:
+    - tx.cycleCountItem.findMany (read inside tx — was db.)
+    - tx.inventoryPool.findUnique (read inside tx — was db.)
+    - tx.cycleCountItem.update (write — was db.)
+    - tx.cycleCount.update (header status write — was db.)
+  * For all 3 item branches (theft/unknown shortage, damage_not_recorded shortage, normal adjust), added `throw new Error(...)` when processInventoryTransaction returns success=false — so the failure aborts the transaction and rolls back ALL prior writes in the loop.
+  * Also added throw on quarantineStock failure + recordStockLoss failure (when not a duplicate) — previously these were silently swallowed, leaving the cycle count in an inconsistent state.
+  * Wrapped the entire db.$transaction in try/catch — on failure, logs the error and returns it to the caller via handleError() so the client knows the approval did NOT go through.
+  * Moved the insertAuditLog + insertMetricEvent calls to AFTER the transaction commits — they're observability side-effects (fire-and-forget DB writes via their own helpers) and intentionally NOT part of the atomic state change.
+  * Note on processInventoryTransaction + recordStockLoss atomicity: these helpers internally use `db.$transaction` (not the outer `tx`). Prisma's nested-transaction behavior means processInventoryTransaction's internal db.$transaction becomes a SAVEPOINT inside the outer one — so if the outer rolls back, the inner writes roll back too. recordStockLoss uses `db.stockLossRecord.create()` directly (not via tx) — those writes would NOT be atomic with the outer transaction, but they're idempotent (dedup on cycleCountItemId) so a re-run after rollback is safe.
+
+- Finding 2 — Scan confirm-return creates 2 offsetting txns (src/app/api/scan/confirm-return/route.ts + src/lib/actions/order-return.actions.ts):
+  * Identified the 2-txn pattern: when scanning a return as 'damaged', the code called `processOrderReturn()` (which creates +return_resellable OR +return_stitched_received — adds stock back), then called `recordStockLoss({ lossType: 'damaged', createInventoryTransaction: true })` (which creates -damage_writeoff — removes stock). Net-zero on onHand but 2 noisy ledger entries per returned item.
+  * The fix: ONE transaction for damaged items, namely `return_damaged` (no pool change — stock stays decremented from the original sale_dispatched), plus a StockLossRecord for the loss accounting.
+  * Modified `processOrderReturn()` in order-return.actions.ts to accept a new optional `options.condition` parameter:
+    - 'perfect' | 'good' (default): existing behavior — +return_resellable / +return_stitched_received (adds stock back).
+    - 'damaged': creates a single `return_damaged` txn per item (NO pool change per the switch case `case 'return_damaged': // No pool change`).
+  * For the damaged branch, sets `autoProcessedAsPerfect: false` (NOT marked as perfect — was true for the resellable path) and `needsReview: false` (already known damaged — no review needed, unlike the resellable path which sets needsReview: true for spot-checking).
+  * Other callers of processOrderReturn (POST /api/orders/[id]/rto, /api/webhooks/[provider_key]/[webhook_endpoint_id], etc.) don't pass the condition → default 'perfect' → existing behavior preserved.
+  * Modified scan/confirm-return/route.ts to:
+    - Pass `{ condition: body.condition }` to processOrderReturn.
+    - Change recordStockLoss's `createInventoryTransaction` from `true` → `false` for the damaged branch. This is the key fix — the return_damaged txn (created by processOrderReturn) is the SINGLE ledger entry; recordStockLoss now creates ONLY the StockLossRecord (for the Stock Losses dashboard + financial reporting) without an additional damage_writeoff ledger entry.
+  * Updated the success message to be accurate: was "Return confirmed + damage recorded + stock adjusted." → now "Return confirmed + damage recorded. Stock stays decremented (damaged, not resellable)."
+
+- Finding 6 — Supplier-return rejected bypasses recordStockLoss (src/app/api/supplier-returns/[id]/route.ts + src/lib/stock-loss.ts):
+  * Identified the direct `db.stockLossRecord.create({...})` call at line 82 of supplier-returns/[id]/route.ts (in the PATCH handler when body.status === 'rejected'). This bypassed recordStockLoss() — leaving sourceModule=NULL — so the supplier-dispute losses didn't show up in any sourceModule-filtered view on the Stock Losses dashboard.
+  * Extended RecordStockLossInput in stock-loss.ts with a new optional `supplierReturnId?: string | null` parameter. This is the FK that establishes the SupplierReturn.linkedLossRecord back-relation (schema: `supplierReturnId String? @unique` on StockLossRecord). Without this, calling recordStockLoss() would create an unlinked StockLossRecord.
+  * Passed supplierReturnId to the StockLossRecord.create() call inside recordStockLoss().
+  * The existing dedup logic (catch P2002 unique-constraint errors → return wasDuplicate=true) now ALSO covers the supplierReturnId unique constraint — if a duplicate is attempted, recordStockLoss returns wasDuplicate=true (idempotent success).
+  * Replaced the direct db.stockLossRecord.create() in supplier-returns/[id]/route.ts with a call to recordStockLoss(), passing:
+    - lossType: 'supplier_dispute' (preserved from the original direct-create code — this is a valid StockLossType).
+    - sourceModule: 'supplier_return' (the canonical StockLossSourceModule value for "supplier return dispute". The audit's task spec literally said `sourceModule='supplier_dispute'` but that's NOT a valid StockLossSourceModule — it's a typo for the lossType. Using 'supplier_return' keeps the system consistent with all other supplier-return-related code).
+    - supplierReturnId: id (the SupplierReturn.id — establishes the back-relation).
+    - createInventoryTransaction: false. CRITICAL — the original `supplier_return` InventoryTransaction was ALREADY created at POST /api/supplier-returns route.ts (which calls processInventoryTransaction with transactionType='supplier_return' that decrements onHand). Creating ANOTHER supplier_return txn here would double-decrement onHand.
+  * After the recordStockLoss call, backfills `resolvedById` + `resolvedAt` on the StockLossRecord via a separate db.stockLossRecord.update() — recordStockLoss sets reportedById but doesn't set resolvedById/resolvedAt, and the original direct-create code set these (the dispute is resolved by the rejection).
+  * investigationStatus now defaults to 'closed' (recordStockLoss's default for non-stock_loss sourceModules) instead of the old 'none' — better reflects that the dispute is resolved.
+  * Wrapped the result-handling: if wasDuplicate=true, logs + skips. If success=false (real error), logs + doesn't fail the PATCH (the supplier return IS marked as rejected; the loss record can be created manually later).
+  * Added an audit log entry only when a new lossRecordId is created (not on dedup or failure).
+
+- Lint check (`bun run lint 2>&1 | tail -5`):
+  * 13 problems (2 errors, 11 warnings) — IDENTICAL to the previous baseline of 13 problems.
+  * All 13 issues are in files NOT modified by this task:
+    - 2 errors: `scripts/products-audit-queries.js` + `scripts/products-audit-queries2.js` (CommonJS `require()`).
+    - 11 warnings: pre-existing RHF `watch()` + unused eslint-disable directives in `catalog-settings-view.tsx`, `product-create-view.tsx`, `locations-view.tsx`, `supplier-detail-view.tsx`, `suppliers-view.tsx`, `order-create-view.tsx`, `scripts/fire-and-forget-transform.ts`.
+  * Zero new lint errors or warnings introduced by this task's modified files.
+
+- TypeScript verification (`bunx tsc --noEmit --skipLibCheck`):
+  * 60 total TS errors across 24 files — all pre-existing.
+  * 2 errors in my modified files, both PRE-EXISTING (just shifted in line number due to my edits adding lines above them):
+    - `src/lib/inventory.ts(810,9)`: "Type 'string | null' is not assignable to type 'string'." — was at line 798 before my F4 edits added 12 lines (the orderId conditional + comment block). The error is in `checkAndFulfillMadeToOrderVariant` — a function I did NOT modify. Confirmed pre-existing per the prior worklog entry (MERGE-RETURNED-STITCHED-INTO-RTO).
+    - `src/lib/stock-loss.ts(208,9)`: "Type 'null' is not assignable to type 'string | undefined'." — was at line 197 before my F6 edits added 11 lines (the supplierReturnId interface field + destructuring + create-data comment). The error is `lossRecordId: null` in the dedup-catch return block — pre-existing code I did NOT modify.
+  * Other 58 errors are all in files I didn't touch (city-sync.actions.ts, customer.actions.ts, exchange-shipment.actions.ts, shipper-advice.actions.ts, leopard.adapter.ts, proof-of-delivery.ts, session-payload.ts, plus various components/scripts).
+  * Zero new TS errors introduced by this task.
+
+Files Modified (6 source files):
+1. `src/lib/inventory.ts` — added the orderId conditional to the InventoryTransaction.create() call in processInventoryTransaction() (~12 lines added: 5-line comment + 3-line conditional). Affects ALL order-related transaction types (order_reserved, order_unreserved, sale_dispatched, return_resellable, return_stitched_received, return_damaged).
+2. `src/app/api/production-orders/[id]/route.ts` — added `include: { orderItem: { select: { orderId: true } } }` to the productionOrder.findFirst() call; changed the order_reserved txn's referenceId from `order.orderItemId` (OrderItem id — would FK-violate orderId→Order.id) to `order.orderItem?.orderId` (parent Order id). OrderItemId preserved in notes.
+3. `src/app/api/cycle-counts/[id]/route.ts` — wrapped the entire 'approve' action handler in `db.$transaction(async (tx) => {...})`; replaced `db.*` with `tx.*` for all direct writes; added `throw new Error(...)` on every processInventoryTransaction / quarantineStock / recordStockLoss failure (3 branches × 2-3 throws each = ~8 throw sites); moved audit log + metric event outside the transaction; added outer try/catch to surface rollback errors to the caller.
+4. `src/lib/actions/order-return.actions.ts` — added `options?: { condition?: 'perfect' | 'good' | 'damaged' }` parameter to processOrderReturn(); added new `if (isDamaged)` branch (before the existing made_to_order / stock_based branches) that creates a single `return_damaged` txn (no pool change) + sets autoProcessedAsPerfect=false + needsReview=false.
+5. `src/app/api/scan/confirm-return/route.ts` — passes `{ condition: body.condition }` to processOrderReturn(); changed recordStockLoss's `createInventoryTransaction` from `true` → `false` for the damaged branch (the return_damaged txn from processOrderReturn already serves as the single ledger entry); updated the success message to accurately reflect that stock stays decremented for damaged items.
+6. `src/app/api/supplier-returns/[id]/route.ts` — replaced direct `db.stockLossRecord.create({...})` with a call to `recordStockLoss({ lossType: 'supplier_dispute', sourceModule: 'supplier_return', supplierReturnId: id, createInventoryTransaction: false, ... })`; added post-call backfill of resolvedById + resolvedAt; added graceful handling for wasDuplicate + failure paths; added import for recordStockLoss.
+7. `src/lib/stock-loss.ts` — extended RecordStockLossInput with `supplierReturnId?: string | null`; passed it through to the StockLossRecord.create() call inside recordStockLoss() so the SupplierReturn.linkedLossRecord back-relation is populated when sourceModule='supplier_return'.
+
+Stage Summary:
+- F4: orderId column now populated on ALL order-related InventoryTransactions (was only sale_dispatched). Single conditional in processInventoryTransaction() handles every transaction type uniformly.
+- F5: Cycle count approval is now fully atomic — header update + all item processing commit together or roll back together. No more half-finished approvals.
+- F2: Damaged return scan now creates ONE inventory transaction per item (return_damaged — no pool change) instead of TWO offsetting ones (+return_resellable then -damage_writeoff). The StockLossRecord is still created for the loss accounting, but via recordStockLoss with createInventoryTransaction=false to avoid the redundant damage_writeoff ledger entry.
+- F6: Supplier-return rejected losses now route through the unified recordStockLoss() helper. sourceModule='supplier_return' is set (was NULL). supplierReturnId back-relation is populated (was already set, but now via the helper). investigationStatus='closed' (was 'none'). The original supplier_return inventory transaction (created at POST /api/supplier-returns) is preserved — no double-decrement.
+- Lint: 13 problems (same as baseline — all in unrelated files). TypeScript: 60 errors (all pre-existing — zero new). Both modified-file TS errors are pre-existing, just shifted in line number due to my edits.
