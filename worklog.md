@@ -17695,3 +17695,25 @@ Stage Summary:
 - F2: Damaged return scan now creates ONE inventory transaction per item (return_damaged — no pool change) instead of TWO offsetting ones (+return_resellable then -damage_writeoff). The StockLossRecord is still created for the loss accounting, but via recordStockLoss with createInventoryTransaction=false to avoid the redundant damage_writeoff ledger entry.
 - F6: Supplier-return rejected losses now route through the unified recordStockLoss() helper. sourceModule='supplier_return' is set (was NULL). supplierReturnId back-relation is populated (was already set, but now via the helper). investigationStatus='closed' (was 'none'). The original supplier_return inventory transaction (created at POST /api/supplier-returns) is preserved — no double-decrement.
 - Lint: 13 problems (same as baseline — all in unrelated files). TypeScript: 60 errors (all pre-existing — zero new). Both modified-file TS errors are pre-existing, just shifted in line number due to my edits.
+
+---
+Task ID: MERGE-RETURNED-STITCHED-COMPLETE
+Agent: main
+Task: Merge Returned-Stitched into RTO + fix all audit findings
+
+Work Log:
+- ARCHITECTURAL MERGE: Returned-Stitched create/receive flow merged into RTO
+  * restockOrderForRto() now auto-creates ReturnedStitchedInventory for MTO items
+  * Dedup guard prevents duplicate register rows for same order+variant
+  * processReturnedStitchedReceipt() removed (-230 lines)
+  * POST /api/returned-stitched + /api/inventory/receive-returned-stitched deleted
+  * Frontend Record-a-Return form removed (-648 lines)
+  * Register management routes KEPT (list, mark-sold, write-off, stats)
+
+- Finding 2: Scan confirm-return damaged path → 1 txn (was 2)
+- Finding 4: orderId set on all order-related transactions
+- Finding 5: Cycle count approval wrapped in $transaction
+- Finding 6: Supplier-return rejected uses recordStockLoss()
+
+Net code reduction: -662 lines (728 insertions, 1390 deletions)
+Committed as 7b4e003, pushed to GitHub.
