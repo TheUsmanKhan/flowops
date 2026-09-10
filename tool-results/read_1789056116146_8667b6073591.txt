@@ -1,0 +1,869 @@
+     1→/**
+     2→ * PostEx Load Sheet Generation + Status Polling — Server Actions.
+     3→ *
+     4→ * Phase 4 of the PostEx adapter implementation.
+     5→ *
+     6→ * Two capabilities:
+     7→ *   1. generatePostExLoadSheet — standalone batch action for generating a
+     8→ *      load sheet (pickup manifest) for multiple tracking numbers. Can be
+     9→ *      called manually from a "Generate Load Sheet" button OR chained
+    10→ *      automatically after a successful bookShipment() call.
+    11→ *   2. pollPostExOrderStatuses — the polling job that queries all orders
+    12→ *      AND exchange_shipments with PostEx courier integrations, calls the
+    13→ *      bulk tracking API, and triggers OMS state transitions for any
+    14→ *      status changes.
+    15→ *
+    16→ * SCHEDULING NOTE: pollPostExOrderStatuses() needs to run every 30 minutes
+    17→ * via whatever scheduler infrastructure exists/gets set up. Same note as
+    18→ * Prompt 2's city-sync job — do not build infrastructure-level cron in this
+    19→ * prompt unless an established pattern already exists.
+    20→ */
+    21→
+    22→import { db } from '@/lib/db'
+    23→import { getWorkspace, isElevated, ApiError } from '@/lib/workspace'
+    24→import { insertAuditLog } from '@/lib/audit'
+    25→import { insertMetricEvent } from '@/lib/metrics'
+    26→import { decryptCredentials } from '@/lib/utils/encryption'
+    27→import { getCourierAdapter } from '@/lib/integrations/registry'
+    28→import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
+    29→import { mapPostExStatus } from '@/lib/integrations/couriers/postex.status-map'
+    30→import type { TrackShipmentResult } from '@/lib/integrations/types'
+    31→import { performOrderDispatch } from '@/lib/actions/order.actions'
+    32→import { performExchangeShipmentDispatch, performExchangeShipmentRto } from '@/lib/actions/exchange-shipment.actions'
+    33→import { unreserveStockForOrder, restockOrderForRto } from '@/lib/inventory'
+    34→
+    35→interface ActionResult<T = unknown> {
+    36→  success: boolean
+    37→  data?: T
+    38→  error?: string
+    39→}
+    40→
+    41→// ──────────────────────────────────────────────────────────────
+    42→// 1. generatePostExLoadSheet — standalone batch action
+    43→// ──────────────────────────────────────────────────────────────
+    44→
+    45→/**
+    46→ * Generate a PostEx load sheet (pickup manifest) for a batch of tracking numbers.
+    47→ *
+    48→ * Can be called:
+    49→ *   (a) Manually from a "Generate Load Sheet" button for multiple Unbooked orders.
+    50→ *   (b) Automatically right after a successful bookShipment() call (chained).
+    51→ *
+    52→ * @param companyIntegrationId - The PostEx company integration to use
+    53→ * @param trackingNumbers - List of PostEx tracking numbers to include
+    54→ * @param pickupAddress - Optional pickup address text (from the address book)
+    55→ */
+    56→export async function generatePostExLoadSheet(
+    57→  companyIntegrationId: string,
+    58→  trackingNumbers: string[],
+    59→  pickupAddress?: string,
+    60→): Promise<ActionResult> {
+    61→  try {
+    62→    const ctx = await getWorkspace()
+    63→    if (!isElevated(ctx)) {
+    64→      return { success: false, error: 'Only elevated roles can generate load sheets.' }
+    65→    }
+    66→
+    67→    const integration = await db.companyIntegration.findFirst({
+    68→      where: {
+    69→        id: companyIntegrationId,
+    70→        companyId: ctx.company.id,
+    71→        provider: { providerKey: 'postex' },
+    72→      },
+    73→      include: { provider: true },
+    74→    })
+    75→    if (!integration) {
+    76→      return { success: false, error: 'PostEx integration not found.' }
+    77→    }
+    78→
+    79→    const credentials = decryptCredentials(integration.credentialsEncrypted!)
+    80→    const adapter = getCourierAdapter('postex', credentials)
+    81→
+    82→    if (!adapter.generateLoadSheet) {
+    83→      return { success: false, error: 'PostEx adapter does not support load sheet generation.' }
+    84→    }
+    85→
+    86→    const result = await executeLoggedIntegrationAction<{ success: boolean; rawResponse?: unknown; error?: string }>({
+    87→      companyIntegrationId,
+    88→      organizationId: integration.organizationId,
+    89→      actionType: 'generate_load_sheet',
+    90→      direction: 'outbound',
+    91→      fn: async () => adapter.generateLoadSheet!(trackingNumbers, pickupAddress),
+    92→      // Log the tracking numbers + pickup address used for the load sheet request
+    93→      requestPayload: { trackingNumbers, pickupAddress },
+    94→    })
+    95→
+    96→    insertAuditLog({
+    97→      action: 'postex.load_sheet_generated',
+    98→      entityType: 'company_integration',
+    99→      entityId: companyIntegrationId,
+   100→      companyId: ctx.company.id,
+   101→      organizationId: ctx.company.organizationId,
+   102→      userId: ctx.user.id,
+   103→      employeeId: ctx.employee.id,
+   104→      newValues: {
+   105→        trackingNumbersCount: trackingNumbers.length,
+   106→        pickupAddress: pickupAddress ?? null,
+   107→      },
+   108→    })
+   109→
+   110→    return { success: result.success, data: result }
+   111→  } catch (err) {
+   112→    return {
+   113→      success: false,
+   114→      error: err instanceof Error ? err.message : 'Failed to generate load sheet',
+   115→    }
+   116→  }
+   117→}
+   118→
+   119→// ──────────────────────────────────────────────────────────────
+   120→// 2. pollPostExOrderStatuses — the polling job
+   121→// ──────────────────────────────────────────────────────────────
+   122→
+   123→/**
+   124→ * Poll PostEx for status updates on all active orders AND exchange_shipments.
+   125→ *
+   126→ * Queries all records with a PostEx courier integration where status is NOT
+   127→ * 'delivered' or 'rto' (permanent exclusion — these are never re-polled).
+   128→ * Batches tracking numbers, calls trackBulkShipments(), and for each result:
+   129→ *   - If status changed → triggers the appropriate OMS function
+   130→ *   - If status unchanged → only updates lastPolledAt
+   131→ *
+   132→ * IDEMPOTENT: calling twice with no underlying change produces no duplicate
+   133→ * audit/metric entries beyond the tracking API call log itself.
+   134→ *
+   135→ * SCHEDULING: needs to run every 30 minutes. Infrastructure-level scheduling
+   136→ * (cron, Vercel Cron, etc.) still needs to be connected — same pattern as
+   137→ * the city-sync job.
+   138→ */
+   139→
+   140→// ──────────────────────────────────────────────────────────────
+   141→// 2b. trackSingleOrderStatus — single-order immediate tracking (uses trackShipment)
+   142→// ──────────────────────────────────────────────────────────────
+   143→
+   144→/**
+   145→ * Track a SINGLE order's courier status immediately via the adapter's
+   146→ * trackShipment() method (NOT the bulk API). This is the function wired to the
+   147→ * manual "Refresh Courier Status" button on the Order Detail page.
+   148→ *
+   149→ * Why a separate function (not just calling pollPostExOrderStatuses)?
+   150→ *   - The bulk poll iterates ALL active orders across ALL companies — wasteful
+   151→ *     for a single user-initiated check.
+   152→ *   - trackShipment() is the adapter's single-tracking method (GET /v1/track-order/{tn}),
+   153→ *     which is faster and cheaper than the bulk API for one order.
+   154→ *   - This gives the user an immediate, per-order refresh without waiting for
+   155→ *     the next cron cycle.
+   156→ *
+   157→ * Reuses the SAME status-transition logic as the bulk poll (performOrderDispatch
+   158→ * for in_transit, mark delivered for delivered, RTO handling, etc.) by calling
+   159→ * the shared functions directly.
+   160→ *
+   161→ * @param orderId - The order to track
+   162→ * @returns { success, data: { status, subStatus, updated } }
+   163→ */
+   164→export async function trackSingleOrderStatus(orderId: string): Promise<ActionResult<{
+   165→  status: string
+   166→  subStatus: string | null
+   167→  updated: boolean
+   168→}>> {
+   169→  try {
+   170→    const ctx = await getWorkspace()
+   171→    if (!isElevated(ctx)) {
+   172→      return { success: false, error: 'Only elevated roles can refresh courier status.' }
+   173→    }
+   174→
+   175→    // Fetch the order (workspace-scoped)
+   176→    const order = await db.order.findFirst({
+   177→      where: { id: orderId, companyId: ctx.company.id },
+   178→      select: {
+   179→        id: true,
+   180→        trackingNumber: true,
+   181→        courierCompanyIntegrationId: true,
+   182→        status: true,
+   183→        courierSubStatus: true,
+   184→        flowopsOrderNumber: true,
+   185→      },
+   186→    })
+   187→    if (!order) return { success: false, error: 'Order not found' }
+   188→    if (!order.trackingNumber) return { success: false, error: 'Order has no tracking number' }
+   189→    if (!order.courierCompanyIntegrationId) {
+   190→      return { success: false, error: 'Order has no courier integration' }
+   191→    }
+   192→
+   193→    // Fetch the integration + decrypt credentials
+   194→    const integration = await db.companyIntegration.findUnique({
+   195→      where: { id: order.courierCompanyIntegrationId },
+   196→      include: { provider: true },
+   197→    })
+   198→    if (!integration || !integration.credentialsEncrypted) {
+   199→      return { success: false, error: 'Courier integration not found or no credentials' }
+   200→    }
+   201→
+   202→    const credentials = decryptCredentials(integration.credentialsEncrypted)
+   203→    const providerKey = integration.provider.providerKey
+   204→    const adapter = getCourierAdapter(providerKey, credentials)
+   205→
+   206→    // Call trackShipment() via the logged wrapper (single-order, NOT bulk)
+   207→    const trackResult = await executeLoggedIntegrationAction<TrackShipmentResult>({
+   208→      companyIntegrationId: integration.id,
+   209→      organizationId: integration.organizationId,
+   210→      actionType: 'track_shipment',
+   211→      direction: 'outbound',
+   212→      relatedEntityType: 'order',
+   213→      relatedEntityId: order.id,
+   214→      fn: async () => adapter.trackShipment(order.trackingNumber!),
+   215→      // Log the tracking number being tracked
+   216→      requestPayload: { trackingNumber: order.trackingNumber, providerKey },
+   217→    })
+   218→
+   219→    // Extract mapped subStatus from raw response
+   220→    const raw = trackResult.rawResponse as Record<string, unknown> | undefined
+   221→    const mappedSubStatus = (raw?.mappedSubStatus as string) ?? null
+   222→    const needsShipperAdvice = (raw?.needsShipperAdvice as boolean) ?? false
+   223→    const unrecognized = (raw?.unrecognized as boolean) ?? false
+   224→
+   225→    const subStatusChanged = mappedSubStatus !== order.courierSubStatus
+   226→    const now = new Date()
+   227→
+   228→    // Update lastPolledAt + courierSubStatus + flags (same as bulk poll)
+   229→    await db.order.update({
+   230→      where: { id: order.id },
+   231→      data: {
+   232→        lastPolledAt: now,
+   233→        courierSubStatus: mappedSubStatus,
+   234→        needsShipperAdvice,
+   235→        unrecognizedCourierStatus: unrecognized,
+   236→      },
+   237→    })
+   238→
+   239→    // Apply the SAME status transitions as the bulk poll
+   240→    if (subStatusChanged) {
+   241→      // in_transit → auto-dispatch (with inventory deduction)
+   242→      if (trackResult.status === 'in_transit') {
+   243→        if (order.status === 'confirmed' || order.status === 'processing') {
+   244→          const dispatchResult = await performOrderDispatch(order.id, { source: 'auto_poll' })
+   245→          if (!dispatchResult.success && !dispatchResult.skipped) {
+   246→            console.error(`[trackSingle] Failed to auto-dispatch order ${order.id}: ${dispatchResult.error}`)
+   247→          }
+   248→        }
+   249→      }
+   250→
+   251→      // delivered → mark as delivered
+   252→      if (trackResult.status === 'delivered') {
+   253→        const freshOrder = await db.order.findUnique({ where: { id: order.id }, select: { status: true } })
+   254→        if (freshOrder && (freshOrder.status === 'confirmed' || freshOrder.status === 'processing')) {
+   255→          await performOrderDispatch(order.id, { source: 'auto_poll' }).catch(() => {})
+   256→        }
+   257→        if (freshOrder && freshOrder.status !== 'delivered' && freshOrder.status !== 'cancelled' && freshOrder.status !== 'refunded') {
+   258→          await db.order.update({
+   259→            where: { id: order.id },
+   260→            data: { status: 'delivered', deliveredAt: new Date() },
+   261→          })
+   262→        }
+   263→      }
+   264→
+   265→      // returned → RTO (restock inventory for both reserved AND dispatched items)
+   266→      if (trackResult.status === 'returned') {
+   267→        const freshOrder = await db.order.findUnique({
+   268→          where: { id: order.id },
+   269→          select: { status: true, dispatchLocationId: true, organizationId: true, companyId: true },
+   270→        })
+   271→        if (freshOrder && freshOrder.status !== 'rto' && freshOrder.status !== 'cancelled' && freshOrder.status !== 'refunded') {
+   272→          // Restock inventory — handles BOTH confirmed/processing (unreserve)
+   273→          // AND dispatched (return_resellable/return_stitched_received) cases.
+   274→          // Previously the dispatched case was a GAP (onHand never restored).
+   275→          const restockResult = await restockOrderForRto(order.id, {
+   276→            organizationId: freshOrder.organizationId,
+   277→            companyId: freshOrder.companyId ?? integration.companyId,
+   278→            employeeId: integration.createdBy ?? null,
+   279→            returnReason: `PostEx courier returned (status: returned, detected via trackSingleOrderStatus)`,
+   280→          })
+   281→          if (restockResult.itemsRestocked > 0) {
+   282→            console.log(`[trackSingle] Restocked ${restockResult.itemsRestocked} item(s) for RTO order ${order.flowopsOrderNumber}`)
+   283→          }
+   284→          await db.order.update({
+   285→            where: { id: order.id },
+   286→            data: { status: 'rto', returnedAt: new Date() },
+   287→          })
+   288→        }
+   289→      }
+   290→
+   291→      // failed + cancelled_by_merchant/expired → cancel the order + unreserve stock
+   292→      // (same as the bulk poll does — previously MISSING from trackSingleOrderStatus)
+   293→      if (trackResult.status === 'failed' && mappedSubStatus &&
+   294→          (mappedSubStatus === 'cancelled_by_merchant' || mappedSubStatus === 'expired')) {
+   295→        const freshOrder = await db.order.findUnique({
+   296→          where: { id: order.id },
+   297→          select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true, companyId: true },
+   298→        })
+   299→        if (freshOrder && freshOrder.status !== 'cancelled' && freshOrder.status !== 'delivered' && freshOrder.status !== 'rto') {
+   300→          // Unreserve stock for any reserved items (if not yet dispatched)
+   301→          if (freshOrder.status === 'confirmed' || freshOrder.status === 'processing') {
+   302→            const restockResult = await restockOrderForRto(order.id, {
+   303→              organizationId: freshOrder.organizationId,
+   304→              companyId: freshOrder.companyId ?? integration.companyId,
+   305→              employeeId: integration.createdBy ?? null,
+   306→              returnReason: `Courier booking ${mappedSubStatus === 'cancelled_by_merchant' ? 'cancelled by merchant' : 'expired'} (trackSingleOrderStatus)`,
+   307→            })
+   308→            if (restockResult.itemsRestocked > 0) {
+   309→              console.log(`[trackSingle] Released ${restockResult.itemsRestocked} item(s) for cancelled order ${freshOrder.flowopsOrderNumber}`)
+   310→            }
+   311→          }
+   312→          await db.order.update({
+   313→            where: { id: order.id },
+   314→            data: {
+   315→              status: 'cancelled',
+   316→              cancelledAt: new Date(),
+   317→              cancellationReason: `Courier booking ${mappedSubStatus === 'cancelled_by_merchant' ? 'cancelled by merchant on PostEx portal' : 'expired on PostEx'} (detected via single-order track)`,
+   318→              courierBookingStatus: 'cancelled',
+   319→            },
+   320→          })
+   321→          console.log(`[trackSingle] Auto-cancelled ${freshOrder.flowopsOrderNumber} (PostEx: ${mappedSubStatus})`)
+   322→        }
+   323→      }
+   324→    }
+   325→
+   326→    return {
+   327→      success: true,
+   328→      data: {
+   329→        status: trackResult.status ?? 'unknown',
+   330→        subStatus: mappedSubStatus,
+   331→        updated: subStatusChanged,
+   332→      },
+   333→    }
+   334→  } catch (err) {
+   335→    return {
+   336→      success: false,
+   337→      error: err instanceof Error ? err.message : 'Failed to track single order',
+   338→    }
+   339→  }
+   340→}
+   341→
+   342→export async function pollPostExOrderStatuses(): Promise<ActionResult<{
+   343→  polledOrders: number
+   344→  polledShipments: number
+   345→  statusChanges: number
+   346→  errors: string[]
+   347→}>> {
+   348→  const errors: string[] = []
+   349→  let polledOrders = 0
+   350→  let polledShipments = 0
+   351→  let statusChanges = 0
+   352→
+   353→  try {
+   354→    // Find all active PostEx company integrations
+   355→    const postexIntegrations = await db.companyIntegration.findMany({
+   356→      where: {
+   357→        isActive: true,
+   358→        provider: { providerKey: 'postex' },
+   359→        credentialsEncrypted: { not: null },
+   360→      },
+   361→      include: { provider: true },
+   362→    })
+   363→
+   364→    if (postexIntegrations.length === 0) {
+   365→      return { success: true, data: { polledOrders: 0, polledShipments: 0, statusChanges: 0, errors: [] } }
+   366→    }
+   367→
+   368→    for (const integration of postexIntegrations) {
+   369→      try {
+   370→        const credentials = decryptCredentials(integration.credentialsEncrypted!)
+   371→        const adapter = getCourierAdapter('postex', credentials)
+   372→
+   373→        if (!adapter.trackBulkShipments) {
+   374→          errors.push(`PostEx adapter for integration ${integration.id} does not support bulk tracking.`)
+   375→          continue
+   376→        }
+   377→
+   378→        // ── Fetch active Orders (not delivered/rto) with PostEx tracking ──
+   379→        const activeOrders = await db.order.findMany({
+   380→          where: {
+   381→            courierCompanyIntegrationId: integration.id,
+   382→            status: { notIn: ['delivered', 'rto', 'cancelled', 'refunded'] },
+   383→            trackingNumber: { not: null },
+   384→          },
+   385→          select: {
+   386→            id: true,
+   387→            trackingNumber: true,
+   388→            courierSubStatus: true, // we'll use this to detect changes
+   389→            status: true,
+   390→          },
+   391→        })
+   392→
+   393→        // ── Fetch active Exchange Shipments (not delivered/rto) with PostEx tracking ──
+   394→        const activeShipments = await db.exchangeShipment.findMany({
+   395→          where: {
+   396→            courierCompanyIntegrationId: integration.id,
+   397→            status: { notIn: ['delivered', 'rto', 'cancelled'] },
+   398→            trackingNumber: { not: null },
+   399→          },
+   400→          select: {
+   401→            id: true,
+   402→            trackingNumber: true,
+   403→            courierSubStatus: true,
+   404→            status: true,
+   405→          },
+   406→        })
+   407→
+   408→        // Combine all tracking numbers for bulk API call
+   409→        const allTrackingNumbers: Array<{ trackingNumber: string; type: 'order' | 'shipment'; id: string; currentSubStatus: string | null; currentStatus: string }> = [
+   410→          ...activeOrders.map((o) => ({
+   411→            trackingNumber: o.trackingNumber!,
+   412→            type: 'order' as const,
+   413→            id: o.id,
+   414→            currentSubStatus: o.courierSubStatus ?? null,
+   415→            currentStatus: o.status,
+   416→          })),
+   417→          ...activeShipments.map((s) => ({
+   418→            trackingNumber: s.trackingNumber!,
+   419→            type: 'shipment' as const,
+   420→            id: s.id,
+   421→            currentSubStatus: s.courierSubStatus ?? null,
+   422→            currentStatus: s.status,
+   423→          })),
+   424→        ]
+   425→
+   426→        if (allTrackingNumbers.length === 0) continue
+   427→
+   428→        // Call the bulk tracking API via the logged wrapper
+   429→        const trackingResults = await executeLoggedIntegrationAction<TrackShipmentResult[]>({
+   430→          companyIntegrationId: integration.id,
+   431→          organizationId: integration.organizationId,
+   432→          actionType: 'track_shipment_bulk',
+   433→          direction: 'outbound',
+   434→          fn: async () => adapter.trackBulkShipments!(allTrackingNumbers.map((t) => t.trackingNumber)),
+   435→          // Log the tracking numbers being bulk-tracked
+   436→          requestPayload: { trackingNumbers: allTrackingNumbers.map((t) => t.trackingNumber), count: allTrackingNumbers.length },
+   437→        })
+   438→
+   439→        // Map results back to records by tracking number
+   440→        const resultsByTrackingNumber = new Map<string, TrackShipmentResult>()
+   441→        for (let i = 0; i < allTrackingNumbers.length; i++) {
+   442→          if (trackingResults[i]) {
+   443→            resultsByTrackingNumber.set(allTrackingNumbers[i].trackingNumber, trackingResults[i])
+   444→          }
+   445→        }
+   446→
+   447→        const now = new Date()
+   448→
+   449→        for (const entry of allTrackingNumbers) {
+   450→          const result = resultsByTrackingNumber.get(entry.trackingNumber)
+   451→          if (!result || !result.success) {
+   452→            // Tracking failed for this number — update lastPolledAt only,
+   453→            // AND push to errors[] so the audit log reflects real failures
+   454→            // (previously this was silently swallowed — errorCount stayed 0
+   455→            // even when all API calls failed, hiding the problem).
+   456→            const failReason = result?.error || `No tracking result returned for ${entry.trackingNumber}`
+   457→            errors.push(`${entry.type} ${entry.trackingNumber}: ${failReason}`)
+   458→            if (entry.type === 'order') {
+   459→              await db.order.update({ where: { id: entry.id }, data: { lastPolledAt: now } }).catch((e) => {
+   460→                console.error(`[poll] Failed to update lastPolledAt for order ${entry.id}:`, e)
+   461→              })
+   462→              polledOrders++
+   463→            } else {
+   464→              await db.exchangeShipment.update({ where: { id: entry.id }, data: { lastPolledAt: now } }).catch((e) => {
+   465→                console.error(`[poll] Failed to update lastPolledAt for shipment ${entry.id}:`, e)
+   466→              })
+   467→              polledShipments++
+   468→            }
+   469→            continue
+   470→          }
+   471→
+   472→          // Extract the mapped subStatus from the raw response
+   473→          const raw = result.rawResponse as Record<string, unknown> | undefined
+   474→          const mappedSubStatus = (raw?.mappedSubStatus as string) ?? null
+   475→          const needsShipperAdvice = (raw?.needsShipperAdvice as boolean) ?? false
+   476→          const unrecognized = (raw?.unrecognized as boolean) ?? false
+   477→
+   478→          // Check if status changed (compare subStatus)
+   479→          const subStatusChanged = mappedSubStatus !== entry.currentSubStatus
+   480→
+   481→          if (entry.type === 'order') {
+   482→            // Update lastPolledAt + courierSubStatus + flags
+   483→            // NOTE: we also persist unrecognizedCourierStatus on Order (was
+   484→            // previously only persisted on ExchangeShipment — bug fix).
+   485→            await db.order.update({
+   486→              where: { id: entry.id },
+   487→              data: {
+   488→                lastPolledAt: now,
+   489→                courierSubStatus: mappedSubStatus,
+   490→                needsShipperAdvice: needsShipperAdvice,
+   491→                unrecognizedCourierStatus: unrecognized,
+   492→              },
+   493→            }).catch((e) => {
+   494→              console.error(`[poll] Failed to update courier status for order ${entry.id}:`, e)
+   495→            })
+   496→            polledOrders++
+   497→
+   498→            if (subStatusChanged) {
+   499→              statusChanges++
+   500→
+   501→              // ── "Picked By PostEx" → auto-dispatch ──
+   502→              // When PostEx picks up the package, the item has physically left
+   503→              // the warehouse. Call performOrderDispatch() which runs the FULL
+   504→              // inventory deduction (processInventoryTransaction('sale_dispatched')
+   505→              // per item — decrements onHand, releases reserved, locks WAC) +
+   506→              // sets status='dispatched' + audit/metric. This is the fix for the
+   507→              // critical bug where polling previously set status='dispatched' via
+   508→              // direct db.order.update() WITHOUT inventory deduction.
+   509→              if (result.status === 'in_transit') {
+   510→                try {
+   511→                  const order = await db.order.findUnique({
+   512→                    where: { id: entry.id },
+   513→                    select: { status: true, flowopsOrderNumber: true },
+   514→                  })
+   515→                  if (order && (order.status === 'confirmed' || order.status === 'processing')) {
+   516→                    const dispatchResult = await performOrderDispatch(entry.id, { source: 'auto_poll' })
+   517→                    if (dispatchResult.success) {
+   518→                      console.log(`[poll] Auto-dispatched ${order.flowopsOrderNumber} (PostEx picked up; inventory deducted${dispatchResult.skipped ? ' — skipped, already dispatched' : ''})`)
+   519→                    } else if (!dispatchResult.skipped) {
+   520→                      console.error(`[poll] Failed to auto-dispatch order ${entry.id}: ${dispatchResult.error}`)
+   521→                      errors.push(`Failed to auto-dispatch order ${entry.id}: ${dispatchResult.error}`)
+   522→                    }
+   523→                  }
+   524→                } catch (e) {
+   525→                  console.error(`[poll] Failed to auto-dispatch order ${entry.id}:`, e)
+   526→                  errors.push(`Failed to auto-dispatch order ${entry.id}: ${e}`)
+   527→                }
+   528→              }
+   529→
+   530→              // ── "Delivered" → mark as delivered ──
+   531→              if (result.status === 'delivered') {
+   532→                try {
+   533→                  // First ensure the order is dispatched WITH inventory deduction
+   534→                  // (auto-dispatch if still confirmed/processing). performOrderDispatch
+   535→                  // creates the sale_dispatched txn so onHand is correctly decremented.
+   536→                  const order = await db.order.findUnique({
+   537→                    where: { id: entry.id },
+   538→                    select: { status: true, flowopsOrderNumber: true },
+   539→                  })
+   540→                  if (order && (order.status === 'confirmed' || order.status === 'processing')) {
+   541→                    const dispatchResult = await performOrderDispatch(entry.id, { source: 'auto_poll' })
+   542→                    if (!dispatchResult.success && !dispatchResult.skipped) {
+   543→                      console.error(`[poll] Failed to auto-dispatch order ${entry.id} before marking delivered: ${dispatchResult.error}`)
+   544→                      errors.push(`Failed to auto-dispatch order ${entry.id} before delivered: ${dispatchResult.error}`)
+   545→                    }
+   546→                  }
+   547→                  if (order && order.status !== 'delivered' && order.status !== 'cancelled' && order.status !== 'refunded') {
+   548→                    // Mark as delivered directly (bypass markOrderDelivered's
+   549→                    // getWorkspace() which breaks multi-tenant polling).
+   550→                    // No inventory change at delivery time — the dispatch txn
+   551→                    // already decremented onHand.
+   552→                    await db.order.update({
+   553→                      where: { id: entry.id },
+   554→                      data: {
+   555→                        status: 'delivered',
+   556→                        deliveredAt: new Date(),
+   557→                      },
+   558→                    })
+   559→                    console.log(`[poll] Marked order ${order.flowopsOrderNumber} as delivered (PostEx confirmed delivery)`)
+   560→                  }
+   561→                } catch (e) {
+   562→                  console.error(`[poll] Failed to mark order ${entry.id} as delivered:`, e)
+   563→                  errors.push(`Failed to mark order ${entry.id} as delivered: ${e}`)
+   564→                }
+   565→              }
+   566→
+   567→              // ── "Returned" → mark as RTO ──
+   568→              // RTO means the item came back. The correct inventory treatment is
+   569→              // to RELEASE the reservation (order_unreserved) — NOT create a
+   570→              // sale_dispatched txn, because the item never stayed sold. This
+   571→              // matches the retroactive cleanup fix for RTO orders.
+   572→              //
+   573→              // NOTE: if the order was already 'dispatched' (has a sale_dispatched
+   574→              // txn from a previous in_transit polling cycle), the onHand was
+   575→              // already decremented. The correct return would be a return_resellable
+   576→              // txn to add stock back, but that requires per-item cost lookup and
+   577→              // the full processOrderReturn() logic (which uses getWorkspace()).
+   578→              // This is a pre-existing gap in the polling RTO path — NOT introduced
+   579→              // by this fix. For orders that go directly confirmed→rto (never
+   580→              // dispatched), this path correctly releases the reservation without
+   581→              // touching onHand.
+   582→              if (result.status === 'returned') {
+   583→                try {
+   584→                  const order = await db.order.findUnique({
+   585→                    where: { id: entry.id },
+   586→                    select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true, companyId: true },
+   587→                  })
+   588→                  if (order && order.status !== 'rto' && order.status !== 'cancelled' && order.status !== 'refunded') {
+   589→                    // Restock inventory for the RTO — handles BOTH cases:
+   590→                    //   - confirmed/processing items: releases the reservation (unreserve)
+   591→                    //   - dispatched items: restocks onHand via return_resellable/return_stitched_received
+   592→                    // Previously the dispatched case was a GAP (onHand was
+   593→                    // decremented at dispatch but never restored on RTO →
+   594→                    // stock permanently lost). Now fixed via restockOrderForRto().
+   595→                    const restockResult = await restockOrderForRto(entry.id, {
+   596→                      organizationId: order.organizationId,
+   597→                      companyId: order.companyId ?? integration.companyId,
+   598→                      employeeId: integration.createdBy ?? null,
+   599→                      returnReason: `PostEx courier returned (status: returned, detected via single-order track)`,
+   600→                    })
+   601→                    if (restockResult.itemsRestocked > 0) {
+   602→                      console.log(`[poll] Restocked ${restockResult.itemsRestocked} item(s) for RTO order ${order.flowopsOrderNumber}`)
+   603→                    }
+   604→
+   605→                    // Mark as RTO
+   606→                    await db.order.update({
+   607→                      where: { id: entry.id },
+   608→                      data: {
+   609→                        status: 'rto',
+   610→                        returnedAt: new Date(),
+   611→                      },
+   612→                    })
+   613→                    console.log(`[poll] Marked order ${order.flowopsOrderNumber} as RTO (PostEx returned; inventory restocked)`)
+   614→                  }
+   615→                } catch (e) {
+   616→                  console.error(`[poll] Failed to mark order ${entry.id} as RTO:`, e)
+   617→                  errors.push(`Failed to mark order ${entry.id} as RTO: ${e}`)
+   618→                }
+   619→              }
+   620→              // ── "Cancelled by merchant" / "Expired" → cancel the order ──
+   621→              // PostEx returns "Un-Assigned By Me" when the merchant cancels
+   622→              // on the PostEx portal, or "Expired" when the booking expires.
+   623→              // Both map to genericStatus='failed' + courierSubStatus='cancelled_by_merchant' or 'expired'.
+   624→              // We need to cancel the order in FlowOps and unreserve stock.
+   625→              if (result.status === 'failed' && mappedSubStatus &&
+   626→                  (mappedSubStatus === 'cancelled_by_merchant' || mappedSubStatus === 'expired')) {
+   627→                try {
+   628→                  const order = await db.order.findUnique({
+   629→                    where: { id: entry.id },
+   630→                    select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true },
+   631→                  })
+   632→                  if (order && order.status !== 'cancelled' && order.status !== 'delivered' && order.status !== 'rto') {
+   633→                    // Unreserve stock for reserved items
+   634→                    const reservedItems = await db.orderItem.findMany({
+   635→                      where: { orderId: entry.id, fulfillmentStatus: 'reserved' },
+   636→                    })
+   637→                    for (const item of reservedItems) {
+   638→                      const locationId = item.reservedLocationId ?? order.dispatchLocationId
+   639→                      if (!locationId) continue
+   640→                      try {
+   641→                        await unreserveStockForOrder({
+   642→                          orgVariantId: item.orgVariantId,
+   643→                          locationId,
+   644→                          organizationId: order.organizationId,
+   645→                          companyId: integration.companyId,
+   646→                          employeeId: integration.createdBy ?? '',
+   647→                          quantity: item.quantity,
+   648→                          orderId: entry.id,
+   649→                        })
+   650→                      } catch (e) {
+   651→                        console.error(`[poll] Failed to unreserve stock for item ${item.id}:`, e)
+   652→                      }
+   653→                    }
+   654→
+   655→                    // Cancel the order
+   656→                    await db.order.update({
+   657→                      where: { id: entry.id },
+   658→                      data: {
+   659→                        status: 'cancelled',
+   660→                        cancelledAt: new Date(),
+   661→                        cancellationReason: `Courier booking ${mappedSubStatus === 'cancelled_by_merchant' ? 'cancelled by merchant on PostEx portal' : 'expired on PostEx'} (detected via status polling)`,
+   662→                        courierBookingStatus: 'cancelled',
+   663→                      },
+   664→                    })
+   665→                    console.log(`[poll] Auto-cancelled ${order.flowopsOrderNumber} (PostEx status: ${mappedSubStatus})`)
+   666→                  }
+   667→                } catch (e) {
+   668→                  console.error(`[poll] Failed to auto-cancel order ${entry.id}:`, e)
+   669→                  errors.push(`Failed to auto-cancel order ${entry.id}: ${e}`)
+   670→                }
+   671→              }
+   672→            }
+   673→
+   674→            // ── Payment Status lookup (Phase 3 — migration 012) ──
+   675→            if (result.status === 'delivered' || result.status === 'returned') {
+   676→              try {
+   677→                const paymentStatus = await executeLoggedIntegrationAction<{
+   678→                  success: boolean
+   679→                  settled: boolean
+   680→                  settlementDate: string | null
+   681→                  error?: string
+   682→                }>({
+   683→                  companyIntegrationId: integration.id,
+   684→                  organizationId: integration.organizationId,
+   685→                  actionType: 'fetch_payment_status',
+   686→                  direction: 'outbound',
+   687→                  relatedEntityType: 'order',
+   688→                  relatedEntityId: entry.id,
+   689→                  fn: async () => {
+   690→                    const postexAdapter = adapter as unknown as {
+   691→                      fetchPaymentStatus: (tn: string) => Promise<{
+   692→                        success: boolean
+   693→                        settled: boolean
+   694→                        settlementDate: string | null
+   695→                        error?: string
+   696→                      }>
+   697→                    }
+   698→                    if (typeof postexAdapter.fetchPaymentStatus === 'function') {
+   699→                      return postexAdapter.fetchPaymentStatus(entry.trackingNumber)
+   700→                    }
+   701→                    return { success: false, settled: false, settlementDate: null }
+   702→                  },
+   703→                })
+   704→
+   705→                if (paymentStatus?.settled) {
+   706→                  insertAuditLog({
+   707→                    action: 'postex.payment_settled',
+   708→                    entityType: 'order',
+   709→                    entityId: entry.id,
+   710→                    companyId: integration.companyId,
+   711→                    organizationId: integration.organizationId,
+   712→                    newValues: {
+   713→                      trackingNumber: entry.trackingNumber,
+   714→                      settlementDate: paymentStatus.settlementDate,
+   715→                    },
+   716→                  })
+   717→                }
+   718→              } catch (e) {
+   719→                console.error(`[poll] Payment status lookup failed for ${entry.id}:`, e)
+   720→              }
+   721→            }
+   722→          } else {
+   723→            // Exchange shipment
+   724→            await db.exchangeShipment.update({
+   725→              where: { id: entry.id },
+   726→              data: {
+   727→                lastPolledAt: now,
+   728→                courierSubStatus: mappedSubStatus,
+   729→                needsShipperAdvice: needsShipperAdvice,
+   730→                unrecognizedCourierStatus: unrecognized,
+   731→              },
+   732→            }).catch((e) => {
+   733→              console.error(`[poll] Failed to update courier status for shipment ${entry.id}:`, e)
+   734→            })
+   735→            polledShipments++
+   736→
+   737→            if (subStatusChanged) {
+   738→              statusChanges++
+   739→
+   740→              // ── "Picked By PostEx" → auto-dispatch exchange shipment ──
+   741→              // Call performExchangeShipmentDispatch() which runs the FULL
+   742→              // inventory deduction (dispatchOrder → sale_dispatched txn —
+   743→              // decrements onHand, releases reserved) + sets status='dispatched'
+   744→              // + updates parent exchange status + audit/metric. This is the fix
+   745→              // for the bug where polling previously set status='dispatched' via
+   746→              // direct db.exchangeShipment.update() WITHOUT inventory deduction.
+   747→              if (result.status === 'in_transit') {
+   748→                try {
+   749→                  const shipment = await db.exchangeShipment.findUnique({
+   750→                    where: { id: entry.id },
+   751→                    select: { status: true, exchangeShipmentNumber: true },
+   752→                  })
+   753→                  if (shipment && shipment.status === 'confirmed') {
+   754→                    const dispatchResult = await performExchangeShipmentDispatch(entry.id, { source: 'auto_poll' })
+   755→                    if (dispatchResult.success) {
+   756→                      console.log(`[poll] Auto-dispatched exchange shipment ${shipment.exchangeShipmentNumber} (inventory deducted${dispatchResult.skipped ? ' — skipped, already dispatched' : ''})`)
+   757→                    } else if (!dispatchResult.skipped) {
+   758→                      console.error(`[poll] Failed to auto-dispatch shipment ${entry.id}: ${dispatchResult.error}`)
+   759→                      errors.push(`Failed to auto-dispatch shipment ${entry.id}: ${dispatchResult.error}`)
+   760→                    }
+   761→                  }
+   762→                } catch (e) {
+   763→                  console.error(`[poll] Failed to auto-dispatch shipment ${entry.id}:`, e)
+   764→                  errors.push(`Failed to auto-dispatch shipment ${entry.id}: ${e}`)
+   765→                }
+   766→              }
+   767→
+   768→              if (result.status === 'delivered') {
+   769→                try {
+   770→                  const shipment = await db.exchangeShipment.findUnique({
+   771→                    where: { id: entry.id },
+   772→                    select: { status: true, exchangeShipmentNumber: true },
+   773→                  })
+   774→                  if (shipment && shipment.status !== 'delivered' && shipment.status !== 'cancelled') {
+   775→                    // Auto-dispatch first if needed (with inventory deduction)
+   776→                    if (shipment.status === 'confirmed') {
+   777→                      const dispatchResult = await performExchangeShipmentDispatch(entry.id, { source: 'auto_poll' })
+   778→                      if (!dispatchResult.success && !dispatchResult.skipped) {
+   779→                        console.error(`[poll] Failed to auto-dispatch shipment ${entry.id} before delivered: ${dispatchResult.error}`)
+   780→                        errors.push(`Failed to auto-dispatch shipment ${entry.id} before delivered: ${dispatchResult.error}`)
+   781→                      }
+   782→                    }
+   783→                    // Mark as delivered (no inventory change at delivery — dispatch txn already decremented onHand)
+   784→                    await db.exchangeShipment.update({
+   785→                      where: { id: entry.id },
+   786→                      data: { status: 'delivered', deliveredAt: new Date() },
+   787→                    })
+   788→                    console.log(`[poll] Marked exchange shipment ${shipment.exchangeShipmentNumber} as delivered`)
+   789→                  }
+   790→                } catch (e) {
+   791→                  console.error(`[poll] Failed to mark shipment ${entry.id} as delivered:`, e)
+   792→                  errors.push(`Failed to mark exchange shipment ${entry.id} as delivered: ${e}`)
+   793→                }
+   794→              }
+   795→
+   796→              // ── "Returned" → mark exchange shipment as RTO ──
+   797→              // The replacement item itself was returned by the courier.
+   798→              // Calls performExchangeShipmentRto() which restores inventory
+   799→              // (return_resellable or return_stitched_received) + sets status='rto'
+   800→              // + sets parent order_exchanges to 'exchange_item_returned' (terminal).
+   801→              // This is INTENTIONALLY terminal — no automatic re-exchange/refund.
+   802→              if (result.status === 'returned') {
+   803→                try {
+   804→                  const shipment = await db.exchangeShipment.findUnique({
+   805→                    where: { id: entry.id },
+   806→                    select: { status: true, exchangeShipmentNumber: true },
+   807→                  })
+   808→                  if (shipment && shipment.status !== 'rto' && shipment.status !== 'cancelled' &&
+   809→                      (shipment.status === 'dispatched' || shipment.status === 'delivered')) {
+   810→                    const rtoResult = await performExchangeShipmentRto(entry.id, {
+   811→                      source: 'auto_poll',
+   812→                      returnReason: 'Courier returned the replacement item (detected via PostEx status polling)',
+   813→                    })
+   814→                    if (rtoResult.success) {
+   815→                      console.log(`[poll] Marked exchange shipment ${shipment.exchangeShipmentNumber} as RTO (inventory restored${rtoResult.skipped ? ' — skipped, already RTO' : ''})`)
+   816→                    } else if (!rtoResult.skipped) {
+   817→                      console.error(`[poll] Failed to mark shipment ${entry.id} as RTO: ${rtoResult.error}`)
+   818→                      errors.push(`Failed to mark exchange shipment ${entry.id} as RTO: ${rtoResult.error}`)
+   819→                    }
+   820→                  }
+   821→                } catch (e) {
+   822→                  console.error(`[poll] Failed to mark shipment ${entry.id} as RTO:`, e)
+   823→                  errors.push(`Failed to mark exchange shipment ${entry.id} as RTO: ${e}`)
+   824→                }
+   825→              }
+   826→            }
+   827→          }
+   828→        }
+   829→      } catch (integrationErr) {
+   830→        errors.push(
+   831→          `Failed to poll integration ${integration.id}: ${integrationErr instanceof Error ? integrationErr.message : String(integrationErr)}`,
+   832→        )
+   833→      }
+   834→    }
+   835→
+   836→    // Audit log for the polling run (non-fatal) — use the first integration's
+   837→    // company/org context so the audit row is queryable (was previously empty strings).
+   838→    const firstIntegration = postexIntegrations[0]
+   839→    insertAuditLog({
+   840→      action: 'postex.status_poll_completed',
+   841→      entityType: 'company_integration',
+   842→      entityId: firstIntegration?.id ?? '',
+   843→      companyId: firstIntegration?.companyId ?? '',
+   844→      organizationId: firstIntegration?.organizationId ?? '',
+   845→      newValues: { polledOrders, polledShipments, statusChanges, errorCount: errors.length },
+   846→    })
+   847→
+   848→    insertMetricEvent({
+   849→      companyId: firstIntegration?.companyId ?? '',
+   850→      entityType: 'company_integration',
+   851→      entityId: firstIntegration?.id ?? '',
+   852→      metricKey: 'postex.status_poll_completed',
+   853→      numericValue: statusChanges,
+   854→      dimensions: { polled_orders: polledOrders, polled_shipments: polledShipments, errors: errors.length },
+   855→    })
+   856→
+   857→    return {
+   858→      success: true,
+   859→      data: { polledOrders, polledShipments, statusChanges, errors },
+   860→    }
+   861→  } catch (err) {
+   862→    return {
+   863→      success: false,
+   864→      error: err instanceof Error ? err.message : 'Failed to poll PostEx statuses',
+   865→      data: { polledOrders, polledShipments, statusChanges, errors },
+   866→    }
+   867→  }
+   868→}
+   869→

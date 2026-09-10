@@ -67,8 +67,13 @@ interface OrderFilters {
   customerId?: string
   deliveryCity?: string      // case-insensitive contains on delivery_city
   search?: string
-  limit?: number
-  offset?: number
+  // Pagination — ORD-013: page+pageSize are the preferred pagination API
+  // (1-indexed page number). limit+offset are still supported for backward
+  // compatibility. When BOTH are supplied, page+pageSize take precedence.
+  page?: number              // 1-indexed page number (page=1 → first N rows)
+  pageSize?: number          // rows per page (overrides `limit` when present)
+  limit?: number             // legacy — kept for backward compat
+  offset?: number            // legacy — kept for backward compat
   // Backward compat with single-value filters
   status?: string
   paymentType?: string
@@ -2050,11 +2055,26 @@ export async function listOrders(
     salesEmployeeName: string | null
   }>
   total: number
+  // ORD-013: pagination metadata — returned so the UI can render
+  // page controls without re-counting.
+  page: number
+  pageSize: number
 }>> {
   try {
     const ctx = await getWorkspace()
-    const limit = Math.min(filters.limit ?? 50, 100)
-    const offset = filters.offset ?? 0
+    // ORD-013: page/pageSize are preferred over limit/offset. If page+pageSize
+    // are supplied, derive limit/offset from them. Otherwise fall back to
+    // the legacy limit/offset params (still used by some internal callers).
+    const pageSize =
+      filters.pageSize ?? filters.limit ?? 50
+    const page =
+      filters.page ??
+      // If only `offset`+`limit` are supplied (legacy), derive page from them
+      (filters.offset !== undefined && (filters.pageSize ?? filters.limit)
+        ? Math.floor(filters.offset / (filters.pageSize ?? filters.limit ?? 50)) + 1
+        : 1)
+    const limit = Math.min(pageSize, 100)
+    const offset = (page - 1) * limit
 
     const where: Prisma.OrderWhereInput = {
       companyId: ctx.company.id,
@@ -2235,6 +2255,11 @@ export async function listOrders(
           salesEmployeeName: o.salesEmployee?.user?.fullName ?? null,
         })),
         total,
+        // ORD-013: echo back the resolved pagination metadata so the UI
+        // can render page controls (it doesn't have to re-derive from
+        // limit/offset or remember what it sent).
+        page,
+        pageSize: limit,
       },
     }
   } catch (err) {
@@ -2467,6 +2492,11 @@ export async function performOrderDispatch(
       createdAt: true,
       totalOrderValue: true,
       customerId: true,
+      // ORD-001: salesEmployeeId MUST be in the select clause — otherwise
+      // the updateEmployeeStats() guard below silently evaluates to false
+      // (undefined !== truthy) and the sales rep's dispatch stats are
+      // never refreshed.
+      salesEmployeeId: true,
     },
   })
   if (!order) return { success: false, error: 'Order not found' }
@@ -2885,4 +2915,79 @@ export async function markOrderDelivered(orderId: string): Promise<ActionResult>
       error: err instanceof Error ? err.message : 'Failed to mark order as delivered',
     }
   }
+}
+
+// ──────────────────────────────────────────────────────────────
+// ORD-003 / ORD-006 / ORD-009 — Shared side-effects helper
+// ──────────────────────────────────────────────────────────────
+
+/**
+ * Shared side-effect handler for order status transitions that bypass
+ * the normal UI action functions (markOrderDelivered / processOrderReturn /
+ * cancelOrder). Specifically used by the auto-poller and webhook receiver
+ * paths that have no HTTP session and therefore cannot call
+ * `getWorkspace()` + `requirePermission()`.
+ *
+ * Fires-and-forgets the FOUR downstream side effects that the UI action
+ * functions perform after a status transition:
+ *   1. `updateCustomerStats(order.customerId)` — refresh cached totals/rates
+ *   2. `updateEmployeeStats(order.salesEmployeeId)` — refresh rep's KPIs
+ *   3. `insertAuditLog('order.<status>')` — the gap fixed by ORD-012
+ *   4. `insertMetricEvent('order.<status>')` — dashboards + reports
+ *
+ * Call this IMMEDIATELY AFTER the direct `db.order.update` in poller /
+ * webhook paths so downstream stats + audit/metric rows stay in sync
+ * with the order status. Each side effect is non-fatal — failures are
+ * logged but never break the status transition itself.
+ *
+ * NOTE: this does NOT replace markOrderDelivered/processOrderReturn/cancelOrder
+ * for the UI/manual flows — it only fills the gap in auto-poll + webhook
+ * flows that have no HTTP session.
+ */
+export async function handleOrderStatusSideEffects(
+  orderId: string,
+  newStatus: 'delivered' | 'rto' | 'cancelled' | 'dispatched',
+  order: {
+    companyId: string
+    organizationId: string
+    customerId: string | null
+    salesEmployeeId: string | null
+    totalOrderValue: Prisma.Decimal | number | string | null
+  },
+): Promise<void> {
+  // 1. Customer stats — delivery/rto/cancel all affect total counts + rates.
+  // Non-fatal: a customer-stats failure shouldn't block the audit/metric.
+  if (order.customerId) {
+    await updateCustomerStats(order.customerId).catch((e) =>
+      console.error(
+        `[handleOrderStatusSideEffects] updateCustomerStats failed for ${order.customerId}:`,
+        e,
+      ),
+    )
+  }
+
+  // 2. Employee stats — delivery/rto/cancel all affect the rep's funnel
+  // KPIs (deliveredCount, rtoCount, rtoRate, inTransitCount).
+  if (order.salesEmployeeId) {
+    updateEmployeeStats(order.salesEmployeeId).catch(() => {})
+  }
+
+  // 3. Audit log — every status transition creates an audit entry.
+  insertAuditLog({
+    action: `order.${newStatus}`,
+    entityType: 'order',
+    entityId: orderId,
+    companyId: order.companyId,
+    organizationId: order.organizationId,
+    newValues: { status: newStatus, source: 'auto_poll_or_webhook' },
+  })
+
+  // 4. Metric event — always created so dashboards/reports stay accurate.
+  insertMetricEvent({
+    companyId: order.companyId,
+    entityType: 'order',
+    entityId: orderId,
+    metricKey: `order.${newStatus}`,
+    numericValue: Number(order.totalOrderValue ?? 0),
+  })
 }

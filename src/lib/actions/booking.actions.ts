@@ -21,6 +21,7 @@ import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
 import { revalidateCityAtBookingTime } from '@/lib/integrations/city-matcher'
 import { determinePostExOrderType } from '@/lib/integrations/couriers/postex.order-type'
 import { calculateOrderWeightKg } from '@/lib/utils/order-weight'
+import { insertCourierStatusHistory } from '@/lib/integrations/status-history'
 import {
   parseLeopardPreferences,
   buildLeopardSpecialInstructions,
@@ -41,8 +42,12 @@ export interface BookOrderResult {
 }
 
 export interface BookOrderOptions {
-  /** The order to book. */
-  orderId: string
+  /** The order to book. Required for bookOrderWithCourier; ignored by
+   *  bookExchangeShipmentWithCourier (which uses shipmentId instead).
+   *  Marked optional so the exchange-shipment path can omit it without
+   *  triggering TypeScript errors — bookOrderWithCourier still enforces
+   *  the requirement at runtime via `if (!orderId)`. */
+  orderId?: string
   /** The courier integration to book with. */
   companyIntegrationId: string
   /** Optional per-booking overrides (from the Workbench UI or auto-booking). */
@@ -466,13 +471,40 @@ export async function bookOrderWithCourier(
         courierBookingFailureReason: null,
         // Store our own copy of the courier slip PDF (if downloaded)
         ...(courierSlipStoragePath ? { courierSlipStoragePath } : {}),
-        // Persist the (possibly corrected) delivery city + address on the order
-        deliveryCity: resolvedDeliveryCity || deliveryCity,
+        // Persist the (possibly corrected) delivery address on the order.
+        // ORD-007: do NOT overwrite `deliveryCity` here — for Leopard,
+        // `resolvedDeliveryCity` is the NUMERIC city ID (used only for
+        // the API call), not the human-readable city name. Writing it
+        // back to `order.deliveryCity` would replace "Lahore" with "543"
+        // and break every downstream city-based display + filter. The
+        // (possibly corrected) human-readable city name was already
+        // written back to the customer's saved address (below) if a
+        // saved address was used; the order's own deliveryCity is left
+        // untouched (it retains whatever the customer entered).
         ...(deliveryAddress ? { deliveryAddress } : {}),
       },
     })
     mark('orderUpdateEnd')
     measure('orderUpdateStart', 'orderUpdateEnd', '9_order_update')
+
+    // ORD-008: record the "Booked" status event in courier_status_history.
+    // This was previously a 0-row table — no caller ever wrote to it. Non-fatal.
+    await insertCourierStatusHistory({
+      entityType: 'order',
+      entityId: orderId,
+      orderId,
+      trackingNumber: bookResult.trackingNumber,
+      courierIntegrationId: integration.id,
+      status: 'Booked',
+      subStatus: mappedBookingStatus?.courierSubStatus ?? null,
+      rawResponse: {
+        providerStatus: bookResult.providerStatus,
+        orderType,
+        slipLink: bookResult.slipLink ?? null,
+      },
+      organizationId: ctx.company.organizationId,
+      companyId: ctx.company.id,
+    }).catch((e) => console.error(`[booking] courierStatusHistory insert failed for ${orderId}:`, e))
 
     // ── Propagate city correction back to the customer's saved address ──
     // If the city was corrected during booking (e.g., via the mismatch
@@ -860,6 +892,24 @@ export async function bookExchangeShipmentWithCourier(
         courierBookingStatus: 'booked',
       },
     })
+
+    // ORD-008: record the "Booked" status event in courier_status_history.
+    // Same pattern as the order booking path above. Non-fatal.
+    await insertCourierStatusHistory({
+      entityType: 'exchange_shipment',
+      entityId: shipment.id,
+      exchangeShipmentId: shipment.id,
+      trackingNumber: bookResult.trackingNumber,
+      courierIntegrationId: integration.id,
+      status: 'Booked',
+      subStatus: mappedBookingStatus?.courierSubStatus ?? null,
+      rawResponse: {
+        providerStatus: bookResult.providerStatus,
+        orderType,
+      },
+      organizationId: ctx.company.organizationId,
+      companyId: ctx.company.id,
+    }).catch((e) => console.error(`[booking] courierStatusHistory insert failed for shipment ${shipment.id}:`, e))
 
     return {
       success: true,

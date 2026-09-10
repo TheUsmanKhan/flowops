@@ -17035,3 +17035,199 @@ All 10 Part D queries ran successfully. Key data points:
 - ✅ No Prisma schema changes.
 - ✅ No DB writes performed — all queries were SELECT/count/column-inspection only.
 - ✅ No migrations applied.
+
+---
+Task ID: ORDERS-FIX-CRITICAL
+Agent: sub-agent (general-purpose)
+Task: Fix 7 Critical bugs in the Orders Core Lifecycle — ORD-001, ORD-003, ORD-004, ORD-006, ORD-008, ORD-009, ORD-016.
+
+Work Log:
+- Read `/home/z/my-project/ORDERS_CORE_SOLUTIONS.md` (full spec — 17 issues, plain-language explanations + recommended fixes for each).
+- Read all 7 target source files before editing.
+
+Files modified (7):
+1. `src/lib/actions/order.actions.ts`
+   - ORD-001: added `salesEmployeeId: true` to the `db.order.findUnique({ select })` call in `performOrderDispatch()` (~line 2456). The fetched order is now `{ ..., salesEmployeeId }` so the guard `if (order.salesEmployeeId) updateEmployeeStats(...)` (line ~2609) evaluates to true and the sales rep's funnel stats actually get refreshed on dispatch.
+   - ORD-003/006/009: added new exported `handleOrderStatusSideEffects(orderId, newStatus, order)` helper at the bottom of the file (~line 2895). Fires the four downstream side effects that `markOrderDelivered`/`processOrderReturn`/`cancelOrder` would have done in the UI path: (1) `updateCustomerStats`, (2) `updateEmployeeStats`, (3) `insertAuditLog('order.<status>')`, (4) `insertMetricEvent('order.<status>')`. Non-fatal — each side effect is wrapped in `.catch()`.
+
+2. `src/lib/actions/order-return.actions.ts`
+   - ORD-004: added `fulfillmentStatus: 'returned'` to BOTH OrderItem updates in `processOrderReturn()` (the made_to_order branch ~line 132 + the stock_based branch ~line 158). Previously the OrderItem stayed at `'dispatched'` after RTO even though the order transitioned to `'rto'`, inflating warehouse "currently dispatched" counts.
+
+3. `src/lib/integrations/status-history.ts`
+   - ORD-008: rewrote `insertCourierStatusHistory()` to match the ACTUAL Prisma schema for `CourierStatusHistory`. The previous version wrote fields that don't exist on the schema (`providerKey`, `rawStatus`, `courierActivityDate`, `source`, `metadata`) — every insert silently failed, leaving the table permanently empty. New field set: `entityType`, `entityId`, `orderId?`, `exchangeShipmentId?`, `trackingNumber?`, `courierIntegrationId?`, `status`, `subStatus?`, `rawResponse?`, `organizationId`, `companyId`. Also exported a proper `InsertStatusHistoryInput` interface.
+
+4. `src/lib/actions/postex-status-poll.actions.ts`
+   - Imported `handleOrderStatusSideEffects` + `insertCourierStatusHistory`.
+   - Bulk poll (`pollPostExOrderStatuses`):
+     * Added `insertCourierStatusHistory` call at the top of the `if (subStatusChanged)` block for BOTH the order branch and the exchange-shipment branch.
+     * Delivered branch: expanded order select to include `companyId, organizationId, customerId, salesEmployeeId, totalOrderValue`, then called `handleOrderStatusSideEffects(entry.id, 'delivered', order)` after the direct `db.order.update`.
+     * RTO branch: same expanded select + `handleOrderStatusSideEffects(entry.id, 'rto', order)` after `db.order.update` (after `restockOrderForRto`).
+     * Cancelled branch: same expanded select + `handleOrderStatusSideEffects(entry.id, 'cancelled', order)` after `db.order.update`.
+   - Single-order poll (`trackSingleOrderStatus`): applied the same three side-effect calls (delivered / RTO / cancelled) + the courier-status-history insert at the top of the `if (subStatusChanged)` block.
+
+5. `src/lib/actions/leopard-webhook.actions.ts`
+   - Imported `handleOrderStatusSideEffects` + `insertCourierStatusHistory`.
+   - Expanded the order select in `processLeopardWebhookUpdates` to include `customerId, salesEmployeeId, totalOrderValue`.
+   - Added `insertCourierStatusHistory` call right after the entity is matched (covers BOTH order + exchange_shipment, with `orderId`/`exchangeShipmentId` set conditionally).
+   - Delivered branch: after `db.order.update` for delivered status, called `handleOrderStatusSideEffects(entityId, 'delivered', order)`.
+   - RTO branch: after `db.order.update` for rto status (post-restock), called `handleOrderStatusSideEffects(entityId, 'rto', order)`.
+   - Cancelled branch: replaced the inline `insertAuditLog` + `updateCustomerStats` block with a single `handleOrderStatusSideEffects(entityId, 'cancelled', order)` call (the helper covers all four side effects — also fills the previously missing employee stats + metric event).
+   - Safety-net poll (`pollLeopardOrderStatuses`): fixed a pre-existing TS error where `relatedEntityType: entry.type` ('order' | 'shipment') didn't match the schema's accepted values ('order' | 'exchange_shipment' | 'product'). Now maps `'shipment'` → `'exchange_shipment'`.
+
+6. `src/lib/actions/booking.actions.ts`
+   - Imported `insertCourierStatusHistory`.
+   - ORD-008: added `insertCourierStatusHistory` call after the `db.order.update` in `bookOrderWithCourier` (status='Booked') AND after the `db.exchangeShipment.update` in `bookExchangeShipmentWithCourier` (status='Booked'). Both calls include the tracking number, integration id, provider status as raw response, and company/org context.
+   - ORD-016 prep: made `BookOrderOptions.orderId` optional (`orderId?: string`). The intersection `BookOrderOptions & { shipmentId: string }` now works for the exchange-shipment path without forcing the caller to pass `orderId: ''`. `bookOrderWithCourier` still enforces orderId at runtime via the existing `if (!orderId || !companyIntegrationId)` check.
+   - (Pre-existing TS errors in `bookExchangeShipmentWithCourier`'s relation access — `shipment.shippingAddress`, `shipment.orderExchange`, `shipment.newOrgVariant`, `shipment.codAmount` — are NOT in scope for this task and were left untouched. They appear to be from a Prisma schema change that didn't propagate to booking.actions.ts.)
+
+7. `src/app/api/booking-workbench/book/route.ts`
+   - ORD-016: replaced the broken positional call
+     `bookExchangeShipmentWithCourier(body.entity_id, body.courier_company_integration_id, body.pickup_address_id || undefined)`
+     with a proper options object:
+     ```
+     bookExchangeShipmentWithCourier({
+       shipmentId: body.shipmentId!,
+       companyIntegrationId: body.companyIntegrationId,
+       pickupAddressCode: body.pickupAddressCode,
+       customerName, customerPhone, deliveryAddress, deliveryCity,
+       codAmount, orderType, transactionNotes, itemDescription, orderRefNumber,
+     })
+     ```
+     The previous call passed `undefined` for all 3 positional args (the snake_case fields don't exist on `BookRequest`), breaking every exchange-shipment booking from the Booking Workbench UI.
+   - Removed the dead inline `bookExchangeShipment` function (was 165 lines of duplicate logic that drifted from `bookExchangeShipmentWithCourier`) and cleaned up the now-unused imports.
+
+8. `src/app/api/courier-status-history/route.ts`
+   - ORD-008 follow-up: updated the `db.courierStatusHistory.findMany({ select })` call to use the ACTUAL schema fields (`status, subStatus, rawResponse, orderId, exchangeShipmentId, trackingNumber, courierIntegrationId, receivedAt, createdAt`). Was previously selecting non-existent fields (`providerKey, rawStatus, courierActivityDate, source, metadata`) which caused a pre-existing TS error.
+
+Verification:
+- `bun run lint 2>&1 | tail -5` — 14 problems (2 errors, 12 warnings), ALL pre-existing in `scripts/*.js` and `src/components/**` (unrelated to this task). Zero new lint errors introduced.
+- `bun run tsc --noEmit` — fixed 9 pre-existing TS errors:
+  * 2 in order.actions.ts (salesEmployeeId — confirms ORD-001 fix)
+  * 4 in booking-workbench/book/route.ts (entity_id / wrong arg count — confirms ORD-016 fix)
+  * 1 in bookOrdersBatch call to bookExchangeShipmentWithCourier (BookOrderOptions.orderId now optional)
+  * 1 in leopard-webhook.actions.ts (relatedEntityType mapping)
+  * 1 in status-history.ts (providerKey field removed)
+  * 1 in courier-status-history/route.ts (providerKey field in select removed)
+- 16 pre-existing TS errors remain in `bookExchangeShipmentWithCourier`'s relation access (`shippingAddress`, `orderExchange`, `newOrgVariant`, `codAmount`) — out of scope for ORD-001/003/004/006/008/009/016. They are unrelated to the booking-call signature bug (ORD-016) that was fixed.
+
+Stage Summary:
+All 7 Critical bugs are now patched:
+- ORD-001: `salesEmployeeId` is now in the dispatch select clause → `updateEmployeeStats` actually fires.
+- ORD-003: PostEx poll + Leopard webhook delivered branches now fire customer/employee stats + audit + metric via `handleOrderStatusSideEffects`.
+- ORD-004: `OrderItem.fulfillmentStatus='returned'` is set on every RTO item (both made_to_order + stock_based branches).
+- ORD-006: PostEx poll + Leopard webhook RTO branches now fire customer/employee stats + audit + metric.
+- ORD-008: `insertCourierStatusHistory` rewritten against the real Prisma schema and called from 3 places (poller, webhook, booking) + 2 paths (order, exchange_shipment). The courier_status_history table will now actually populate.
+- ORD-009: PostEx poll + Leopard webhook cancelled branches now fire customer/employee stats + audit + metric.
+- ORD-016: Booking Workbench exchange-shipment booking now passes a proper options object instead of 3 broken positional args.
+
+Next Actions (out of scope, follow-up work):
+1. Backfill 13 RTO OrderItems where `fulfillmentStatus` is still `'dispatched'` (per ORD-004 SQL in ORDERS_CORE_SOLUTIONS.md).
+2. Backfill 18 `sale_dispatched` InventoryTransactions with NULL `orderId` (ORD-011).
+3. Fix the 16 pre-existing TS errors in `bookExchangeShipmentWithCourier`'s Prisma relation access (separate bug — the ExchangeShipment model was changed but the booking code wasn't updated).
+4. Wire up `pollPostExOrderStatuses` and `pollLeopardOrderStatuses` to an actual cron scheduler (still TODO per existing code comments).
+
+---
+Task ID: ORDERS-FIX-HIGH-MEDIUM-LOW
+Agent: sub-agent (general-purpose)
+Task: Fix remaining Orders bugs (High + Medium + Low) — ORD-002, 005, 007, 010, 011, 012, 013, 014, 015, 017.
+
+Work Log:
+- Read prior worklog entry `ORDERS-FIX-CRITICAL` (Task ID at top of this file) to understand the `handleOrderStatusSideEffects` helper + `insertCourierStatusHistory` rewrite + `bookExchangeShipmentWithCourier` signature fix already in place. Read each target source file BEFORE editing.
+
+Files modified (8) + 1 new script:
+
+1. `src/lib/actions/order-return.actions.ts` — ORD-002/005
+   - Replaced the single `const locationId = order.dispatchLocationId` (line 84) with `const fallbackLocationId = order.dispatchLocationId` (kept as early-exit guard + fallback).
+   - Inside the items loop, resolve per-item: `const locationId = item.reservedLocationId ?? fallbackLocationId`.
+   - The per-item `locationId` is now used in: (a) the `dispatchTxn` lookup `findFirst`, (b) the made_to_order `processInventoryTransaction({ locationId, ... })`, (c) the stock_based `processInventoryTransaction({ locationId, ... })`.
+   - Previously, multi-location orders had ALL their RTO returns booked against the order-level default location, corrupting per-location onHand counts.
+   - Prisma `include.items` already returns all OrderItem scalar fields by default, so `item.reservedLocationId` is available without adding it to a `select` clause (verified against `correctReturnItemCondition` which uses the same pattern).
+
+2. `src/lib/inventory.ts` — ORD-002/005 (restockOrderForRto)
+   - Same fix in the session-free `restockOrderForRto()` used by the polling jobs + Leopard webhook.
+   - Replaced `const locationId = order.dispatchLocationId` (line 1308) with `const fallbackLocationId = order.dispatchLocationId` (kept as early-exit guard + fallback).
+   - Inside the items loop: `const locationId = item.reservedLocationId ?? fallbackLocationId`.
+   - The per-item `locationId` is used in: (a) dispatched-branch `dispatchTxn` lookup, (b) dispatched-branch `processInventoryTransaction({ locationId, ... })`, (c) reserved-branch `unreserveStockForOrder({ locationId, ... })`.
+
+3. `src/lib/actions/booking.actions.ts` — ORD-007
+   - Removed the line `deliveryCity: resolvedDeliveryCity || deliveryCity` from the `db.order.update` in `bookOrderWithCourier` (line 475).
+   - For Leopard, `resolvedDeliveryCity` is the NUMERIC city ID (looked up from `courier_operational_cities.cityId`) — used ONLY for the API `bookInput.deliveryCity`. Writing it back to `order.deliveryCity` was replacing the human-readable city name (e.g. "Lahore") with "543", breaking every downstream city-based display + filter.
+   - The (possibly corrected) human-readable city name is still propagated to the customer's saved address via the existing `customerAddress.update` block (lines 509-516) — that block uses `resolvedDeliveryCity` only when non-empty AND when a saved address was used, which is the correct semantic. The order's own `deliveryCity` is now left untouched (retains whatever the customer entered).
+
+4. `src/app/api/webhooks/[provider_key]/[webhook_endpoint_id]/route.ts` — ORD-010
+   - Imported `performOrderDispatch` from `@/lib/actions/order.actions`.
+   - Added a third `else if` branch to the standard single-update webhook handler: when `statusUpdate.status === 'in_transit' || statusUpdate.status === 'picked_up'` AND `order.status` is in `['pending', 'confirmed', 'processing', 'partially_backordered']`, calls `performOrderDispatch(order.id, { source: 'auto_poll', trackingNumber: statusUpdate.trackingNumber })`.
+   - `performOrderDispatch` is idempotent (skips items already in 'dispatched' state) and safe to call here. For orders that are already 'dispatched'/'delivered'/'rto'/'cancelled'/'refunded', the new branch is skipped (no-op).
+   - Previously, a courier "in_transit"/"picked_up" webhook was silently ignored if the order was still in a pre-dispatch state in our DB (e.g., the booking succeeded but the dispatch side-effect didn't fire — manual workflow, race with the booking API). The order stayed in 'confirmed' forever while the parcel was physically en route.
+
+5. `src/lib/integrations/types.ts` — ORD-010 supporting change
+   - Added `'picked_up'` to the `ParseStatusWebhookResult.status` union (was `'booked' | 'in_transit' | 'delivered' | 'returned' | 'failed'`).
+   - Without this, the webhook route's `statusUpdate.status === 'picked_up'` comparison was a TS error (comparison between disjoint types). Some couriers (e.g. Leopard) push a "picked_up" status separately from "in_transit" — both should trigger the dispatch side-effect.
+
+6. `src/app/api/orders/route.ts` + `src/lib/actions/order.actions.ts` (listOrders) — ORD-013
+   - Added `page` + `pageSize` to the `OrderFilters` interface (with backward-compat docs).
+   - `listOrders` now:
+     * Accepts `page` (1-indexed) + `pageSize` (rows per page; max 100) as preferred pagination params.
+     * Falls back to legacy `limit` + `offset` if `page` is not supplied (derives `page` from `offset / limit` for the response metadata).
+     * Returns `{ orders, total, page, pageSize }` instead of just `{ orders, total }` — the API response now includes the resolved pagination metadata so the UI can render page controls without re-counting.
+   - GET `/api/orders` handler now parses `page` + `page_size` (also accepts `pageSize` camelCase) query params. Legacy `limit` + `offset` still accepted.
+   - Only one caller exists (`src/app/api/orders/route.ts`) and it just spreads `result.data` to JSON, so the additional `page` + `pageSize` fields are purely additive (no breaking change to existing API consumers).
+
+7. `src/components/orders/order-detail-view.tsx` — ORD-015
+   - `Timeline` component now accepts `auditLogs: AuditLogResponse['rows']` as a prop (passed from the parent `<Timeline order={order} auditLogs={auditQuery.data?.rows ?? []} />`).
+   - Looks up the `order.processing_started` audit log entry (inserted by `markOrderProcessing`) and uses its `createdAt` as the timestamp for the Processing step.
+   - Previously the Processing step showed `order.createdAt` — which is when the order was PLACED, not when processing started. This was misleading (e.g. "Order placed: 10am → Processing: 10am" implied processing started instantly, even when it didn't).
+   - Added a `note?: string | null` field to the step type. When `processingStartedAt` is null (historical orders that predate the audit log) AND the order has reached processing/packed/dispatched state, the step shows the note "Processing started (timestamp not tracked)" instead of the misleading "Pending" label.
+   - Rendering logic updated: a step is "reached" if it has a timestamp OR a note. The icon is rendered with full color (not grayed-out) in either case. The sub-text shows `formatDateTime(s.time)` if `s.time` is set, otherwise `s.note ?? 'Pending'`.
+   - Added `note: null as string | null` to all other step objects (created/confirmed/packed/dispatched/delivered/rto/cancelled) to keep the TypeScript array type uniform.
+
+8. `src/app/api/booking-workbench/bookable/route.ts` — ORD-017
+   - Added `requirePermission` to the existing import from `@/lib/workspace`.
+   - Added `await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)` immediately after `getWorkspace()` in the GET handler.
+   - Previously, any authenticated employee (including those with only ORDERS_VIEW) could see the full bookable orders + exchange shipments queue. The book + dispatch actions downstream already enforced ORDERS_FULFILL, so this is just list-end consistency.
+
+9. NEW: `scripts/backfill-sale-dispatched-order-id.ts` — ORD-011 (DB backfill)
+   - One-shot backfill script for the 17 `sale_dispatched` InventoryTransactions with NULL `orderId` (per the task spec).
+   - Selection: `transactionType='sale_dispatched' AND referenceType='order' AND referenceId IS NOT NULL AND orderId IS NULL`.
+   - Update: `SET orderId = referenceId WHERE EXISTS (SELECT 1 FROM "Order" o WHERE o.id = t."referenceId")`. The EXISTS guard is REQUIRED — 3 of the 17 affected rows have a `referenceId` that doesn't match any Order row (legacy test data). Without the guard, the FK constraint `InventoryTransaction_orderId_fkey` fails with code 23503.
+   - Idempotent: re-running after a successful run is a no-op (the WHERE clause filters to NULL orderId rows only).
+   - **EXECUTED**: 14 rows updated, 3 rows skipped (referenceId doesn't match any Order — these need manual investigation; possibly legacy test data with non-Order referenceId values).
+
+ORD-014 (INVESTIGATE ONLY — no code change):
+- `canMarkRto = status === 'dispatched' && canManage` in `src/components/orders/order-detail-view.tsx:530`.
+- `canManage = can(PERMISSIONS.ORDERS_MANAGE)` — the higher "manage" permission.
+- Backend enforces the same: `processOrderReturn` calls `requirePermission(ctx, PERMISSIONS.ORDERS_MANAGE)`.
+- **Finding**: This is INCONSISTENT with `canMarkDelivered = status === 'dispatched' && canFulfill` (line 529), which only requires ORDERS_FULFILL. RTO is logically a fulfillment-team action (courier returned the parcel — staff record it), exactly like "Mark Delivered" (courier delivered the parcel — staff record it). Both are courier-result transitions on a dispatched order. The current ORDERS_MANAGE requirement forces the higher manage-permission for what should be a routine fulfillment workflow. A reasonable fix would be to relax BOTH the frontend `canMarkRto` check AND the backend `processOrderReturn` permission to ORDERS_FULFILL (matching "Mark Delivered"). However, per the task instructions, NO code change was made — this is reported as a finding only.
+
+ORD-012 (verify only — no code change):
+- Per the prior `ORDERS-FIX-CRITICAL` worklog, the `handleOrderStatusSideEffects(orderId, newStatus, order)` helper (in `src/lib/actions/order.actions.ts`) now fires audit logs for every transition routed through PostEx poll + Leopard webhook (delivered/rto/cancelled branches). Going forward, all new transitions will have proper audit logs.
+- **Backfill of missing audit logs for historical transitions is NOT needed**: the historical transitions lack both the timestamp of when they occurred AND the employee/user who triggered them — backfilling would be guesswork. The system gracefully handles missing audit logs (the Timeline just shows "timestamp not tracked" per ORD-015). Going forward, all new transitions are properly logged.
+
+Verification:
+- `bun run lint 2>&1 | tail -5` — 14 problems (2 errors, 12 warnings), ALL pre-existing (2 errors in `scripts/products-audit-queries*.js` `require()` imports, 12 warnings about React Hook Form `watch()` API in unrelated inventory/products components). ZERO new lint errors introduced by this task.
+- `bun run tsc --noEmit` — 59 TS errors total (down from 69 before applying ORDERS-FIX-CRITICAL + ORDERS-FIX-HIGH-MEDIUM-LOW combined). ZERO new TS errors introduced by this task. The webhook route `'picked_up'` comparison error that would have been introduced by ORD-010 was preemptively fixed by adding `'picked_up'` to the `ParseStatusWebhookResult.status` union in `src/lib/integrations/types.ts`.
+
+Stage Summary:
+All 10 bugs are now patched:
+- ORD-002 + ORD-005: RTO returns now book against `item.reservedLocationId ?? order.dispatchLocationId` per-item — multi-location orders no longer corrupt the wrong location's onHand counts.
+- ORD-007: Leopard booking no longer overwrites the human-readable `order.deliveryCity` with the numeric city ID — the numeric ID is used only for the API call, not stored.
+- ORD-010: Webhook now handles `in_transit`/`picked_up` → triggers `performOrderDispatch` if the order is still in pre-dispatch state.
+- ORD-011: 14 of 17 NULL orderId rows backfilled via `scripts/backfill-sale-dispatched-order-id.ts`. 3 rows skipped (referenceId doesn't match any Order — needs manual investigation).
+- ORD-012: Audit log gaps verified — `handleOrderStatusSideEffects` (added by ORDERS-FIX-CRITICAL) handles all new transitions going forward. No historical backfill needed.
+- ORD-013: `listOrders` now accepts `page` + `pageSize` and returns `{ orders, total, page, pageSize }`. Legacy `limit` + `offset` still supported.
+- ORD-014: INVESTIGATE ONLY — RTO button requires ORDERS_MANAGE while Mark Delivered requires ORDERS_FULFILL. Documented as an inconsistency; no code change per task instructions.
+- ORD-015: Processing timeline step now shows the real timestamp (from the `order.processing_started` audit log entry) instead of `order.createdAt`. Falls back to "Processing started (timestamp not tracked)" for historical orders.
+- ORD-017: Bookable list endpoint now enforces ORDERS_FULFILL (was previously open to any authenticated employee).
+
+Next Actions (out of scope, follow-up work):
+1. Investigate the 3 `sale_dispatched` rows whose `referenceId` doesn't match any Order — likely legacy test data. The diagnostic query:
+   ```sql
+   SELECT id, "referenceId", "transactionType", "referenceType"
+   FROM "InventoryTransaction"
+   WHERE "transactionType" = 'sale_dispatched'
+     AND "referenceType" = 'order'
+     AND "referenceId" IS NOT NULL
+     AND "orderId" IS NULL;
+   ```
+2. Consider relaxing ORD-014: change `canMarkRto` to use `canFulfill` (matching Mark Delivered) and update `processOrderReturn`'s `requirePermission` call accordingly. Requires product-level discussion.
+3. The 16 pre-existing TS errors in `bookExchangeShipmentWithCourier`'s Prisma relation access (`shippingAddress`, `orderExchange`, `newOrgVariant`, `codAmount`) remain — out of scope for this task. The `ExchangeShipment` model was changed but the booking code wasn't updated.

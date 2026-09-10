@@ -1342,7 +1342,7 @@ export function OrderDetailView({ orderId }: { orderId: string }) {
               <CardTitle className="text-base">Timeline</CardTitle>
             </CardHeader>
             <CardContent>
-              <Timeline order={order} />
+              <Timeline order={order} auditLogs={auditQuery.data?.rows ?? []} />
             </CardContent>
           </Card>
 
@@ -1504,15 +1504,32 @@ function InfoRow({
 
 function Timeline({
   order,
+  auditLogs,
 }: {
   order: OrderDetail['order']
+  auditLogs: AuditLogResponse['rows']
 }) {
+  // ORD-015: recover the "Processing started" timestamp from the audit log.
+  // The Order model has no `processingAt` column — the only place this
+  // timestamp exists is the `order.processing_started` audit log entry
+  // (inserted by markOrderProcessing). If we find one, use its createdAt;
+  // otherwise we show "Processing started (timestamp not tracked)" instead
+  // of the misleading `order.createdAt` (which is when the order was
+  // PLACED, not when processing started).
+  const processingStartedAt = useMemo(() => {
+    const entry = auditLogs.find(
+      (r) => r.action === 'order.processing_started' && r.entityType === 'order',
+    )
+    return entry?.createdAt ?? null
+  }, [auditLogs])
+
   const steps = useMemo(() => {
     return [
       {
         key: 'created',
         label: 'Order placed',
         time: order.createdAt,
+        note: null as string | null,
         icon: Clock,
         tone: 'muted' as const,
       },
@@ -1520,14 +1537,32 @@ function Timeline({
         key: 'confirmed',
         label: 'Confirmed',
         time: order.confirmedAt,
+        note: null as string | null,
         icon: CheckCircle2,
         tone: 'sky' as const,
       },
       {
         key: 'processing',
         label: 'Processing',
+        // ORD-015: previously this was `order.createdAt` whenever the
+        // order had reached the processing/packed/dispatched stage —
+        // which is WRONG. `order.createdAt` is when the order was placed,
+        // not when processing started. Now we look up the
+        // `order.processing_started` audit log entry's createdAt (which
+        // is the real timestamp). If we can't find one (historical
+        // orders that predate the audit log), `time` is null and the
+        // rendering below shows the "Processing started (timestamp not
+        // tracked)" fallback.
         time: order.status === 'processing' || order.packedAt || order.dispatchedAt
-          ? order.createdAt
+          ? processingStartedAt
+          : null,
+        // When `time` is null but the step is visible, the rendering
+        // shows this note instead of the misleading "Pending" label
+        // (since processing ISN'T pending — it already happened, we just
+        // don't have the timestamp recorded).
+        note: !processingStartedAt
+          && (order.status === 'processing' || !!order.packedAt || !!order.dispatchedAt)
+          ? 'Processing started (timestamp not tracked)'
           : null,
         icon: Package,
         tone: 'blue' as const,
@@ -1536,6 +1571,7 @@ function Timeline({
         key: 'packed',
         label: 'Packed',
         time: order.packedAt,
+        note: null as string | null,
         icon: PackageCheck,
         tone: 'blue' as const,
       },
@@ -1543,6 +1579,7 @@ function Timeline({
         key: 'dispatched',
         label: 'Dispatched',
         time: order.dispatchedAt,
+        note: null as string | null,
         icon: Truck,
         tone: 'violet' as const,
       },
@@ -1550,6 +1587,7 @@ function Timeline({
         key: 'delivered',
         label: 'Delivered',
         time: order.deliveredAt,
+        note: null as string | null,
         icon: CheckCircle2,
         tone: 'emerald' as const,
       },
@@ -1557,6 +1595,7 @@ function Timeline({
         key: 'rto',
         label: 'Returned (RTO)',
         time: order.returnedAt,
+        note: null as string | null,
         icon: RotateCcw,
         tone: 'rose' as const,
       },
@@ -1564,11 +1603,12 @@ function Timeline({
         key: 'cancelled',
         label: 'Cancelled',
         time: order.cancelledAt,
+        note: null as string | null,
         icon: XCircle,
         tone: 'slate' as const,
       },
     ]
-  }, [order])
+  }, [order, processingStartedAt])
 
   const toneClasses: Record<string, string> = {
     muted: 'bg-gray-100 text-gray-500',
@@ -1594,7 +1634,12 @@ function Timeline({
     <ol className="space-y-3">
       {visibleSteps.map((s, idx) => {
         const Icon = s.icon
-        const reached = !!s.time
+        // ORD-015: a step is "reached" if it has a timestamp OR a note.
+        // The note case covers steps where the action happened but the
+        // timestamp wasn't tracked (e.g. processing on historical orders
+        // that predate the audit log). We still want the icon rendered
+        // with full color (not grayed-out "Pending") in that case.
+        const reached = !!s.time || !!s.note
         return (
           <li key={s.key} className="flex gap-3">
             <div className="flex flex-col items-center">
@@ -1615,7 +1660,9 @@ function Timeline({
                 {s.label}
               </p>
               <p className="text-xs text-muted-foreground">
-                {reached ? formatDateTime(s.time) : 'Pending'}
+                {s.time
+                  ? formatDateTime(s.time)
+                  : s.note ?? 'Pending'}
               </p>
             </div>
           </li>

@@ -3,7 +3,7 @@ import { db } from '@/lib/db'
 import { decryptCredentials } from '@/lib/utils/encryption'
 import { getCourierAdapter, getEcommerceAdapter, getAdapterCategory } from '@/lib/integrations/registry'
 import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
-import { markOrderDelivered } from '@/lib/actions/order.actions'
+import { markOrderDelivered, performOrderDispatch } from '@/lib/actions/order.actions'
 import { processOrderReturn } from '@/lib/actions/order-return.actions'
 import { matchOrCreateExternalCustomer } from '@/lib/actions/customer.actions'
 import { processLeopardWebhookUpdates } from '@/lib/actions/leopard-webhook.actions'
@@ -125,6 +125,23 @@ export async function POST(
             await markOrderDelivered(order.id)
           } else if (statusUpdate.status === 'returned' && order.status !== 'rto') {
             await processOrderReturn(order.id, 'Courier returned (RTO)')
+          } else if (
+            // ORD-010: handle "in_transit" / "picked_up" — the courier has
+            // physically collected the parcel. If the order is still in a
+            // pre-dispatch state in our DB (e.g., the booking succeeded but
+            // the dispatch side-effect didn't fire — manual workflow, race
+            // with the booking API, etc.), trigger the dispatch now.
+            // performOrderDispatch is idempotent (skips items already in
+            // 'dispatched' state) and safe to call here. For orders that
+            // are already 'dispatched' / 'delivered' / 'rto' / 'cancelled'
+            // / 'refunded', this is a no-op.
+            (statusUpdate.status === 'in_transit' || statusUpdate.status === 'picked_up') &&
+            ['pending', 'confirmed', 'processing', 'partially_backordered'].includes(order.status)
+          ) {
+            await performOrderDispatch(order.id, {
+              source: 'auto_poll',
+              trackingNumber: statusUpdate.trackingNumber,
+            })
           }
 
           return { statusUpdate, orderId: order.id }

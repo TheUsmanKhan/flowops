@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server'
 import { db } from '@/lib/db'
-import { ApiError, handleError, getOrdersDataScope, getWorkspace } from '@/lib/workspace'
+import { ApiError, handleError, getOrdersDataScope, getWorkspace, requirePermission } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
 
 export const runtime = 'nodejs'
@@ -19,6 +19,13 @@ export async function GET(_req: NextRequest) {
   try {
     // Modern auth: getWorkspace() (cached, 0ms) — replaces 4 DB queries
     const ctx = await getWorkspace()
+    // ORD-017: enforce ORDERS_FULFILL on the bookable list. This endpoint
+    // returns orders + exchange shipments that the caller can book a
+    // courier for — without this check, any authenticated employee
+    // (including those with only ORDERS_VIEW) could see the full booking
+    // workbench queue. The book + dispatch actions downstream already
+    // enforce ORDERS_FULFILL, so this is just the list-end consistency.
+    await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
     const companyId = ctx.company.id
     const orgId = ctx.company.organizationId
     const caller = ctx.employee

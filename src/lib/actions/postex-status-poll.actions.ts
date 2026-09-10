@@ -28,9 +28,10 @@ import { getCourierAdapter } from '@/lib/integrations/registry'
 import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
 import { mapPostExStatus } from '@/lib/integrations/couriers/postex.status-map'
 import type { TrackShipmentResult } from '@/lib/integrations/types'
-import { performOrderDispatch } from '@/lib/actions/order.actions'
+import { performOrderDispatch, handleOrderStatusSideEffects } from '@/lib/actions/order.actions'
 import { performExchangeShipmentDispatch, performExchangeShipmentRto } from '@/lib/actions/exchange-shipment.actions'
 import { unreserveStockForOrder, restockOrderForRto } from '@/lib/inventory'
+import { insertCourierStatusHistory } from '@/lib/integrations/status-history'
 
 interface ActionResult<T = unknown> {
   success: boolean
@@ -238,6 +239,21 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
 
     // Apply the SAME status transitions as the bulk poll
     if (subStatusChanged) {
+      // ORD-008: record the status change in courier_status_history.
+      // Same call as the bulk poll — non-fatal.
+      await insertCourierStatusHistory({
+        entityType: 'order',
+        entityId: order.id,
+        orderId: order.id,
+        trackingNumber: order.trackingNumber,
+        courierIntegrationId: order.courierCompanyIntegrationId,
+        status: trackResult.status ?? 'unknown',
+        subStatus: mappedSubStatus,
+        rawResponse: trackResult.rawResponse as Record<string, unknown> | null,
+        organizationId: integration.organizationId,
+        companyId: integration.companyId,
+      }).catch((e) => console.error(`[trackSingle] courierStatusHistory insert failed for ${order.id}:`, e))
+
       // in_transit → auto-dispatch (with inventory deduction)
       if (trackResult.status === 'in_transit') {
         if (order.status === 'confirmed' || order.status === 'processing') {
@@ -250,7 +266,17 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
 
       // delivered → mark as delivered
       if (trackResult.status === 'delivered') {
-        const freshOrder = await db.order.findUnique({ where: { id: order.id }, select: { status: true } })
+        const freshOrder = await db.order.findUnique({
+          where: { id: order.id },
+          select: {
+            status: true,
+            companyId: true,
+            organizationId: true,
+            customerId: true,
+            salesEmployeeId: true,
+            totalOrderValue: true,
+          },
+        })
         if (freshOrder && (freshOrder.status === 'confirmed' || freshOrder.status === 'processing')) {
           await performOrderDispatch(order.id, { source: 'auto_poll' }).catch(() => {})
         }
@@ -259,6 +285,10 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
             where: { id: order.id },
             data: { status: 'delivered', deliveredAt: new Date() },
           })
+          // ORD-003: fire customer/employee stats + audit/metric side effects.
+          await handleOrderStatusSideEffects(order.id, 'delivered', freshOrder).catch((e) =>
+            console.error(`[trackSingle] Side-effects failed for delivered ${order.id}:`, e),
+          )
         }
       }
 
@@ -266,7 +296,15 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
       if (trackResult.status === 'returned') {
         const freshOrder = await db.order.findUnique({
           where: { id: order.id },
-          select: { status: true, dispatchLocationId: true, organizationId: true, companyId: true },
+          select: {
+            status: true,
+            dispatchLocationId: true,
+            organizationId: true,
+            companyId: true,
+            customerId: true,
+            salesEmployeeId: true,
+            totalOrderValue: true,
+          },
         })
         if (freshOrder && freshOrder.status !== 'rto' && freshOrder.status !== 'cancelled' && freshOrder.status !== 'refunded') {
           // Restock inventory — handles BOTH confirmed/processing (unreserve)
@@ -285,6 +323,10 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
             where: { id: order.id },
             data: { status: 'rto', returnedAt: new Date() },
           })
+          // ORD-006: fire customer/employee stats + audit/metric side effects.
+          await handleOrderStatusSideEffects(order.id, 'rto', freshOrder).catch((e) =>
+            console.error(`[trackSingle] Side-effects failed for RTO ${order.id}:`, e),
+          )
         }
       }
 
@@ -294,7 +336,16 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
           (mappedSubStatus === 'cancelled_by_merchant' || mappedSubStatus === 'expired')) {
         const freshOrder = await db.order.findUnique({
           where: { id: order.id },
-          select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true, companyId: true },
+          select: {
+            status: true,
+            flowopsOrderNumber: true,
+            dispatchLocationId: true,
+            organizationId: true,
+            companyId: true,
+            customerId: true,
+            salesEmployeeId: true,
+            totalOrderValue: true,
+          },
         })
         if (freshOrder && freshOrder.status !== 'cancelled' && freshOrder.status !== 'delivered' && freshOrder.status !== 'rto') {
           // Unreserve stock for any reserved items (if not yet dispatched)
@@ -319,6 +370,10 @@ export async function trackSingleOrderStatus(orderId: string): Promise<ActionRes
             },
           })
           console.log(`[trackSingle] Auto-cancelled ${freshOrder.flowopsOrderNumber} (PostEx: ${mappedSubStatus})`)
+          // ORD-009: fire customer/employee stats + audit/metric side effects.
+          await handleOrderStatusSideEffects(order.id, 'cancelled', freshOrder).catch((e) =>
+            console.error(`[trackSingle] Side-effects failed for cancelled ${order.id}:`, e),
+          )
         }
       }
     }
@@ -498,6 +553,29 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
             if (subStatusChanged) {
               statusChanges++
 
+              // ORD-008: record every detected status change in
+              // courier_status_history (was previously dead code — the helper
+              // wrote fields that didn't exist on the Prisma schema, so the
+              // table stayed permanently empty). Non-fatal.
+              //
+              // NOTE: this branch is inside `if (entry.type === 'order')`, so
+              // entry.type is narrowed to 'order' here — orderId is always
+              // entry.id and exchangeShipmentId is always null. The
+              // exchange-shipment equivalent runs in the `else` branch below.
+              await insertCourierStatusHistory({
+                entityType: 'order',
+                entityId: entry.id,
+                orderId: entry.id,
+                exchangeShipmentId: null,
+                trackingNumber: entry.trackingNumber,
+                courierIntegrationId: integration.id,
+                status: result.status ?? 'unknown',
+                subStatus: mappedSubStatus,
+                rawResponse: result.rawResponse as Record<string, unknown> | null,
+                organizationId: integration.organizationId,
+                companyId: integration.companyId,
+              }).catch((e) => console.error(`[poll] courierStatusHistory insert failed for ${entry.id}:`, e))
+
               // ── "Picked By PostEx" → auto-dispatch ──
               // When PostEx picks up the package, the item has physically left
               // the warehouse. Call performOrderDispatch() which runs the FULL
@@ -535,7 +613,15 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                   // creates the sale_dispatched txn so onHand is correctly decremented.
                   const order = await db.order.findUnique({
                     where: { id: entry.id },
-                    select: { status: true, flowopsOrderNumber: true },
+                    select: {
+                      status: true,
+                      flowopsOrderNumber: true,
+                      companyId: true,
+                      organizationId: true,
+                      customerId: true,
+                      salesEmployeeId: true,
+                      totalOrderValue: true,
+                    },
                   })
                   if (order && (order.status === 'confirmed' || order.status === 'processing')) {
                     const dispatchResult = await performOrderDispatch(entry.id, { source: 'auto_poll' })
@@ -557,6 +643,13 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                       },
                     })
                     console.log(`[poll] Marked order ${order.flowopsOrderNumber} as delivered (PostEx confirmed delivery)`)
+
+                    // ORD-003: fire customer/employee stats + audit/metric side
+                    // effects that markOrderDelivered() would have done in the UI
+                    // path. Non-fatal — failures don't break the status transition.
+                    await handleOrderStatusSideEffects(entry.id, 'delivered', order).catch((e) =>
+                      console.error(`[poll] Side-effects failed for delivered ${entry.id}:`, e),
+                    )
                   }
                 } catch (e) {
                   console.error(`[poll] Failed to mark order ${entry.id} as delivered:`, e)
@@ -583,7 +676,16 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                 try {
                   const order = await db.order.findUnique({
                     where: { id: entry.id },
-                    select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true, companyId: true },
+                    select: {
+                      status: true,
+                      flowopsOrderNumber: true,
+                      dispatchLocationId: true,
+                      organizationId: true,
+                      companyId: true,
+                      customerId: true,
+                      salesEmployeeId: true,
+                      totalOrderValue: true,
+                    },
                   })
                   if (order && order.status !== 'rto' && order.status !== 'cancelled' && order.status !== 'refunded') {
                     // Restock inventory for the RTO — handles BOTH cases:
@@ -611,6 +713,13 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                       },
                     })
                     console.log(`[poll] Marked order ${order.flowopsOrderNumber} as RTO (PostEx returned; inventory restocked)`)
+
+                    // ORD-006: fire customer/employee stats + audit/metric side
+                    // effects that processOrderReturn() would have done in the UI
+                    // path. Also re-flags the customer if RTO count crosses 3+.
+                    await handleOrderStatusSideEffects(entry.id, 'rto', order).catch((e) =>
+                      console.error(`[poll] Side-effects failed for RTO ${entry.id}:`, e),
+                    )
                   }
                 } catch (e) {
                   console.error(`[poll] Failed to mark order ${entry.id} as RTO:`, e)
@@ -627,7 +736,16 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                 try {
                   const order = await db.order.findUnique({
                     where: { id: entry.id },
-                    select: { status: true, flowopsOrderNumber: true, dispatchLocationId: true, organizationId: true },
+                    select: {
+                      status: true,
+                      flowopsOrderNumber: true,
+                      dispatchLocationId: true,
+                      organizationId: true,
+                      companyId: true,
+                      customerId: true,
+                      salesEmployeeId: true,
+                      totalOrderValue: true,
+                    },
                   })
                   if (order && order.status !== 'cancelled' && order.status !== 'delivered' && order.status !== 'rto') {
                     // Unreserve stock for reserved items
@@ -663,6 +781,12 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
                       },
                     })
                     console.log(`[poll] Auto-cancelled ${order.flowopsOrderNumber} (PostEx status: ${mappedSubStatus})`)
+
+                    // ORD-009: fire customer/employee stats + audit/metric side
+                    // effects that cancelOrder() would have done in the UI path.
+                    await handleOrderStatusSideEffects(entry.id, 'cancelled', order).catch((e) =>
+                      console.error(`[poll] Side-effects failed for cancelled ${entry.id}:`, e),
+                    )
                   }
                 } catch (e) {
                   console.error(`[poll] Failed to auto-cancel order ${entry.id}:`, e)
@@ -736,6 +860,22 @@ export async function pollPostExOrderStatuses(): Promise<ActionResult<{
 
             if (subStatusChanged) {
               statusChanges++
+
+              // ORD-008: record the status change for the exchange shipment
+              // (mirror of the order branch above). Non-fatal.
+              await insertCourierStatusHistory({
+                entityType: 'exchange_shipment',
+                entityId: entry.id,
+                orderId: null,
+                exchangeShipmentId: entry.id,
+                trackingNumber: entry.trackingNumber,
+                courierIntegrationId: integration.id,
+                status: result.status ?? 'unknown',
+                subStatus: mappedSubStatus,
+                rawResponse: result.rawResponse as Record<string, unknown> | null,
+                organizationId: integration.organizationId,
+                companyId: integration.companyId,
+              }).catch((e) => console.error(`[poll] courierStatusHistory insert failed for shipment ${entry.id}:`, e))
 
               // ── "Picked By PostEx" → auto-dispatch exchange shipment ──
               // Call performExchangeShipmentDispatch() which runs the FULL

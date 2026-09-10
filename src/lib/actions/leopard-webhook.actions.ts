@@ -17,13 +17,14 @@ import { db } from '@/lib/db'
 import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { mapLeopardStatus, normalizeLeopardStatusString } from '@/lib/integrations/couriers/leopard.status-map'
-import { performOrderDispatch } from '@/lib/actions/order.actions'
+import { performOrderDispatch, handleOrderStatusSideEffects } from '@/lib/actions/order.actions'
 import { markOrderDelivered } from '@/lib/actions/order.actions'
 import { processOrderReturn } from '@/lib/actions/order-return.actions'
 import { performExchangeShipmentDispatch, performExchangeShipmentRto, markExchangeShipmentDelivered } from '@/lib/actions/exchange-shipment.actions'
 import { decryptCredentials } from '@/lib/utils/encryption'
 import { getCourierAdapter } from '@/lib/integrations/registry'
 import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
+import { insertCourierStatusHistory } from '@/lib/integrations/status-history'
 import type { TrackShipmentResult } from '@/lib/integrations/types'
 
 interface ActionResult<T = unknown> {
@@ -98,7 +99,17 @@ export async function processLeopardWebhookUpdates(
       // Find the matching order OR exchange_shipment by trackingNumber
       const order = await db.order.findFirst({
         where: { trackingNumber, courierCompanyIntegrationId: integrationId },
-        select: { id: true, status: true, flowopsOrderNumber: true, companyId: true, organizationId: true },
+        select: {
+          id: true,
+          status: true,
+          flowopsOrderNumber: true,
+          companyId: true,
+          organizationId: true,
+          // ORD-003/006/009: side-effects helper needs these fields.
+          customerId: true,
+          salesEmployeeId: true,
+          totalOrderValue: true,
+        },
       })
 
       const shipment = order ? null : await db.exchangeShipment.findFirst({
@@ -116,6 +127,29 @@ export async function processLeopardWebhookUpdates(
       const companyId = (order ?? shipment)!.companyId
       const organizationId = (order ?? shipment)!.organizationId
       const currentStatus = (order ?? shipment)!.status
+
+      // ORD-008: record every webhook status update in courier_status_history.
+      // Non-fatal. (This was the missing call that left the table at 0 rows.)
+      await insertCourierStatusHistory({
+        entityType,
+        entityId,
+        orderId: order?.id ?? null,
+        exchangeShipmentId: shipment?.id ?? null,
+        trackingNumber,
+        courierIntegrationId: integration.id,
+        status: rawStatus,
+        subStatus: mapping.courierSubStatus,
+        rawResponse: {
+          cn_number: trackingNumber,
+          rawStatus,
+          receiverName: update.receiver_name ?? null,
+          reason: update.reason ?? null,
+          activityDate: update.activity_date ?? null,
+          unrecognized: mapping.unrecognized,
+        },
+        organizationId,
+        companyId,
+      }).catch((e) => console.error(`[leopard-webhook] courierStatusHistory insert failed for ${entityId}:`, e))
 
       // Skip if already in a terminal state (delivered/rto/cancelled)
       // — prevents re-processing of stale webhook pushes
@@ -186,6 +220,13 @@ export async function processLeopardWebhookUpdates(
               where: { id: entityId },
               data: { status: 'delivered', deliveredAt: now },
             })
+            // ORD-003: fire customer/employee stats + audit/metric side effects
+            // that markOrderDelivered() would have done in the UI path.
+            if (order) {
+              await handleOrderStatusSideEffects(entityId, 'delivered', order).catch((e) =>
+                console.error(`[leopard-webhook] Side-effects failed for delivered ${entityId}:`, e),
+              )
+            }
           } else {
             // markExchangeShipmentDelivered uses getWorkspace — update directly
             await db.exchangeShipment.update({
@@ -221,6 +262,13 @@ export async function processLeopardWebhookUpdates(
               where: { id: entityId },
               data: { status: 'rto', returnedAt: now },
             })
+            // ORD-006: fire customer/employee stats + audit/metric side effects
+            // that processOrderReturn() would have done in the UI path.
+            if (order) {
+              await handleOrderStatusSideEffects(entityId, 'rto', order).catch((e) =>
+                console.error(`[leopard-webhook] Side-effects failed for RTO ${entityId}:`, e),
+              )
+            }
           } else {
             // For exchange shipments: use performExchangeShipmentRto (no getWorkspace)
             const rtoResult = await performExchangeShipmentRto(entityId, {
@@ -277,27 +325,15 @@ export async function processLeopardWebhookUpdates(
                 courierBookingStatus: 'cancelled',
               },
             })
-            // Audit log
-            insertAuditLog({
-              action: 'order.cancelled',
-              entityType: 'order',
-              entityId,
-              companyId,
-              organizationId,
-              newValues: {
-                reason: `Leopard courier cancelled (${update.reason ?? rawStatus})`,
-                trackingNumber,
-                source: 'leopard_webhook_or_poll',
-              },
-            })
-            // Update customer stats
-            const { updateCustomerStats } = await import('./customer.actions')
-            const orderForCustomer = await db.order.findUnique({
-              where: { id: entityId },
-              select: { customerId: true },
-            })
-            if (orderForCustomer?.customerId) {
-              updateCustomerStats(orderForCustomer.customerId).catch(() => {})
+            // ORD-009: fire customer/employee stats + audit/metric side effects
+            // that cancelOrder() would have done in the UI path. The previous
+            // inline code only did insertAuditLog + updateCustomerStats — it
+            // was missing employee stats + metric event. The helper covers
+            // all four side effects uniformly.
+            if (order) {
+              await handleOrderStatusSideEffects(entityId, 'cancelled', order).catch((e) =>
+                console.error(`[leopard-webhook] Side-effects failed for cancelled ${entityId}:`, e),
+              )
             }
           } else {
             await db.exchangeShipment.update({
@@ -478,7 +514,10 @@ export async function pollLeopardOrderStatuses(): Promise<ActionResult<{
               organizationId: integration.organizationId,
               actionType: 'track_shipment',
               direction: 'outbound',
-              relatedEntityType: entry.type,
+              // ORD-008 follow-up: map entry.type ('order' | 'shipment') to the
+              // schema's relatedEntityType values ('order' | 'exchange_shipment').
+              // Was previously passing 'shipment' which isn't a valid value.
+              relatedEntityType: entry.type === 'order' ? 'order' : 'exchange_shipment',
               relatedEntityId: entry.id,
               fn: async () => adapter.trackShipment(entry.trackingNumber),
               // Log the tracking number being tracked

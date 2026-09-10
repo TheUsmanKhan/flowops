@@ -107,7 +107,11 @@ export interface CalculateRateResult {
 
 export interface ParseStatusWebhookResult {
   trackingNumber: string
-  status: 'booked' | 'in_transit' | 'delivered' | 'returned' | 'failed'
+  // ORD-010: added 'picked_up' — some couriers (e.g. Leopard) push a
+  // "picked_up" status separately from "in_transit" to signal that the
+  // rider has physically collected the parcel. Both should trigger the
+  // dispatch side-effect if the order is still in a pre-dispatch state.
+  status: 'booked' | 'in_transit' | 'picked_up' | 'delivered' | 'returned' | 'failed'
   lastUpdateAt?: string
 }
 

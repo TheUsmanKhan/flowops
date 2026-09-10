@@ -31,13 +31,18 @@ export async function GET(req: NextRequest) {
       take: 50,
       select: {
         id: true,
-        providerKey: true,
-        rawStatus: true,
-        courierSubStatus: true,
-        courierActivityDate: true,
+        // ORD-008: select the ACTUAL schema fields (was previously selecting
+        // providerKey/rawStatus/courierActivityDate/source/metadata which
+        // don't exist on the schema — caused TS error + empty results).
+        status: true,
+        subStatus: true,
+        rawResponse: true,
+        orderId: true,
+        exchangeShipmentId: true,
+        trackingNumber: true,
+        courierIntegrationId: true,
         receivedAt: true,
-        source: true,
-        metadata: true,
+        createdAt: true,
       },
     })
 

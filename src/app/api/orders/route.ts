@@ -41,7 +41,11 @@ function parseArrayParam(url: URL, key: string): string[] {
  *       amount_min, amount_max (numbers — total_order_value >= / <=)
  *       date_from, date_to (ISO date strings)
  *   - Scalar:
- *       customer_id, org_variant_id, delivery_city, search, limit, offset
+ *       customer_id, org_variant_id, delivery_city, search
+ *   - Pagination (ORD-013 — preferred):
+ *       page (1-indexed page number; default 1), page_size (rows per page; default 50, max 100)
+ *   - Pagination (legacy — still supported):
+ *       limit, offset
  */
 export async function GET(req: Request) {
   try {
@@ -78,6 +82,12 @@ export async function GET(req: Request) {
     const amountMin = amountMinRaw ? Number(amountMinRaw) : undefined
     const amountMax = amountMaxRaw ? Number(amountMaxRaw) : undefined
 
+    // Pagination (ORD-013) — prefer page/page_size, fall back to limit/offset
+    const pageRaw = url.searchParams.get('page')
+    const pageSizeRaw = url.searchParams.get('page_size') ?? url.searchParams.get('pageSize')
+    const page = pageRaw ? Number(pageRaw) : undefined
+    const pageSize = pageSizeRaw ? Number(pageSizeRaw) : undefined
+
     const limit = url.searchParams.get('limit')
       ? Number(url.searchParams.get('limit'))
       : undefined
@@ -108,7 +118,10 @@ export async function GET(req: Request) {
       dateTo: dateTo || undefined,
       amountMin: amountMin !== undefined && !Number.isNaN(amountMin) ? amountMin : undefined,
       amountMax: amountMax !== undefined && !Number.isNaN(amountMax) ? amountMax : undefined,
-      // Pagination
+      // Pagination (ORD-013) — page/pageSize preferred; legacy limit/offset
+      // still accepted by listOrders for backward compatibility.
+      page: page && !Number.isNaN(page) ? page : undefined,
+      pageSize: pageSize && !Number.isNaN(pageSize) ? pageSize : undefined,
       limit,
       offset,
     })

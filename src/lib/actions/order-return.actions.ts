@@ -81,8 +81,15 @@ export async function processOrderReturn(
       return { success: false, error: `Can only return a dispatched order (current: ${order.status})` }
     }
 
-    const locationId = order.dispatchLocationId
-    if (!locationId) {
+    // ORD-002/005: resolve location PER-ITEM, not from the order header.
+    // The order-level `dispatchLocationId` is just the default location —
+    // individual items may have been reserved at a DIFFERENT location
+    // (OrderItem.reservedLocationId) when the order was multi-location.
+    // Using the order-level id for ALL items caused RTO returns to be
+    // booked against the wrong InventoryLocation, corrupting per-location
+    // onHand counts.
+    const fallbackLocationId = order.dispatchLocationId
+    if (!fallbackLocationId) {
       return { success: false, error: 'Order has no dispatch location set' }
     }
 
@@ -95,6 +102,10 @@ export async function processOrderReturn(
     let itemsProcessed = 0
 
     for (const item of order.items) {
+      // ORD-002/005: prefer the per-item reserved location, fall back to
+      // the order-level dispatch location.
+      const locationId = item.reservedLocationId ?? fallbackLocationId
+
       // Compute cost basis from the dispatch transaction
       const dispatchTxn = await db.inventoryTransaction.findFirst({
         where: {
@@ -132,6 +143,11 @@ export async function processOrderReturn(
           await db.orderItem.update({
             where: { id: item.id },
             data: {
+              // ORD-004: previously MISSING — OrderItem.fulfillmentStatus
+              // stayed 'dispatched' after RTO, causing warehouse reports /
+              // item-count queries to over-count "currently dispatched" items.
+              // Now correctly transitions to 'returned'.
+              fulfillmentStatus: 'returned',
               autoProcessedAsPerfect: true,
               needsReview: true,
             },
@@ -158,6 +174,9 @@ export async function processOrderReturn(
           await db.orderItem.update({
             where: { id: item.id },
             data: {
+              // ORD-004: same fix as above — see the made_to_order branch
+              // for the full explanation.
+              fulfillmentStatus: 'returned',
               autoProcessedAsPerfect: true,
               needsReview: true,
             },

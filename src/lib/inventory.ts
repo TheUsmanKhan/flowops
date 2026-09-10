@@ -1305,8 +1305,14 @@ export async function restockOrderForRto(
   })
   if (!order) return { success: false, itemsRestocked: 0 }
 
-  const locationId = order.dispatchLocationId
-  if (!locationId) {
+  // ORD-002/005: resolve location PER-ITEM — the order-level
+  // `dispatchLocationId` is only the default; individual items may have
+  // been reserved at a different location (OrderItem.reservedLocationId)
+  // for multi-location orders. Using the order-level id for ALL items
+  // caused RTO returns to be booked against the wrong InventoryLocation.
+  // We still keep the order-level id as a fallback + early-exit guard.
+  const fallbackLocationId = order.dispatchLocationId
+  if (!fallbackLocationId) {
     console.error(`[restockOrderForRto] Order ${orderId} has no dispatchLocationId — cannot restock`)
     return { success: false, itemsRestocked: 0 }
   }
@@ -1316,6 +1322,10 @@ export async function restockOrderForRto(
   for (const item of order.items) {
     // Idempotency: skip items already processed (fulfillmentStatus='returned')
     if (item.fulfillmentStatus === 'returned') continue
+
+    // ORD-002/005: prefer the per-item reserved location, fall back to
+    // the order-level dispatch location.
+    const locationId = item.reservedLocationId ?? fallbackLocationId
 
     if (item.fulfillmentStatus === 'dispatched') {
       // Dispatched item — onHand was decremented at dispatch. Restock it.

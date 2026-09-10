@@ -1,15 +1,7 @@
 import { NextRequest } from 'next/server'
-import { db } from '@/lib/db'
 import { ApiError, handleError, readBody, getWorkspace, requirePermission } from '@/lib/workspace'
 import { PERMISSIONS } from '@/lib/permissions'
 import { bookOrderWithCourier, bookExchangeShipmentWithCourier } from '@/lib/actions/booking.actions'
-import { decryptCredentials } from '@/lib/utils/encryption'
-import { getCourierAdapter } from '@/lib/integrations/registry'
-import { executeLoggedIntegrationAction } from '@/lib/integrations/logged-call'
-import { revalidateCityAtBookingTime } from '@/lib/integrations/city-matcher'
-import { determinePostExOrderType } from '@/lib/integrations/couriers/postex.order-type'
-import { calculateOrderWeightKg } from '@/lib/utils/order-weight'
-import type { BookShipmentInput, BookShipmentResult } from '@/lib/integrations/types'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -41,16 +33,13 @@ interface BookRequest {
  * For ORDERS: delegates to bookOrderWithCourier() server action (shared
  * with the auto-booking flow).
  *
- * For EXCHANGE SHIPMENTS: handles inline (the exchange-shipment booking
- * path is not used by auto-booking, so it stays in the route for now).
+ * For EXCHANGE SHIPMENTS: delegates to bookExchangeShipmentWithCourier()
+ * server action (shared with batch-booking + auto-booking paths).
  */
 export async function POST(req: NextRequest) {
   try {
     const ctx = await getWorkspace()
     await requirePermission(ctx, PERMISSIONS.ORDERS_FULFILL)
-    const companyId = ctx.company.id
-    const orgId = ctx.company.organizationId
-    const caller = ctx.employee
 
     const body = await readBody<BookRequest>(req)
     if (!body.companyIntegrationId) {
@@ -84,15 +73,28 @@ export async function POST(req: NextRequest) {
     }
 
     // ── EXCHANGE SHIPMENT booking: delegate to the unified action ──
-    // BUG FIX (H7): was using an inline bookExchangeShipment function
-    // defined in this route file (duplicate logic that drifted from
-    // bookExchangeShipmentWithCourier in booking.actions.ts). Now delegates
-    // to the proper action for consistency.
-    const shipmentResult = await bookExchangeShipmentWithCourier(
-      body.entity_id,
-      body.courier_company_integration_id,
-      body.pickup_address_id || undefined,
-    )
+    // ORD-016 FIX: previously called bookExchangeShipmentWithCourier with 3
+    // positional args (body.entity_id, body.courier_company_integration_id,
+    // body.pickup_address_id) — but the function expects a SINGLE options
+    // object with named fields. The positional call passed `undefined` for
+    // every argument, breaking every exchange-shipment booking from the
+    // Booking Workbench. Now passes a proper options object.
+    const shipmentResult = await bookExchangeShipmentWithCourier({
+      shipmentId: body.shipmentId!,
+      companyIntegrationId: body.companyIntegrationId,
+      pickupAddressCode: body.pickupAddressCode,
+      // Pass through the editable overrides from the Workbench UI (same
+      // set of fields the order-booking path above exposes).
+      customerName: body.customerName,
+      customerPhone: body.customerPhone,
+      deliveryAddress: body.deliveryAddress,
+      deliveryCity: body.deliveryCity,
+      codAmount: body.codAmount,
+      orderType: body.orderType,
+      transactionNotes: body.transactionNotes,
+      itemDescription: body.itemDescription,
+      orderRefNumber: body.orderRefNumber,
+    })
     if (!shipmentResult.success) {
       throw new ApiError(400, shipmentResult.error ?? 'Failed to book exchange shipment')
     }
@@ -100,173 +102,4 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     return handleError(err)
   }
-}
-
-/**
- * Book an exchange shipment with the selected courier.
- */
-async function bookExchangeShipment(
-  body: BookRequest,
-  companyId: string,
-  orgId: string,
-): Promise<Response> {
-  const integration = await db.companyIntegration.findFirst({
-    where: { id: body.companyIntegrationId!, companyId, isActive: true },
-    include: { provider: true },
-  })
-  if (!integration) {
-    return Response.json({ error: 'Courier integration not found or inactive.' }, { status: 404 })
-  }
-
-  const providerKey = integration.provider.providerKey
-  if (providerKey !== 'postex') {
-    return Response.json({ error: `Booking not yet implemented for provider '${providerKey}'.` }, { status: 400 })
-  }
-
-  const shipment = await db.exchangeShipment.findFirst({
-    where: { id: body.shipmentId!, companyId },
-    include: {
-      customer: {
-        select: {
-          id: true, name: true,
-          phones: { select: { id: true, phoneRaw: true, isPrimary: true }, orderBy: { isPrimary: 'desc' } },
-        },
-      },
-      shippingAddress: { select: { address: true, city: true, country: true } },
-      shippingPhone: { select: { phoneRaw: true } },
-      newOrgVariant: {
-        select: { id: true, sku: true, weightKg: true, product: { select: { title: true } } },
-      },
-      orderExchange: {
-        select: { id: true, exchangeMethod: true, originalOrder: { select: { flowopsOrderNumber: true } } },
-      },
-    },
-  })
-  if (!shipment) {
-    return Response.json({ error: 'Exchange shipment not found.' }, { status: 404 })
-  }
-
-  const customerName = body.customerName?.trim() || shipment.customer?.name || 'Customer'
-  const customerPhone =
-    body.customerPhone?.trim() ||
-    shipment.shippingPhone?.phoneRaw ||
-    shipment.customer?.phones.find((p) => p.isPrimary)?.phoneRaw ||
-    shipment.customer?.phones[0]?.phoneRaw || ''
-  const deliveryAddress = body.deliveryAddress?.trim() || shipment.shippingAddress?.address || ''
-  const deliveryCity = body.deliveryCity?.trim() || shipment.shippingAddress?.city || shipment.shippingCityOverride || ''
-  const codAmount = body.codAmount ?? Number(shipment.invoiceAmount)
-  const orderRefNumber =
-    body.orderRefNumber?.trim() ||
-    (shipment.orderRefNumber && shipment.orderRefNumber.trim()) ||
-    shipment.exchangeShipmentNumber
-  const itemDescription =
-    body.itemDescription?.trim() ||
-    (shipment.orderDetail && shipment.orderDetail.trim()) ||
-    `${shipment.newOrgVariant.product.title} (${shipment.newOrgVariant.sku}) ×${shipment.quantity}`
-  const transactionNotes = body.transactionNotes?.trim() || ''
-  const isExchangeReplacement = shipment.orderExchange.exchangeMethod === 'courier_replacement'
-
-  if (!deliveryCity) {
-    return Response.json({ error: 'Delivery city is required.' }, { status: 400 })
-  }
-  if (!customerPhone) {
-    return Response.json({ error: 'Customer phone is required.' }, { status: 400 })
-  }
-
-  const cityValid = await revalidateCityAtBookingTime(providerKey, deliveryCity, integration.id, shipment.shippingAddress?.country ?? undefined)
-  if (!cityValid) {
-    await db.exchangeShipment.update({
-      where: { id: shipment.id },
-      data: { courierCityStatus: 'unresolved' },
-    })
-    return Response.json({
-      error: `City "${deliveryCity}" is not available for delivery with ${integration.provider.providerName}.`,
-    }, { status: 400 })
-  }
-
-  const weightResult = calculateOrderWeightKg([
-    {
-      quantity: shipment.quantity,
-      variant: { weightKg: shipment.newOrgVariant.weightKg ? Number(shipment.newOrgVariant.weightKg) : null },
-    },
-  ])
-
-  const orderType = body.orderType || determinePostExOrderType(
-    weightResult.totalWeightKg,
-    weightResult.hasMissingWeight,
-    isExchangeReplacement,
-  )
-
-  let pickupAddressCode = body.pickupAddressCode
-  if (!pickupAddressCode) {
-    const defaultAddr = await db.courierPickupAddress.findFirst({
-      where: { companyIntegrationId: integration.id, isDefault: true },
-      select: { providerAddressCode: true },
-    })
-    pickupAddressCode = defaultAddr?.providerAddressCode
-  }
-
-  const bookInput: BookShipmentInput = {
-    orderNumber: orderRefNumber,
-    recipientName: customerName,
-    recipientPhone: customerPhone,
-    deliveryAddress,
-    deliveryCity,
-    pickupLocationAddress: '',
-    pickupLocationCity: '',
-    weightGrams: Math.round(weightResult.totalWeightKg * 1000),
-    codAmount,
-    itemDescription,
-    pickupAddressCode,
-    orderType,
-    quantity: shipment.quantity,
-    transactionNotes,
-  }
-
-  const credentials = decryptCredentials(integration.credentialsEncrypted!)
-  const adapter = getCourierAdapter(providerKey, credentials)
-
-  const bookResult = await executeLoggedIntegrationAction<BookShipmentResult>({
-    companyIntegrationId: integration.id,
-    organizationId: orgId,
-    actionType: 'book_shipment',
-    direction: 'outbound',
-    relatedEntityType: 'exchange_shipment',
-    relatedEntityId: shipment.id,
-    fn: async () => adapter.bookShipment(bookInput),
-  })
-
-  if (!bookResult.success || !bookResult.trackingNumber) {
-    return Response.json({
-      error: bookResult.error || 'Booking failed — no tracking number returned.',
-    }, { status: 400 })
-  }
-
-  // Update the shipment — note: ExchangeShipment has no courierName column
-  // (courier is identified by courierCompanyIntegrationId + the provider name
-  // is looked up via the relation). We set the integration ID + tracking +
-  // booking status.
-  // Map the PostEx providerStatus through the status map for canonical subStatus
-  const { mapPostExStatus } = await import('@/lib/integrations/couriers/postex.status-map')
-  const mappedBookingStatus = bookResult.providerStatus
-    ? mapPostExStatus(bookResult.providerStatus)
-    : null
-
-  await db.exchangeShipment.update({
-    where: { id: shipment.id },
-    data: {
-      courierCompanyIntegrationId: integration.id,
-      trackingNumber: bookResult.trackingNumber,
-      courierCityStatus: 'matched',
-      courierSubStatus: mappedBookingStatus?.courierSubStatus ?? null,
-      courierBookingStatus: 'booked',
-    },
-  })
-
-  return Response.json({
-    success: true,
-    trackingNumber: bookResult.trackingNumber,
-    orderType,
-    providerStatus: bookResult.providerStatus,
-  })
 }
