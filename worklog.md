@@ -16959,3 +16959,79 @@ Next Actions:
 - The 2 ReturnedStitchedInventory orphan rows from PO-005 (with no matching return_stitched_received transaction) are documented in audit logs. If audit-trail completeness is desired, a follow-up script could create the missing transactions (with appropriate inventory-pool side effects) — but this is out of scope for the current backfill task and would require business-logic review.
 - The 1 orphan fabric_consumed_for_stitching txn from PO-004 (txn cmrl6rw64000fodkv55e2xfu8 with no matching ProductionOrder) is also documented in audit logs. This is a pre-INV-004 test artifact — the current code always creates the ProductionOrder first, then consumes fabric with the PO id as referenceId, so this orphan type can no longer occur.
 
+
+---
+
+## Task ID: ORDERS-CORE-LIFECYCLE-AUDIT
+
+**Audit type:** READ-ONLY investigation (no code/schema/data modified).
+**Scope:** Complete order lifecycle: create → confirm → processing → packed → dispatch → deliver → RTO → cancel → un-cancel, including courier booking (Leopard + PostEx), status tracking, and cross-module relationships.
+
+### Summary
+20 issues found (3 Critical, 8 High, 5 Medium, 4 Low). Full report written to `/home/z/my-project/ORDERS_CORE_AUDIT_FINAL.md` (846 lines).
+
+### Critical findings (3)
+- **ORD-001** — `performOrderDispatch` select clause omits `salesEmployeeId`, making the `updateEmployeeStats(order.salesEmployeeId)` block dead code for EVERY dispatch. Sales rep KPIs (dispatchedCount, inTransitCount, deliveryRate, rtoRate) never recomputed on dispatch.
+- **ORD-003** — PostEx + Leopard auto-poll delivered transitions bypass `markOrderDelivered`. Customer stats, employee stats, audit log (`order.delivered`), and metric events all skipped. DB confirms: 14 delivered orders but only 2 `order.delivered` audit log entries (12 missing).
+- **ORD-004** — Manual RTO via `processOrderReturn` (POST /api/orders/[id]/rto) does NOT update `OrderItem.fulfillmentStatus` to `'returned'`. Auto-poll RTO via `restockOrderForRto` DOES. DB confirms: 13 of 14 RTO orders have items stuck at `'dispatched'` instead of `'returned'`.
+- **ORD-006** — PostEx + Leopard auto-poll RTO transitions bypass `processOrderReturn`. Customer `totalRtoCount` (fraud-detection at 3+ RTO) goes stale; employee rtoRate KPI wrong; 11 of 14 RTO orders missing `order.returned` audit log entries.
+- **ORD-008** — `courier_status_history` table has 0 rows despite 14 booked + 15 dispatched + 14 delivered + 14 RTO orders. The `insertCourierStatusHistory()` helper exists but writes fields that don't exist on the actual schema (`providerKey`, `rawStatus`, `courierSubStatus`, `courierActivityDate`, `source`, `metadata`) and is never imported anywhere — dead code. Poller + webhook handlers update `Order.courierSubStatus` directly without creating any history rows.
+- **ORD-016** — `/api/booking-workbench/book` route's exchange-shipment branch calls `bookExchangeShipmentWithCourier(body.entity_id, body.courier_company_integration_id, body.pickup_address_id)` — 3 positional args — but the function expects a single options object. The dead inline `bookExchangeShipment` helper is still defined at line 108-272 (incomplete refactor). Exchange-shipment booking via the Workbench is broken.
+
+### High-severity findings (8)
+- **ORD-002 + ORD-005** — `restockOrderForRto` (inventory.ts:1308) and `processOrderReturn` (order-return.actions.ts:84) resolve `locationId = order.dispatchLocationId` — NOT `item.reservedLocationId ?? order.dispatchLocationId` like `performOrderDispatch` does. Multi-location dispatch + RTO scenario corrupts inventory (wrong pool restocked, original pool permanently short).
+- **ORD-007** — `bookOrderWithCourier` line 470: `deliveryCity: resolvedDeliveryCity || deliveryCity` overwrites `Order.deliveryCity` (human-readable name) with the numeric Leopard cityId. PostEx unaffected (uses name). 0 rows currently corrupt in DB but code path is live for every future Leopard booking.
+- **ORD-009** — PostEx poller auto-cancel path (lines 620-671) does NOT create an `order.cancelled` audit log entry (only console.log). Customer stats + employee stats also skipped. Leopard webhook auto-cancel path (lines 242-301) DOES create an audit log but still skips stats + metric.
+- **ORD-011** — 18 `sale_dispatched` `InventoryTransaction` rows have NULL `orderId` despite having `referenceId=<orderId>` set. Backfill script (likely scripts/backfill-dispatch-inventory.ts) missed them. Affects any code that filters by `orderId` instead of `referenceType='order' AND referenceId=<id>`.
+- **ORD-012** — Audit log gaps on auto-poll transitions: 12 of 14 delivered orders missing `order.delivered` audit log entry; 11 of 14 RTO orders missing `order.returned` entry.
+
+### Medium-severity findings (5)
+- **ORD-010** — Webhook receiver's standard (PostEx) path only handles `delivered` + `returned` statuses. Does NOT handle `in_transit` (picked up) — silently drops the dispatch trigger. Also, the `delivered` branch's precondition `order.status === 'dispatched'` means a Delivered webhook arriving before our Picked processing completes (race) is dropped.
+- **ORD-013** — orders-view.tsx has no pagination UI; silently caps at 50 orders per page.
+- **ORD-017** — `/api/booking-workbench/bookable` route does NOT call `requirePermission(ORDERS_FULFILL)`. Any authenticated employee can see the full bookable list (customer phones, addresses, COD amounts).
+
+### Low-severity findings (4)
+- **ORD-014** — `canMarkRto` gated by `ORDERS_MANAGE` while `canMarkDelivered` gated by `ORDERS_FULFILL`. Warehouse staff can deliver but not RTO. Backend matches UI; design choice flagged.
+- **ORD-015** — `order-detail-view.tsx` timeline shows `order.createdAt` as the "Processing" step's timestamp (no `processingAt` field in schema — faked value).
+
+### Files Reviewed
+1. `prisma/schema.prisma` — Order, OrderItem, CompanyOrderSetting, CourierStatusHistory, LoadSheet, ScanEvent, Customer, OrgProductVariant, InventoryTransaction, InventoryPool, AuditLog models.
+2. `src/lib/actions/order.actions.ts` (2888 lines) — createManualOrder, confirmOrder, convertPaymentStatus, markCodCollected, cancelOrder, unCancelOrder, listOrders, getOrderDetail, performOrderDispatch, dispatchOrderAction, markOrderProcessing, markOrderPacked, markOrderDelivered.
+3. `src/lib/actions/order-return.actions.ts` (498 lines) — processOrderReturn, correctReturnItemCondition, dismissReturnReview, listReturnsNeedingReview.
+4. `src/lib/actions/booking.actions.ts` (982 lines) — bookOrderWithCourier, maybeAutoBookOrder, bookExchangeShipmentWithCourier.
+5. `src/lib/actions/courier-cancel.actions.ts` (270 lines) — cancelCourierBooking.
+6. `src/lib/actions/postex-status-poll.actions.ts` (868 lines) — generatePostExLoadSheet, trackSingleOrderStatus, pollPostExOrderStatuses.
+7. `src/lib/actions/leopard-webhook.actions.ts` (572 lines) — processLeopardWebhookUpdates, pollLeopardOrderStatuses.
+8. `src/lib/actions/scan.actions.ts` (356 lines) — processScan, confirmPhysicalUnpack, confirmCancelAfterScan.
+9. `src/lib/actions/order-settings.actions.ts` (177 lines) — getCompanyOrderSettings, updateCompanyOrderSettings, ensureCompanyOrderSettings.
+10. `src/lib/inventory.ts` (1393 lines) — processInventoryTransaction, reserveStockForOrder, unreserveStockForOrder, dispatchOrder, restockOrderForRto, checkAndFulfillMadeToOrderVariant.
+11. `src/lib/integrations/couriers/leopard.adapter.ts` (784 lines) — bookShipment, trackShipment, cancelShipment, parseStatusWebhook, fetchOperationalCities, createPickupAddress, fetchExistingPickupAddresses.
+12. `src/lib/integrations/couriers/postex.adapter.ts` (761 lines) — bookShipment, trackShipment, trackBulkShipments, cancelShipment, fetchPaymentStatus.
+13. `src/lib/integrations/couriers/leopard.status-map.ts` (307 lines) — mapLeopardStatus, normalizeLeopardStatusString.
+14. `src/lib/integrations/status-history.ts` (47 lines) — dead `insertCourierStatusHistory` helper.
+15. All 18 routes under `src/app/api/orders/`.
+16. `src/app/api/booking-workbench/book/route.ts`, `bookable/route.ts`.
+17. `src/app/api/webhooks/[provider_key]/[webhook_endpoint_id]/route.ts`.
+18. `src/app/api/scan/route.ts`.
+19. Frontend: `orders-view.tsx`, `order-create-view.tsx`, `order-detail-view.tsx`, `booking-workbench-view.tsx`, `order-scan-view.tsx`.
+20. `src/lib/validations/order.schemas.ts`, `src/lib/permissions.ts`.
+21. DB migrations: `023_pod_and_status_history.sql`, `029_order_status_check.sql`.
+
+### Database queries executed (read-only)
+All 10 Part D queries ran successfully. Key data points:
+- 150 orders total. Status distribution: 44 confirmed, 26 cancelled, 15 dispatched, 14 rto, 14 delivered, 13 pending, 12 processing, 11 refunded, 1 partially_backordered.
+- courier_status_history: **0 rows** (confirms ORD-008).
+- 3 dispatched orders with NULL trackingNumber — all backfilled via scripts/backfill-dispatch-inventory.ts (data-quality artifact, not a code bug).
+- 0 cancelled orders with NULL cancelledAt, 0 delivered orders with NULL deliveredAt, 0 rto orders with NULL returnedAt.
+- 0 OrderItems with `fulfillmentStatus='dispatched'` under non-terminal parent order.
+- 0 sale_dispatched txns with NULL referenceId. **18 sale_dispatched txns with NULL orderId** (confirms ORD-011).
+- avg gap between Order.createdAt and first OrderItem.createdAt = 202ms, max 5720ms (one-off slow run, batch insert working as designed).
+- 13 of 14 RTO orders have at least one OrderItem with `fulfillmentStatus='dispatched'` (confirms ORD-004).
+- All 14 delivered orders have ZERO courier_status_history entries (confirms ORD-008 systemic).
+- 1 test order `ORD-TEST-CANCEL-1788321348005` has `courierBookingStatus='booked'` AND `trackingNumber IS NULL` — impossible state from current booking flow (manual DB intervention during testing).
+
+### Read-only confirmation
+- ✅ No source code files modified (only 2 throwaway diagnostic scripts under `/home/z/my-project/scripts/` were CREATED for the DB queries — these do not affect the running application).
+- ✅ No Prisma schema changes.
+- ✅ No DB writes performed — all queries were SELECT/count/column-inspection only.
+- ✅ No migrations applied.
