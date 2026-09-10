@@ -17269,3 +17269,101 @@ System Health:
 - Stale incoming: 0
 
 All 33 fixes verified. Module is production-ready.
+
+---
+
+## CUSTOMER-AUDIT (2026-09-10) — Customer Management Module Audit
+
+**Task ID:** CUSTOMER-AUDIT
+**Mode:** READ-ONLY (no code modified)
+**Auditor:** Explore sub-agent
+
+### Scope
+- Models: Customer, CustomerPhone, CustomerAddress, CustomerExternalIdentity
+- Routes: `src/app/api/customers/**` (7 route files)
+- Actions: `src/lib/actions/customer.actions.ts` (1913 lines)
+- Validations: `src/lib/validations/customer.schemas.ts` (178 lines)
+- Frontend: customers-view.tsx, customer-detail-view.tsx, CreateCustomerForm.tsx, CustomerSearchAutocomplete.tsx, AddressSelector.tsx
+- Cross-module: order.actions.ts (createManualOrder, confirmOrder, cancelOrder, unCancelOrder, performOrderDispatch, markOrderDelivered, handleOrderStatusSideEffects), order-return.actions.ts (processOrderReturn auto-flag)
+
+### DB Snapshot
+- 38 customers across 9 orgs
+- 36 phones, 33 addresses, 0 external identities
+- 0 orphaned orders, 0 NULL-customer orders, 0 mismatched address/phone refs
+- 0 customers flagged (despite 1 qualifying customer with 11 RTOs)
+
+### Issues Found: 21 total (3 Critical, 6 High, 5 Medium, 7 Low)
+
+**Critical (data corruption):**
+- **CUS-001** — 2 customers with zero phones (violates hard invariant)
+- **CUS-002** — `phoneNormalized` column has 3 distinct formats for the same number (`03001234567`, `+92 300 1234567`, `+923001234567`) — dedup broken
+- **CUS-003** — 7 customers with zero addresses (violates hard invariant)
+
+**High (silent functional bugs / permission gaps):**
+- **CUS-004** — `getCustomerDetail` has no permission check (any in-org user can fetch any customer's full record)
+- **CUS-005** — `searchCustomerByPhone` / `searchCustomersDetailed` have no permission check
+- **CUS-006** — 5 customers have stale cached stats (Test Booking Customer: cached 14 vs actual 0 orders)
+- **CUS-007** — Auto-flag at 3+ RTO has NEVER fired in production (Fatima Ahmed has 11 RTOs, not flagged). Root cause: `processOrderReturn` calls the public `flagCustomer` which requires `CUSTOMERS_EDIT` permission; users with only `ORDERS_MANAGE` get a 403 that breaks the RTO response
+- **CUS-009** — Country stored as `'Pakistan'` (name) instead of `'PK'` (code) when address added via customer-detail-view (which has no Country field). 4 rows affected. Breaks city validation, CityMatchInfo UI, AddressSelector, CountrySelector
+
+**Medium:**
+- **CUS-008** — `deliveryCountry` returned as `undefined` in customer detail API (not in `select` clause but in response mapping)
+- **CUS-010** — Customer detail view add/edit address forms have no Country field
+- **CUS-016** — `validateCustomerAddressCity` fire-and-forget swallows errors; 31 addresses stuck with `cityValidatedAt IS NULL`
+- **CUS-018** — Auto-flag failure in `processOrderReturn` surfaces as 500 to user despite successful RTO processing (the order is already marked RTO + items processed + audit/metric logs written)
+
+**Low (UX / type / consistency):**
+- **CUS-011** — Address display shows raw alpha-2 code instead of country name
+- **CUS-012** — Auto-flag reason string inconsistency between `updateCustomerStats` (`'High RTO rate (3+ returns)'`) and `processOrderReturn` (`'High RTO rate (11 returns)'`)
+- **CUS-013** — "Set as Primary phone" deletes+recreates phone (loses phone ID + FK references on orders)
+- **CUS-014** — `CustomerSummary.defaultAddress` type omits `country` field
+- **CUS-015** — Type comments lie about country format (says NAME, code is CODE)
+- **CUS-017** — Customer detail loads ALL orders (no pagination — works for current max 81 orders but won't scale)
+- **CUS-019** — Search autocomplete shows only ONE match (`findFirst`) — users may miss other matches
+- **CUS-020** — No Zod validation at route layer (relies on action only)
+- **CUS-021** — `isValidFormat=false` phones (1 row) not surfaced in UI
+
+### Manual Stats Verification — 3 Sample Customers
+1. **Fatima Ahmed** (81 orders, 11 RTOs): cached = actual for all 3 stats. **BUT not flagged** despite 11 RTOs (CUS-007).
+2. **Test Booking Customer** (14 cached, 0 actual orders): stale by 14 (CUS-006).
+3. **Test Customer** (8 orders, 2 RTOs): cached = actual for all 3 stats. No issues.
+
+### Cross-Module Verified
+- ✅ Order creation correctly links customer via `customer_id` (existing) OR `createCustomerInternal` (new). Org-scoped verification on both paths.
+- ✅ `usedCustomerAddressId` / `usedCustomerPhoneId` verified to belong to the same customer in the same org.
+- ✅ All order lifecycle hooks (create, confirm, dispatch, deliver, rto, cancel, un-cancel) call `updateCustomerStats` non-fatally.
+- ✅ `handleOrderStatusSideEffects` is correctly called from auto-poll + webhook paths (no HTTP session).
+- ✅ RTO updates stats correctly when `processOrderReturn` succeeds.
+- ❌ RTO auto-flag silently broken (CUS-007 + CUS-018).
+- ❌ Hard-deletes outside the rollback path leave stats stale (CUS-006).
+
+### Frontend Audit
+- ✅ Search works (debounced 300ms, OR across name/email/phone).
+- ✅ Detail view has 4 tabs (Phones, Addresses, Platforms, Orders) + 5 stat cards (Total Orders, Total Value, RTO Count, RTO Rate, Delivery Rate).
+- ✅ RTO Rate + Delivery Rate live-computed server-side with correct denominator (dispatched+delivered+rto).
+- ✅ Limited-view orders correctly stripped for non-own orders when scope='own'.
+- ✅ Mobile-responsive across all views.
+- ⚠️ Mutation buttons (Flag, Add Phone, Add Address, Edit, Remove, Set Primary/Default) gated on `ORDERS_MANAGE` permission but underlying actions require `CUSTOMERS_EDIT` — users with only `ORDERS_MANAGE` will see the buttons but get 403s.
+- ⚠️ "Add Customer" button NOT gated — should hide for users without `CUSTOMERS_CREATE`.
+
+### Recommendations (P0 → P2)
+**P0 (data corruption / security):**
+1. Backfill-correct all `phoneNormalized` values to canonical E.164 (CUS-002).
+2. Repair the 2 customers with zero phones + 7 with zero addresses (CUS-001, CUS-003).
+3. Add `requirePermission(ctx, PERMISSIONS.CUSTOMERS_VIEW)` to `getCustomerDetail`, `searchCustomerByPhone`, `searchCustomersDetailed` (CUS-004, CUS-005).
+
+**P1 (silent functional bugs):**
+4. Export `flagCustomerInternal` and call it from `processOrderReturn`; wrap in `.catch(() => {})`. Run backfill-stats endpoint to retroactively flag Fatima Ahmed + any other qualifying customers (CUS-007, CUS-018).
+5. Change country fallback to `'PK'` (not `'Pakistan'`); add `CountrySelector` to customer-detail-view add/edit address forms; backfill-correct the 4 affected rows (CUS-009, CUS-010).
+6. Run `POST /api/customers/backfill-stats` for the 5 stale-stat customers; add nightly cron for ongoing integrity (CUS-006).
+7. Make `validateCustomerAddressCity` log errors; backfill the 31 stuck addresses (CUS-016).
+
+**P2 (UX / type / consistency):**
+8-16. Fix CUS-008 (add to select), CUS-011 (display country name), CUS-013 (PATCH endpoint for primary phone), CUS-012 (standardize reason), CUS-014/015 (type fixes), CUS-017 (paginate orders), CUS-019 (findMany with take:5), CUS-020 (route Zod), CUS-021 (surface invalid-format phones).
+17. Reconcile button-permission gating (`ORDERS_MANAGE` vs `CUSTOMERS_EDIT`).
+
+### Files Written
+- `/home/z/my-project/CUSTOMER_AUDIT_FINAL.md` (full report, 21 BUG entries with repro steps)
+- This worklog entry.
+
+No code modified. No DB writes. Read-only audit complete.
