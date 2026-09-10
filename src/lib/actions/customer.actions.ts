@@ -61,6 +61,10 @@ interface PhoneDTO {
   phoneNormalized: string
   label: string | null
   isPrimary: boolean
+  // CUS-021: surface the isValidFormat flag (false = phone failed format
+  // validation, typically from an external platform import). The frontend
+  // shows an "Invalid format" warning badge next to these phones.
+  isValidFormat: boolean
   createdAt: Date
 }
 
@@ -170,6 +174,7 @@ function toPhoneDTO(p: {
   phoneNormalized: string
   label: string | null
   isPrimary: boolean
+  isValidFormat: boolean
   createdAt: Date
 }): PhoneDTO {
   return {
@@ -178,6 +183,8 @@ function toPhoneDTO(p: {
     phoneNormalized: p.phoneNormalized,
     label: p.label,
     isPrimary: p.isPrimary,
+    // CUS-021: include the flag in the response.
+    isValidFormat: p.isValidFormat,
     createdAt: p.createdAt,
   }
 }
@@ -249,6 +256,10 @@ export async function searchCustomerByPhone(
 }>> {
   try {
     const ctx = await getWorkspace()
+    // CUS-004/005: enforce CUSTOMERS_VIEW permission — without this, any
+    // authenticated employee could fetch any customer's full record
+    // (phones + addresses) via the live search.
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_VIEW)
 
     if (!phone || !phone.trim()) {
       return { success: true, data: { found: false } }
@@ -354,6 +365,10 @@ export async function searchCustomersDetailed(
 }>> {
   try {
     const ctx = await getWorkspace()
+    // CUS-004/005: enforce CUSTOMERS_VIEW permission — without this, any
+    // authenticated employee could fetch any customer's full record via the
+    // live search (sensitive PII: phones + addresses).
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_VIEW)
     const q = query.trim()
 
     if (!q) {
@@ -458,6 +473,100 @@ export async function searchCustomersDetailed(
           phones: customer.phones.map(toPhoneDTO),
           addresses: customer.addresses.map(toAddressDTO),
         },
+      },
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to search customers',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
+// searchCustomersMulti — CUS-019 fix
+// ──────────────────────────────────────────────────────────────
+/**
+ * Multi-result customer search. Same matching strategy as
+ * searchCustomersDetailed (exact phone match first, then OR across
+ * name + email + phone partials) but returns UP TO `limit` (default 10)
+ * matches instead of just the first.
+ *
+ * CUS-019: the order-create autocomplete previously showed only ONE result
+ * even when multiple customers matched a query (e.g. searching "Ahmed"
+ * matched both Ahmed Khan and Ahmed Ali but only the first was shown).
+ *
+ * Returns `{ customers: CustomerSearchHit[] }` (may be empty).
+ */
+export async function searchCustomersMulti(
+  query: string,
+  limit: number = 10,
+): Promise<ActionResult<{
+  customers: Array<{
+    id: string
+    name: string
+    email: string | null
+    totalOrdersCount: number
+    totalRtoCount: number
+    isFlagged: boolean
+    flaggedReason: string | null
+    phones: PhoneDTO[]
+    addresses: AddressDTO[]
+  }>
+}>> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_VIEW)
+    const q = query.trim()
+
+    if (!q) {
+      return { success: true, data: { customers: [] } }
+    }
+
+    const orgId = ctx.company.organizationId
+    const safeLimit = Math.max(1, Math.min(limit, 25))
+
+    const normalizedPhone = normalizePhoneInternational(q)
+
+    // Build the OR clause — same shape as searchCustomersDetailed.
+    const orClauses: Prisma.CustomerWhereInput[] = [
+      { name: { contains: q, mode: 'insensitive' } },
+      { email: { contains: q, mode: 'insensitive' } },
+      { phones: { some: { phoneRaw: { contains: q, mode: 'insensitive' } } } },
+    ]
+    if (normalizedPhone) {
+      orClauses.push({ phones: { some: { phoneNormalized: normalizedPhone } } })
+    }
+
+    const customers = await db.customer.findMany({
+      where: { organizationId: orgId, OR: orClauses },
+      include: {
+        phones: { orderBy: { isPrimary: 'desc' } },
+        addresses: {
+          orderBy: [
+            { isDefault: 'desc' },
+            { lastUsedAt: { sort: 'desc', nulls: 'last' } },
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: safeLimit,
+    })
+
+    return {
+      success: true,
+      data: {
+        customers: customers.map((c) => ({
+          id: c.id,
+          name: c.name,
+          email: c.email,
+          totalOrdersCount: c.totalOrdersCount,
+          totalRtoCount: c.totalRtoCount,
+          isFlagged: c.isFlagged,
+          flaggedReason: c.flaggedReason,
+          phones: c.phones.map(toPhoneDTO),
+          addresses: c.addresses.map(toAddressDTO),
+        })),
       },
     }
   } catch (err) {
@@ -878,6 +987,70 @@ export async function removeCustomerPhone(phoneId: string): Promise<ActionResult
 }
 
 // ──────────────────────────────────────────────────────────────
+// setCustomerPhonePrimary — CUS-013 fix
+// ──────────────────────────────────────────────────────────────
+/**
+ * Mark a specific phone as the customer's primary phone. Updates the existing
+ * row in place (in a transaction that also unsets any other primary phone) —
+ * does NOT delete + recreate, which previously lost `createdAt` and any
+ * metadata.
+ *
+ * Equivalent to PATCH /api/customers/[id]/phones/[phoneId] { is_primary: true }
+ */
+export async function setCustomerPhonePrimary(
+  phoneId: string,
+): Promise<ActionResult> {
+  try {
+    const ctx = await getWorkspace()
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_EDIT)
+
+    const phone = await db.customerPhone.findUnique({
+      where: { id: phoneId },
+      include: { customer: { select: { organizationId: true } } },
+    })
+    if (!phone || phone.customer.organizationId !== ctx.company.organizationId) {
+      return { success: false, error: 'Phone not found' }
+    }
+
+    // Idempotent — if it's already the only primary, no-op.
+    if (phone.isPrimary) {
+      return { success: true }
+    }
+
+    await db.$transaction(async (tx) => {
+      // Unset any existing primary on this customer.
+      await tx.customerPhone.updateMany({
+        where: { customerId: phone.customerId, isPrimary: true },
+        data: { isPrimary: false },
+      })
+      // Set the new primary.
+      await tx.customerPhone.update({
+        where: { id: phoneId },
+        data: { isPrimary: true },
+      })
+    })
+
+    insertAuditLog({
+      action: 'customer.phone_primary_set',
+      entityType: 'customer',
+      entityId: phone.customerId,
+      companyId: ctx.company.id,
+      organizationId: ctx.company.organizationId,
+      userId: ctx.user.id,
+      employeeId: ctx.employee.id,
+      newValues: { phoneId, phoneNormalized: phone.phoneNormalized },
+    })
+
+    return { success: true }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Failed to set primary phone',
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────────
 // Phase 7: validateCustomerAddressCity — non-blocking early warning
 // ──────────────────────────────────────────────────────────────
 /**
@@ -994,9 +1167,10 @@ export async function addCustomerAddress(
           label: d.label?.trim() || null,
           address: d.address.trim(),
           city: d.city.trim(),
-          // Country (Phase: Country System). Defaults to "Pakistan" when
-          // absent — mirrors the addressInputSchema default.
-          country: d.country?.trim() || 'Pakistan',
+          // CUS-009: country is an ISO 3166-1 alpha-2 code (e.g. "PK", "GB"),
+          // NOT a country name. The addressInputSchema default is "PK" —
+          // never write a country name here.
+          country: d.country?.trim() || 'PK',
           isDefault: d.is_default,
         },
       })
@@ -1018,7 +1192,13 @@ export async function addCustomerAddress(
     // This is INFORMATIONAL — the authoritative check remains
     // revalidateCityAtBookingTime() at booking time. Non-blocking: if zero
     // couriers match, the address is still saved successfully.
-    validateCustomerAddressCity(address.id, d.city.trim(), ctx.company.id, d.country).catch(() => {})
+    //
+    // CUS-016: log failures instead of silently swallowing — fire-and-forget
+    // is intentional (don't block the address creation) but the error must
+    // be visible so we can debug the 31 "pending validation" addresses.
+    validateCustomerAddressCity(address.id, d.city.trim(), ctx.company.id, d.country).catch((e) => {
+      console.error('[customer] City validation failed:', e instanceof Error ? e.message : e)
+    })
 
     return { success: true, data: { addressId: address.id } }
   } catch (err) {
@@ -1071,9 +1251,8 @@ export async function updateCustomerAddress(
           label: d.label?.trim() || null,
           address: d.address.trim(),
           city: d.city.trim(),
-          // Country (Phase: Country System). Defaults to "Pakistan" when
-          // absent — same pattern as addCustomerAddress.
-          country: d.country?.trim() || 'Pakistan',
+          // CUS-009: country is an ISO 3166-1 alpha-2 code, not a name.
+          country: d.country?.trim() || 'PK',
           isDefault: d.is_default,
         },
       })
@@ -1105,8 +1284,11 @@ export async function updateCustomerAddress(
 
     // ── Phase 7: City validation (non-blocking early warning) ──
     // Re-validate the city if it changed. Non-blocking.
+    // CUS-016: log failures instead of silently swallowing.
     if (updated.city !== address.city) {
-      validateCustomerAddressCity(updated.id, updated.city, ctx.company.id, d.country).catch(() => {})
+      validateCustomerAddressCity(updated.id, updated.city, ctx.company.id, d.country).catch((e) => {
+        console.error('[customer] City validation failed:', e instanceof Error ? e.message : e)
+      })
     }
 
     return { success: true, data: { addressId: updated.id } }
@@ -1494,7 +1676,8 @@ export async function updateCustomerStats(customerId: string): Promise<ActionRes
 
     // Auto-flag at 3+ RTO (idempotent — only flags if not already flagged
     // for the high-RTO reason).
-    const RTO_FLAG_REASON = 'High RTO rate (3+ returns)'
+    // CUS-012: standardized reason string across all auto-flag paths.
+    const RTO_FLAG_REASON = 'Auto-flagged: 3+ RTO rate exceeded'
     if (totalRtoCount >= 3) {
       const customer = await db.customer.findUnique({
         where: { id: customerId },
@@ -1541,11 +1724,16 @@ export async function flagCustomer(
  * path in updateCustomerStats(). The auto path skips the permission check
  * (it's triggered by an order status change, not a user action) and skips
  * the metric event (to avoid metric spam during bulk recomputes).
+ *
+ * CUS-007: EXPORTED so that order-return.actions.ts can call it directly
+ * from the RTO processing flow — that path runs with ORDERS_MANAGE
+ * permission, NOT CUSTOMERS_EDIT, so calling the public flagCustomer()
+ * would 403 (which broke RTO processing entirely per CUS-018).
  */
-async function flagCustomerInternal(
+export async function flagCustomerInternal(
   customerId: string,
   reason: string,
-  auto: boolean,
+  auto: boolean = false,
   ctx?: {
     company: { id: string; organizationId: string }
     user: { id: string }
@@ -1771,6 +1959,10 @@ export async function getCustomerDetail(
 ): Promise<ActionResult<CustomerDetailDTO>> {
   try {
     const ctx = await getWorkspace()
+    // CUS-004/005: enforce CUSTOMERS_VIEW permission — without this, any
+    // authenticated employee could fetch any customer's full record (phones,
+    // addresses, order history, RTO stats).
+    await requirePermission(ctx, PERMISSIONS.CUSTOMERS_VIEW)
 
     const customer = await db.customer.findFirst({
       where: { id: customerId, organizationId: ctx.company.organizationId },
@@ -1807,16 +1999,13 @@ export async function getCustomerDetail(
     const rtoRate = dispatchedOrLater > 0 ? Math.round((rtoCount / dispatchedOrLater) * 100) : null
     const deliveryRate = dispatchedOrLater > 0 ? Math.round((deliveredCount / dispatchedOrLater) * 100) : null
 
-    // Fetch ALL orders for this customer (not just 20) so the Orders tab
-    // matches the stat card's totalOrdersCount. The Orders tab renders a
-    // scrollable table (max-h-96 overflow-y-auto) so even 100+ orders are
-    // manageable in the UI.
-    //
-    // Phase 4 — Row-level scoping: includes salesEmployeeId so we can compute
-    // isOwnOrder per row. For rows where isOwnOrder is false AND the viewer's
-    // ordersDataScope is 'own', the response strips detail down to only
-    // {orderNumber, date, status} and OMITS salesEmployeeId/employee name
-    // entirely (not just hidden in the UI — not sent over the network).
+    // CUS-017: limit recent orders to the 20 most recent. Loading ALL
+    // orders for high-volume customers caused slow responses + memory
+    // pressure. The UI already renders a scrollable table; further pagination
+    // can be added later via /api/customers/[id]/orders if needed.
+    // CUS-008: include deliveryCountry in the SELECT so the response mapping
+    // has the actual value (previously the response referenced
+    // o.deliveryCountry but the select omitted it, returning undefined).
     const recentOrders = await db.order.findMany({
       where: { customerId },
       select: {
@@ -1828,11 +2017,13 @@ export async function getCustomerDetail(
         recipientName: true,
         deliveryAddress: true,
         deliveryCity: true,
+        deliveryCountry: true,
         usedCustomerAddressId: true,
         usedCustomerPhoneId: true,
         salesEmployeeId: true,
       },
       orderBy: { createdAt: 'desc' },
+      take: 20,
     })
 
     // Resolve the viewer's orders data scope — determines row-level stripping.

@@ -20,9 +20,9 @@ export interface AddressDTO {
   label: string | null
   address: string
   city: string
-  /** Country NAME (e.g. "Pakistan"), NOT an alpha-2 code. Nullable for
-   *  rows created before the country-system phase (default applied at DB
-   *  layer going forward). */
+  /** Country as an ISO 3166-1 alpha-2 code (e.g. "PK", "GB", "AE"),
+   *  NOT a country name. Nullable for rows created before the
+   *  country-system phase. */
   country: string | null
   isDefault: boolean
   lastUsedAt: string | null
@@ -54,8 +54,9 @@ export interface RecentOrderDTO {
   recipientName: string | null
   deliveryAddress: string | null
   deliveryCity: string | null
-  /** Country NAME snapshot at order creation (nullable for historical
-   *  orders pre-dating the country-system phase). */
+  /** Country as an ISO 3166-1 alpha-2 code (e.g. "PK", "GB") snapshot at
+   *  order creation. Nullable for historical orders pre-dating the
+   *  country-system phase. */
   deliveryCountry: string | null
   usedCustomerAddressId: string | null
   usedCustomerPhoneId: string | null
@@ -73,7 +74,10 @@ export interface CustomerSummary {
   name: string
   email: string | null
   primaryPhone: string | null
-  defaultAddress: { address: string; city: string } | null
+  /** CUS-014: includes `country` (alpha-2 code, nullable). The backend
+   *  already returned this; the type previously omitted it, causing TS
+   *  errors when consumers tried to read it. */
+  defaultAddress: { address: string; city: string; country: string | null } | null
   totalOrdersCount: number
   totalOrderValue: number
   totalRtoCount: number
@@ -132,8 +136,8 @@ export interface AddressInput {
   label?: string
   address: string
   city: string
-  /** Country NAME (e.g. "Pakistan"). Optional — server defaults to
-   *  "Pakistan" when absent. NOT an alpha-2 code. */
+  /** Country as an ISO 3166-1 alpha-2 code (e.g. "PK", "GB", "AE").
+   *  NOT a country name. Optional — server defaults to "PK" when absent. */
   country?: string
   is_default: boolean
 }

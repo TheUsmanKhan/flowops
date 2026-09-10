@@ -1,0 +1,330 @@
+[
+  {
+    "step": "start",
+    "timestamp": "2026-09-10T19:53:21.116Z",
+    "details": {
+      "message": "Customer DB repair script starting"
+    }
+  },
+  {
+    "step": "CUS-009_country_codes",
+    "timestamp": "2026-09-10T19:53:23.667Z",
+    "details": {
+      "customerAddressRowsInspected": 33,
+      "customerAddressRowsUpdated": 4,
+      "orderRowsInspected": 27,
+      "orderRowsUpdated": 1,
+      "addressUpdates": [
+        {
+          "id": "cmtgwo9pm000fjg9e3lk9v6k7",
+          "oldCountry": "Pakistan",
+          "newCountry": "PK"
+        },
+        {
+          "id": "cmtgzi3qh000krmrwepp5tf82",
+          "oldCountry": "Pakistan",
+          "newCountry": "PK"
+        },
+        {
+          "id": "cmth0dczc000xrmrw7uqcyg1o",
+          "oldCountry": "Pakistan",
+          "newCountry": "PK"
+        },
+        {
+          "id": "cmthm41l00005rm6h5cea3b5b",
+          "oldCountry": "Pakistan",
+          "newCountry": "PK"
+        }
+      ],
+      "orderUpdates": [
+        {
+          "id": "cmthscooe001prmp73fif9ot6",
+          "oldCountry": "Pakistan",
+          "newCountry": "PK"
+        }
+      ]
+    }
+  },
+  {
+    "step": "CUS-002_phone_normalization",
+    "timestamp": "2026-09-10T19:53:25.778Z",
+    "details": {
+      "phoneRowsInspected": 36,
+      "phoneRowsUpdated": 16,
+      "sampleChanges": [
+        {
+          "id": "cmshgvufn0001p680mkzbutbv",
+          "oldNorm": "03001234567",
+          "newNorm": "+923001234567",
+          "raw": "03001234567"
+        },
+        {
+          "id": "cmshgvv2y0004p6804pni2ut0",
+          "oldNorm": "03007654321",
+          "newNorm": "+923007654321",
+          "raw": "03007654321"
+        },
+        {
+          "id": "cmsykx7xt0006smjlvwhqssp2",
+          "oldNorm": "+92 300 1234567",
+          "newNorm": "+923001234567",
+          "raw": "03001234567"
+        },
+        {
+          "id": "cmsykxa5r000dsmjl6ew213up",
+          "oldNorm": "+44 7911 123456",
+          "newNorm": "+447911123456",
+          "raw": "+447911123456"
+        },
+        {
+          "id": "cmsynf9kk0003lqykzdkw0vn5",
+          "oldNorm": "+92 345 8963222",
+          "newNorm": "+923458963222",
+          "raw": "03458963222"
+        },
+        {
+          "id": "cmtcwqhf3000bjk1c9a66w5c5",
+          "oldNorm": "+92 324 7545352",
+          "newNorm": "+923247545352",
+          "raw": "03247545352"
+        },
+        {
+          "id": "cmte1ko2d0003jhm55yd9gi61",
+          "oldNorm": "+92 332 0961517",
+          "newNorm": "+923320961517",
+          "raw": "03320961517"
+        },
+        {
+          "id": "cmte4chu40003jheyo426pcdm",
+          "oldNorm": "+92 333 0961443",
+          "newNorm": "+923330961443",
+          "raw": "03330961443"
+        },
+        {
+          "id": "cmtgd2kga0008lq8gliwt3c8k",
+          "oldNorm": "+92 324 7545354",
+          "newNorm": "+923247545354",
+          "raw": "03247545354"
+        },
+        {
+          "id": "cmtgwo9lt000ejg9egjss2jpr",
+          "oldNorm": "+92 324 7545343",
+          "newNorm": "+923247545343",
+          "raw": "03247545343"
+        },
+        {
+          "id": "cmtgzi3ii000jrmrw8qattf1w",
+          "oldNorm": "+92 319 6273245",
+          "newNorm": "+923196273245",
+          "raw": "03196273245"
+        },
+        {
+          "id": "cmth0dcrg000wrmrw5tb2164f",
+          "oldNorm": "+92 319 6273247",
+          "newNorm": "+923196273247",
+          "raw": "03196273247"
+        },
+        {
+          "id": "cmtjfi2nm000blkca1xopnvc4",
+          "oldNorm": "+92 300 1234567",
+          "newNorm": "+923001234567",
+          "raw": "03001234567"
+        },
+        {
+          "id": "cmtjgza4i000dlke3d4eqbzjb",
+          "oldNorm": "+92 300 9876543",
+          "newNorm": "+923009876543",
+          "raw": "03009876543"
+        },
+        {
+          "id": "cmtjinghb019blke3cqco6x9u",
+          "oldNorm": "+92 300 1112233",
+          "newNorm": "+923001112233",
+          "raw": "03001112233"
+        },
+        {
+          "id": "cmtlv0cie000dp50wxrlnyji9",
+          "oldNorm": "+92 300 1234567",
+          "newNorm": "+923001234567",
+          "raw": "03001234567"
+        }
+      ],
+      "duplicateCustomersNeedingManualMerge": [
+        {
+          "orgId": "cmrsfbcyu0001tdocmgpf13nv",
+          "norm": "+923001234567",
+          "phoneIds": [
+            "cmshgvufn0001p680mkzbutbv",
+            "cmtjfi2nm000blkca1xopnvc4",
+            "cmtqif3pf000flqsd09de139k"
+          ]
+        },
+        {
+          "orgId": "cmrsfbcyu0001tdocmgpf13nv",
+          "norm": "+923247545352",
+          "phoneIds": [
+            "cmsn8c4ox00ssjlms1xl8gvdg",
+            "cmtcwqhf3000bjk1c9a66w5c5"
+          ]
+        },
+        {
+          "orgId": "cmth4rtzx000grmft0nqbdtzx",
+          "norm": "+923009876543",
+          "phoneIds": [
+            "cmthm420x0009rm6halxvf81v",
+            "cmtjgza4i000dlke3d4eqbzjb"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "step": "CUS-001_customers_without_phones",
+    "timestamp": "2026-09-10T19:53:26.800Z",
+    "details": {
+      "totalCustomersWithoutPhones": 2,
+      "testCustomersDeleted": 1,
+      "realCustomersForManualReview": [
+        {
+          "id": "cmthm3ci30003rm5irmm3msmn",
+          "name": "Test Customer Karachi",
+          "organizationId": "cmth4rtzx000grmft0nqbdtzx"
+        }
+      ],
+      "deletedTestCustomers": [
+        {
+          "id": "cms4kdynw0001rvpgaq4rfuh0",
+          "name": "Exchange Test Customer"
+        }
+      ]
+    }
+  },
+  {
+    "step": "CUS-003_customers_without_addresses",
+    "timestamp": "2026-09-10T19:53:28.201Z",
+    "details": {
+      "totalCustomersWithoutAddresses": 6,
+      "testCustomersDeleted": 2,
+      "realCustomersForManualReview": [
+        {
+          "id": "cms1ns3s9000ttdjo64gk3oap",
+          "name": "Fatima Ahmed",
+          "organizationId": "cmrsfbcyu0001tdocmgpf13nv"
+        },
+        {
+          "id": "cms2drzes0009tdes9tyfptri",
+          "name": "Usman Khan",
+          "organizationId": "cmrsfbcyu0001tdocmgpf13nv"
+        },
+        {
+          "id": "cms34jj0s0003q6bbab74jj5a",
+          "name": "Test Customer 1785150542",
+          "organizationId": "cmrsfbcyu0001tdocmgpf13nv"
+        },
+        {
+          "id": "cmthm3ci30003rm5irmm3msmn",
+          "name": "Test Customer Karachi",
+          "organizationId": "cmth4rtzx000grmft0nqbdtzx"
+        }
+      ],
+      "deletedTestCustomers": [
+        {
+          "id": "cms39lkq40003q6qhs0diwpkn",
+          "name": "Fix Test 1785159036"
+        },
+        {
+          "id": "cms3aj9gu0003q6hgkv1cl85e",
+          "name": "Test 1785160607"
+        }
+      ]
+    }
+  },
+  {
+    "step": "CUS-006_recompute_stats",
+    "timestamp": "2026-09-10T19:53:34.357Z",
+    "details": {
+      "customersInspected": 35,
+      "customersUpdated": 5,
+      "sampleUpdates": [
+        {
+          "id": "cmshgvv2y0003p680i9p8czn9",
+          "name": "Test Bad City Customer",
+          "before": {
+            "orders": 1,
+            "value": 0,
+            "rto": 0
+          },
+          "after": {
+            "orders": 0,
+            "value": 0,
+            "rto": 0
+          }
+        },
+        {
+          "id": "cmtgd2kc40007lq8gz4lwety1",
+          "name": "MZ Web",
+          "before": {
+            "orders": 2,
+            "value": 0,
+            "rto": 0
+          },
+          "after": {
+            "orders": 1,
+            "value": 0,
+            "rto": 0
+          }
+        },
+        {
+          "id": "cms34jj0s0003q6bbab74jj5a",
+          "name": "Test Customer 1785150542",
+          "before": {
+            "orders": 7,
+            "value": 12500,
+            "rto": 0
+          },
+          "after": {
+            "orders": 5,
+            "value": 12500,
+            "rto": 0
+          }
+        },
+        {
+          "id": "cmsyfip580004smcg116m60js",
+          "name": "City Test Customer",
+          "before": {
+            "orders": 2,
+            "value": 0,
+            "rto": 0
+          },
+          "after": {
+            "orders": 0,
+            "value": 0,
+            "rto": 0
+          }
+        },
+        {
+          "id": "cmshgvufn0000p680a7qlnc7e",
+          "name": "Test Booking Customer",
+          "before": {
+            "orders": 14,
+            "value": 4990,
+            "rto": 0
+          },
+          "after": {
+            "orders": 0,
+            "value": 0,
+            "rto": 0
+          }
+        }
+      ]
+    }
+  },
+  {
+    "step": "CUS-007_backfill_rto_flags",
+    "timestamp": "2026-09-10T19:53:34.910Z",
+    "details": {
+      "customersFlagged": 1,
+      "reason": "Auto-flagged: 3+ RTO rate exceeded (backfill)"
+    }
+  }
+]

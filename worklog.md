@@ -17367,3 +17367,82 @@ All 33 fixes verified. Module is production-ready.
 - This worklog entry.
 
 No code modified. No DB writes. Read-only audit complete.
+
+---
+Task ID: CUSTOMER-FIX-ALL
+Agent: general-purpose sub-agent
+Task: Fix all 21 Customer Management bugs (CUS-001 → CUS-021) — code modification + DB repair.
+
+Work Log:
+
+- Read worklog.md, CUSTOMER_SOLUTIONS.md, and all relevant source files (customer.actions.ts, order-return.actions.ts, customer-detail-view.tsx, CustomerSearchAutocomplete.tsx, CreateCustomerForm.tsx, customers/types.ts, phone-validation.ts, api/customers/route.ts, country-selector.tsx, countries.ts, prisma schema for Customer/CustomerPhone/CustomerAddress).
+
+- CUS-002 (Backend): Rewrote `src/lib/phone-validation.ts` `normalizePhoneInternational()` as a pure deterministic string transform — strips all non-digit chars, then applies Pakistan prefix rules (0 → +92, 92 → +), preserves `+` prefix for international numbers, defaults to `+92` for unknown shapes. Output is now ALWAYS consistent E.164 (no spaces, no dashes). Same input → same output → unique index works. Kept `isValidPhoneFormat()` using libphonenumber-js for client-side validation (decoupled from normalization).
+
+- CUS-004/005 (Backend): Added `await requirePermission(ctx, PERMISSIONS.CUSTOMERS_VIEW)` to `getCustomerDetail()`, `searchCustomerByPhone()`, and `searchCustomersDetailed()` in `src/lib/actions/customer.actions.ts`. Previously these returned full customer PII (phones + addresses + order history) to any authenticated employee regardless of role.
+
+- CUS-008 (Backend): Added `deliveryCountry: true` to the `db.order.findMany` SELECT in `getCustomerDetail()` (was missing — the response mapping referenced `o.deliveryCountry` but the SELECT omitted it, returning undefined).
+
+- CUS-016 (Backend): Changed `.catch(() => {})` to `.catch((e) => console.error('[customer] City validation failed:', e instanceof Error ? e.message : e))` in both `addCustomerAddress()` and `updateCustomerAddress()` — errors now logged instead of silently swallowed.
+
+- CUS-017 (Backend): Added `take: 20` to the recentOrders query in `getCustomerDetail()` (previously fetched ALL orders with no limit — slow + memory pressure for high-volume customers). The Orders tab already renders a scrollable table.
+
+- CUS-007 (Backend): Exported `flagCustomerInternal()` (was previously only an internal helper, not exported). Updated `src/lib/actions/order-return.actions.ts` `processOrderReturn()` to call `flagCustomerInternal()` instead of `flagCustomer()` (which requires `CUSTOMERS_EDIT` permission the RTO handler doesn't have — it has `ORDERS_MANAGE`). Wrapped in `.catch()` so a flag failure never breaks the RTO response.
+
+- CUS-018 (Backend): Fixed by CUS-007 — using `flagCustomerInternal()` with `.catch()` makes the flag failure non-fatal (no more 500 propagated to the client when the inventory returns succeeded).
+
+- CUS-012 (Backend): Standardized the auto-flag reason string to `'Auto-flagged: 3+ RTO rate exceeded'` in both `updateCustomerStats()` (auto-flag path) and `processOrderReturn()` (RTO handler). Both call paths now use the exact same reason.
+
+- CUS-013 (Backend + Frontend): Added new `setCustomerPhonePrimary()` server action + PATCH endpoint at `/api/customers/[id]/phones/[phoneId]` (with `{ is_primary: true }`). The action updates the existing phone row in place (transactionally unsets other primary phones on the same customer). Frontend `customer-detail-view.tsx` "Set as Primary" button now calls PATCH instead of DELETE + POST (which previously lost `createdAt` and any metadata).
+
+- CUS-009/010 (Backend + Frontend): Changed country fallback in `addCustomerAddress()` and `updateCustomerAddress()` from `'Pakistan'` (name) to `'PK'` (alpha-2 code). Added `country` parameter passthrough to the address API routes (POST + PATCH). Frontend `customer-detail-view.tsx`: added `CountrySelector` to BOTH the "Add Address" and "Edit Address" inline forms (matching the existing `CreateCustomerForm` pattern). PK uses `CityAutocomplete`; non-PK uses a plain text input.
+
+- CUS-011 (Frontend): In `customer-detail-view.tsx` AddressCardView, replaced `{address.country}` (raw alpha-2 code like "PK") with `countryCodeToName(address.country) ?? address.country` so users see "Pakistan" instead of "PK". Falls back to the raw code if the code is unknown so no data is lost.
+
+- CUS-014/015 (Frontend): In `src/components/customers/types.ts`, added `country: string | null` to `CustomerSummary.defaultAddress` (CUS-014 — was missing entirely even though the API returned it). Updated all 4 doc comments on `country`/`deliveryCountry` fields to say "ISO 3166-1 alpha-2 code" instead of "country NAME" (CUS-015 — comments were lying about the storage format).
+
+- CUS-019 (Backend + Frontend): Added new `searchCustomersMulti()` action in `customer.actions.ts` — same matching strategy as `searchCustomersDetailed` (exact phone match first, then OR across name + email + phone partials) but returns up to 10 matches instead of just the first. Updated `/api/customers` GET route to support `?multi=1` flag (backwards compatible — without it, the original single-result shape is returned). Rewrote `CustomerSearchAutocomplete.tsx` to fetch from the multi endpoint and render ALL matches as a scrollable dropdown list with proper keyboard navigation.
+
+- CUS-020 (Backend): Added Zod validation at the route layer in `src/app/api/customers/route.ts` POST handler. The create-customer branch now `safeParse`s the body against `createCustomerSchema` BEFORE delegating to the action. The flag/unflag branch validates `customer_id` is a non-empty string, `action` is `'flag'|'unflag'`, and `reason` (when flagging) is ≥ 3 chars. Malformed payloads are rejected with a clear 400 at the route boundary (defensive depth — the action also validates).
+
+- CUS-021 (Backend + Frontend): Added `isValidFormat` to the `PhoneDTO` interface + `toPhoneDTO()` mapper in `customer.actions.ts` so the API actually returns it (the DB column already existed; the response just wasn't including it). Frontend `customer-detail-view.tsx` PhoneNumbersTab now shows an amber "Invalid format" badge (with tooltip explaining the issue) next to phones where `isValidFormat === false`. Hidden when undefined or true.
+
+- DB repair script (one-time backfill): created `scripts/customer-repair.ts` and ran it. Inline-port of the fixed `normalizePhoneInternational()` so the script doesn't need Next.js alias resolution. Writes an audit log to `scripts/customer-repair-audit.json`. Script run results:
+  - CUS-009 (country codes): 4 customer addresses + 1 order had `country='Pakistan'` → converted to `'PK'`.
+  - CUS-002 (phone re-normalization): 16 of 36 phone rows had inconsistent `phoneNormalized` values (e.g. `03001234567`, `+92 300 1234567`, `+44 7911 123456` — all wrong). All now consistent E.164 (`+923001234567`, `+447911123456`). Found 3 duplicate-customer clusters needing manual merge (logged in audit — same normalized phone on 2+ different customers; can't auto-merge safely without human review).
+  - CUS-001 (zero phones): 2 customers found. 1 test customer ("Exchange Test Customer") deleted. 1 real customer ("Test Customer Karachi") logged for manual review.
+  - CUS-003 (zero addresses): 6 customers found. 2 test customers deleted. 4 real customers logged for manual review.
+  - CUS-006 (stale stats): 5 customers had stale cached stats. All recomputed. Notable: "Test Booking Customer" showed 14 orders / Rs 4990 value but actually had 0 (orders were hard-deleted). "MZ Web" showed 2 orders but had 1.
+  - CUS-007 (RTO backfill): 1 customer with 3+ RTOs flagged with reason `'Auto-flagged: 3+ RTO rate exceeded (backfill)'`.
+
+- Lint check (`bun run lint 2>&1 | tail -5`): 14 problems (2 errors, 12 warnings). ALL are pre-existing in files NOT modified by this task:
+  - 2 errors in `scripts/products-audit-queries.js` and `scripts/products-audit-queries2.js` (unrelated JS scripts using CommonJS require()).
+  - 12 warnings in `src/components/products/catalog-settings-view.tsx`, `product-create-view.tsx`, `returned-stitched-view.tsx` (unrelated React Hook Form `watch()` usage).
+  - Zero new lint errors or warnings introduced by this task's modified files.
+
+### Files Modified (10 source files + 1 new script + 1 audit JSON)
+1. `src/lib/phone-validation.ts` — rewrote `normalizePhoneInternational()` + added `formatPhoneForDisplay()`.
+2. `src/lib/actions/customer.actions.ts` — perm checks (CUS-004/005), deliveryCountry in SELECT (CUS-008), city validation error logging (CUS-016), orders take:20 (CUS-017), exported `flagCustomerInternal()` (CUS-007), standardized flag reason (CUS-012), added `setCustomerPhonePrimary()` (CUS-013), added `searchCustomersMulti()` (CUS-019), country fallback `'PK'` (CUS-009), `isValidFormat` in PhoneDTO + toPhoneDTO (CUS-021).
+3. `src/lib/actions/order-return.actions.ts` — use `flagCustomerInternal()` with `.catch()` + standardized reason (CUS-007/012/018).
+4. `src/app/api/customers/route.ts` — Zod safeParse on POST (CUS-020) + `?multi=1` endpoint (CUS-019).
+5. `src/app/api/customers/[id]/phones/[phoneId]/route.ts` — added PATCH handler (CUS-013).
+6. `src/app/api/customers/[id]/phones/route.ts` — unchanged (already supported POST add).
+7. `src/app/api/customers/[id]/addresses/route.ts` — added `country` passthrough (CUS-009).
+8. `src/app/api/customers/[id]/addresses/[addressId]/route.ts` — added `country` passthrough (CUS-009).
+9. `src/components/customers/types.ts` — added `country` to CustomerSummary.defaultAddress (CUS-014) + updated 4 doc comments (CUS-015).
+10. `src/components/customers/CustomerSearchAutocomplete.tsx` — multi-result dropdown (CUS-019).
+11. `src/components/orders/customer-detail-view.tsx` — CountrySelector in add/edit address forms (CUS-009/010), country code → name display (CUS-011), PATCH for set-primary (CUS-013), `isValidFormat=false` warning badge (CUS-021).
+12. `scripts/customer-repair.ts` (NEW) — one-time DB repair script.
+13. `scripts/customer-repair-audit.json` (NEW) — audit log of what the repair script changed.
+
+### Next Actions / Manual Follow-up
+1. **Manual customer merges (CUS-002)** — 3 duplicate customer clusters identified in the audit JSON where the same normalized phone appears on 2+ different customer records (e.g. `+923001234567` is on 3 different customers in org `cmrsfbcyu0001tdocmgpf13nv`). The script deliberately did NOT touch these — they need a human to review order history + decide which customer record is canonical, then merge phones/addresses/orders onto the canonical record and delete the duplicates. See `duplicateCustomersNeedingManualMerge` array in the audit JSON.
+2. **Manual review of customers without phones/addresses (CUS-001/003)** — 5 real customers (with orders) have no phones or no addresses. These can't be deleted (they have order history). A human needs to either: (a) reach out to the customer to capture a real phone/address, or (b) decide they're test data and manually delete their orders first. See `realCustomersForManualReview` arrays in the audit JSON.
+3. **Add a DB trigger** to enforce `customer_phones ≥ 1` and `customer_addresses ≥ 1` per customer at INSERT time (prevention measure recommended in CUSTOMER_SOLUTIONS.md).
+4. **Add a weekly reconciliation cron** to call `updateCustomerStats()` for all customers (CUS-006 prevention) — the existing `/api/customers/backfill-stats` endpoint already implements this; just needs a cron entry.
+
+Stage Summary:
+- All 21 Customer Management bugs addressed (3 Critical, 5 High, 4 Medium, 9 Low).
+- Code changes pass lint with zero new errors/warnings (pre-existing 2 errors + 12 warnings in unrelated files remain unchanged).
+- DB repair script executed successfully — 4 country rows fixed, 16 phones re-normalized, 3 test customers deleted, 5 customer stats recomputed, 1 customer flagged for 3+ RTOs.
+- Audit JSON at `scripts/customer-repair-audit.json` documents every DB change made for traceability.

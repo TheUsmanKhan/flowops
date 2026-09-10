@@ -79,6 +79,12 @@ import {
   type RecentOrderDTO,
   type ExternalIdentityDTO,
 } from '@/components/customers/types'
+// CUS-011: convert alpha-2 country code back to display name for the UI
+import { countryCodeToName } from '@/lib/data/countries'
+// CUS-009/010: CountrySelector for add/edit address forms
+import { CountrySelector } from '@/components/ui/country-selector'
+// CUS-010: CityAutocomplete for non-default address forms (matches CreateCustomerForm)
+import { CityAutocomplete } from '@/components/couriers/city-autocomplete'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -164,17 +170,16 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
     onError: (err) => toast.error(getErrorMessage(err)),
   })
 
-  // Set as Primary = DELETE the phone, then POST it back with is_primary:true.
-  // The backend addCustomerPhone(is_primary:true) unsets the existing primary.
+  // CUS-013: "Set as Primary" now uses PATCH (update in place) instead of
+  // DELETE + POST (recreate). The old approach lost `createdAt` and any
+  // metadata. The new backend setCustomerPhonePrimary() updates isPrimary
+  // transactionally (unsets other primary phones on the same customer).
   const setPrimaryPhoneMutation = useMutation({
-    mutationFn: async (phone: PhoneDTO) => {
-      await api.delete(`/api/customers/${customerId}/phones/${phone.id}`)
-      return api.post<{ phoneId: string }>(`/api/customers/${customerId}/phones`, {
-        phone: phone.phoneRaw,
-        label: phone.label ?? undefined,
-        is_primary: true,
-      })
-    },
+    mutationFn: async (phone: PhoneDTO) =>
+      api.patch<{ ok: true }>(
+        `/api/customers/${customerId}/phones/${phone.id}`,
+        { is_primary: true },
+      ),
     onSuccess: () => {
       toast.success('Primary phone updated.')
       invalidate()
@@ -187,6 +192,7 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
       label?: string
       address: string
       city: string
+      country?: string
       is_default: boolean
     }) => api.post<{ addressId: string }>(`/api/customers/${customerId}/addresses`, input),
     onSuccess: () => {
@@ -202,7 +208,7 @@ export function CustomerDetailView({ customerId }: { customerId: string }) {
       input,
     }: {
       addressId: string
-      input: { label?: string; address: string; city: string; is_default: boolean }
+      input: { label?: string; address: string; city: string; country?: string; is_default: boolean }
     }) =>
       api.patch<{ addressId: string }>(
         `/api/customers/${customerId}/addresses/${addressId}`,
@@ -781,6 +787,30 @@ function PhoneNumbersTab({
                         {p.label}
                       </Badge>
                     )}
+                    {/* CUS-021: surface the isValidFormat flag so staff can
+                        see which phones have format issues (typically from
+                        external platforms that sent unformatted numbers).
+                        Hidden when isValidFormat is undefined or true (the
+                        default for manually-created phones). */}
+                    {p.isValidFormat === false && (
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span>
+                              <Badge
+                                variant="outline"
+                                className="bg-amber-50 text-amber-700 border-amber-200 text-[10px] cursor-help"
+                              >
+                                <AlertTriangle className="h-2.5 w-2.5 mr-0.5" /> Invalid format
+                              </Badge>
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs">
+                            This phone failed format validation (likely imported from an external platform with an unnormalized number). Please verify and correct it.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
                   </div>
                   <p className="text-[10px] text-muted-foreground mt-0.5">
                     Added {formatDate(p.createdAt)}
@@ -848,10 +878,10 @@ function PhoneNumbersTab({
 interface AddressTabProps {
   addresses: AddressDTO[]
   canManage: boolean
-  onAdd: (input: { label?: string; address: string; city: string; is_default: boolean }) => void
+  onAdd: (input: { label?: string; address: string; city: string; country?: string; is_default: boolean }) => void
   onUpdate: (
     addressId: string,
-    input: { label?: string; address: string; city: string; is_default: boolean },
+    input: { label?: string; address: string; city: string; country?: string; is_default: boolean },
   ) => void
   onRemove: (addressId: string) => void
   onSetDefault: (addressId: string) => void
@@ -877,6 +907,9 @@ function AddressesTab({
   const [newLabel, setNewLabel] = useState('')
   const [newAddress, setNewAddress] = useState('')
   const [newCity, setNewCity] = useState('')
+  // CUS-009/010: new addresses start with the PK default (alpha-2 code),
+  // matching CreateCustomerForm.
+  const [newCountry, setNewCountry] = useState('PK')
   const [newIsDefault, setNewIsDefault] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const isLastAddress = addresses.length <= 1
@@ -886,6 +919,7 @@ function AddressesTab({
     setNewLabel('')
     setNewAddress('')
     setNewCity('')
+    setNewCountry('PK')
     setNewIsDefault(false)
     setShowAdd(false)
   }
@@ -905,6 +939,7 @@ function AddressesTab({
       label: newLabel.trim() || undefined,
       address: addr,
       city,
+      country: newCountry,
       is_default: newIsDefault,
     })
     resetAddForm()
@@ -943,13 +978,29 @@ function AddressesTab({
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">City *</Label>
-                <Input
-                  placeholder="e.g. Lahore"
-                  value={newCity}
-                  onChange={(e) => setNewCity(e.target.value)}
-                />
+                {/* CUS-010: only Pakistan (PK) gets the courier-city autocomplete
+                    (courier_operational_cities is PK-sourced). Non-PK uses a
+                    plain text input — matches CreateCustomerForm. */}
+                {newCountry === 'PK' ? (
+                  <CityAutocomplete
+                    providerKey="all"
+                    value={newCity}
+                    onChange={(city) => setNewCity(city)}
+                    placeholder="e.g. Lahore"
+                  />
+                ) : (
+                  <Input
+                    placeholder="Enter city"
+                    value={newCity}
+                    onChange={(e) => setNewCity(e.target.value)}
+                  />
+                )}
               </div>
               <div className="space-y-1">
+                <Label className="text-xs">Country *</Label>
+                <CountrySelector value={newCountry} onChange={setNewCountry} />
+              </div>
+              <div className="space-y-1 sm:col-span-2">
                 <Label className="text-xs">Label (optional)</Label>
                 <Input
                   placeholder="Home, Office…"
@@ -1067,7 +1118,11 @@ function AddressCardView({
       <div className="min-w-0">
         <p className="text-sm font-medium">{address.address}</p>
         <p className="text-xs text-muted-foreground">
-          {address.city}{address.country ? `, ${address.country}` : ''}
+          {/* CUS-011: show the user-friendly country NAME (e.g. "Pakistan")
+              instead of the alpha-2 code (e.g. "PK") that's stored in the DB.
+              countryCodeToName falls back to the raw input if the code is
+              unknown so no data is lost. */}
+          {address.city}{address.country ? `, ${countryCodeToName(address.country) ?? address.country}` : ''}
         </p>
       </div>
       {/* City validation — early warning, not blocking.
@@ -1223,12 +1278,14 @@ function AddressCardEdit({
   onCancel,
 }: {
   address: AddressDTO
-  onSave: (input: { label?: string; address: string; city: string; is_default: boolean }) => void
+  onSave: (input: { label?: string; address: string; city: string; country?: string; is_default: boolean }) => void
   onCancel: () => void
 }) {
+  // CUS-009/010: country state for the edit form (alpha-2 code).
   const [label, setLabel] = useState(address.label ?? '')
   const [addr, setAddr] = useState(address.address)
   const [city, setCity] = useState(address.city)
+  const [country, setCountry] = useState(address.country ?? 'PK')
   const [isDefault, setIsDefault] = useState(address.isDefault)
 
   const handleSave = () => {
@@ -1246,6 +1303,7 @@ function AddressCardEdit({
       label: label.trim() || undefined,
       address: trimmedAddr,
       city: trimmedCity,
+      country,
       is_default: isDefault,
     })
   }
@@ -1278,9 +1336,26 @@ function AddressCardEdit({
       <div className="grid sm:grid-cols-2 gap-2">
         <div className="space-y-1">
           <Label className="text-xs">City *</Label>
-          <Input value={city} onChange={(e) => setCity(e.target.value)} />
+          {country === 'PK' ? (
+            <CityAutocomplete
+              providerKey="all"
+              value={city}
+              onChange={setCity}
+              placeholder="e.g. Lahore"
+            />
+          ) : (
+            <Input
+              placeholder="Enter city"
+              value={city}
+              onChange={(e) => setCity(e.target.value)}
+            />
+          )}
         </div>
         <div className="space-y-1">
+          <Label className="text-xs">Country *</Label>
+          <CountrySelector value={country} onChange={setCountry} />
+        </div>
+        <div className="space-y-1 sm:col-span-2">
           <Label className="text-xs">Label (optional)</Label>
           <Input value={label} onChange={(e) => setLabel(e.target.value)} />
         </div>

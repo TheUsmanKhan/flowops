@@ -10,6 +10,16 @@ import { Search, Loader2, Plus, User, Phone, MapPin, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { CustomerSearchResult } from './types'
 
+/**
+ * Multi-result customer search response (CUS-019).
+ *
+ * Returned by GET /api/customers?detailed=1&search=...&multi=1.
+ * The `customers` array contains up to 10 matches (empty when no match).
+ */
+interface CustomerSearchMultiResult {
+  customers: NonNullable<CustomerSearchResult['customer']>[]
+}
+
 export interface CustomerSearchAutocompleteProps {
   /** Called when a customer is selected from the dropdown. */
   onSelect: (customer: NonNullable<CustomerSearchResult['customer']>) => void
@@ -24,16 +34,16 @@ export interface CustomerSearchAutocompleteProps {
 }
 
 /**
- * Debounced phone/name search input with a dropdown of matches.
+ * Debounced phone/name search input with a dropdown of MULTIPLE matches.
  *
- * As the user types, calls GET /api/customers?detailed=1&search=... which
- * normalizes the input via the normalize_phone() SQL function and matches
- * against customer_phones.phoneNormalized + customer name.
+ * CUS-019: previously, the search returned only ONE result, so when a query
+ * matched multiple customers (e.g. "Ahmed" → Ahmed Khan + Ahmed Ali), only
+ * the first was shown. The dropdown now renders ALL matches (up to 10) and
+ * a "+ Create New Customer" option at the bottom.
  *
- * Selecting a match fires onSelect with the full customer object (including
- * all phones and addresses). A "+ Create New Customer" option at the bottom
- * fires onCreateNew (which the caller uses to expand the CreateCustomerForm
- * inline).
+ * Calls GET /api/customers?detailed=1&search=...&multi=1 which normalizes
+ * the input via the pure-JS normalizePhoneInternational() and matches
+ * against customer_phones.phoneNormalized + customer name + email.
  *
  * Used in:
  *   - The Order Creation page's customer section
@@ -69,20 +79,25 @@ export function CustomerSearchAutocomplete({
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
-  // Search query — only fires when debouncedQuery is non-empty
-  const searchQuery = useQuery<CustomerSearchResult>({
-    queryKey: ['customer-search', debouncedQuery],
+  // CUS-019: multi-result search — returns up to 10 matches.
+  const searchQuery = useQuery<CustomerSearchMultiResult>({
+    queryKey: ['customer-search-multi', debouncedQuery],
     queryFn: () =>
-      api.get<CustomerSearchResult>(
-        `/api/customers?detailed=1&search=${encodeURIComponent(debouncedQuery)}`,
+      api.get<CustomerSearchMultiResult>(
+        `/api/customers?detailed=1&multi=1&search=${encodeURIComponent(debouncedQuery)}`,
       ),
     enabled: debouncedQuery.trim().length >= 3,
     staleTime: 10_000,
   })
 
-  const customer = searchQuery.data?.customer
+  const customers = searchQuery.data?.customers ?? []
+  const hasAnyMatch = customers.length > 0
   const showDropdown = isOpen && debouncedQuery.trim().length >= 3
   const isLoading = searchQuery.isFetching && debouncedQuery.trim().length >= 3
+
+  // Total dropdown items: matches + 1 (create-new) when at least one match
+  // exists, OR 0 matches + 1 (no-match create-new).
+  const totalItems = hasAnyMatch ? customers.length + 1 : 1
 
   const handleSelect = useCallback(
     (c: NonNullable<CustomerSearchResult['customer']>) => {
@@ -101,21 +116,24 @@ export function CustomerSearchAutocomplete({
     setHighlightedIndex(-1)
   }, [onCreateNew])
 
-  // Keyboard navigation
+  // Keyboard navigation across all dropdown items.
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (!showDropdown) return
-    const maxIndex = customer ? 1 : 0 // [result? , create-new]
+    const createNewIndex = hasAnyMatch ? customers.length : 0
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      setHighlightedIndex((i) => Math.min(i + 1, maxIndex))
+      setHighlightedIndex((i) => Math.min(i + 1, createNewIndex))
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       setHighlightedIndex((i) => Math.max(i - 1, -1))
     } else if (e.key === 'Enter') {
       e.preventDefault()
       if (highlightedIndex === -1) return
-      if (customer && highlightedIndex === 0) handleSelect(customer)
-      else handleCreateNew()
+      if (highlightedIndex < customers.length) {
+        handleSelect(customers[highlightedIndex])
+      } else {
+        handleCreateNew()
+      }
     } else if (e.key === 'Escape') {
       setIsOpen(false)
       setHighlightedIndex(-1)
@@ -165,63 +183,63 @@ export function CustomerSearchAutocomplete({
               <Skeleton className="h-10" />
               <Skeleton className="h-10" />
             </div>
-          ) : customer ? (
+          ) : hasAnyMatch ? (
             <>
-              {/* Exact match result — shows name, phone, city, order count
-                  so the user can verify they're selecting the right customer. */}
-              <button
-                type="button"
-                onMouseEnter={() => setHighlightedIndex(0)}
-                onClick={() => handleSelect(customer)}
-                className={cn(
-                  'w-full text-left px-3 py-2.5 transition-colors flex items-center justify-between gap-2',
-                  highlightedIndex === 0 ? 'bg-muted/60' : 'hover:bg-muted/40',
-                )}
-              >
-                <div className="flex items-start gap-2.5 min-w-0">
-                  <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
-                    <User className="h-3.5 w-3.5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    {/* Line 1: Name + Flagged badge */}
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium truncate">{customer.name}</p>
-                      {customer.isFlagged && (
-                        <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px] h-4 px-1.5 shrink-0">
-                          Flagged
-                        </Badge>
-                      )}
+              {/* CUS-019: render ALL matches (up to 10) — previously only
+                  the first match was shown. */}
+              {customers.map((c, idx) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onMouseEnter={() => setHighlightedIndex(idx)}
+                  onClick={() => handleSelect(c)}
+                  className={cn(
+                    'w-full text-left px-3 py-2.5 transition-colors flex items-center justify-between gap-2 border-b last:border-b-0',
+                    highlightedIndex === idx ? 'bg-muted/60' : 'hover:bg-muted/40',
+                  )}
+                >
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10 text-primary shrink-0">
+                      <User className="h-3.5 w-3.5" />
                     </div>
-                    {/* Line 2: Phone + City (inline, so user sees both key identifiers) */}
-                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                      {customer.phones[0] && (
-                        <span className="text-xs text-muted-foreground font-mono flex items-center gap-1">
-                          <Phone className="h-2.5 w-2.5" /> {customer.phones[0].phoneRaw}
-                        </span>
-                      )}
-                      {customer.addresses[0]?.city && (
-                        <span className="text-xs text-muted-foreground flex items-center gap-1">
-                          <MapPin className="h-2.5 w-2.5" /> {customer.addresses[0].city}
-                        </span>
-                      )}
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-medium truncate">{c.name}</p>
+                        {c.isFlagged && (
+                          <Badge variant="outline" className="bg-rose-50 text-rose-700 border-rose-200 text-[10px] h-4 px-1.5 shrink-0">
+                            Flagged
+                          </Badge>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                        {c.phones[0] && (
+                          <span className="text-xs text-muted-foreground font-mono flex items-center gap-1">
+                            <Phone className="h-2.5 w-2.5" /> {c.phones[0].phoneRaw}
+                          </span>
+                        )}
+                        {c.addresses[0]?.city && (
+                          <span className="text-xs text-muted-foreground flex items-center gap-1">
+                            <MapPin className="h-2.5 w-2.5" /> {c.addresses[0].city}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">
+                        {c.totalOrdersCount} order{c.totalOrdersCount === 1 ? '' : 's'}
+                        {c.addresses.length > 0 && ` · ${c.addresses.length} address${c.addresses.length === 1 ? '' : 'es'}`}
+                      </p>
                     </div>
-                    {/* Line 3: Order count + address count (secondary info) */}
-                    <p className="text-[10px] text-muted-foreground mt-0.5">
-                      {customer.totalOrdersCount} order{customer.totalOrdersCount === 1 ? '' : 's'}
-                      {customer.addresses.length > 0 && ` · ${customer.addresses.length} address${customer.addresses.length === 1 ? '' : 'es'}`}
-                    </p>
                   </div>
-                </div>
-              </button>
+                </button>
+              ))}
 
               {/* Create new option */}
               <button
                 type="button"
-                onMouseEnter={() => setHighlightedIndex(1)}
+                onMouseEnter={() => setHighlightedIndex(customers.length)}
                 onClick={handleCreateNew}
                 className={cn(
                   'w-full text-left px-3 py-2 border-t transition-colors flex items-center gap-2',
-                  highlightedIndex === 1 ? 'bg-muted/60' : 'hover:bg-muted/40',
+                  highlightedIndex === customers.length ? 'bg-muted/60' : 'hover:bg-muted/40',
                 )}
               >
                 <Plus className="h-4 w-4 text-muted-foreground" />

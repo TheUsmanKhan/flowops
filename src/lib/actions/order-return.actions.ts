@@ -23,7 +23,7 @@ import { insertAuditLog } from '@/lib/audit'
 import { insertMetricEvent } from '@/lib/metrics'
 import { PERMISSIONS } from '@/lib/permissions'
 import { processInventoryTransaction } from '@/lib/inventory'
-import { updateCustomerStats, flagCustomer } from './customer.actions'
+import { updateCustomerStats, flagCustomerInternal } from './customer.actions'
 import { updateEmployeeStats } from './employee-stats.actions'
 import { z } from 'zod'
 
@@ -220,12 +220,26 @@ export async function processOrderReturn(
     }
 
     // Auto-flag customer if RTO count crosses threshold (3+)
+    // CUS-007: use flagCustomerInternal (no permission check) instead of
+    // flagCustomer (requires CUSTOMERS_EDIT, which the RTO handler doesn't
+    // have — it has ORDERS_MANAGE). This was breaking RTO processing
+    // entirely (CUS-018) with a 403 propagated as a 500 to the client.
+    // CUS-012: standardized reason string across all auto-flag paths.
+    // Wrapped in try/catch + .catch() so a flag failure NEVER breaks the
+    // RTO response — the inventory returns + order status update already
+    // succeeded; flagging is a non-critical side-effect.
     const customer = await db.customer.findUnique({
       where: { id: order.customerId },
       select: { totalRtoCount: true, isFlagged: true },
     })
     if (customer && customer.totalRtoCount >= 3 && !customer.isFlagged) {
-      await flagCustomer(order.customerId, `High RTO rate (${customer.totalRtoCount} returns)`)
+      await flagCustomerInternal(
+        order.customerId,
+        'Auto-flagged: 3+ RTO rate exceeded',
+        /* auto */ true,
+      ).catch((e) => {
+        console.error('[rto] Auto-flag failed for customer', order.customerId, ':', e instanceof Error ? e.message : e)
+      })
     }
 
     return { success: true, data: { itemsProcessed } }

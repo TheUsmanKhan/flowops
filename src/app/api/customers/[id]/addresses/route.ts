@@ -17,6 +17,9 @@ export async function POST(
       label: typeof body.label === 'string' ? body.label : undefined,
       address: typeof body.address === 'string' ? body.address : '',
       city: typeof body.city === 'string' ? body.city : '',
+      // CUS-009: country is now an ISO 3166-1 alpha-2 code (e.g. "PK").
+      // The action's addressInputSchema default ("PK") applies if absent.
+      country: typeof body.country === 'string' ? body.country : undefined,
       is_default: body.is_default === true,
     })
     if (!result.success) {
