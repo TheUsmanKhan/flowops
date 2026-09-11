@@ -70,8 +70,11 @@ ENV HOSTNAME=0.0.0.0
 
 # Health check — hits /api/health every 30s, allows 10s for response,
 # 5s startup grace, 3 retries before marking unhealthy
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:3000/api/health || exit 1
+# Uses bun (not curl) because the oven/bun base image is minimal and doesn't
+# ship curl. Bun's built-in fetch() makes the HTTP request and checks the
+# response status. Exits 0 on 200, exits 1 on any other status or network error.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD bun -e "fetch('http://localhost:3000/api/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))" || exit 1
 
 # Start the standalone server (matches the current production start command:
 # `NODE_ENV=production bun .next/standalone/server.js`)
